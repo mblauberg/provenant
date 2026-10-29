@@ -101,9 +101,7 @@ contain no unnecessary words, as a drawing has no unnecessary lines.
 This is Strunk's Rule 11, put statements in positive form. `Not` is weak as
 mere evasion (`not honest` for `dishonest`), but other negatives are strong:
 `No subgroup estimate is reported` is direct and correct where the absence
-is the claim. Positive form is a style rule, not a licence to spin; see
-Positive form is not positive spin in
-[anti-ai-taxonomy.md](anti-ai-taxonomy.md) for the integrity guard.
+is the claim. Positive form is a style rule, not a licence to spin.
 
 Do not force positive form when the absence is the claim.
 

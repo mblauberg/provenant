@@ -1,305 +1,176 @@
-# Legal Concision And Anti-AI Drafting
+# Legal concision and machine-prose drafting
 
-Use this reference for any `draft`, `rewrite`, `condense`, `diagnose` or `final-scrub` task involving court
-forms, affidavits, submissions, orders, chronologies, correspondence or annexure notes.
-
-Load the `natural-writing` skill first for the doctrine this file does not
-restate: the tiered artefact/density/structural sweep and the shared condense
-procedure and integrity check. This file is the
-legal-specific overlay: the Legal Function Test (a distinct classification
-scheme, not the hub's observed/inferred claim schema), legal noun-stack
-examples, and the leave/interlocutory register and persuasive-strength
-material that has no general-prose or engineering/academic equivalent.
+Load for any draft, rewrite, condense, diagnose or final-scrub task. The hub
+`natural-writing` owns the mechanism catalogue and the condense procedure; this
+file is the legal overlay: the Legal Function Test (a distinct scheme, not the
+hub's observed/inferred claim classes), register, persuasion and the hard bans.
 
 ## Principle
 
-Concision in legal drafting means every sentence does legal work. A sentence should state relief, a request, a
-source-backed fact, a rule, a contention, a procedural step, a limitation, a safety qualification, a consequence
-or a necessary transition. If it does none of those things, cut it or move it to the document that owns it.
-
-Plain language is not casual language. Keep legal terms of art, source anchors, defined terms, forum labels,
-redaction limits and honest negatives where they do work.
-
-Cutting repetition is a persuasion move, not housekeeping (the rationale and the one-allowed-echo rule live in
-`references/argument-structure-and-paragraphing.md`, which owns argument architecture: one point per paragraph,
-headings that carry the argument, grounds selection, adverse authority, reply craft).
-
-## Mode Selection
-
-- `draft`: organise the material by legal function before writing full prose.
-- `rewrite`: preserve meaning, anchors and legal status while making the passage clearer.
-- `condense`: shorten first; add only if a missing source, qualification, correspondence protection,
-  enforceability detail or safety fact must be stated.
-- `diagnose`: report the highest-risk writing defects first, with concrete repairs.
-- `final-scrub`: make one adversarial pass for overclaim, missing source, wrong home, unsafe disclosure,
-  machine rhythm, noun stacks, false transitions and unsupported legal conclusions.
+Every sentence does legal work: relief, request, source-backed fact, rule,
+contention, procedural step, limitation, safety qualification, consequence or a
+necessary transition. Otherwise cut it or move it to the document that owns it.
+Plain language is not casual language: keep terms of art, source anchors,
+defined terms, forum labels, redaction limits and honest negatives where they
+work. Cutting repetition is a persuasion move (see
+`argument-structure-and-paragraphing.md`).
 
 ## Legal Function Test
 
-For each paragraph, name its one function in a phrase:
+Name each paragraph's one function: relief or order sought; procedural step;
+source-backed fact; legal rule; contention; consequence or prejudice; safety or
+redaction limit; practical request or deadline; correspondence protection (offer
+term, non-admission, non-waiver, rights reservation); enforceable order detail
+(actor, act, object, deadline or trigger). No function: cut. Two unrelated
+functions: split. Another document owns it: move it, do not polish it in place.
 
-- relief or order sought;
-- procedural step;
-- source-backed fact;
-- legal rule;
-- contention;
-- consequence or prejudice;
-- safety or redaction limit;
-- practical request or deadline;
-- correspondence protection, including an offer term, non-admission, non-waiver wording or rights reservation;
-- enforceable order detail, including actor, act, object, deadline or trigger.
+## Condense
 
-If the paragraph has no function, cut it. If it has two unrelated functions, split it. If another document owns
-the function, move it rather than rephrasing it in place.
+Follow the hub procedure. Legal specifics:
 
-## Condense Pass
+- Lock facts, dates, amounts, parties, source anchors, exhibit labels, rule
+  numbers, defined terms, disputed-status wording, redaction limits and
+  user-authority conditions. Put the operative point first.
+- Reverse-outline by legal function. Move detail to the chronology, annexure
+  index, affidavit or submissions; do not delete it.
+- Stop before losing an anchor, party label, status, redaction qualifier,
+  exhibit label, pinpoint, forum wording or safety boundary. There is no
+  percentage target. If the result is longer, re-run the function test.
+- Integrity: set-diff figures, dates, amounts, pinpoints, labels, authorities
+  and defined terms, then an independent qualitative pass. A premise moved too
+  far from its contention, or a numbered particular de-listed into prose, can
+  cost identifiability: re-read the argument that relied on it.
 
-Follow the hub condense procedure (measure, lock invariants, reverse-outline,
-de-duplicate to one home, cut fluff, narrow-not-soften, stop rule, report the
-delta). Legal-specific application:
+## Wrong-home repair
 
-- **Lock invariants**: facts, dates, amounts, parties, source anchors, exhibit labels, rule numbers, defined terms,
-  disputed-status wording, redaction limits and user-authority conditions.
-- **Put the operative point first**: relief, request, answer, contention or next step.
-- **Reverse-outline** the paragraphs by legal function (see the Legal Function Test above), not by the hub's
-  generic paragraph test.
-- **Move detail**, do not delete it, into chronologies, annexure indexes, affidavits or submissions where that
-  document owns it.
-- **Stop rule addition**: stop when the next cut would remove a source anchor, party label, legal status,
-  redaction qualification, exhibit label, paragraph/page/line reference, forum wording or safety boundary.
-- **If the revised passage is longer than the original**, run the Legal Function Test again. Keep the addition
-  only if the draft was legally incomplete without it.
+Affidavit argument goes to submissions. Submission-level factual detail goes to
+an affidavit, chronology or exhibit note. Reasons for an order go to
+submissions. Relief buried in evidence goes to proposed orders. Correspondence
+history goes to an outline if the email body does not need it. Internal
+verification, manifest, render or audit language stays internal; translate it to
+the source or legal act.
 
-There is no percentage target for court work. A short filing can already be tight. A long AI-drafted passage may
-need heavy cutting, but the stop rule controls the cut.
+## Document locks
 
-## Legal Noun Stacks
+- Correspondence: protective labels, offer terms, non-admission or non-waiver,
+  rights reservations, deadlines and attachment/service statements.
+- Affidavit: facts within the deponent's direct knowledge (observations, receipt,
+  conversations, state of mind, actions). A sworn paragraph can be the evidence;
+  lack of an external document goes to weight, not deletion.
+- Proposed orders: classify each item as order, undertaking, recital or reason.
+  Orders need actor, act, object and deadline or trigger; flag missing
+  enforceability details, never invent them.
 
-See the hub taxonomy's Noun-stacking and nominal compression for the general
-repair method (cap premodifiers, unpack vague heads, prefer a verb, release
-nominalisations, reuse the fix). Dense noun stacks are a common machine tell
-in legal drafting because they hide the actor, act and consequence; do not
-strip legal terminology, lighten the phrase around it. Legal-specific
-abstract heads to replace: `context`, `framework`, `posture`, `material`,
-`position`, `issue` and `risk` become the act, source, order, request,
-prejudice or consequence.
+## Legal-specific machine tells
 
-| Weak stack | Better legal phrasing |
-|---|---|
-| `multi-forum procedural consequence context` | `The earlier order matters here because ...` |
-| `source-boundary filing-facing assertion risk` | `The draft would overstate the source if it said ...` |
-| `family-violence safety-context material` | `The dated safety document is relied on as context only.` |
-| `protected-address disclosure framework` | `The draft asks the Court to manage address disclosure.` |
-| `document-function boundary issue` | `The paragraph argues the point, so it belongs in submissions.` |
+- Process language in filing text: `agent summary`, `review set`, `render
+  check`, `manifest proves`, `gate fired`, `source pack`, `audit found`.
+  Translate to the legal act or cite the source.
+- Noun towers (`multi-forum procedural consequence context`). Keep the defined
+  term and move qualifiers into a clause: `The earlier order matters here
+  because ...`. Replace abstract heads (`context`, `framework`, `posture`,
+  `position`, `risk`) with the act, order, request or prejudice.
+- Additive openers (`Moreover`, `Furthermore`) with no relation. Name the
+  relation (`The prejudice is ...`) or omit. Never open consecutive paragraphs
+  the same way. Formal connectives are proper register; govern by density.
+- Rule-of-three by default cadence; hollow authority (a case recited, never
+  applied to these facts); assertions with no record anchor. Polish without
+  record engagement is the strongest tell judges name. Pinpoints and
+  application are the strongest human signal.
+- Buried verbs (`make a determination`, `give consideration to`) and ceremonial
+  doublets (`null and void`, `each and every`): restore the verb, keep the single
+  operative word, unless it is a quoted, statutory or form term.
+- `reasonably arguable` at leave stage is the required standard, not a tell.
 
-## Additive Drafting
+Do not casualise court prose to avoid a tell: contractions, chattiness and
+anecdote are the wrong fix. Do not edit to beat a detector; disciplined formal
+prose trips naive detectors. The fixes are anchors, application, calibration and
+cuts.
 
-See the hub taxonomy's Additive drafting for the general concept. Legal
-application: before adding a sentence, ask what new legal function it serves
-(see the Legal Function Test). If the answer is only `more background`,
-`additional clarity` or `context`, cut it or move it. `makes it more
-persuasive` is also a failed reason unless the addition adds a source, rule,
-contention or relief.
+## Defensive over-qualification and positive form
 
-Replace additive openers with the real legal relation:
+Keep one qualifier that defines a genuine boundary (a source limit, reserved
+issue, non-admission, redaction condition, disputed status, authority gap). Cut
+the repetition around it: belt-and-braces recitals, and closers that re-soften
+a settled point (`the records cut both ways`). Use positive form to make the
+position direct (`excludes the source document`), but keep negatives that are the
+fact: non-service, non-filing, non-payment, non-admission, no order, no finding.
+Positive form is style, not licence to soften.
 
-| Empty opener | Repair |
-|---|---|
-| `Moreover` | state the next source-backed fact, or omit the opener |
-| `Furthermore` | `The consequence is ...` |
-| `Additionally` | `The prejudice is ...` |
-| `In addition` | `The source shows ...` |
-| `Having regard to the above` | `For that reason ...`, if the reason was just stated |
+## Persuasive strength
 
-Never open consecutive paragraphs with additive adverbs. If the paragraphs are independent, no transition is
-needed. If they are linked, name the link.
+Force comes from structure, precision and located candour, not intensifiers.
+Overstatement (`overwhelmingly`, `plainly`, `beyond doubt`) costs credibility;
+frequent intensifiers correlate with losing appeals and emotional language with
+losing merits votes (Long and Christensen 2008; Black et al 2016).
 
-## Positive Form Without Spin
+- Assert the proposition, pin it to a source, drop the intensifier.
+- Argumentative point-headings, not topic labels.
+- Keep your answer in the main clause and subordinate the opponent's point.
+- One located concession beats a fog of caveats; put it in the next sentence.
+- Confront the obvious weakness and meet it.
+- Calibrate, never flatten: uniform confidence across strong and weak points
+  reads as machine tone.
 
-See Positive form is not positive spin in the hub taxonomy for the general
-rule. Use positive form to make the legal position direct. Do not convert an
-honest absence into reassurance.
+## Register at leave and interlocutory stage
 
-| Weak or indirect | Better where accurate |
-|---|---|
-| `does not include the source document` | `excludes the source document` |
-| `is not treated as proof of service` | `is relied on as transmission and actual-notice proof only` |
-| `does not seek to avoid disclosure` | `seeks court-managed disclosure` |
-| `is not a court order` | keep this if the absence of an order is the point |
-| `does not admit liability` | keep this if non-admission is the legal status |
-| `is not relied on to prove the underlying allegation` | keep this if non-reliance defines the evidentiary boundary |
+Pick the register the stage requires and hold it. Leave documents argue
+`reasonably arguable` or `warrants leave`; they do not declare contested facts
+proved. A merits submission may assert `is established` where the record carries
+it. Mixed documents mark the boundary with a heading, not sentence by sentence.
+Uncontested procedural facts stay plain fact at every stage.
 
-Positive form is a style rule, not a licence to soften. Keep negatives for non-service, non-filing,
-non-payment, non-admission, no order, no finding, no concession, no current authority, inability to reconcile
-and any issue that remains under appeal or disputed.
+## Hard bans in filing-facing text
 
-## Defensive Over-Qualification
+The lint (`provenant check writing <paths> --rules legal`) fails on a subset and
+warns on the rest; this list is the standard, the lint a partial check.
 
-See the hub taxonomy's Defensive over-qualification for the general
-cut-or-keep test. Legal symptoms:
+- The em dash (U+2014) anywhere. The en dash only for closed ranges.
+- Internal markers: `TODO`, `TBD`, `TBC`, `FIXME`, `drafting note`, `agent note`,
+  `AI`, `generated`.
+- Internal paths or ids, including in HTML comments (pandoc strips them from the
+  render but they still ship in the source): `.work/`, `docs/audits/`, scratch
+  paths, absolute repo paths, task ids.
+- US dates; US legalese (`COMES NOW`, `wherefore`, `herein`, `heretofore`,
+  `aforementioned`, `Honorable Court`, `pro se`, `esq.`).
+- Dated wording the lint warns on (`pursuant to`, `prior to`, `whilst`,
+  `utilise`, `hereby`, `thereof`, `the said`), unless quoted.
+- Correspondence filler: `I trust this email finds you well`, `please be
+  advised`, `kindly`, `as previously stated`, `we note with concern`,
+  `for the avoidance of doubt`, `we reserve all rights` (state the next step or
+  omit unless instructed), and `without prejudice` unless that legal effect is
+  intended and instructed.
+- Affidavit overreach, to submissions unless quoting a source: `jurisdictional
+  error`, `plainly wrong`, `bad faith`, `abuse of process`, `dishonest`, `the
+  Court should find`, `is an error` of another forum's order (use `disputed`,
+  `under appeal`, `unable to reconcile`), conclusions on a contested figure,
+  relief in the body (`I seek`), self-diagnosis without medical evidence, and
+  `can be produced if required` repeated per paragraph (say it once).
+- Risk words: `clearly`, `obviously` (omit); `currently` (as at [date]);
+  `recent` (dated [date]); `proved family violence` (name the dated source at
+  its true status).
 
-- a sentence that first states what the party does not say, then what it does say, then how little it puts the
-  point (`X does not assert he was 'ordered' or 'forced'; the records are silent as to motive; X asserts none
-  and puts it no higher than ...`);
-- belt-and-braces recitals that re-list everything left legible after a redaction, or every order a relief is
-  not seeking, when one clean statement carries the limit;
-- closers that re-soften a point already made (`the records cut both ways`, `to that extent the matters are
-  not in contest`, `this is neither admitted nor answered here`) after the operative sentence already fixed
-  the position.
+## Quotation integrity
 
-Keep one qualifier that defines a genuine boundary: a source limit, a reserved issue, a non-admission, a
-redaction condition, a disputed status, a user-authority gap. Cut the repetition around it.
+Quotation marks assert the words appear in the source, contiguous and in order.
+Never fuse two passages, findings or paragraphs inside one set of marks. Mark
+every elision with an ellipsis and every change with square brackets; if the
+elision crosses a sentence or pinpoint, quote separately. If the words are not
+contiguous, drop the marks and paraphrase with a pinpoint to each source. The
+lint cannot check this; re-open the source when a quote spans two pinpoints.
 
-| Anxious over-qualification (cut to one clean limit) | Necessary boundary (keep) |
-|---|---|
-| `X does not assert he was 'ordered' or 'forced'; the records are silent as to motive; X asserts none and puts it no higher than ...` | `X relies on the records only for what they independently establish.` |
-| a redaction recital re-listing every field that stays legible | `the footer address will be redacted before service, subject to the verified forum process.` |
-| `premature, and is neither admitted nor answered here` | `premature.` (the non-admission is already stated once elsewhere) |
-| `the records cut both ways` | the limited-purpose sentence that already states what the records are and are not relied on for |
+## Cross-forum drift
 
-A point made once, plainly, with its single necessary limit, is stronger than the same point hedged three
-ways. Distinguish this from honest negatives (non-service, non-admission, no finding, reserved issue, source
-limit): those mark boundaries and stay. Defensive over-qualification only manages how the reader might react,
-so it goes.
+Check for another forum's labels, powers, forms, deadlines or service rules
+copied in; relief sought from a decision-maker who cannot grant it; an
+allegation from one proceeding stated as proof in another; a subsisting order
+called wrong without a verified basis, especially while review or appeal is
+pending; a protective or interim safety instrument framed as a final finding;
+and internal analysis left in filing text.
 
-## Persuasive Strength
+## Final self-audit
 
-The companion to Defensive Over-Qualification: cutting the hedge is only half the job; the other half is putting
-the point with confidence. Persuasive force comes from structure, precision and located candour, not from
-intensifiers. Overstatement (`overwhelmingly`, `plainly`, `incontrovertibly`, `beyond doubt`) is a credibility
-cost, not a gain, and the cost is measured: frequent intensifiers correlate with losing appeals, and emotional
-language with losing merits votes (Long & Christensen 2008; Black et al 2016 - cites in
-`argument-structure-and-paragraphing.md`, Sources). Claim the conclusion cleanly and let the evidence chain
-carry it.
-
-- **Assert the proposition, pin it to a source, drop the intensifier.** "The
-  notice was received at 4:00 pm ([SOURCE PINPOINT]). The response period had
-  already ended."
-  Not "it is respectfully submitted that, arguably, the order may not have been served …", and not "the
-  evidence overwhelmingly proves beyond doubt …".
-- **Argumentative point-headings, not topic labels.** "The reasons disclose no finding on the agreed date"
-  beats "The reasons".
-- **Subordinate the opponent's point; keep your answer in the main clause.**
-  "Although the report states the conclusion, its appendix records the contrary
-  result; the conclusion does not follow."
-- **One located concession beats a fog of caveats.** Make the assertion cleanly; put the single necessary
-  qualification in the next sentence, not stacked onto the assertion.
-- **Confront the obvious weakness and meet it**: volunteering and distinguishing an adverse point is stronger
-  than side-stepping it, which reads as having no answer (see `argument-structure-and-paragraphing.md`,
-  Adverse Authority And Candour).
-- **Use the contention register at threshold/interlocutory stage** ("the applicant contends"; "the proper
-  inference is"): strong without purporting to have proved a contested fact not yet tested.
-- **Specificity is the confidence**: every contention carries a paragraph/exhibit/page so the bench can verify.
-- **Mark arguments cumulative or alternative expressly**, and be proportionate in length.
-- **Calibrate, never flatten.** Uniform confidence across strong and weak points reads as machine tone and
-  wastes the advocate's most important signal. Full positive form on the strong points; an honest, located
-  concession on the weak one.
-
-This does not licence overstatement: keep honest negatives, source limits, disputed-status wording, reserved
-issues and user-authority gaps. Confident ≠ overclaiming; the leave/threshold test is "reasonably arguable",
-and a contested fact stays a contention.
-
-## Register Discipline (Leave And Interlocutory Stages)
-
-Pick the register the stage requires and hold it for the whole document; do not flip mid-paragraph between
-"reasonably arguable" and "is established". Oscillation reads as either overclaim (asserting merits the stage
-cannot decide) or anxiety (re-hedging a point already put), and it hands the other side a framing objection.
-
-- Leave/threshold documents argue that grounds are `reasonably arguable` or that a question `warrants leave`;
-  they do not declare contested facts proved. State the contention with full force inside that register: "it is
-  reasonably arguable the party had no opportunity to answer the report" can
-  still be developed with every pinpoint and consequence.
-- A merits or final submission may assert `is established`, `the record shows`, `the only available inference`,
-  where the record carries it.
-- The two registers may coexist in one document only where the document genuinely does two jobs (a leave
-  application with a fallback merits section); mark the boundary structurally with a heading, not sentence by
-  sentence.
-- Uncontested procedural facts stay plain fact register at every stage: `the decision was delivered on [date]`.
-
-## Condense Integrity
-
-Follow the hub's Condense integrity (deterministic token check, then an
-independent qualitative pass; never patch a gap from memory). Legal-specific
-token set: figures, dates, amounts, paragraph/page/line pinpoints, exhibit
-labels, authorities and defined terms. Legal-specific qualitative question:
-is any ground, particular, qualifier or honest negative now weaker, unowned
-or unlocatable? Relocation risk is acute here: a premise moved too far from
-the contention that uses it, or a numbered particular de-listed into prose,
-can cost identifiability. Re-read the argument that relied on the moved
-material and confirm it still lands with a pinpoint to the new home.
-
-## Wrong-Home Repair
-
-When a sentence is doing the wrong job, move it before rewriting it:
-
-- affidavit argument goes to submissions;
-- submission-level factual detail goes to an affidavit, chronology or exhibit note;
-- reasons for an order go to submissions, not the order;
-- relief buried in affidavit evidence goes to proposed orders;
-- correspondence history goes to an attached outline or chronology if it is not needed in the email body;
-- internal verification, manifest, render or audit language stays internal and is translated to the actual
-  source or legal act in filing-facing prose.
-
-Wrong-home material usually gets worse when it is polished. Relocate it first.
-
-## Document-Specific Locks
-
-Lock legally functional material before cutting:
-
-- correspondence: protective labels, offer terms, non-admission or non-waiver wording, rights reservations,
-  response deadlines and attachment/service statements;
-- affidavit: facts within the deponent's direct knowledge, including observations, receipt, conversations,
-  state of mind and actions. The sworn paragraph can be the evidence; lack of an external document goes to
-  corroboration and weight, not automatic deletion;
-- proposed orders: classify each item as an order, undertaking, notation/recital or reason. Orders need an
-  actor, act, object and deadline or trigger. Missing enforceability details are flagged, not invented.
-
-## Sentence Repair
-
-The hub's condense-pass Sentence repair table covers the general wordy
-forms (`in order to`, `the fact that`, `is able to`, and similar). Legal-only
-additions:
-
-| Wordy form | Repair |
-|---|---|
-| `for the purpose of` | `for` or the specific purpose |
-| `in circumstances where` | `where`, `when` or the actual condition |
-| `with respect to` | `about`, `for`, `on` or the precise legal relation |
-| `it is submitted that` | state the submission directly, unless the forum style calls for it |
-| `respectfully requests` | `asks` or `seeks`, unless formality is needed |
-
-Release buried verbs (nominalisations): `make a determination` becomes `determine`; `give consideration to`
-becomes `consider`; `reach a conclusion` becomes `conclude`; `is applicable to` becomes `applies to`; `conduct
-an investigation into` becomes `investigate`. Heuristic: scan for `make`, `give`, `reach`, `conduct` or
-`provide` followed by an abstract `-tion`/`-ment`/`-ance` noun, and restore the verb.
-
-Collapse ceremonial doublets to the single operative word: `null and void` becomes `void`; `each and every`
-becomes `each`; `any and all` becomes `any`; `full and complete` becomes `complete`; `cease and desist` becomes
-the actual demand. Keep a pair only where the two words genuinely carry distinct legal content or the phrase is
-a quoted, statutory or form-field term.
-
-Collapse modal hedge stacks to one accurate qualifier: `may arguably, in some circumstances, be` becomes `is
-arguably`; `could potentially` becomes `may`. Better again, replace the vague hedge with the precise legal
-standard: `could perhaps be unreasonable` becomes `was not reasonably open on the evidence`. One well-placed
-qualifier reads as care; a stack reads as anxiety (see Defensive Over-Qualification).
-
-Preserve formal language where it is a rule phrase, form field, statutory expression, defined term, quoted text
-or forum convention.
-
-## Final Self-Audit
-
-Before returning a draft, name the single concrete remaining defect, if any:
-
-- overclaim;
-- missing source;
-- wrong document home;
-- unsafe disclosure;
-- machine rhythm;
-- legal noun stack;
-- false transition;
-- unsupported legal conclusion;
-- broad fairness closer;
-- lost legal negative or source boundary.
-
-If no concrete defect can be named, stop. Do not keep rewriting to satisfy an AI detector or a vague feeling
-that the text should sound more human. Fix defects, not style anxiety.
+Name the single concrete remaining defect, if any: overclaim, missing source,
+wrong home, unsafe disclosure, machine rhythm, noun stack, false transition,
+unsupported legal conclusion, broad fairness closer, or a lost negative or
+source boundary. If none, stop; do not rewrite for a vague feeling.
