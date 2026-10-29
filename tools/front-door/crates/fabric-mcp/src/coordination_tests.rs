@@ -372,23 +372,6 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
     Ok(())
 }
 
-macro_rules! local_inbox_owner {
-    ($facade:ty) => {
-        impl crate::tools::McpFacade for $facade {
-            fn inbox_owner(
-                &mut self,
-                input: provenant_fabric_runtime::inbox::InboxInput,
-                host: Option<String>,
-                budget: WaitBudget,
-                cancel: &CancelToken,
-            ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError> {
-                if host.is_some() {
-                    return Err(ServiceError::Facade(FacadeError::InvalidInput));
-                }
-                Ok(self.inbox(input, budget, cancel)?)
-            }
-        }
-    };
-}
+use crate::test_facade::local_inbox_owner;
 local_inbox_owner!(SubmitFacade);
 local_inbox_owner!(FakeFacade);

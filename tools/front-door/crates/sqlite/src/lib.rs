@@ -309,6 +309,134 @@ mod tests {
     use provenant_core::{MonoTime, TestClock, WallTime};
     use std::cell::{Cell, RefCell};
 
+    fn safe_companion() -> Metadata {
+        Metadata {
+            kind: FileKind::Regular,
+            device: 0,
+            inode: 0,
+            links: 1,
+            size: 0,
+            allocated: 0,
+            modified_ns: 0,
+            changed_ns: 0,
+            uid: provenant_os::fs::effective_uid(),
+            mode: 0o600,
+        }
+    }
+
+    #[test]
+    fn companion_rechecks_unlinked_observations() -> Result<(), Box<dyn std::error::Error>> {
+        let safe = safe_companion();
+        for replaced in [false, true] {
+            let mut observations = 0;
+            let result: Result<(), &'static str> = check_companion(
+                || {
+                    observations += 1;
+                    if observations == 1 {
+                        Ok(Metadata { links: 0, ..safe })
+                    } else if replaced {
+                        Ok(safe)
+                    } else {
+                        Err(FsError::Io {
+                            operation: "stat",
+                            path: "missing".into(),
+                            source: std::io::Error::from_raw_os_error(2),
+                        })
+                    }
+                },
+                |check| {
+                    assert_eq!(check()?, None);
+                    assert_eq!(check()?, Some(()));
+                    Ok(())
+                },
+                |_| "filesystem",
+                |_| "unsafe",
+            );
+            assert_eq!(result, Ok(()));
+            assert_eq!(observations, 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn companion_refuses_unsafe_metadata_after_an_unlink() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let safe = safe_companion();
+        for (unsafe_metadata, expected) in [
+            (Metadata { links: 2, ..safe }, CompanionFault::Links),
+            (
+                Metadata {
+                    kind: FileKind::Symlink,
+                    ..safe
+                },
+                CompanionFault::Symlink,
+            ),
+            (
+                Metadata {
+                    kind: FileKind::Directory,
+                    ..safe
+                },
+                CompanionFault::NotRegular,
+            ),
+            (
+                Metadata {
+                    mode: 0o644,
+                    ..safe
+                },
+                CompanionFault::Mode,
+            ),
+            (
+                Metadata {
+                    uid: safe.uid.wrapping_add(1),
+                    ..safe
+                },
+                CompanionFault::Owner,
+            ),
+        ] {
+            let mut observations = 0;
+            let result = check_companion(
+                || {
+                    observations += 1;
+                    Ok(if observations == 1 {
+                        Metadata { links: 0, ..safe }
+                    } else {
+                        unsafe_metadata
+                    })
+                },
+                |check| {
+                    assert_eq!(check()?, None);
+                    check().map(|_| ())
+                },
+                |_| CompanionFault::NotRegular,
+                |fault| fault,
+            );
+            assert_eq!(result, Err(expected));
+            assert_eq!(observations, 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn companion_unlink_retry_preserves_wait_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let removed = Metadata {
+            links: 0,
+            ..safe_companion()
+        };
+        for error in ["cancelled", "contention"] {
+            let result = check_companion(
+                || Ok(removed),
+                |check| {
+                    assert_eq!(check()?, None);
+                    Err(error)
+                },
+                |_| "filesystem",
+                |_| "unsafe",
+            );
+            assert_eq!(result, Err(error));
+        }
+        Ok(())
+    }
+
     struct AdvancingWait {
         clock: RefCell<TestClock>,
         delays: RefCell<Vec<u64>>,

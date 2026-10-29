@@ -61,14 +61,13 @@ class ReferenceTests(unittest.TestCase):
             self.assertIn('"' + key + '"', text)
 
     def test_non_machine_readable_source_is_a_named_gap(self):
-        source = self.root / GEN['SCHEMAS']
+        source = self.root / GEN['ALL_SCHEMAS']
         source.parent.mkdir(parents=True)
-        (self.root / GEN['ALL_SCHEMAS']).write_text('[]')
         for content in ('not JSON', '{"wrong": "shape"}'):
             source.write_text(content)
             files, gaps = GEN['generate'](self.root)
             self.assertIn('no supported machine-readable schema', files['mcp-tools.md'])
-            self.assertTrue(any(str(GEN['SCHEMAS']) in gap for gap in gaps))
+            self.assertTrue(any(str(GEN['ALL_SCHEMAS']) in gap for gap in gaps))
 
     def test_unsupported_help_is_a_gap_but_build_failure_is_an_error(self):
         workspace = self.root / GEN['WORKSPACE']

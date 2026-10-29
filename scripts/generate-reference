@@ -13,9 +13,9 @@ import tempfile
 
 COMMAND = "scripts/generate-reference"
 WORKSPACE = Path("tools/front-door")
-SCHEMAS = WORKSPACE / "crates/fabric-mcp/tests/fixtures/tool-schemas.json"
 ALL_SCHEMAS = WORKSPACE / "crates/fabric-mcp/tests/fixtures/all-tool-schemas.json"
 KNOBS = Path("config/harness-knobs.json")
+DEFAULT_TOOLS = {"fabric_context", "fabric_mail", "fabric_run", "fabric_output", "fabric_discover"}
 SNAPSHOTS = WORKSPACE / "crates/providers/tests/snapshots/seatbelt"
 
 
@@ -89,7 +89,7 @@ def cli_reference(data):
 
 
 def mcp_reference(data, all_tools):
-    text = header("MCP tool reference", f"{SCHEMAS.as_posix()} and {ALL_SCHEMAS.as_posix()}")
+    text = header("MCP tool reference", ALL_SCHEMAS.as_posix())
     for tool in data:
         text += f"## `{tool['name']}`\n\n" + fenced(tool) + "\n"
     names = {tool["name"] for tool in data}
@@ -152,14 +152,19 @@ def generate(root, binary=None):
         else:
             gap(name, f"{source} is missing")
 
-    missing = next((source for source in (SCHEMAS, ALL_SCHEMAS) if not (root / source).is_file()), None)
-    if missing:
-        gap("mcp-tools.md", f"{missing} is missing")
+    if not (root / ALL_SCHEMAS).is_file():
+        gap("mcp-tools.md", f"{ALL_SCHEMAS} is missing")
     else:
         try:
-            files["mcp-tools.md"] = mcp_reference(json.loads((root / SCHEMAS).read_text()), json.loads((root / ALL_SCHEMAS).read_text()))
+            all_tools = json.loads((root / ALL_SCHEMAS).read_text())
+            if not isinstance(all_tools, list):
+                raise ValueError("expected a tool list")
+            default_tools = [tool for tool in all_tools if tool["name"] in DEFAULT_TOOLS]
+            if {tool["name"] for tool in default_tools} != DEFAULT_TOOLS:
+                raise ValueError("missing default tools")
+            files["mcp-tools.md"] = mcp_reference(default_tools, all_tools)
         except (ValueError, KeyError, TypeError, AttributeError):
-            gap("mcp-tools.md", f"{SCHEMAS} or {ALL_SCHEMAS} has no supported machine-readable schema")
+            gap("mcp-tools.md", f"{ALL_SCHEMAS} has no supported machine-readable schema")
 
     if (root / SNAPSHOTS).is_dir():
         # The goldens are verified by the rust job's provider tests; copy only.
