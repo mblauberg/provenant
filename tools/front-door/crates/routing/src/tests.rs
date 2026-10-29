@@ -280,7 +280,7 @@ fn effort_errors_report_recorded_controls_and_nearest_models()
     for (model, expected) in [
         ("codex/gpt-6.1-luna", "codex/gpt-6-luna"),
         ("codex/gpt-6-luna", "supported efforts: low"),
-        ("opencode/opencode-go/glm-5.2", "takes no effort"),
+        ("opencode/opencode-go/glm-5.3-flash", "takes no effort"),
     ] {
         let mut query = request(model)?;
         query.effort = Some("unsupported".into());
@@ -366,8 +366,8 @@ fn nearest_models_respect_namespace_and_distance() -> Result<(), Box<dyn std::er
         Ok(catalogue.nearest_models(&ModelId::parse(id)?))
     };
     assert_eq!(
-        nearest("opencode/openrouter/~anthropic/claude-haiku-latestt")?,
-        vec!["opencode/openrouter/~anthropic/claude-haiku-latest"]
+        nearest("opencode/opencode-go/glm-5.3-flashh")?,
+        vec!["opencode/opencode-go/glm-5.3-flash"]
     );
     assert!(nearest("opencode/openrouter/~openai/claude-haiku-latest")?.is_empty());
     assert!(
@@ -542,7 +542,7 @@ fn explicit_unlisted_model_is_ready_without_provider_listing()
     let mut context = context(&catalogue, &config, now()?);
     context.availability = &records;
     context.access = &access;
-    let query = request("opencode/opencode/beam-free")?;
+    let query = request("opencode/opencode/glm-5.3-flash-free")?;
     let route = resolve(&query, &context)?;
     assert_eq!(route.model, "opencode/beam-free");
     assert_eq!(route.eligibility, RouteEligibility::UnverifiedModel);
@@ -2049,10 +2049,10 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     use provenant_quota::{QuotaStatus, QuotaWindow};
     let catalogue = Catalogue::bundled()?;
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pools": {"trial": [{"model":"opencode/opencode-go/minimax-m3.1-flash", "weight":1, "efforts":[]}]},
+        "pools": {"trial": [{"model":"opencode/opencode-go/glm-5.3-flash", "weight":1, "efforts":[]}]},
         "pacing": {"accounts": {"go": {"policy":"pace", "windows":["rolling", "seven_day", "monthly"], "reserve":{"rolling":0}}}}
     }))?;
-    let model = "opencode/opencode-go/minimax-m3.1-flash";
+    let model = "opencode/opencode-go/glm-5.3-flash";
     let mut record = availability();
     record.adapter = "opencode".into();
     record.account_key = Some("go".into());
@@ -3272,15 +3272,15 @@ fn opencode_zen_and_go_use_separate_account_identities() -> Result<(), Box<dyn s
     ctx.availability = &records;
     ctx.access = &access;
     for (model, key) in [
-        ("opencode/opencode/beam-free", "zen"),
-        ("opencode/opencode-go/glm-5.1", "go"),
+        ("opencode/opencode/glm-5.3-flash-free", "zen"),
+        ("opencode/opencode-go/glm-5.3-flash", "go"),
     ] {
         let query = request(model)?;
         let route = resolve(&query, &ctx)?;
         assert_eq!(route.account_key.as_deref(), Some(key));
         assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     }
-    let free = request("opencode/opencode/beam-free")?;
+    let free = request("opencode/opencode/glm-5.3-flash-free")?;
     let route = resolve_for_account_with_seed(&free, &ctx, Some("go"), "fixture", 0)?;
     assert!(matches!(
         route.readiness,
