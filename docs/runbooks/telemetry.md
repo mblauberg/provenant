@@ -13,6 +13,26 @@ attempts whose price-table entry is marked as a subscription, including those
 whose token usage or API-equivalent price is unavailable. This classification
 does not verify account billing. An unknown cost is not zero.
 
+Group supervised attempts with `--by issue|graph|preset|role`. `issue` reads
+the P7 `work_item` label; missing labels form an `unknown` group. Graph groups
+also include the latest checkpoint's verdicts, findings and repair rounds,
+plus selected attempts' partial-signal counts when available. `--by pr` joins the retained local
+contribution store to PRs GitHub reports as merged, and apportions usage and
+cost by each contribution's recorded weight. Missing weights are reported as
+unknown allocations and counted at full value. PR lookup requires `gh` access
+to the current repository. Add `--since` and `--until` to bound both the
+attempt window and the merged-PR snapshot.
+
+When a quota-history reading matches an account with configured plan prices,
+JSON includes `plan_value`: the configured monthly price and API-equivalent
+usage for the selected attempt window. These periods may differ; this is a
+comparison, not a realised monthly rate or a bill.
+
+For a wave digest, review `provenant inbox --state open` and then run
+`provenant telemetry stats --by pr --since <wave-start>`. The inbox command
+lists open requests across kinds; select the decision requests for the chair
+summary. Both results are local reads, and PR rows include only merged PRs.
+
 To inspect native Claude Code sub-agents for a session, run
 `provenant telemetry stats --claude-subagents PATH`, where `PATH` is that
 session's `subagents` directory under `~/.claude*/projects/<project>/<session>`.

@@ -23,6 +23,8 @@ mod policy;
 pub use policy::{POLICY_ATTEMPT_CEILING, PolicyRetry, ResultAssessment};
 mod pr_contribution;
 pub use pr_contribution::{Contribution, Contributions, PullRequest, WEIGHT_ONE};
+pub mod reactions;
+pub use reactions::Reaction;
 mod reader;
 mod retention;
 mod service;

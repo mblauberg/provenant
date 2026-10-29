@@ -161,8 +161,14 @@ pub enum Command {
 pub enum Preset {
     /// List available presets
     List,
-    /// Show effective preset values and their origins
-    Show { name: String },
+    /// Show effective preset values and their origins, or the role library
+    Show {
+        /// Preset name, or with --roles a role name to show
+        name: Option<String>,
+        /// List the role library (cards, tiers, families, references and origins)
+        #[arg(long)]
+        roles: bool,
+    },
     /// Explain when to use a preset, its cost, and its typed parameters
     Explain { name: String },
 }
@@ -377,6 +383,10 @@ pub enum ChairSummary {
         /// Expected summary revision; use 0 to create a summary
         #[arg(long)]
         expect_revision: u64,
+        /// Stable retry key; generated when omitted. The same key with the same
+        /// request replays the original result, and with another is refused.
+        #[arg(long, value_parser = explicit_operation_id)]
+        operation_id: Option<OperationId>,
     },
 }
 #[derive(Debug, Subcommand)]
@@ -912,10 +922,20 @@ pub struct Trace {
     #[arg(long)]
     pub peers: bool,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum StatsBy {
+    Pr,
+    Issue,
+    Graph,
+    Node,
+    Pattern,
+    Preset,
+    Role,
+}
 #[derive(Debug, Args)]
 pub struct Stats {
     /// Report native Claude subagents from one session's subagents directory instead of supervised attempts
-    #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id"])]
+    #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id", "by"])]
     pub claude_subagents: Option<PathBuf>,
     /// Count local CLI verbs and MCP tools, including unused installed units.
     #[arg(long)]
@@ -929,6 +949,9 @@ pub struct Stats {
     /// Restrict usage and cost to one run.
     #[arg(long)]
     pub run_id: Option<Target>,
+    /// Group supervised attempts by work context or merged pull request
+    #[arg(long, value_enum, conflicts_with = "usage")]
+    pub by: Option<StatsBy>,
     /// Include per-attempt detail
     #[arg(long, conflicts_with = "usage")]
     pub detail: bool,

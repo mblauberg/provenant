@@ -149,7 +149,7 @@ fn skipped_writer_does_not_connect_separate_checkouts_during_expansion() {
     checkpoint.nodes.iter_mut().find(|n| n.id == "skipped").unwrap().state = NodeState::Skipped;
     let planner = plan.nodes.iter().find(|n| n.id == "plan").unwrap();
     let mut child = slice("required", &["src"]); child["access"] = json!("worktree_write"); child["worktree"] = json!(".worktrees/new");
-    assert!(plans::settle(planner, &doc, &mut checkpoint, Some(&capture(&result(vec![child]))), &Default::default()).is_some(), "{:?}", checkpoint.pause_reason);
+    assert!(plans::settle(planner, &doc, &doc, &mut checkpoint, Some(&capture(&result(vec![child]))), &Default::default()).is_some(), "{:?}", checkpoint.pause_reason);
     assert_eq!(checkpoint.expansions[0].nodes[0].worktree.as_deref(), Some(".worktrees/active"));
 }
 

@@ -44,6 +44,7 @@ const PLACEMENT_LIMIT: u64 = 64 * 1024;
 const POLL: Duration = Duration::from_secs(2);
 
 pub(super) struct Task {
+    pub(super) context: Option<provenant_records::run::WorkContext>,
     pub(super) build_heavy: bool,
     pub(super) title: Option<String>,
     pub(super) base: Option<String>,
@@ -783,6 +784,7 @@ fn submitted_task(
     timeout_seconds: u64,
 ) -> SubmittedTask {
     SubmittedTask {
+        context: task.context,
         extra: Default::default(),
         build_heavy: task.build_heavy,
         title: task.title,
@@ -1899,6 +1901,7 @@ mod tests {
         };
         let task = submitted_task(
             Task {
+                context: None,
                 build_heavy: true,
                 title: Some("Make the change".into()),
                 base: Some("main".into()),
@@ -1949,6 +1952,12 @@ mod tests {
     fn read_only_peer_forwards_the_context_ref_and_original_prompt() {
         let task = submitted_task(
             Task {
+                context: Some(provenant_records::run::WorkContext {
+                    graph_id: Some("graph".into()),
+                    node_id: Some("inspect".into()),
+                    pattern: Some("council".into()),
+                    ..Default::default()
+                }),
                 build_heavy: false,
                 title: None,
                 base: Some("main".into()),
@@ -1968,6 +1977,12 @@ mod tests {
         );
         assert_eq!(task.base.as_deref(), Some("main"));
         assert_eq!(task.prompt, "review");
+        assert_eq!(
+            task.context
+                .as_ref()
+                .and_then(|context| context.pattern.as_deref()),
+            Some("council")
+        );
         assert_eq!(task.access, AccessMode::ReadOnly);
     }
 

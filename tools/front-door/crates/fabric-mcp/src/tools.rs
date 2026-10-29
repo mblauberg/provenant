@@ -68,6 +68,7 @@ pub enum ChairInput {
         session: String,
         patch: Value,
         expect_revision: u64,
+        operation_id: Option<String>,
     },
     LogList {
         session: String,
@@ -605,10 +606,16 @@ impl ToolCall {
                 | InboxInput::Acknowledge { operation_id, .. },
                 _,
             ) => operation_id.clone(),
-            Self::Chair(ChairInput::LogAppend {
-                operation_id: Some(id),
-                ..
-            }) => OperationId::parse(id).ok(),
+            Self::Chair(
+                ChairInput::LogAppend {
+                    operation_id: Some(id),
+                    ..
+                }
+                | ChairInput::SummaryUpdate {
+                    operation_id: Some(id),
+                    ..
+                },
+            ) => OperationId::parse(id).ok(),
             Self::Submit(SubmitInput::Submit { operation_id, .. })
             | Self::SubmitWait(SubmitInput::Submit { operation_id, .. }, ..)
             | Self::Run(

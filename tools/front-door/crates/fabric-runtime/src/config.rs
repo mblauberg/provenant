@@ -89,7 +89,7 @@ impl Default for GraphLimits {
             routes_per_node: 16,
             node_prompt_bytes: 256 * 1024,
             graph_prompt_bytes: 4 * 1024 * 1024,
-            expansion_depth: 32,
+            expansion_depth: 64,
             fan_out_width: 32,
             concurrency: None,
         }
@@ -123,6 +123,30 @@ pub struct Lanes {
     /// Seconds between settlement-triggered walks of the lane caches; 5
     /// minutes unless set.
     pub build_dir_survey_interval_seconds: Option<u64>,
+    /// What a settled lane tells the chair that dispatched it.
+    pub settlement: Settlement,
+}
+
+/// Reactions to a lane settling, which run once per attempt. Each is a switch
+/// with a default; none changes the outcome or any lane's authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settlement {
+    /// Post one terse notice to the dispatching chair's inbox.
+    pub notice: bool,
+    /// Also notify for read-only lanes, which are probes by default.
+    pub notice_read_only: bool,
+    /// Append an entry to the dispatching chair's session log.
+    pub chair_log: bool,
+}
+impl Default for Settlement {
+    fn default() -> Self {
+        Self {
+            notice: true,
+            notice_read_only: false,
+            chair_log: true,
+        }
+    }
 }
 
 impl Lanes {
@@ -631,7 +655,7 @@ mod tests {
     #[test]
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
-        assert_eq!(config.graph.limits.expansion_depth, 32);
+        assert_eq!(config.graph.limits.expansion_depth, 64);
         assert_eq!(config.graph.limits.nodes, 512);
         assert_eq!(config.graph.limits.continuations, 2);
         config.graph.limits.continuations = 0;

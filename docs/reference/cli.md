@@ -1792,6 +1792,33 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant route override`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "RouteOverride",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant route override list`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
 ## `provenant preset`
 
 | Argument | Contract |
@@ -1810,7 +1837,8 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `name` | `{"name": "name", "positional": true, "required": true}` |
+| `name` | `{"name": "name", "positional": true}` |
+| `--roles` | `{"defaults": ["false"], "name": "roles", "values": ["true", "false"]}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1819,7 +1847,8 @@ Accepted by every command, before or after the subcommand.
   "groups": [
     {
       "arguments": [
-        "name"
+        "name",
+        "roles"
       ],
       "multiple": true,
       "name": "Show",
@@ -2400,11 +2429,12 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id"], "name": "claude_subagents"}` |
+| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id", "by"], "name": "claude_subagents"}` |
 | `--usage` | `{"defaults": ["false"], "name": "usage", "values": ["true", "false"]}` |
 | `--since` | `{"name": "since"}` |
 | `--until` | `{"name": "until"}` |
 | `--run-id` | `{"name": "run_id"}` |
+| `--by` | `{"conflicts": ["usage"], "name": "by", "values": ["pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
 | `--detail` | `{"conflicts": ["usage"], "defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
@@ -2423,6 +2453,7 @@ Accepted by every command, before or after the subcommand.
         "since",
         "until",
         "run_id",
+        "by",
         "detail"
       ],
       "multiple": true,
@@ -2939,6 +2970,7 @@ Accepted by every command, before or after the subcommand.
 | `session` | `{"name": "session", "positional": true, "required": true}` |
 | `--file` | `{"name": "file", "required": true}` |
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
+| `--operation-id` | `{"name": "operation_id"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2949,7 +2981,8 @@ Accepted by every command, before or after the subcommand.
       "arguments": [
         "session",
         "file",
-        "expect_revision"
+        "expect_revision",
+        "operation_id"
       ],
       "multiple": true,
       "name": "Update",

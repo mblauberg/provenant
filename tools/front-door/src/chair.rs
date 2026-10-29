@@ -825,7 +825,18 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                 session,
                 file,
                 expect_revision,
+                operation_id,
             } => {
+                let operation_id = match operation_id {
+                    Some(id) => id,
+                    None => {
+                        let bytes = provenant_os::fs::entropy_128()?;
+                        provenant_core::OperationId::parse(&format!(
+                            "cli-{}",
+                            provenant_core::AttemptId::from_bytes(bytes)
+                        ))?
+                    }
+                };
                 let patch: SummaryPatch = log_input(&file)?;
                 let context = provenant_cli::fabric::Context::open(
                     resolved.roots,
@@ -847,14 +858,20 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                 .with_chair(context.identity.host, actor)
                 .with_revisions(keep);
                 store.validate_chair()?;
-                let (summary, saved) = store.update_summary(
+                let outcome = store.update_summary(
                     patch,
                     expect_revision,
+                    &operation_id,
                     budget,
                     &provenant_core::CancelToken::new(),
                     &clock,
                 )?;
-                Ok(json!({"summary": summary, "checkpoint": saved}))
+                Ok(json!({
+                    "summary": outcome.summary,
+                    "checkpoint": outcome.saved,
+                    "operation_id": operation_id,
+                    "replayed": outcome.replayed,
+                }))
             }
         }
     })();

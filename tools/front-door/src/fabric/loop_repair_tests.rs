@@ -217,7 +217,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         return Ok(());
     }
     use provenant_fabric_runtime::{
-        graph::{AttemptOwner, LoopDecision, LoopScope},
+        graph::{AskScope, AttemptOwner, loop_ask},
         inbox::{InboxFilter, InboxInput, InboxResult, InboxService},
     };
     use provenant_records::inbox::{AnswerAction, InteractionChannel, RequestState};
@@ -248,13 +248,12 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let actor = original.inbox.actor.to_string();
-    let scope = LoopScope {
+    let ask = loop_ask("actor-loop", "revise", 2, "original-session");
+    let scope = AskScope {
         graph_id: "actor-loop",
         instance_id: "instance-one",
-        node_id: "revise",
-        rounds: 2,
-        session: "original-session",
         actor: &actor,
+        ask: &ask,
     };
     let mut owner = BoundGraphOwner {
         integration_branch: None,
@@ -264,7 +263,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         cancel: &cancel,
         prices: None,
     };
-    assert_eq!(owner.loop_decision(scope)?, None);
+    assert_eq!(owner.node_ask(scope)?, None);
     let service = InboxService::open(
         &fixture.roots.state,
         &original,
@@ -275,7 +274,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
     let InboxResult::Listed { items, .. } = service.execute(
         InboxInput::List {extra: Default::default(),
             id: None,
-            session: Some(scope.session.into()),
+            session: Some(ask.session.clone()),
             state: InboxFilter::All,
             limit: 10,
             cursor: None,
@@ -302,8 +301,10 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         budget,
         &cancel,
     )?;
-    assert_eq!(owner.loop_decision(scope)?, Some(LoopDecision::Accept));
-    owner.close_loop_ask(scope)?;
+    let reply = owner.node_ask(scope)?.ok_or("missing answer")?;
+    assert_eq!(reply.option.as_deref(), Some("accept"));
+    assert_eq!(reply.actor, actor);
+    owner.close_node_ask(scope)?;
     let InboxResult::Item { item, .. } = service.execute(
         InboxInput::List {extra: Default::default(),
             id: Some(ask.id),

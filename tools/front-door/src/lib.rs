@@ -28,6 +28,7 @@ mod pr;
 #[cfg(test)]
 mod pr_land_tests;
 mod preset;
+mod preset_roles;
 #[cfg(test)]
 #[allow(
     dead_code,
@@ -38,6 +39,7 @@ mod preset_tests;
 mod provider_retention;
 mod release_smoke;
 mod roots;
+mod settlement;
 mod target_seed_build;
 mod usage;
 #[cfg(test)]
@@ -647,18 +649,30 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
         ),
         Command::Internal(provenant_cli::Internal::Settle { request }) => {
+            // Recovery commits terminal state without a live guardian, so it
+            // drains the settlement reactions itself.
+            let drained = provenant_run::settlement::ResumeRequest::parse(&request).map(|parsed| {
+                settlement::Subject {
+                    home: parsed.roots().home.clone(),
+                    checkout: parsed.roots().checkout.clone(),
+                    state_root: parsed.roots().state_root.clone(),
+                    project: parsed.project(),
+                    actor: parsed.actor(),
+                    run: parsed.run(),
+                }
+            });
             match provenant_run::settlement::resume(
                 &request,
                 &provenant_cli::run::Registry::default(),
-            ) {
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                let subject = drained.map_err(|error| error.to_string())?;
+                fabric::settlement_reactions(&subject, None, process.workers())
+                    .map_err(|error| error.to_string())
+            }) {
                 Ok(()) => 0,
-                Err(error) => fail(
-                    &inv.leaf,
-                    Outcome::Error,
-                    "SETTLEMENT",
-                    &error.to_string(),
-                    globals,
-                ),
+                Err(error) => fail(&inv.leaf, Outcome::Error, "SETTLEMENT", &error, globals),
             }
         }
         Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
@@ -857,10 +871,26 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             provenant_cli::run::reconcile(cmd, edge)
         }),
         Command::Telemetry(provenant_cli::Telemetry::Stats(cmd)) => {
-            if cmd.usage {
+            if stats_dispatch(&cmd) == StatsDispatch::Usage {
                 usage::run(&cmd, globals)
+            } else if stats_dispatch(&cmd) == StatsDispatch::MergedPullRequests {
+                let merged = match pr::contributions::merged_prs(globals, cmd.since, cmd.until) {
+                    Ok(merged) => merged,
+                    Err(error) => {
+                        return fail(
+                            "telemetry stats",
+                            Outcome::Error,
+                            "MERGED_PR_READ",
+                            &error.to_string(),
+                            globals,
+                        );
+                    }
+                };
+                run_edge_workspace(&inv.leaf, globals, Workspace::Project, |edge| {
+                    provenant_cli::run::stats_by_pr(cmd, edge, merged)
+                })
             } else {
-                let workspace = if cmd.claude_subagents.is_some() {
+                let workspace = if stats_dispatch(&cmd) == StatsDispatch::Directory {
                     Workspace::Directory
                 } else {
                     Workspace::Project
@@ -998,6 +1028,53 @@ mod session_warning_tests {
         drop(tx);
     }
 }
+
+#[cfg(test)]
+mod telemetry_stats_dispatch_tests {
+    #[test]
+    fn grouped_stats_dispatch_to_the_matching_reader() {
+        for (dimension, expected) in [
+            ("pr", super::StatsDispatch::MergedPullRequests),
+            ("node", super::StatsDispatch::Project),
+            ("pattern", super::StatsDispatch::Project),
+        ] {
+            let provenant_cli::ParseOutcome::Invocation(invocation) = provenant_cli::parse(
+                ["telemetry", "stats", "--by", dimension]
+                    .into_iter()
+                    .map(std::ffi::OsString::from),
+            ) else {
+                panic!("stats invocation for {dimension}");
+            };
+            let provenant_cli::Command::Telemetry(provenant_cli::Telemetry::Stats(command)) =
+                invocation.command
+            else {
+                panic!("stats command for {dimension}");
+            };
+            assert_eq!(super::stats_dispatch(&command), expected, "{dimension}");
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatsDispatch {
+    Usage,
+    MergedPullRequests,
+    Directory,
+    Project,
+}
+
+fn stats_dispatch(command: &provenant_cli::Stats) -> StatsDispatch {
+    if command.usage {
+        StatsDispatch::Usage
+    } else if command.by == Some(provenant_cli::StatsBy::Pr) {
+        StatsDispatch::MergedPullRequests
+    } else if command.claude_subagents.is_some() {
+        StatsDispatch::Directory
+    } else {
+        StatsDispatch::Project
+    }
+}
+
 /// Run one parsed command line and count it, returning the exit status.
 // CLI reporting measures real elapsed time for operational diagnostics.
 #[allow(clippy::disallowed_methods)]

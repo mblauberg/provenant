@@ -54,7 +54,8 @@ record_cases! {
     attempt_key_digest_round_trip: AttemptKey => stored()["checkpoint"]["nodes"][0]["attempts"][0]["key"].clone();
     envelope_digest_round_trip: StoredCheckpoint => stored();
     loop_spec_digest_round_trip: LoopSpec => json!({"body":[],"until":"gate","max_rounds":1});
-    loop_ask_digest_round_trip: LoopAsk => json!({"rounds":1,"session":"chair","resolved":false,"closed":false});
+    node_ask_digest_round_trip: NodeAsk => json!({"ask_id":"r.rounds-1","kind":"loop","node":"r","rounds":1,"session":"chair","title":"t","body":"b","options":[{"id":"stop","label":"Stop"}],"resolved":true,"closed":false,"answer":{"source":"answered","option":"stop","actor":"chair"}});
+    decide_spec_digest_round_trip: DecideSpec => json!({"question":"q","options":[{"id":"a","label":"A"},{"id":"b","label":"B"}]});
     loop_round_digest_round_trip: LoopRound => json!({"loop_id":"loop","round":1,"node_id":"reader","until":false,"previous_gate":null});
     plan_spec_digest_round_trip: PlanSpec => json!({"kinds":["task"],"max_nodes":1});
     expansion_digest_round_trip: Expansion => json!({"source":"planner","continuation":false,"nodes":[]});

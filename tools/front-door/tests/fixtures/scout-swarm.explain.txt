@@ -1,0 +1,26 @@
+Graph <id>
+scouts  role=- tier=- family=any kind=composite access=read_only worktree=-
+  scout-1  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+    reference: skill:scope/references/scout-areas.md <digest>
+    read_roots: ["<root>/skills"]
+  scout-2  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+    reference: skill:scope/references/scout-areas.md <digest>
+    read_roots: ["<root>/skills"]
+  scout-3  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+    reference: skill:scope/references/scout-areas.md <digest>
+    read_roots: ["<root>/skills"]
+  scout-4  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
+    reference: skill:scope/references/scout-areas.md <digest>
+    read_roots: ["<root>/skills"]
+  external  role=scout.external tier=junior family=any kind=- access=read_only worktree=-
+    reference: skill:scope/references/researcher.md <digest>
+    read_roots: ["<root>/skills"]
+  exports: [{"node":"scout-1","outputs":["result","findings"]},{"node":"scout-2","outputs":["result","findings"]},{"node":"scout-3","outputs":["result","findings"]},{"node":"scout-4","outputs":["result","findings"]},{"node":"external","outputs":["result","findings"]}]
+synthesis  role=plan.research tier=senior family=any kind=synthesise access=read_only worktree=-
+  inputs: [{"node":"scouts","outputs":["result"]}]
+Roles:
+  plan.research  origin=bundled digest=<digest>
+  scout.codebase  origin=bundled digest=<digest>
+  scout.external  origin=bundled digest=<digest>
+Substituted external: web -> junior (route web is not defined in the routing configuration)
+

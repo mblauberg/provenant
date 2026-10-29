@@ -28,7 +28,7 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | Key | Default | Effect |
 |---|---|---|
 | `allowed_read_roots` | empty (read roots stay inside the project and its registered worktrees) | Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees. (absolute directory paths). |
-| `limits.expansion_depth` | 32 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 29. Graph documents cannot raise it. (1 or more). |
+| `limits.expansion_depth` | 64 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 33. Graph documents cannot raise it. (1 or more). |
 
 ## Host model policy settings
 
@@ -58,7 +58,7 @@ Set these in `[domains.routing.model_policy]` in the host configuration. Omit a 
 | `defaults.result.sections` | per model | Heading lines a result must contain. (exact section heading lines; empty clears). |
 | `defaults.result.fallback` | per model | Model for the one fallback attempt when the result check fails. (model id). |
 | `defaults.result.fallback_effort` | per model | Effort for the fallback attempt. (effort name). |
-| `rules` | empty | Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Inclusive start, exclusive expiry; an overnight window wraps midnight; inactive rules have no effect. (tables with adapter, model, account, starts_unix_seconds, expires_unix_seconds, windows (list of {start_hour, end_hour}, UTC) and policy (the same fields as defaults, under rules.policy)). |
+| `rules` | empty | Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Schedule start is inclusive, expiry and window end are exclusive; an overnight window wraps midnight; inactive rules have no effect. (tables with adapter, model, account, schedule {starts, expires, windows [{weekdays?, start_hour, end_hour}] in UTC} and policy (the same fields as defaults, under rules.policy); weekdays use Monday-based indexes, Monday 0 through Sunday 6). |
 
 ## Quota history and plan prices
 
