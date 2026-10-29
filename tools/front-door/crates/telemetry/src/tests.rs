@@ -11,12 +11,18 @@ fn configured(rate: Option<u64>) -> ConfiguredPrices {
         id: "test-prices".into(),
         reviewed_at: "2026-10-22".into(),
         units: "usd_microdollars_per_million_tokens".into(),
+        max_review_age_days: None,
+        discrepancy_threshold_bps: None,
         models: vec![ConfiguredModel {
             provider: "p".into(),
             model: "m".into(),
             sources: vec!["recorded test rates".into()],
             billing: BillingKind::Subscription,
             zero_rate_verified: rate == Some(0),
+            effective_from: None,
+            effective_to: None,
+            openrouter_id: None,
+            litellm_id: None,
             rates: Rates {
                 uncached_input: rate,
                 cache_read: rate,
@@ -1151,5 +1157,39 @@ fn context_cost_rounding_uses_largest_fractional_remainders() {
             .collect::<Vec<_>>();
         assert_eq!(costs, expected, "input numerators: {inputs:?}");
         assert_eq!(costs.iter().sum::<u64>(), total);
+    }
+}
+
+#[test]
+fn review_older_than_the_configured_age_is_stale() {
+    let mut config = configured(Some(1));
+    config.max_review_age_days = Some(90);
+    let table = validate_prices(&config).unwrap();
+    let on = |text: &str| table.freshness(text.parse().unwrap());
+    // reviewed_at is 2026-10-22; 90 days later is 2027-01-20.
+    assert!(!on("2027-01-20").stale);
+    let late = on("2027-01-21");
+    assert!(late.stale);
+    assert_eq!(late.age_days, 91);
+    config.max_review_age_days = None;
+    assert!(
+        !validate_prices(&config)
+            .unwrap()
+            .freshness("2030-01-01".parse().unwrap())
+            .stale
+    );
+}
+
+#[test]
+fn effective_dates_must_be_ordered_real_dates() {
+    for (from, to, ok) in [
+        (Some("2026-01-01"), Some("2026-06-30"), true),
+        (Some("2026-07-01"), Some("2026-06-30"), false),
+        (Some("2026-02-30"), None, false),
+    ] {
+        let mut config = configured(Some(1));
+        config.models[0].effective_from = from.map(Into::into);
+        config.models[0].effective_to = to.map(Into::into);
+        assert_eq!(validate_prices(&config).is_ok(), ok, "{from:?} {to:?}");
     }
 }

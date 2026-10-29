@@ -130,7 +130,6 @@ pub fn collect(
     let cancel = provenant_core::CancelToken::new();
     let request = crate::Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&clock), 5)?,
         cancel: &cancel,
     };
     crate::ledger::while_admission_held(
@@ -959,8 +958,6 @@ mod tests {
         let cancel = provenant_core::CancelToken::new();
         let request = crate::Request {
             clock: &clock,
-            budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&clock), 1)
-                .unwrap(),
             cancel: &cancel,
         };
         // A claim in flight holds the ledger: collection refuses and deletes nothing.
@@ -1095,8 +1092,6 @@ mod tests {
         let cancel = provenant_core::CancelToken::new();
         let request = crate::Request {
             clock: &clock,
-            budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&clock), 1)
-                .unwrap(),
             cancel: &cancel,
         };
         // A claim in flight holds the ledger; a sweep that has nothing to remove

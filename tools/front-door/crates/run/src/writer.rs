@@ -50,6 +50,13 @@ fn anchored_error(error: FsError, anchor: &Path) -> RunError {
         other => other.into(),
     }
 }
+/// Retain the anchor for filesystem errors raised by held-directory helpers.
+fn anchor_filesystem(error: RunError, anchor: &Path) -> RunError {
+    match error {
+        RunError::Filesystem(error) => anchored_error(error, anchor),
+        other => other,
+    }
+}
 fn runtime(state: &Path) -> Result<UtilityRuntime> {
     let home = state.join("writer-git-home");
     let directory = Directory::open_anchor(state)?;
@@ -207,8 +214,8 @@ pub(crate) fn cleanup_git_pins(
     }
     Ok(())
 }
-/// Reopen the persisted scope and match its active Provenant registration.
-/// The subsequent supervisor reservation is the authoritative exclusion check.
+/// Reopen the persisted scope and verify current Git worktree membership.
+/// The subsequent supervisor writer flock supplies exclusion.
 pub fn prepare_writer(
     request: &WriterRequest,
     state: &Path,
@@ -263,23 +270,12 @@ pub fn prepare_writer(
     )
     .map_err(error("parse writer base", Some(&request.worktree)))?;
     let state_dir = Directory::open_anchor(state)?;
-    // Git knows the worktree but Provenant holds no state for it: it was not
-    // created by `provenant worktree create`.
-    let unregistered = |error: provenant_os::fs::FsError| {
-        if error.is_not_found() {
-            RunError::WorktreeUnregistered(request.worktree.clone())
-        } else {
-            anchored_error(error, state)
-        }
-    };
-    let projects = state_dir
-        .open_verified_directory(OsStr::new("worktrees"))
-        .map_err(unregistered)?;
-    let project_state = projects
-        .open_verified_directory(OsStr::new(&project.to_string()))
-        .map_err(unregistered)?;
+    let projects = crate::artifacts::subdir(&state_dir, OsStr::new("worktrees"), true)
+        .map_err(|error| anchor_filesystem(error, state))?;
+    let project_state = crate::artifacts::subdir(&projects, OsStr::new(&project.to_string()), true)
+        .map_err(|error| anchor_filesystem(error, state))?;
     let (directory, binding) =
-        worktrees::writer_custody(&project_state, project, &worktree, &branch, base, || {
+        worktrees::writer_custody(&project_state, &worktree, &branch, base, || {
             let outcome = provenant_confinement::run_utility(
                 &executor,
                 provenant_confinement::GitRead::WorktreeList,
@@ -1136,9 +1132,13 @@ impl crate::RunStore {
                     .into_iter()
                     .find(|fence| fence.scope == scope)
                     .ok_or(failure)?;
-                let parent = fence.reservation.parent().ok_or_else(|| {
-                    RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
-                })?;
+                let parent = fence
+                    .reservation
+                    .parent()
+                    .and_then(Path::parent)
+                    .ok_or_else(|| {
+                        RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
+                    })?;
                 Ok(Directory::open_anchor(parent)?)
             }
             Err(failure) => Err(failure),

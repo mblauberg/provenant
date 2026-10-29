@@ -169,8 +169,11 @@ pub struct Targets {
     pub remove_hooks: bool,
     /// Rendered per-user LaunchAgent, supplied only by the process edge.
     pub peer_agent: Option<Vec<u8>>,
-    /// Rendered host tick scheduler, supplied only by the process edge.
+    /// Rendered host tick scheduler, supplied only by the process edge: the
+    /// LaunchAgent plist on macOS, the systemd timer unit on Linux.
     pub tick_agent: Option<Vec<u8>>,
+    /// The systemd service unit the Linux timer activates; `None` on macOS.
+    pub tick_service: Option<Vec<u8>>,
     /// Exact recognised historical rendering, for migration from pre-receipt agents.
     pub peer_agent_previous: Option<Vec<u8>>,
     pub hook_specs: Vec<HookRegistration>,
@@ -202,7 +205,7 @@ impl HarnessTarget {
         let instruction = match harness {
             Harness::Claude => Some("CLAUDE.md"),
             Harness::Codex | Harness::Opencode => Some("AGENTS.md"),
-            Harness::Cursor | Harness::Command => None,
+            Harness::Cursor | Harness::Command | Harness::HostNative => None,
             Harness::Agy => Some("GEMINI.md"),
         };
         Self {
@@ -231,7 +234,7 @@ impl Targets {
                     Harness::Cursor => ".cursor",
                     Harness::Agy => ".gemini",
                     Harness::Opencode => ".config/opencode",
-                    Harness::Command => "",
+                    Harness::Command | Harness::HostNative => "",
                 };
                 HarnessTarget::at(*h, home, &home.join(base))
             })
@@ -246,6 +249,7 @@ impl Targets {
             remove_hooks: false,
             peer_agent: None,
             tick_agent: None,
+            tick_service: None,
             peer_agent_previous: None,
             hook_specs: Vec::new(),
             accounts: Vec::new(),
@@ -520,7 +524,7 @@ impl Snapshots {
         if let Some(previous) = &receipt {
             for entry in &previous.entries {
                 if entry.selector == "binary"
-                    || matches!(entry.selector.as_str(), "tick-agent" | "gc-agent")
+                    || scheduler_entry(&entry.selector)
                     || entry_owner(entry, previous, targets.roots.state.as_path())?
                         .is_some_and(|owner| selected.contains(&owner))
                 {
@@ -667,23 +671,36 @@ fn desired(
         )?;
     }
     if let Some(bytes) = &targets.tick_agent {
-        let path = tick_agent_plist(targets.roots.state.as_path()).ok_or(
-            InstallError::InvalidConfig("tick agent requires the default state root"),
-        )?;
         let home =
             provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
-        if path != home.join("Library/LaunchAgents/dev.provenant.tick.plist") {
-            return Err(InstallError::Conflict(path));
+        let state = targets.roots.state.as_path();
+        let mut units = vec![("tick-agent", bytes, tick_agent_plist(state))];
+        if let Some(service) = &targets.tick_service {
+            units = vec![
+                ("tick-agent", bytes, tick_timer_path(state)),
+                ("tick-service", service, tick_service_path(state)),
+            ];
         }
-        insert(
-            path,
-            Value::File {
-                bytes: bytes.clone(),
-                mode: 0o600,
-            },
-            None,
-            "tick-agent".into(),
-        )?;
+        for (selector, bytes, path) in units {
+            let path = path.ok_or(InstallError::InvalidConfig(
+                "tick agent requires the default state root",
+            ))?;
+            if selector == "tick-agent"
+                && targets.tick_service.is_none()
+                && path != home.join(MACOS_TICK)
+            {
+                return Err(InstallError::Conflict(path));
+            }
+            insert(
+                path,
+                Value::File {
+                    bytes: bytes.clone(),
+                    mode: 0o600,
+                },
+                None,
+                selector.into(),
+            )?;
+        }
     }
     for target in &targets.harnesses {
         let mut skills = BTreeMap::new();
@@ -754,9 +771,47 @@ pub fn peer_agent_plist(state: &Path) -> Option<PathBuf> {
         .then(|| home.join("Library/LaunchAgents/dev.provenant.peer.plist"))
 }
 
+const MACOS_TICK: &str = "Library/LaunchAgents/dev.provenant.tick.plist";
+const LINUX_TIMER: &str = "provenant-tick.timer";
+const LINUX_SERVICE: &str = "provenant-tick.service";
+
+/// The systemd user unit directory: `$XDG_CONFIG_HOME/systemd/user` when that
+/// is an absolute path, else `~/.config/systemd/user`.
+pub fn systemd_user_dir(home: &Path) -> PathBuf {
+    user_dir_in(home, std::env::var_os("XDG_CONFIG_HOME"))
+}
+
+/// [`systemd_user_dir`] with the `XDG_CONFIG_HOME` value supplied by the caller.
+pub fn user_dir_in(home: &Path, config_home: Option<std::ffi::OsString>) -> PathBuf {
+    match config_home.map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => dir.join("systemd/user"),
+        _ => home.join(".config/systemd/user"),
+    }
+}
+
+fn default_state_home(state: &Path) -> Option<&Path> {
+    let home = state.ancestors().nth(4)?;
+    (state == home.join(".local/share/provenant/v1")).then_some(home)
+}
+
 /// The host tick shares the per-user default-state ownership scope.
 pub fn tick_agent_plist(state: &Path) -> Option<PathBuf> {
-    peer_agent_plist(state).map(|path| path.with_file_name("dev.provenant.tick.plist"))
+    default_state_home(state).map(|home| home.join(MACOS_TICK))
+}
+
+/// The Linux systemd user timer, in the same ownership scope.
+pub fn tick_timer_path(state: &Path) -> Option<PathBuf> {
+    default_state_home(state).map(|home| systemd_user_dir(home).join(LINUX_TIMER))
+}
+
+/// The service the Linux timer activates.
+pub fn tick_service_path(state: &Path) -> Option<PathBuf> {
+    default_state_home(state).map(|home| systemd_user_dir(home).join(LINUX_SERVICE))
+}
+
+/// Receipt entries the scheduler owns, whichever platform wrote them.
+fn scheduler_entry(selector: &str) -> bool {
+    matches!(selector, "tick-agent" | "tick-service" | "gc-agent")
 }
 
 fn validate_removal(
@@ -965,7 +1020,7 @@ pub fn plan_install(
             }
             if !matches!(
                 entry.selector.as_str(),
-                "binary" | "tick-agent" | "gc-agent"
+                "binary" | "tick-agent" | "tick-service" | "gc-agent"
             ) {
                 let Some(owner) = owner else {
                     continue;
@@ -983,8 +1038,7 @@ pub fn plan_install(
             if current
                 .as_ref()
                 .is_some_and(|before| matches_owned(&before.value, &entry.expected))
-                || (current.is_none()
-                    && matches!(entry.selector.as_str(), "tick-agent" | "gc-agent"))
+                || (current.is_none() && scheduler_entry(&entry.selector))
             {
                 actions.push(Action {
                     path: entry.path.clone(),
@@ -995,7 +1049,7 @@ pub fn plan_install(
                     identity: identity(current),
                     edits: Vec::new(),
                 });
-            } else if matches!(entry.selector.as_str(), "tick-agent" | "gc-agent") {
+            } else if scheduler_entry(&entry.selector) {
                 snapshots.harness.findings.push(InstallFinding {
                     rule: "relinquished_modified_entry".into(),
                     detail: None,
@@ -1954,11 +2008,18 @@ fn permitted_entry(
     if entry.harness.is_none() {
         if matches!(
             entry.selector.as_str(),
-            "peer-agent" | "tick-agent" | "gc-agent"
+            "peer-agent" | "tick-agent" | "tick-service" | "gc-agent"
         ) {
             let expected_path = match entry.selector.as_str() {
                 "peer-agent" => peer_agent_plist(state_root),
-                "tick-agent" => tick_agent_plist(state_root),
+                "tick-agent" => {
+                    let path = entry.path.to_path_buf()?;
+                    [tick_agent_plist(state_root), tick_timer_path(state_root)]
+                        .into_iter()
+                        .find(|expected| expected.as_ref() == Some(&path))
+                        .flatten()
+                }
+                "tick-service" => tick_service_path(state_root),
                 // Only migration/removal reads this former install receipt entry.
                 _ => peer_agent_plist(state_root)
                     .map(|path| path.with_file_name("dev.provenant.gc.plist")),
@@ -2406,7 +2467,7 @@ pub fn uninstall(
         owner.as_ref().is_some_and(|id| selected.contains(id))
             || (matches!(
                 entry.selector.as_str(),
-                "peer-agent" | "tick-agent" | "gc-agent"
+                "peer-agent" | "tick-agent" | "tick-service" | "gc-agent"
             ) && selected == registered)
     };
 
@@ -2459,7 +2520,7 @@ pub fn uninstall(
         // A deleted plist can still have a loaded service. Keep its stop in the
         // same locked, retryable removal path as an unchanged recorded plist.
         if before.is_none()
-            && !matches!(entry.selector.as_str(), "tick-agent" | "gc-agent")
+            && !scheduler_entry(&entry.selector)
             && (entry.selector != "peer-agent" || !recorded_peer_agent)
         {
             continue;
@@ -2609,3 +2670,18 @@ pub fn uninstall(
 #[cfg(test)]
 #[path = "managed_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod unit_dir_tests {
+    use super::*;
+
+    #[test]
+    fn systemd_unit_dir_honours_an_absolute_xdg_config_home_only() {
+        let home = Path::new("/h");
+        let dir = |xdg: Option<&str>| user_dir_in(home, xdg.map(Into::into));
+        assert_eq!(dir(None), Path::new("/h/.config/systemd/user"));
+        assert_eq!(dir(Some("/c")), Path::new("/c/systemd/user"));
+        assert_eq!(dir(Some("rel")), Path::new("/h/.config/systemd/user"));
+        assert_eq!(dir(Some("")), Path::new("/h/.config/systemd/user"));
+    }
+}

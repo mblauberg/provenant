@@ -529,8 +529,8 @@ never share a worktree.
    and passes the plan to supervisor. A lost acknowledgement records
    `launch_unknown`, keeps capacity and the reservation, and is never replayed.
 3. Supervisor observes provider exit and releases host build capacity. Once
-   cleanup proves quiescence, it releases the live writer lock before settlement.
-   The durable reservation still excludes another writer from this worktree.
+   cleanup proves quiescence, it retains the worktree writer lock through settlement.
+   Read-only attempts may release their attempt-local lock.
 4. Settlement imports objects, publishes the branch, records the outcome and
    releases the reservation through the durable phases below.
 5. A run closes only when every task and registered child is terminal.
@@ -541,7 +541,9 @@ excludes a second driver. A dead owner can be replaced after checking its boot,
 PID and start identity. An unknown process observation protects its owner for
 at most ten minutes from the claim. The replacement continues the recorded phase; it does
 not restart the provider. Journal locks cover only short reads and durable
-updates. No settlement lock or writer lock spans an external command.
+updates. No settlement journal lock spans an external command. The worktree
+writer flock spans import and publication, so lifecycle mutations cannot race
+terminal settlement.
 
 | Phase | Durable effect and replay |
 | --- | --- |
@@ -664,6 +666,27 @@ could not read, truncated captures and `slices_complete: false`.
   `::an_incomplete_prompt_names_the_changed_files_without_a_slice`;
   `::real_git_stat_and_slices_match_the_whole_patch`
 - Owner: `crates/run/src/git_context.rs`
+
+## Host-native launch rows
+
+The optional `host-native` adapter selects a named
+`domains.fabric.host_native` entry. Its `AdapterSpec::launch` row refuses task
+model and effort selectors and session resume; model and effort are configured
+on the entry. `claude-agent` is the first kind and delegates preparation to
+Claude before adding its inline `--agents` definition and `--agent` selector.
+The same provider admission, accounts, network/access confinement, prompt
+transport, decoder and writer delivery apply. Applied route provenance retains
+the entry name and configuration source alongside the actual provider route.
+Host-native attempts retain model-policy result refusals but do not automatically
+retry as ordinary model routes or resume a session. Explicit resume may fall
+back to a fresh named launch under the existing resume policy.
+- Why: optional host features must declare their lane contract and keep its
+  confinement and provenance through execution and recovery.
+- Test: `crates/records/src/adapters.rs::host_native_declares_a_fresh_named_writer_contract`;
+  `tests/dispatch_provider.rs::host_native_preparation_uses_the_provider_contract`;
+  `::host_native_dispatch_uses_the_declared_agent_and_refuses_resume`;
+  `crates/cli/src/run.rs::host_native_attempts_do_not_resume_implicitly_or_explicitly`
+- Owner: `crates/records/src/adapters.rs`, `crates/cli/src/run/provider.rs`
 
 ## Launch prompts
 
@@ -882,8 +905,33 @@ refuses unsafe companion files beside the database, and caps (1 MiB record or pr
 
 ## Reads and waits
 
-`output` offsets count original bytes and reads are lossless; prompt reads
-need dispatch-equivalent authority. A terminal attempt with no requested
+### Output redaction and identity
+
+The guardian applies independent streaming known-shape redactors to stdout
+and stderr before retaining bytes or writing captures to disk. Split credential
+markers remain buffered across chunks. A filter failure discards that stream's
+remaining output. Provider lifecycle frames are decoded before filtering.
+At settlement, the holder filters the decoded result again before sealing
+`result.md`, including credential markers revealed by JSON escapes. A result
+redaction failure refuses publication rather than storing the raw answer.
+
+Result artifact `digest` and `bytes` identify the stored, redacted bytes;
+there is no raw result copy or raw-result digest. Newly sealed holder results set
+`redacted: true` to mean that redaction was applied, even when no credential
+matched. It is not a count of replacements or a guarantee against unknown
+secret formats. This does not rewrite earlier run files or provider-owned
+session state. Result-only orphan recovery preserves sealed bytes and their
+digest; it clears a proposed `redacted: true` if those bytes still contain a
+known credential shape or cannot be safely filtered.
+- Test: `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
+  `crates/run/src/dispatch_tests.rs::holder_seals_redacted_results_and_digests_the_stored_bytes`;
+  `crates/run/src/tests.rs::result_orphan_redaction_flag_describes_the_preserved_bytes`;
+  `tests/dispatch_provider.rs::printed_credentials_leave_no_plaintext_in_run_files`
+- Owner: `src/lib.rs`, `crates/run/src/holder.rs`, `crates/run/src/store.rs`
+
+`output` scans the whole artifact for known shapes before paging, including
+older artifacts. Its offsets and digest refer to those filtered bytes. Prompt
+reads are lossless and need dispatch-equivalent authority. A terminal attempt with no requested
 output is `NOT_FOUND`. `wait any` returns on the next unseen terminal or
 `input_required` lane, and `wait all` returns when all are terminal or any needs
 input. The set is fixed at entry and excludes the caller and its ancestors.
@@ -908,7 +956,7 @@ in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
 - Alias coercion, old-root scans, record migration or a state deletion
   command.
 
-## Lane-owned worktrees and adoption
+## Lane-owned worktrees and Git membership
 
 Dispatch may opt into local lifecycle ownership with `--worktree-branch BRANCH
 [--base REF]`, exclusive with `--worktree` and peer `--branch`. Creation uses
@@ -923,15 +971,11 @@ atomic `WorktreeOwner`: optional attempt and operation IDs, short branch,
 pinned base OID, host, creation time, origin (`lane` or `adopted`) and optional
 owner label. `load_owner` and `save_owner` require a verified linked worktree.
 
-`worktree adopt PATH [--owner LABEL]` proves common-repository registration
-and the Git backlink, acquires repository and writer locks, refuses live or
-reserved writers and publishes the ordinary custody identity plus an adopted
-owner. Ownership never grants deletion authority by itself. Existing explicit
-`--worktree` dispatches keep their existing lifecycle.
-Adoption does not mistake an incomplete native census for a live writer. As
-with ordinary mutations, an exclusive writer lock and absent reservation prove
-custody; an observed live process still refuses, and callers requiring a
-complete census still refuse unknown observations.
+Git's inventory and verified common-directory/backlink membership admit
+existing linked checkouts without an adoption step. Canonical paths locate
+persistent exclusion slots; neither old `identity.json` nor registry reservation
+records gate admission. Ownership metadata only controls lane lifecycle cleanup.
+Per-attempt supervisor evidence still controls recovery of launched work.
 
 Owned lane settlement may prune its own clean checkout only after success
 without requested delivery, or after successful delivery, and when its exact
@@ -956,7 +1000,7 @@ is silently skipped. Other failures may add a fixed, redacted
 or change an adopted worktree's receipt. Concurrent refreshes of the same
 branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
-- Test: `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
+- Test: `crates/confinement/src/worktrees.rs::git_inventory_accepts_unregistered_and_recreated_worktrees`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
   `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
   `tools/front-door/src/gc_support.rs::writer_tracking_refresh_handles_remote_branch_absence_and_failure`;

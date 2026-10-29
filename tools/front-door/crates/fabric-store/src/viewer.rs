@@ -64,21 +64,22 @@ impl Store {
         id: HumanRequestId,
         request: &Request<'_>,
     ) -> Result<RequestView> {
+        request.check()?;
         viewer_id(viewer)?;
-        request.retry(|| {
-            let row: Option<(Option<i64>, Option<String>, bool)> = self.db.query_row(
-                "SELECT seen_revision,snoozed_until,dismissed FROM viewer_requests WHERE project=?1 AND viewer=?2 AND request=?3",
-                params![project.to_string(), viewer, id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            ).optional()?;
-            match row {
-                None => Ok(RequestView::default()),
-                Some((seen, until, dismissed)) => Ok(RequestView {
-                    seen_revision: seen.map(|n| u64::try_from(n).map_err(|_| Error::Invalid("seen revision"))).transpose()?,
-                    snoozed_until: until.map(|s| WallTime::parse(&s)).transpose()?,
-                    dismissed,
-                }),
-            }
-        })
+        let row: Option<(Option<i64>, Option<String>, bool)> = self.db.query_row(
+            "SELECT seen_revision,snoozed_until,dismissed FROM viewer_requests WHERE project=?1 AND viewer=?2 AND request=?3",
+            params![project.to_string(), viewer, id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional()?;
+        match row {
+            None => Ok(RequestView::default()),
+            Some((seen, until, dismissed)) => Ok(RequestView {
+                seen_revision: seen
+                    .map(|n| u64::try_from(n).map_err(|_| Error::Invalid("seen revision")))
+                    .transpose()?,
+                snoozed_until: until.map(|s| WallTime::parse(&s)).transpose()?,
+                dismissed,
+            }),
+        }
     }
 
     /// Store presentation state only after verifying the referenced request exists.
@@ -114,15 +115,18 @@ impl Store {
         session: &str,
         request: &Request<'_>,
     ) -> Result<Option<u64>> {
+        request.check()?;
         viewer_id(viewer)?;
         text(session, "session")?;
         if session.len() > 128 {
             return Err(Error::Invalid("session"));
         }
-        request.retry(|| {
+        {
             let value: Option<i64> = self.db.query_row("SELECT revision FROM viewer_summaries WHERE project=?1 AND viewer=?2 AND session=?3", params![project.to_string(), viewer, session], |r| r.get(0)).optional()?;
-            value.map(|n| u64::try_from(n).map_err(|_| Error::Invalid("summary revision"))).transpose()
-        })
+            value
+                .map(|n| u64::try_from(n).map_err(|_| Error::Invalid("summary revision")))
+                .transpose()
+        }
     }
 
     /// Record the revision actually rendered. The workflow caller must validate

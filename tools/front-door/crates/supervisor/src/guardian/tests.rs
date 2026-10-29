@@ -3,6 +3,64 @@ use crate::census::{Census, ProcessFact};
 use std::collections::BTreeSet;
 
 #[test]
+fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() {
+    use provenant_core::{AttemptId, Clock, RunId, WaitBudget};
+    use provenant_os::{
+        clock::SystemClock,
+        fs::{FsError, LockMode},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let directory = Directory::open_anchor(root.path()).unwrap();
+    let clock = SystemClock;
+    let scope = Scope {
+        run: RunId::from_bytes([1; 16]),
+        attempt: AttemptId::from_bytes([2; 16]),
+        generation: 1,
+    };
+    let mut writer = crate::fixture::acquire_writer(
+        directory.try_clone().unwrap(),
+        scope,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &CancelToken::new(),
+        &clock,
+    )
+    .unwrap();
+    let before = writer
+        .directory
+        .read_bounded(OsStr::new("reservation.json"), RECORD_LIMIT)
+        .unwrap();
+    let error = settlement_recovery(
+        &mut writer.lease,
+        writer.directory.try_clone().unwrap(),
+        Err(FsError::Io {
+            operation: "clone directory",
+            path: root.path().into(),
+            source: io::Error::from_raw_os_error(libc::EMFILE),
+        }),
+        &writer.reservation,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("provenant reconcile --id {}", scope.run))
+    );
+    assert!(writer.lease.is_some());
+    assert!(matches!(
+        directory.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive),
+        Err(FsError::LockTimeout { .. })
+    ));
+    assert_eq!(
+        writer
+            .directory
+            .read_bounded(OsStr::new("reservation.json"), RECORD_LIMIT)
+            .unwrap(),
+        before
+    );
+    writer.withdraw_unlaunched().unwrap();
+}
+
+#[test]
 fn terminal_retries_wait_until_the_holder_can_publish() {
     use std::cell::{Cell, RefCell};
     let elapsed = Cell::new(Duration::ZERO);

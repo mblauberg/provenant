@@ -557,7 +557,6 @@
       "parameters.max_iterations.type": "bundled",
       "parameters.repair_tier.default": "bundled",
       "parameters.repair_tier.doc": "bundled",
-      "parameters.repair_tier.type": "bundled",
       "parameters.review_shape.default": "bundled",
       "parameters.review_shape.doc": "bundled",
       "parameters.review_shape.type": "bundled",

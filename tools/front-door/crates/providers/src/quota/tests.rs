@@ -252,6 +252,10 @@ fn no_reported_windows_remain_unknown() {
 #[test]
 fn quota_effects_follow_specs_and_require_successful_commands() {
     for spec in provenant_records::ADAPTER_SPECS {
+        // Host-native delegates to a registered provider and has no quota plan.
+        if spec.id == provenant_records::Harness::HostNative {
+            continue;
+        }
         let expected = match spec.name {
             "claude" | "cursor" => QuotaEffectKind::HttpGet,
             "codex" | "agy" => QuotaEffectKind::Command,

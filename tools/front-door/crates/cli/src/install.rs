@@ -162,7 +162,13 @@ mod tests {
             .iter()
             .map(|entry| entry.adapter.id())
             .collect();
-        assert_eq!(providers, specs);
+        // Host-native delegates to a registered provider and has no registry entry.
+        let provider_specs: BTreeSet<_> = ADAPTER_SPECS
+            .iter()
+            .filter(|spec| spec.id != provenant_records::Harness::HostNative)
+            .map(|spec| spec.name)
+            .collect();
+        assert_eq!(providers, provider_specs);
         assert_eq!(providers.len(), provenant_providers::REGISTRY.len());
         Ok(())
     }

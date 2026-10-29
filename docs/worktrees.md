@@ -23,12 +23,12 @@ provenant worktree remove fix-repo-example
 provenant worktree remove fix-repo-example --discard
 ```
 
-`git worktree add` registers a tree with Git, so `provenant worktree list` can
-see it, but writer dispatch also needs Provenant's custody registration.
-An advisory Fabric claim does not supply that registration. Fabric refuses
-such submissions with `worktree_unregistered` and the worktree path. Create
-a writer at the branch's tip with
-`provenant worktree create <new-branch> --base <branch>`.
+`git worktree list --porcelain` is the worktree registry. Linked checkouts
+created with `git worktree add` are immediately usable, including a checkout
+recreated at a previously used path. The `.worktrees/` convention identifies
+managed checkouts for cleanup. There is no separate identity registration,
+adoption or repair step. Writer exclusion uses `writer.lock`; its state slot
+is created when needed and retained so all callers lock the same file.
 
 New branch names must not differ from an existing local or remote-tracking
 branch name only by case (including non-ASCII case) or by a branch-path
@@ -91,24 +91,18 @@ path and reason. A writer that succeeded but left edits uncommitted with no
 new commit ends `uncommitted`, and its reason names the dirty paths.
 No force removal is offered.
 
-A custody refusal names its reason (a stale registration names the recorded
-field that differs, as a tree re-added with `git worktree add` at a registered
-path does; a locked or prunable Git entry; a reservation; an unreadable record)
-and a repair. `worktree adopt PATH --owner NAME`, run from outside the tree,
-replaces a stale registration. It still refuses a held writer lock, a
-reservation and a live process, and names the process by pid and command, as
-`pr land` does.
-An incomplete native process census alone does not identify a live writer:
-ordinary adoption, like removal, can proceed while holding the exclusive writer
-lock with no reservation. A positive live-process observation still refuses.
+A held writer lock reports `lock busy` (`WORKTREE_LOCK_BUSY` from the CLI;
+`writer: "busy"` in listings), without claiming a live process. A positive
+process observation still refuses removal and names the pid and command when
+available. Git-locked or prunable entries remain protected. An incomplete
+native census alone does not identify a live writer; ordinary removal can
+proceed with a free writer lock, while landing requires a complete census.
 
-When a filesystem renumbers its device, a registered tree can refresh that
-number under the worktree registry lock. Its recorded root inode, path, branch
-and project must still match, and Git must confirm the linked worktree and its
-common directory and backlink. New registrations and refreshed legacy records
-also retain the common and private Git directory identities for later checks.
-The registration records the number of device refreshes. Other identity
-changes remain stale and require adoption.
+Legacy `identity.json` and registry reservation files do not gate membership,
+listing, cache collection or removal. Git confirms the common directory and
+backlink on each operation; persistent schema, inode, device and path pins are
+not a registry. Per-attempt supervisor records still bind launched work and
+support crash recovery. These do not create worktree membership.
 
 `worktree list` prints one terse line per tree. The path is a plain path,
 quoted only when it needs it; `--json` keeps the structured path object.
@@ -272,8 +266,8 @@ interrupted cleanup tombstones remain for `provenant gc`.
 GC collects idle caches (default seven days), then collects eligible caches
 oldest-first by last write to reach the free-space floor. The default floor
 is 10% of the state volume's capacity, at least 50 GiB; `gc.free_floor` or
-`--free-floor SIZE` overrides it. Both paths protect live writers and
-reservations. Writer dispatch refuses to launch below the floor on the
+`--free-floor SIZE` overrides it. Both paths protect busy writer locks and
+observed live processes. Writer dispatch refuses to launch below the floor on the
 worktree's volume and names `provenant gc` in its error; read-only lanes
 still start. GC alerts if the state volume remains below the floor after
 collection. macOS default-state installs run GC at load and daily; `[gc]` can
@@ -332,7 +326,7 @@ provenant run --operation-id OP --model ADAPTER/MODEL \
 
 Fabric uses `access: "worktree_write"` and `worktree`. Both entry points accept
 an absolute path or one relative to the selected repository's primary root.
-The worktree must have an active Provenant registration for that project.
+The worktree must appear in that project's Git inventory.
 The primary checkout and another project's worktree are refused. Run reserves
 the worktree before compiling its writer permissions, so another writer cannot
 launch beside it. The guardian retains the lease until terminal settlement.
@@ -344,13 +338,19 @@ settlement receipt and do not change the lane outcome or an adopted receipt.
 
 ## Writer custody recovery
 
-A guardian crash leaves `reservation.json` in the worktree registry, even when
-every process descriptor closes. A free kernel lock is not proof of provider
-exit. Run `provenant reconcile --id RUN --json`: `writer_reservations` names
-the exact reservation path and scoped run, attempt and generation. Reconcile
-also reports reservations left behind after a terminal commit. Keep the worktree
-reserved while custody is uncertain; do not remove the lock or reservation by
-hand, or rerun the same writer alongside it.
+The `writer.lock` flock is the writer exclusion policy. The guardian passes its
+held lock descriptor to the provider without close-on-exec, so descendants
+inherit it. If the guardian is killed, a retry remains busy while a descendant
+holds that descriptor. Admission can proceed once the last holder closes it;
+an earlier attempt's reservation does not reserve the worktree.
+
+A guardian crash leaves per-attempt `reservation.json` recovery evidence under
+`worktrees/<project>/<path-slot>/<attempt>/`. A free kernel lock does not prove
+that an attempt's result was imported. Run `provenant reconcile --id RUN --json`:
+`writer_reservations` names the exact reservation path and scoped run, attempt
+and generation, including reservations left after a terminal commit. Legacy
+slot-root reservations appear as issues requiring recovery. Do not remove the
+lock or recovery evidence by hand.
 
 After a reboot, reconcile can settle an attempt as lost and release its
 reservation when the recorded boot and directory bindings prove the previous
@@ -363,7 +363,8 @@ chair recovery. An unchanged boot does not establish absence.
 The chair clears a fence through supervisor's existing recovery API, under
 authority for that exact reservation:
 
-1. Acquire `custody::acquire_recovery` on the reported worktree state directory.
+1. Acquire `custody::acquire_recovery` on the shared worktree exclusion slot,
+   supplying the reported scope. The API opens only that attempt's evidence.
    Check its scope against the report. Native process identities and the
    recorded boot/session evidence determine whether custody is absent. A
    reservation still in `Prepared` with no guardian, provider or bound attempt
@@ -380,14 +381,12 @@ authority for that exact reservation:
    call `settle_reconciled`. Both paths hold the writer lock while settling
    classified scratch and clearing the reservation.
 
-`land` clears a retained reservation for its merged worktree when supervisor
-proves it was never handed off, or its canonical attempt is terminal and
-supervisor proves absence and verifies settlement. It checks the worktree/Git
-binding and keeps malformed, live, nonterminal or unproved reservations.
-Dirty and ignored-output prechecks run under recovered writer exclusion before
-any lease clearance; a refused precheck leaves the reservation intact.
-Ordinary `worktree remove` still refuses any reservation.
-When custody is lost without a durable exit or reboot proof, the fence cannot
-yet be cleared. Retain it and use a fresh registered worktree. A failed provider or an unfinished Git
+`land` and `worktree remove` use writer exclusion, process observation and
+dirty-tree checks. They leave attempt recovery records intact for Run rather
+than interpreting a predecessor's reservation. Active host settlement retains
+the writer lock through object import and publication.
+When custody is lost without a durable exit or reboot proof, the attempt's
+recovery evidence cannot yet be cleared. Use a fresh linked worktree if
+the writer lock remains busy. A failed provider or an unfinished Git
 operation with normally settled custody needs Git repair by the chair,
 rather than fence clearance.

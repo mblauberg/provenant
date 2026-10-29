@@ -1808,18 +1808,18 @@ fn review_delivery_requires_acceptance_and_exact_head()
                 base: String::from_utf8_lossy(&head.stdout.bytes).trim().into(),
                 ..owner
             };
-            provenant_confinement::worktrees::adopt(
-                &context,
-                &fixture.writer.worktree,
+            provenant_confinement::worktrees::save_owner(
+                &provenant_confinement::repo::verify_worktree(
+                    context.repo,
+                    &fixture.writer.worktree,
+                )?,
                 &owner,
-                &cancel,
             )?;
             Ok(context.binding.project_id())
         },
     )?;
     let call = Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
         cancel: &cancel,
     };
     let store = RunStore::open(&execution, &call)?;
@@ -1849,7 +1849,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let lock = attempt.lock(
         std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
         provenant_os::fs::LockMode::Exclusive,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;
@@ -1961,18 +1961,18 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
                 base: String::from_utf8_lossy(&head.stdout.bytes).trim().into(),
                 ..owner
             };
-            provenant_confinement::worktrees::adopt(
-                &context,
-                &fixture.writer.worktree,
+            provenant_confinement::worktrees::save_owner(
+                &provenant_confinement::repo::verify_worktree(
+                    context.repo,
+                    &fixture.writer.worktree,
+                )?,
                 &owner,
-                &cancel,
             )?;
             Ok(context.binding.project_id())
         },
     )?;
     let call = Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
         cancel: &cancel,
     };
     let store = RunStore::open(&execution, &call)?;
@@ -1998,7 +1998,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
     let lock = attempt.lock(
         std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
         provenant_os::fs::LockMode::Exclusive,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;
@@ -2297,7 +2297,7 @@ impl PrepareFixture {
                 format!("{tip}\n"),
             )?;
         }
-        recovery.release_writer_lock()?;
+        recovery.prepare_settlement()?;
         let mut settlement =
             crate::settlement::Guard::claim(&attempt, scope)?.ok_or("settlement owner")?;
         if resume_after_publish {
@@ -3131,11 +3131,12 @@ pub(super) fn registered_landed_writer_fixture(
                 base: String::from_utf8_lossy(&head.stdout.bytes).trim().into(),
                 ..owner
             };
-            provenant_confinement::worktrees::adopt(
-                &context,
-                &fixture.writer.worktree,
+            provenant_confinement::worktrees::save_owner(
+                &provenant_confinement::repo::verify_worktree(
+                    context.repo,
+                    &fixture.writer.worktree,
+                )?,
                 &owner,
-                &cancel,
             )?;
             Ok(context.binding.project_id())
         },
@@ -3238,7 +3239,7 @@ fn landed_writer_fence_fixture(
         directory,
         scope,
         binding,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
@@ -3249,6 +3250,7 @@ fn landed_writer_fence_fixture(
         .join(provenant_confinement::worktrees::state_dir_name(
             &fixture.writer.worktree,
         ))
+        .join(scope.attempt.to_string())
         .join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
     let metadata = attempt.metadata()?;
@@ -3272,8 +3274,14 @@ fn landed_writer_fence_fixture(
     std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
     let before = std::fs::read(&reservation)?;
     let recovery = custody::acquire_recovery(
-        Directory::open_anchor(reservation.parent().ok_or("custody directory")?)?,
-        call.budget,
+        Directory::open_anchor(
+            reservation
+                .parent()
+                .and_then(std::path::Path::parent)
+                .ok_or("custody directory")?,
+        )?,
+        scope,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;

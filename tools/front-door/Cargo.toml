@@ -94,6 +94,7 @@ provenant-records = { workspace = true }
 provenant-config = { workspace = true }
 provenant-supervisor = { workspace = true }
 provenant-confinement = { workspace = true }
+provenant-sqlite = { workspace = true }
 
 [build-dependencies]
 provenant-records = { workspace = true }

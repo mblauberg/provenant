@@ -17,6 +17,12 @@ again. `provenant status` shows active lanes and the twenty newest settled
 lanes, newest first. `--json` returns full records for the same selection.
 Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
 
+New stdout/stderr captures and settled `result.md` files mask known credential
+shapes before storage. Result digests identify the stored bytes, and
+`redacted: true` means the filter was applied even when nothing matched.
+Unknown secret formats, earlier run files and provider-owned session state
+still need care when sharing. See [output redaction and identity](../specs/run.md#output-redaction-and-identity).
+
 On macOS, the host selects a nice value for the lane, and the guardian applies
 it to the provider process before confinement. Its descendants inherit that
 value.
@@ -42,12 +48,11 @@ launches at its inherited priority and the reason is recorded as a warning.
 The receipt names the worktree. `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned
 checkout; for an absolute path or a path below `.worktrees/`, use
-`--branch BRANCH` to create it. To register a native linked checkout, use
-`provenant worktree adopt PATH --owner manual`; another project's checkout and
-a live or reserved writer are refused, and a live refusal names the process
-(pid and command). The same command replaces a stale registration, such as one
-left by an earlier tree at the same path; run it from outside the tree, since a
-shell inside the tree counts as a live process.
+`--branch BRANCH` to create it. Git's worktree inventory establishes membership,
+so native linked checkouts and checkouts recreated at a previously used path
+need no registration or adoption. Another project's checkout is refused.
+A held writer lock reports busy; lifecycle removal also refuses an observed
+live process and names its pid and command when available.
 
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
@@ -123,8 +128,8 @@ head retained by the delivered ref or creation base. Local branches remain
 until integration is proved. Cleanup uses the project's declared regenerable
 and keep paths. `worktree-settlement.json` beside `result.md` records a pruning
 intent before removal, then pruning or the retention reason. Failed and
-cancelled lanes retain their worktrees. Explicitly supplied and adopted
-worktrees retain their existing GC policy.
+cancelled lanes retain their worktrees. Explicitly supplied worktrees retain
+their existing GC policy.
 
 `provenant resume ATTEMPT --prompt-file followup.md` generates and prints an
 operation ID; supply `--operation-id ID` for a planned retry. It pins the prior
@@ -135,8 +140,8 @@ Targets accept unique hex prefixes of at least eight
 characters and `RUN/ATTEMPT`; an ambiguous prefix lists candidates. Resume
 starts fresh by default when continuation state is unavailable, preserving authority with
 original context and the previous result attached. Ownership must match the
-lane lineage for a previously lane-owned tree. Explicit unowned and adopted
-checkouts resume in place unless a lane owner now names another lineage.
+lane lineage for a previously lane-owned tree. Explicit checkouts resume in
+place unless a lane owner now names another lineage.
 Attempts recorded before #1855 have no launch evidence of running under an
 owned tree, so continuation resumes them in place (fail open).
 A missing or reassigned checkout uses a fresh owned worktree when fallback is

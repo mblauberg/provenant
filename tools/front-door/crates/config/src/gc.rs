@@ -258,6 +258,37 @@ impl LaneBuildSettings {
     }
 }
 
+/// Longest configurable store busy timeout, in milliseconds.
+pub const STORE_BUSY_TIMEOUT_CEILING_MS: u64 = 600_000;
+
+/// Host-wide store contention settings, read once when a command starts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoreSettings {
+    /// Milliseconds a store waits for a contended lock before it reports
+    /// contention. Zero fails fast; 30 seconds unless set.
+    pub store_busy_timeout_ms: Option<u64>,
+}
+impl StoreSettings {
+    pub fn read(state: &Path) -> std::io::Result<Self> {
+        crate::loader::read_settings(state, "domains.fabric.limits", |settings: &Self| {
+            if settings
+                .store_busy_timeout_ms
+                .is_some_and(|ms| ms > STORE_BUSY_TIMEOUT_CEILING_MS)
+            {
+                Err("invalid_value")
+            } else {
+                Ok(())
+            }
+        })
+    }
+    /// The configured wait, or `None` for the store's compiled default.
+    pub fn busy_timeout(&self) -> Option<std::time::Duration> {
+        self.store_busy_timeout_ms
+            .map(std::time::Duration::from_millis)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GcSettings {
@@ -420,6 +451,33 @@ mod tests {
             super::MemoryPressureThreshold::Critical
         );
         assert!(lanes.invalid_keys().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn store_settings_read_the_busy_timeout_and_drop_an_out_of_range_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        assert_eq!(
+            super::StoreSettings::read(temp.path())?.busy_timeout(),
+            None
+        );
+        for (text, expected) in [
+            ("store_busy_timeout_ms=250\nbody_bytes=1", Some(250)),
+            ("store_busy_timeout_ms=0", Some(0)),
+            ("store_busy_timeout_ms=600001", None),
+            ("store_busy_timeout_ms='soon'", None),
+        ] {
+            std::fs::write(
+                temp.path().join("config.toml"),
+                format!("schema_version=1\n[domains.fabric.limits]\n{text}\n"),
+            )?;
+            assert_eq!(
+                super::StoreSettings::read(temp.path())?.busy_timeout(),
+                expected.map(std::time::Duration::from_millis),
+                "{text}"
+            );
+        }
         Ok(())
     }
 

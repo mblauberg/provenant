@@ -11,7 +11,7 @@ mod gc;
 mod github_policy;
 pub use gc::{
     ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold, ProjectGcSettings,
-    deserialize_auto, parse_cache_size,
+    STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings, deserialize_auto, parse_cache_size,
 };
 pub use github_policy::GithubPolicy;
 mod harness;
@@ -214,7 +214,8 @@ pub use managed::{
     InstallContext, InstallError, InstallFinding, InstallInspection, InstallOutcome, InstallPlan,
     InstallReporter, ManualInclude, ReleaseSmoke, SelectorChange, Snapshots, Targets,
     inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
-    plan_and_install, plan_install, private_directory, release_root, tick_agent_plist, uninstall,
+    plan_and_install, plan_install, private_directory, release_root, systemd_user_dir,
+    tick_agent_plist, tick_service_path, tick_timer_path, uninstall, user_dir_in,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

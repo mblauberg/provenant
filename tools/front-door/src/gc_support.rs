@@ -273,32 +273,6 @@ struct StoreSnapshot {
 }
 
 impl LaneSnapshot {
-    /// Find the reservation's canonical attempt, including nested stores. The
-    /// Run owner checks terminal state and binding before releasing custody.
-    pub(crate) fn settle_landed_writer(
-        &self,
-        recovery: provenant_supervisor::custody::Recovery,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let clock = SystemClock;
-        let cancel = CancelToken::new();
-        let call = provenant_run::Request {
-            clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 5)?,
-            cancel: &cancel,
-        };
-        for observed in &self.stores {
-            let Some(store) = &observed.store else {
-                continue;
-            };
-            match store.record(recovery.scope().attempt, &call) {
-                Ok(_) => return Ok(store.settle_landed_writer(recovery, &call)?),
-                Err(provenant_run::RunError::NotFound) => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Err("writer reservation has no canonical attempt".into())
-    }
-
     pub(crate) fn get(&self, path: &Path) -> Option<&bool> {
         self.is_current().then(|| self.states.get(path)).flatten()
     }
@@ -318,7 +292,6 @@ impl LaneSnapshot {
             let cancel = CancelToken::new();
             let call = provenant_run::Request {
                 clock: &clock,
-                budget: WaitBudget::cli(clock.mono_now(), 1)?,
                 cancel: &cancel,
             };
             for observed in &self.stores {
@@ -451,7 +424,6 @@ fn scan_terminal(
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 5)?,
         cancel: &cancel,
     };
     let root = Directory::open_anchor(context.state_root.as_path())?;
@@ -620,12 +592,9 @@ pub(crate) fn disk_alert(
     if projects.is_empty() {
         return Ok(vec![detail]);
     }
-    let backoff = provenant_fabric_store::ThreadWait;
     let request = provenant_fabric_store::Request {
         clock: &clock,
-        budget,
         cancel: &cancel,
-        backoff: &backoff,
     };
     let store = provenant_fabric_store::Store::open(&roots.state, &request)
         .map_err(|_| Error::GcObservation("cannot open Fabric for disk alert"))?;

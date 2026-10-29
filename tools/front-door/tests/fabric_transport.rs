@@ -796,12 +796,11 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
             .parse()?,
         read_prompts: false,
     };
-    use provenant_core::Clock;
+
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
@@ -1089,7 +1088,7 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
 fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Result {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, HostId, OperationId, ProjectId, RootInputs,
-        RunId, TaskId, WaitBudget,
+        RunId, TaskId,
     };
     use provenant_os::clock::SystemClock;
     use provenant_records::{
@@ -1108,7 +1107,6 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let context = provenant_run::ExecutionContext {
@@ -1327,7 +1325,6 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     configure_fixture_peer(&rig, remote_host)?;
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let records = {
@@ -3660,9 +3657,9 @@ fn git(rig: &TestRig, cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout.bytes)?.trim().into())
 }
 
-/// A Git registration and an advisory claim do not grant writer custody.
+/// A Git worktree registration is enough for writer custody; no Provenant registration is required.
 #[test]
-fn submit_git_worktree_names_the_missing_provenant_registration() -> Result {
+fn submit_git_worktree_needs_no_provenant_registration() -> Result {
     let rig = TestRig::new()?;
     git(
         &rig,
@@ -3708,7 +3705,10 @@ fn submit_git_worktree_names_the_missing_provenant_registration() -> Result {
         "{}",
         String::from_utf8_lossy(&claim.stderr.bytes)
     );
-    for deliver in [None, Some(json!({"remote":"origin","branch":"git-writer"}))] {
+    for (index, deliver) in [None, Some(json!({"remote":"origin","branch":"git-writer"}))]
+        .into_iter()
+        .enumerate()
+    {
         let mut task = json!({
             "prompt":"commit the fix", "access":"worktree_write", "worktree":worktree,
             "route":{"kind":"model","provider":"codex","model":"gpt-6.1-sol","effort":"high"},
@@ -3721,7 +3721,7 @@ fn submit_git_worktree_names_the_missing_provenant_registration() -> Result {
             &rig,
             &[
                 json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                    "name":"fabric_run","arguments":{"op":"submit","operation_id":"git-writer","tasks":[task]}
+                    "name":"fabric_run","arguments":{"op":"submit","operation_id":format!("git-writer-{index}"),"tasks":[task]}
                 }}),
             ],
         )?;
@@ -3729,14 +3729,12 @@ fn submit_git_worktree_names_the_missing_provenant_registration() -> Result {
             .iter()
             .find(|reply| reply["id"] == 1)
             .ok_or("submit reply")?["result"];
-        assert_eq!(result["isError"], true, "{result}");
-        assert_eq!(
+        // Git membership is the registry: custody no longer needs Provenant state,
+        // so the task is admitted and fails later on route availability only.
+        assert_ne!(result["isError"], true, "{result}");
+        assert_ne!(
             result["structuredContent"]["code"], "worktree_unregistered",
             "{result}"
-        );
-        assert_eq!(
-            result["structuredContent"]["path"],
-            worktree.to_str().ok_or("worktree")?
         );
     }
     rig.assert_legacy_unchanged()
@@ -4183,7 +4181,7 @@ fn seed_attempt(
 )> {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
-        TaskId, WaitBudget,
+        TaskId,
     };
     use provenant_os::clock::SystemClock;
     use provenant_records::{
@@ -4201,7 +4199,6 @@ fn seed_attempt(
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let context = provenant_run::ExecutionContext {

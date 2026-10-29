@@ -29,75 +29,74 @@ impl RunStore {
         through: Option<u64>,
         call: &Request<'_>,
     ) -> Result<BoardPage> {
+        call.check()?;
         if !(1..=100).contains(&limit) {
             return Err(RunError::Validation("board page bounds"));
         }
         let after = crate::db::sql_int(after)?;
-        call.retry(|| {
-            let tx = self.db.unchecked_transaction()?;
-            let project = project.map(|id| id.to_string());
-            // All board-visible attempt/run writes append an event atomically.
-            // Future run-only writes must do the same. GC retains the latest
-            // event per attempt. Both MAX queries use primary-key end lookups.
-            let (event, current): (i64, i64) = tx.query_row(
-                "SELECT (SELECT COALESCE(MAX(sequence),0) FROM events), \
-                        (SELECT COALESCE(MAX(sequence),0) FROM attempts)",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            let high_water = through
-                .map(crate::db::sql_int)
-                .transpose()?
-                .unwrap_or(current);
-            if high_water > current || after > high_water {
-                return Err(RunError::Validation("board high-water mark"));
+        let tx = self.db.unchecked_transaction()?;
+        let project = project.map(|id| id.to_string());
+        // All board-visible attempt/run writes append an event atomically.
+        // Future run-only writes must do the same. GC retains the latest
+        // event per attempt. Both MAX queries use primary-key end lookups.
+        let (event, current): (i64, i64) = tx.query_row(
+            "SELECT (SELECT COALESCE(MAX(sequence),0) FROM events), \
+                    (SELECT COALESCE(MAX(sequence),0) FROM attempts)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let high_water = through
+            .map(crate::db::sql_int)
+            .transpose()?
+            .unwrap_or(current);
+        if high_water > current || after > high_water {
+            return Err(RunError::Validation("board high-water mark"));
+        }
+        let generation = format!("events:{event}");
+        let mut statement = tx.prepare(
+            "SELECT a.sequence,a.id,a.project,a.run,a.task,a.record,r.record,\
+             a.number,a.revision,a.terminal FROM attempts a \
+             JOIN runs r ON r.id=a.run AND r.project=a.project \
+             WHERE (?1 IS NULL OR a.project=?1) AND (?2 OR a.terminal=0) \
+             AND (?3=0 OR a.sequence<?3) AND a.sequence<=?5 ORDER BY a.sequence DESC LIMIT ?4",
+        )?;
+        let mut rows =
+            statement.query(params![project, all, after, (limit + 1) as i64, high_water])?;
+        let mut lanes = Vec::new();
+        let mut last = 0;
+        let mut more = false;
+        while let Some(row) = rows.next()? {
+            if lanes.len() == limit as usize {
+                more = true;
+                break;
             }
-            let generation = format!("events:{event}");
-            let mut statement = tx.prepare(
-                "SELECT a.sequence,a.id,a.project,a.run,a.task,a.record,r.record,\
-                 a.number,a.revision,a.terminal FROM attempts a \
-                 JOIN runs r ON r.id=a.run AND r.project=a.project \
-                 WHERE (?1 IS NULL OR a.project=?1) AND (?2 OR a.terminal=0) \
-                 AND (?3=0 OR a.sequence<?3) AND a.sequence<=?5 ORDER BY a.sequence DESC LIMIT ?4",
-            )?;
-            let mut rows =
-                statement.query(params![project, all, after, (limit + 1) as i64, high_water])?;
-            let mut lanes = Vec::new();
-            let mut last = 0;
-            let mut more = false;
-            while let Some(row) = rows.next()? {
-                if lanes.len() == limit as usize {
-                    more = true;
-                    break;
-                }
-                let attempt: AttemptRecord = decode(&row.get::<_, Vec<u8>>(5)?)?;
-                let run: RunRecord = decode(&row.get::<_, Vec<u8>>(6)?)?;
-                if attempt.attempt_id.to_string() != row.get::<_, String>(1)?
-                    || attempt.project_id.to_string() != row.get::<_, String>(2)?
-                    || attempt.run_id.to_string() != row.get::<_, String>(3)?
-                    || attempt.task_id.to_string() != row.get::<_, String>(4)?
-                    || crate::db::sql_int(attempt.attempt_number)? != row.get::<_, i64>(7)?
-                    || crate::db::sql_int(attempt.revision)? != row.get::<_, i64>(8)?
-                    || matches!(attempt.state, AttemptState::Terminal { .. })
-                        != row.get::<_, bool>(9)?
-                    || run.run_id != attempt.run_id
-                    || run.project_id != attempt.project_id
-                    || run.operation_id != attempt.operation_id
-                    || !run.task_ids.contains(&attempt.task_id)
-                {
-                    return Err(RunError::Validation("board index identity"));
-                }
-                crate::reader::validate_attempt(&attempt)?;
-                last = u64::try_from(row.get::<_, i64>(0)?)
-                    .map_err(|_| RunError::Validation("board sequence"))?;
-                lanes.push(BoardLane { attempt, run });
+            let attempt: AttemptRecord = decode(&row.get::<_, Vec<u8>>(5)?)?;
+            let run: RunRecord = decode(&row.get::<_, Vec<u8>>(6)?)?;
+            if attempt.attempt_id.to_string() != row.get::<_, String>(1)?
+                || attempt.project_id.to_string() != row.get::<_, String>(2)?
+                || attempt.run_id.to_string() != row.get::<_, String>(3)?
+                || attempt.task_id.to_string() != row.get::<_, String>(4)?
+                || crate::db::sql_int(attempt.attempt_number)? != row.get::<_, i64>(7)?
+                || crate::db::sql_int(attempt.revision)? != row.get::<_, i64>(8)?
+                || matches!(attempt.state, AttemptState::Terminal { .. })
+                    != row.get::<_, bool>(9)?
+                || run.run_id != attempt.run_id
+                || run.project_id != attempt.project_id
+                || run.operation_id != attempt.operation_id
+                || !run.task_ids.contains(&attempt.task_id)
+            {
+                return Err(RunError::Validation("board index identity"));
             }
-            Ok(BoardPage {
-                generation,
-                high_water: high_water as u64,
-                lanes,
-                next: more.then_some(last),
-            })
+            crate::reader::validate_attempt(&attempt)?;
+            last = u64::try_from(row.get::<_, i64>(0)?)
+                .map_err(|_| RunError::Validation("board sequence"))?;
+            lanes.push(BoardLane { attempt, run });
+        }
+        Ok(BoardPage {
+            generation,
+            high_water: high_water as u64,
+            lanes,
+            next: more.then_some(last),
         })
     }
 }

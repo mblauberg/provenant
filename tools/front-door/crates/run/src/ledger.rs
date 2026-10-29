@@ -49,7 +49,7 @@ CREATE TABLE spacing (
 /// last, so a crash leaves the old ledger whole or the new one.
 pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
     let (_, db, _initialisation) = open_database(host, FILE, request)?;
-    if request.retry(|| version(&db))? < 5 || !request.retry(|| timed_spacing(&db))? {
+    if version(&db)? < 5 || !timed_spacing(&db)? {
         immediate(&db, request, |tx| {
             let current_version = version(tx)?;
             match current_version {
@@ -100,12 +100,8 @@ pub(crate) fn while_admission_held<T>(
     action: impl FnOnce() -> T,
 ) -> Result<T> {
     let db = open(host, request)?;
-    let tx = request.retry(|| {
-        Ok(rusqlite::Transaction::new_unchecked(
-            &db,
-            rusqlite::TransactionBehavior::Immediate,
-        )?)
-    })?;
+    let tx =
+        { rusqlite::Transaction::new_unchecked(&db, rusqlite::TransactionBehavior::Immediate)? };
     let value = action();
     tx.rollback()?;
     Ok(value)

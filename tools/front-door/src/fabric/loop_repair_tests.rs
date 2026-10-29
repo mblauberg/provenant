@@ -46,7 +46,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         )?,
         project_attribution: false,
         clock: SystemClock,
-        backoff: ThreadWait,
+        backoff: ThreadPause,
         executor: SystemExecutor::new(1)?,
         home: fixture.rig.home.clone(),
         cwd: fixture.rig.project.clone(),
@@ -60,7 +60,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
     let call = provenant_run::Request {
         clock: &factory.clock,
         cancel: &cancel,
-        budget,
     };
     let head = fixture
         .store
@@ -239,7 +238,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         context,
         project_attribution: false,
         clock: SystemClock,
-        backoff: ThreadWait,
+        backoff: ThreadPause,
         executor: SystemExecutor::new(1)?,
         home: fixture.rig.home.clone(),
         cwd: fixture.rig.project.clone(),
@@ -273,7 +272,6 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         &fixture.roots.state,
         &original,
         &factory.clock,
-        budget,
         &cancel,
     )?;
     let InboxResult::Listed { items, .. } = service.execute(
@@ -284,7 +282,6 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
             limit: 10,
             cursor: None,
         },
-        budget,
         &cancel,
     )?
     else {
@@ -303,7 +300,6 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
             channel: InteractionChannel::Cli,
             operation_id: None,
         },
-        budget,
         &cancel,
     )?;
     let reply = owner.node_ask(scope)?.ok_or("missing answer")?;
@@ -318,7 +314,6 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
             limit: 1,
             cursor: None,
         },
-        budget,
         &cancel,
     )?
     else {
@@ -343,7 +338,6 @@ fn loop_corrupt_unrelated_checkpoint_does_not_fail_ordinary_settlement()
     let call = provenant_run::Request {
         clock: &clock,
         cancel: &cancel,
-        budget,
     };
     let record = fixture.store.record(fixture.settled.attempt_id, &call)?;
     assert!(!record.operation_id.as_str().starts_with("graph-"));

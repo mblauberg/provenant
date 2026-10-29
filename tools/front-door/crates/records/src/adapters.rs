@@ -14,6 +14,8 @@ pub enum Harness {
     Agy,
     Opencode,
     Command,
+    #[serde(rename = "host-native")]
+    HostNative,
 }
 impl Harness {
     pub fn spec(self) -> &'static AdapterSpec {
@@ -183,7 +185,7 @@ impl AdapterSpec {
 }
 
 // Keep the rows in Harness order. CLI installation also uses this order.
-pub static ADAPTER_SPECS: &[AdapterSpec; 6] = &[
+pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
     AdapterSpec {
         id: Harness::Claude,
         name: "claude",
@@ -364,11 +366,83 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 6] = &[
             write: false,
         },
     },
+    // A named, optional host feature. Preparation delegates to its provider;
+    // decoding, accounts and confinement remain owned by that provider.
+    AdapterSpec {
+        id: Harness::HostNative,
+        name: "host-native",
+        binary: "",
+        registered_account: false,
+        local_login: false,
+        argv_prompt: false,
+        authentication: None,
+        user_sessions: false,
+        quota_probe: QuotaProbeKind::None,
+        quota_credits: false,
+        grouped_quota_pools: false,
+        retain_quota_accounts: false,
+        quota_identity_check: false,
+        peer_bootstrap: false,
+        quota_model_prefix: None,
+        free_account: None,
+        free_pool: None,
+        pacing_keys: None,
+        launch: LaunchCapabilities {
+            model: false,
+            default_network: NetworkAccess::Open,
+            effort: false,
+            resume: false,
+            steering: false,
+            network: ALL_NETWORK,
+            image_input: false,
+            write: true,
+        },
+    },
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_native_declares_a_fresh_named_writer_contract() {
+        let spec = AdapterSpec::get("host-native").unwrap();
+        assert!(spec.binary.is_empty() && !spec.registered_account);
+        assert_eq!(spec.launch.default_network, NetworkAccess::Open);
+        assert!(
+            spec.check_launch(&LaunchRequest {
+                write: true,
+                network: Some(NetworkAccess::Open),
+                ..Default::default()
+            })
+            .is_ok()
+        );
+        for (request, field) in [
+            (
+                LaunchRequest {
+                    model: Some("claude/model"),
+                    ..Default::default()
+                },
+                LaunchField::Model,
+            ),
+            (
+                LaunchRequest {
+                    effort: Some("high"),
+                    ..Default::default()
+                },
+                LaunchField::Effort,
+            ),
+            (
+                LaunchRequest {
+                    resume: true,
+                    ..Default::default()
+                },
+                LaunchField::Resume,
+            ),
+        ] {
+            assert_eq!(spec.check_launch(&request).unwrap_err().field, field);
+        }
+    }
 
     #[test]
     fn adapter_specs_are_unique_and_match_typed_identities() {

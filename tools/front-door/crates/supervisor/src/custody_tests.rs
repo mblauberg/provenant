@@ -5,6 +5,169 @@ use std::os::unix::fs::PermissionsExt;
 
 type TestResult = std::result::Result<(), Box<dyn Error>>;
 #[test]
+fn reservation_listing_isolates_an_inaccessible_slot() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let blocked = root.path().join("blocked");
+    let good = root.path().join("good");
+    std::fs::create_dir(&blocked)?;
+    std::fs::create_dir(&good)?;
+    drop(acquire(&good)?);
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o0))?;
+    let result = list_writer_reservations(&Directory::open_anchor(root.path())?);
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700))?;
+    let listing = result?;
+    assert_eq!(listing.reservations.len(), 1);
+    assert_eq!(listing.reservations[0].scope, scope());
+    assert_eq!(listing.issues.len(), 1);
+    assert_eq!(
+        listing.issues[0].reservation,
+        PathBuf::from("blocked/reservation.json")
+    );
+    Ok(())
+}
+
+#[test]
+fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("writer");
+    std::fs::create_dir(&path)?;
+    let slot = Directory::open_anchor(&path)?;
+    for name in ["ownership.json", "settlement.json"] {
+        std::fs::write(path.join(name), b"retired malformed registry record")?;
+    }
+    let first = acquire(&path)?;
+    let first_path = path
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    let first_bytes = std::fs::read(&first_path)?;
+    let next = Scope {
+        run: RunId::from_bytes([3; 16]),
+        attempt: AttemptId::from_bytes([4; 16]),
+        generation: 1,
+    };
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let admit = || {
+        crate::fixture::acquire_writer(
+            slot.try_clone()?,
+            next,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )
+    };
+    assert!(matches!(admit(), Err(CustodyError::Busy)));
+    drop(first);
+    let second = admit()?;
+    assert!(matches!(
+        slot.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive),
+        Err(FsError::LockTimeout { .. })
+    ));
+    assert_eq!(std::fs::read(&first_path)?, first_bytes);
+    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
+    assert_eq!(listing.reservations.len(), 2);
+    assert!(
+        listing
+            .reservations
+            .iter()
+            .any(|record| record.scope == scope())
+    );
+    assert!(
+        listing
+            .reservations
+            .iter()
+            .any(|record| record.scope == next)
+    );
+    second.withdraw_unlaunched()?;
+    assert_eq!(std::fs::read(&first_path)?, first_bytes);
+    let recovery = acquire_recovery(
+        slot.try_clone()?,
+        scope(),
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    assert_eq!(recovery.scope(), scope());
+    assert!(matches!(admit(), Err(CustodyError::Busy)));
+    recovery.withdraw_prepared()?;
+    admit()?.withdraw_unlaunched()?;
+    Ok(())
+}
+
+#[test]
+fn reservation_listing_surfaces_a_legacy_slot_root_reservation() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("writer");
+    std::fs::create_dir(&path)?;
+    drop(acquire(&path)?);
+    std::fs::write(path.join("reservation.json"), b"legacy crash evidence")?;
+    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
+    assert_eq!(listing.reservations.len(), 1);
+    assert_eq!(listing.reservations[0].scope, scope());
+    assert_eq!(listing.issues.len(), 1);
+    assert_eq!(
+        listing.issues[0].reservation,
+        PathBuf::from("writer/reservation.json")
+    );
+    assert!(listing.issues[0].reason.contains("legacy"));
+    Ok(())
+}
+
+#[test]
+fn worktree_settlement_retains_flock_until_recovery_is_dropped() -> TestResult {
+    for read_only in [false, true] {
+        let root = tempfile::tempdir()?;
+        let tree = tempfile::tempdir()?;
+        let git = tempfile::tempdir()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let directory = Directory::open_anchor(root.path())?;
+        let binding = if read_only {
+            WriterBinding::read_only()
+        } else {
+            WriterBinding::from_verified(
+                &Directory::open_anchor(tree.path())?,
+                &Directory::open_anchor(git.path())?,
+                "refs/heads/lane",
+                GitOid::parse(&"1".repeat(40))?,
+            )?
+        };
+        let mut writer = acquire_writer(
+            directory.try_clone()?,
+            scope(),
+            binding,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?;
+        writer.reservation.launch_state = LaunchState::NeverSpawned;
+        writer.reservation.unresolved_cleanup = false;
+        writer.reservation.census_incomplete = false;
+        let metadata = Directory::open_anchor(tree.path())?.metadata()?;
+        writer.reservation.attempt_device = Some(metadata.device);
+        writer.reservation.attempt_inode = Some(metadata.inode);
+        Publication::require_durable(write_record(
+            &writer.directory,
+            "reservation.json",
+            &writer.reservation,
+            PublishMode::Replace,
+        )?)?;
+        let mut recovery = writer.into_recovery()?;
+        recovery.prepare_settlement()?;
+        let attempt_lock =
+            || directory.try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive);
+        if read_only {
+            drop(attempt_lock()?);
+        } else {
+            assert!(matches!(attempt_lock(), Err(FsError::LockTimeout { .. })));
+        }
+        drop(recovery);
+        drop(attempt_lock()?);
+    }
+    Ok(())
+}
+
+#[test]
 fn persisted_custody_accepts_future_fields_without_changing_scope_checks() -> TestResult {
     let record = serde_json::json!({
         "schema_version": 1,
@@ -136,14 +299,22 @@ fn missing_or_malformed_reservation_does_not_reopen_a_writer() -> TestResult {
     std::fs::create_dir(&path)?;
     let writer = acquire(&path)?;
     drop(writer);
-    std::fs::remove_file(path.join("reservation.json"))?;
+    std::fs::remove_file(
+        path.join(scope().attempt.to_string())
+            .join("reservation.json"),
+    )?;
     assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
-    std::fs::write(path.join("reservation.json"), b"{}")?;
+    std::fs::write(
+        path.join(scope().attempt.to_string())
+            .join("reservation.json"),
+        b"{}",
+    )?;
     assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
     let clock = SystemClock::new();
     assert!(matches!(
         acquire_recovery(
             Directory::open_anchor(&path)?,
+            scope(),
             WaitBudget::cli(clock.mono_now(), 1)?,
             &CancelToken::new(),
             &clock
@@ -159,7 +330,9 @@ fn missing_or_malformed_reservation_does_not_reopen_a_writer() -> TestResult {
     assert_eq!(listing.issues.len(), 1);
     assert_eq!(
         listing.issues[0].reservation,
-        PathBuf::from("writer/reservation.json")
+        PathBuf::from("writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
     );
     Ok(())
 }
@@ -190,7 +363,13 @@ fn reconcile_requires_matching_authority_and_records_before_release() -> TestRes
             )
             .is_err()
     );
-    assert!(!root.path().join("reconcile.json").exists());
+    assert!(
+        !root
+            .path()
+            .join(scope().attempt.to_string())
+            .join("reconcile.json")
+            .exists()
+    );
     let mut stale = scope();
     stale.generation += 1;
     assert!(
@@ -205,8 +384,18 @@ fn reconcile_requires_matching_authority_and_records_before_release() -> TestRes
         decision(scope(), ReconcileDisposition::RetainFence),
         &Authority(true),
     )?;
-    assert!(root.path().join("reconcile.json").is_file());
-    assert!(root.path().join("reservation.json").is_file());
+    assert!(
+        root.path()
+            .join(scope().attempt.to_string())
+            .join("reconcile.json")
+            .is_file()
+    );
+    assert!(
+        root.path()
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
+            .is_file()
+    );
     assert!(
         recovery
             .reconcile(
@@ -293,8 +482,19 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
     recovery.settle(commit, &mut scratch)?;
     assert!(!scratch_dir.path().join("generated").exists());
     assert!(scratch_dir.path().join("transcript").exists());
-    assert!(!root.path().join("reservation.json").exists());
-    assert!(root.path().join("settlement.json").exists());
+    assert!(
+        !root
+            .path()
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
+            .exists()
+    );
+    assert!(
+        root.path()
+            .join(scope().attempt.to_string())
+            .join("settlement.json")
+            .exists()
+    );
     drop(acquire(root.path())?);
     Ok(())
 }
@@ -326,12 +526,14 @@ fn two_recoverers_cannot_hold_the_same_writer_exclusion() -> TestResult {
     let clock = SystemClock::new();
     let first = acquire_recovery(
         Directory::open_anchor(root.path())?,
+        scope(),
         WaitBudget::cli(clock.mono_now(), 1)?,
         &CancelToken::new(),
         &clock,
     )?;
     let second = acquire_recovery(
         Directory::open_anchor(root.path())?,
+        scope(),
         WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
         &CancelToken::new(),
         &clock,
@@ -403,7 +605,12 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
         before,
         std::fs::read(attempt.path().join("process-exit.json"))?
     );
-    assert!(root.path().join("reservation.json").is_file());
+    assert!(
+        root.path()
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
+            .is_file()
+    );
     Ok(())
 }
 
@@ -496,7 +703,12 @@ fn reboot_recovery_requires_native_proof() -> TestResult {
         if boot.is_none() {
             assert!(matches!(result, Err(CustodyError::Io(ref error))
                 if error.to_string().contains("boot identity unavailable")));
-            assert!(root.path().join("reservation.json").exists());
+            assert!(
+                root.path()
+                    .join(scope().attempt.to_string())
+                    .join("reservation.json")
+                    .exists()
+            );
             continue;
         }
         let proof = result?;
@@ -504,9 +716,20 @@ fn reboot_recovery_requires_native_proof() -> TestResult {
         if let Some(proof) = proof {
             assert_eq!(proof.scope(), scope());
             proof.release()?;
-            assert!(!root.path().join("reservation.json").exists());
+            assert!(
+                !root
+                    .path()
+                    .join(scope().attempt.to_string())
+                    .join("reservation.json")
+                    .exists()
+            );
         } else {
-            assert!(root.path().join("reservation.json").exists());
+            assert!(
+                root.path()
+                    .join(scope().attempt.to_string())
+                    .join("reservation.json")
+                    .exists()
+            );
         }
     }
     Ok(())
@@ -563,7 +786,11 @@ fn reboot_recovery_requires_the_original_attempt_and_exclusive_custody() -> Test
             10,
             20,
         )?;
-        let before = std::fs::read(root.path().join("reservation.json"))?;
+        let before = std::fs::read(
+            root.path()
+                .join(scope().attempt.to_string())
+                .join("reservation.json"),
+        )?;
         let mut target = scope();
         let mut attempt = &original;
         let _custody = match refusal {
@@ -584,7 +811,14 @@ fn reboot_recovery_requires_the_original_attempt_and_exclusive_custody() -> Test
         };
         let result = recovery.after_reboot_with(attempt, target, &world);
         assert!(result?.is_none(), "unavailable evidence is not proof");
-        assert_eq!(std::fs::read(root.path().join("reservation.json"))?, before);
+        assert_eq!(
+            std::fs::read(
+                root.path()
+                    .join(scope().attempt.to_string())
+                    .join("reservation.json")
+            )?,
+            before
+        );
     }
     Ok(())
 }

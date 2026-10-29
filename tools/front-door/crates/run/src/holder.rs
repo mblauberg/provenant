@@ -198,12 +198,7 @@ impl HolderContext {
     }
 }
 fn call<'a>(clock: &'a dyn Clock, cancel: &'a CancelToken) -> Result<Request<'a>> {
-    Ok(Request {
-        clock,
-        budget: WaitBudget::cli(clock.mono_now(), 30)
-            .map_err(|_| RunError::Validation("call budget"))?,
-        cancel,
-    })
+    Ok(Request { clock, cancel })
 }
 
 pub struct RunHolder<'a> {
@@ -425,7 +420,7 @@ impl RunStore {
         };
         if let Some(recovery) = &mut recovery {
             recovery
-                .release_writer_lock()
+                .prepare_settlement()
                 .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
         }
         let record = self.finish_in_custody(
@@ -451,7 +446,8 @@ impl RunStore {
     ) -> Result<Option<custody::Recovery>> {
         match custody::acquire_recovery(
             directory,
-            call.transaction_budget(),
+            scope,
+            call.lock_budget(),
             call.cancel,
             call.clock,
         ) {
@@ -966,8 +962,6 @@ impl RunStore {
         let record_call = Request {
             clock: call.clock,
             cancel: call.cancel,
-            budget: WaitBudget::cli(call.clock.mono_now(), 30)
-                .map_err(|_| RunError::Validation("record budget"))?,
         };
         let call = &record_call;
         let cancelled = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some();
@@ -1119,6 +1113,12 @@ impl RunStore {
                 decoded.reason = Some("cancelled during delivery".into());
             }
         }
+        // Decoding can reveal credential markers hidden by JSON escapes in
+        // the already-filtered capture. Seal only the filtered rendering.
+        let result = provenant_confinement::redact::known_shapes(decoded.result.as_bytes())
+            .map_err(|_| RunError::Validation("result redaction failed"))?;
+        let result = std::str::from_utf8(&result)
+            .map_err(|_| RunError::Validation("redacted result is not UTF-8"))?;
         let publication = TerminalPublication {
             outcome: decoded.outcome,
             finished_at,
@@ -1128,9 +1128,9 @@ impl RunStore {
                     .ok()
             }),
             reason: decoded.reason,
-            result: &decoded.result,
+            result,
             complete: decoded.complete,
-            redacted: false,
+            redacted: true,
             resolved_route: record.resolved_route.clone(),
             applied_route: record.applied_route.clone(),
             observed_route: decoded.observed_route,
@@ -1320,13 +1320,13 @@ mod writer_recovery_tests {
             directory,
             scope,
             binding,
-            call.budget,
+            call.lock_budget(),
             &cancel,
             &clock,
         )?;
         let mut recovery =
             provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?.into_recovery()?;
-        recovery.release_writer_lock()?;
+        recovery.prepare_settlement()?;
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         crate::dispatch_tests::seal_exit(&store, &observed)?;
@@ -1442,7 +1442,7 @@ mod writer_recovery_tests {
         drop(custody::acquire_reader(
             directory()?,
             scope,
-            call.budget,
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?);
@@ -1481,7 +1481,13 @@ mod writer_recovery_tests {
                 .is_err(),
             "another generation's terminal state is not settlement"
         );
-        std::fs::write(custody_dir.path().join("reservation.json"), b"{")?;
+        std::fs::write(
+            custody_dir
+                .path()
+                .join(scope.attempt.to_string())
+                .join("reservation.json"),
+            b"{",
+        )?;
         assert!(
             store
                 .recover_writer_exit(directory()?, scope, &call)

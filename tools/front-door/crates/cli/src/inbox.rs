@@ -63,7 +63,6 @@ pub fn resolve_work(
     project: provenant_core::ProjectId,
     work: &RequestWork,
     clock: &dyn Clock,
-    budget: WaitBudget,
     cancel: &provenant_core::CancelToken,
 ) -> Result<WorkCoverage, InboxError> {
     provenant_run::validate_work(
@@ -76,11 +75,7 @@ pub fn resolve_work(
             repository: work.repository.clone(),
             head: work.head,
         },
-        &provenant_run::Request {
-            clock,
-            budget,
-            cancel,
-        },
+        &provenant_run::Request { clock, cancel },
     )
     .map_err(|error| match error {
         provenant_run::RunError::Contention => {
@@ -592,7 +587,6 @@ fn execute(
         context.in_lane,
         &clock,
         input,
-        budget,
         &provenant_core::CancelToken::new(),
         &|work, call| {
             resolve_work(
@@ -600,7 +594,6 @@ fn execute(
                 context.identity.project,
                 work,
                 call.clock,
-                call.budget,
                 call.cancel,
             )
         },

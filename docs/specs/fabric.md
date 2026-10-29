@@ -396,6 +396,13 @@ binding to the writer, so it judges the newest repaired head; a verdict gate
 and a `land` node merge that head under the host's tier policy. No model runs
 while a gate is pending. `max_iterations` bounds the rounds; exhaustion raises
 the loop ask when `decision_session` is set and otherwise pauses the graph.
+The repairer's tier selector may supply ordered routes with a named
+`host-native` entry. Each such route requires a later non-native fallback,
+checked before graph execution.
+Fallback retains the existing rule that a launched writer never switches routes.
+A host-native repair's delivered commit passes through the same CI gate before
+review or land; a host completion status cannot replace that observation.
+See [host-native repairs](../runbooks/presets.md#host-native-repairs).
 The same session is bound to the land node's `session`, so a nested `deliver`
 still asks it, and the chair lands by hand; with none, a tier that asks fails
 the land node with guidance to land by hand. A repository preset layer never
@@ -441,6 +448,12 @@ override of a bundled preset may add parameters of its own. An optional `[patter
 `select_when` and `tags`. Parents pass `risk_tier` and `subject` to a child
 that declares them unless the entry sets them; `prompt` is always available.
 
+`--set PATH+=VALUE` appends to a list parameter and is refused on a scalar.
+Composite `inputs` and `exports` are typed by output kind: lowering refuses a
+selection its source node cannot supply (`commit` needs write access or a
+pinned source, inherited from an enclosing composite; `branch` needs write
+access; loops supply neither), with an error naming both nodes. Selections
+resolve against the enclosing scopes, and `previous.X` against the loop body.
 `--set` addresses a top-level stage by id (`sN` by position when it has none):
 `--set first.width=3` sets a parameter of the preset that stage runs, and on a
 role stage `--set task.tier=junior` sets that entry field. Stage `id` and

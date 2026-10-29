@@ -1123,6 +1123,7 @@ mod tests {
             agent_label: "fixture".into(),
             client_label: "fixture".into(),
             commands: Default::default(),
+            host_native: Default::default(),
             ssh_executable: None,
             home_hosts: Default::default(),
             peers: Default::default(),
@@ -1139,6 +1140,7 @@ mod tests {
                 lease_seconds: 3600,
                 peer_seconds: 30,
                 graph_timeout_seconds: 14400,
+                store_busy_timeout_ms: 30_000,
                 bundle_bytes: 67108864,
             },
         };

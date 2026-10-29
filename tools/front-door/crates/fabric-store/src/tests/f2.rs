@@ -356,13 +356,16 @@ fn landing_os_lock_serialises_connections_and_ref_and_store_are_bound() {
             .lock_landing(project(), &input.reference, &f.request())
             .unwrap();
         let fence = store.acquire_landing(&guard, input, &f.request()).unwrap();
-        let mut req = f.request();
-        req.budget = WaitBudget::cli(MonoTime::from_micros(0), 1).unwrap();
-        let expired_clock = TestClock::new(f.now(), MonoTime::from_micros(1_000_000));
-        req.clock = &expired_clock;
+        let name = crate::landing::landing_lock_name(project(), &input.reference).unwrap();
         assert!(
             store
-                .lock_landing(project(), &input.reference, &req)
+                .locks
+                .as_ref()
+                .unwrap()
+                .try_lock(
+                    std::ffi::OsStr::new(&name),
+                    provenant_os::fs::LockMode::Exclusive
+                )
                 .is_err()
         );
         let other = Fixture::new();
@@ -742,8 +745,7 @@ fn exercise_fault(stage: Mutation, full: bool) {
     };
     let before = database_records(&store);
     let holder = f.open();
-    let clock = AdvancingClock(std::cell::RefCell::new(f.clock.clone()));
-    let mut req = f.request();
+    let req = f.request();
     if full {
         store.db.execute_batch("CREATE TABLE fault_padding(bytes BLOB); CREATE TRIGGER fill_on_event BEFORE INSERT ON events BEGIN INSERT INTO fault_padding VALUES(zeroblob(1048576)); END;").unwrap();
         let pages: i64 = store
@@ -756,8 +758,10 @@ fn exercise_fault(stage: Mutation, full: bool) {
             .unwrap();
     } else {
         holder.db.execute_batch("BEGIN IMMEDIATE").unwrap();
-        req.clock = &clock;
-        req.backoff = &clock;
+        store
+            .db
+            .busy_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
     }
     let result = action(&req);
     if full {

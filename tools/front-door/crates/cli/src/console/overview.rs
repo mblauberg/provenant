@@ -1,6 +1,6 @@
 //! Compact local menu read, composed from bounded owner batches.
 use super::{Error, Project};
-use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots, WaitBudget};
+use provenant_core::{ActorId, CancelToken, ProjectId, Roots};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, OverviewState, RunStore};
 use serde_json::{Value, json};
@@ -25,16 +25,7 @@ pub fn summary_comparison(
     };
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let Ok(budget) = WaitBudget::cli(clock.mono_now(), 5) else {
-        return json!({"stale":[],"missing":[],"unknown":unknown(),"coverage":"unavailable"});
-    };
-    match provenant_fabric_runtime::inbox::overview(
-        &roots.state,
-        &clock,
-        budget,
-        &cancel,
-        1_048_576,
-    ) {
+    match provenant_fabric_runtime::inbox::overview(&roots.state, &clock, &cancel, 1_048_576) {
         Ok(page) => compare_summary(page, project, &host.to_string(), chair, needs_you),
         Err(provenant_fabric_runtime::inbox::OverviewError::Incompatible) => {
             json!({"stale":[],"missing":[],"unknown":unknown(),"coverage":"incompatible"})
@@ -113,13 +104,11 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
         .collect();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Encode)?;
     let mut needs_you = Vec::new();
     let mut remaining_bytes = BYTE_BUDGET;
     let fabric = match provenant_fabric_runtime::inbox::overview(
         &roots.state,
         &clock,
-        budget,
         &cancel,
         remaining_bytes,
     ) {
@@ -141,7 +130,6 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
     };
     let run_call = provenant_run::Request {
         clock: &clock,
-        budget,
         cancel: &cancel,
     };
     let context = ExecutionContext {

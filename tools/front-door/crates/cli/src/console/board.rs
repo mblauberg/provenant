@@ -1,7 +1,7 @@
 //! Board envelope and opaque, filter-bound continuation tokens.
 use super::Error;
-use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots, WaitBudget};
-use provenant_fabric_runtime::chairs::{ChairIndex, Request as ChairRequest, ThreadWait};
+use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
+use provenant_fabric_runtime::chairs::{ChairIndex, Request as ChairRequest};
 use provenant_os::clock::SystemClock;
 use provenant_records::CanonicalV1;
 use provenant_run::{AttemptState, ExecutionContext, Outcome, RunStore};
@@ -52,10 +52,8 @@ pub(super) fn read(
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Encode)?;
     let call = provenant_run::Request {
         clock: &clock,
-        budget,
         cancel: &cancel,
     };
     let context = ExecutionContext {
@@ -107,9 +105,7 @@ pub(super) fn read(
     let snapshot = binding(high_water, &filters)?;
     let chair_call = ChairRequest {
         clock: &clock,
-        budget,
         cancel: &cancel,
-        backoff: &ThreadWait,
     };
     let chairs = ChairIndex::open_read_only(
         &roots.state,
@@ -235,7 +231,6 @@ mod tests {
         let cancel = CancelToken::new();
         let call = provenant_run::Request {
             clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
             cancel: &cancel,
         };
         let project = ProjectId::from_bytes([1; 16]);
@@ -382,9 +377,7 @@ mod tests {
         std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o600))?;
         let chair_call = ChairRequest {
             clock: &clock,
-            budget: call.budget,
             cancel: &cancel,
-            backoff: &ThreadWait,
         };
         ChairIndex::open(&roots.state, &chair_call)?.submit(
             project,

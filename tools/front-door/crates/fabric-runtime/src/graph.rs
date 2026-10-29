@@ -3552,6 +3552,16 @@ fn validate_flat_plan(
         if routes.iter().any(|route| !route_is_bounded(route)) {
             return Err("route field size");
         }
+        // Configured aliases resolve model providers, whose registry excludes host-native.
+        for (index, route) in routes.iter().enumerate() {
+            if route.adapter.as_deref() == Some("host-native")
+                && !routes[index + 1..]
+                    .iter()
+                    .any(|fallback| fallback.adapter.as_deref() != Some("host-native"))
+            {
+                return Err("host-native route requires a later non-native fallback");
+            }
+        }
         for route in &routes {
             if let Some(spec) = route
                 .adapter
@@ -6863,6 +6873,28 @@ mod tests {
                 "{adapter}"
             );
         }
+    }
+
+    #[test]
+    fn host_native_requires_a_later_non_native_fallback() {
+        let mut host = route("host-native");
+        host.model = None;
+        host.name = Some("ci-fixer".into());
+        let mut repair = node("repair", host.clone());
+        repair.access = AccessMode::WorktreeWrite;
+        repair.worktree = Some("/repo/writer".into());
+        assert_eq!(
+            validate_plan(&graph(vec![repair.clone()])).err(),
+            Some("host-native route requires a later non-native fallback")
+        );
+        repair.route = None;
+        repair.routes = Some(vec![host.clone(), host.clone()]);
+        assert_eq!(
+            validate_plan(&graph(vec![repair.clone()])).err(),
+            Some("host-native route requires a later non-native fallback")
+        );
+        repair.routes = Some(vec![host, route("claude")]);
+        assert!(validate_plan(&graph(vec![repair])).is_ok());
     }
 
     #[test]

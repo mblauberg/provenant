@@ -138,8 +138,6 @@ impl WaitTransport {
 pub struct WaitBudget {
     deadline: Deadline,
     nonblocking: bool,
-    /// Set for an allowance each transaction takes afresh.
-    allowance: Option<DurationMicros>,
 }
 impl WaitBudget {
     /// One immediate attempt, with no retry wait. Used for writer probes while
@@ -148,7 +146,6 @@ impl WaitBudget {
         Self {
             deadline: Deadline(now),
             nonblocking: true,
-            allowance: None,
         }
     }
     /// Explicitly allow one immediate attempt, even though the deadline is now.
@@ -168,29 +165,19 @@ impl WaitBudget {
         Ok(Self {
             deadline: Deadline(now.checked_add(duration)?),
             nonblocking: false,
-            allowance: None,
         })
     }
-    /// A CLI contention allowance of `seconds` that each transaction takes
-    /// afresh through [`Self::for_transaction`], so slow work between
-    /// transactions never spends it. Cancellation, not this budget, ends the
-    /// operation.
-    pub fn per_transaction(now: MonoTime, seconds: u64) -> Result<Self, TimeError> {
-        let duration = DurationMicros::from_seconds(seconds)?;
-        Ok(Self {
-            allowance: Some(duration),
-            ..Self::new(now, duration, WaitTransport::Cli)?
-        })
-    }
-    /// The budget for one transaction that starts at `now`. A per-transaction
-    /// allowance restarts at `now`; any other budget is returned unchanged.
-    pub fn for_transaction(self, now: MonoTime) -> Self {
-        match self.allowance.map(|allowance| now.checked_add(allowance)) {
-            Some(Ok(deadline)) => Self {
-                deadline: Deadline(deadline),
-                ..self
-            },
-            _ => self,
+    /// A wait of up to `duration`, shortened to the CLI maximum. Unlike
+    /// [`Self::new`] it accepts sub-second waits, for internal lock bounds
+    /// rather than requested waits.
+    pub fn up_to(now: MonoTime, duration: DurationMicros) -> Self {
+        let maximum = DurationMicros(MAX_LANE_RUNTIME_SECONDS * 1_000_000);
+        Self {
+            deadline: Deadline(
+                now.checked_add(DurationMicros(duration.0.min(maximum.0)))
+                    .unwrap_or(MonoTime(u64::MAX)),
+            ),
+            nonblocking: false,
         }
     }
     pub fn cli(now: MonoTime, seconds: u64) -> Result<Self, TimeError> {
@@ -332,23 +319,16 @@ mod tests {
         assert_eq!(test.boot_identity().unwrap(), "test-boot");
     }
     #[test]
-    fn a_per_transaction_allowance_restarts_and_other_budgets_do_not() {
+    fn an_internal_bound_accepts_sub_second_waits_and_caps_long_ones() {
         let start = MonoTime::from_micros(0);
-        let later = MonoTime::from_micros(60_000_000);
-        let allowance = WaitBudget::per_transaction(start, 10).unwrap();
-        assert_eq!(allowance.remaining(later).as_micros(), 0);
+        let short = WaitBudget::up_to(start, DurationMicros::from_micros(50_000));
+        assert_eq!(short.remaining(start).as_micros(), 50_000);
+        assert!(!short.is_nonblocking());
+        let long = WaitBudget::up_to(start, DurationMicros::from_micros(u64::MAX));
         assert_eq!(
-            allowance
-                .for_transaction(later)
-                .remaining(later)
-                .as_micros(),
-            10_000_000
+            long.remaining(start).as_micros(),
+            MAX_LANE_RUNTIME_SECONDS * 1_000_000
         );
-        let deadline = WaitBudget::cli(start, 10).unwrap();
-        assert_eq!(deadline.for_transaction(later), deadline);
-        let probe = WaitBudget::nonblocking(start);
-        assert!(probe.for_transaction(later).is_nonblocking());
-        assert!(WaitBudget::per_transaction(start, 0).is_err());
     }
     #[test]
     fn wall_time_is_exact_and_has_only_one_wire_spelling() {

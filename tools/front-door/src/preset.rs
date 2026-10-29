@@ -504,6 +504,7 @@ fn override_stage(
     path: &str,
     parts: &[&str],
     replacement: &Value,
+    append: bool,
     origins: &mut BTreeMap<String, String>,
     origin: &str,
 ) -> Result<bool, String> {
@@ -536,7 +537,11 @@ fn override_stage(
             .or_insert_with(|| json!([]))
             .as_array_mut()
             .ok_or("stage set must be a list")?
-            .push(json!({"path": field.join("."), "value": replacement}));
+            .push(json!({"path": field.join("."), "value": replacement, "append": append}));
+    } else if append {
+        return Err(format!(
+            "{path}: += appends to a list parameter of a preset stage"
+        ));
     } else {
         set_nested(entry, field, replacement.clone())?;
     }
@@ -551,11 +556,16 @@ fn override_value(
     origins: &mut BTreeMap<String, String>,
     origin: &str,
 ) -> Result<(), String> {
+    // A trailing `+` (`path+=value`) appends to a list instead of replacing it.
+    let (path, append) = match path.strip_suffix('+') {
+        Some(path) => (path, true),
+        None => (path, false),
+    };
     let parts: Vec<_> = path.split('.').collect();
     if parts.len() >= 2
         && parts[0] != "parameters"
         && parts[0] != "roles"
-        && override_stage(value, path, &parts, &replacement, origins, origin)?
+        && override_stage(value, path, &parts, &replacement, append, origins, origin)?
     {
         return Ok(());
     }
@@ -573,10 +583,21 @@ fn override_value(
             let existing = map
                 .get_mut(*part)
                 .ok_or_else(|| format!("unknown parameter, role or stage: {path}"))?;
-            if is_spec(existing) && !is_fragment(&replacement) {
-                existing["default"] = replacement;
+            let slot = if is_spec(existing) && !is_fragment(&replacement) {
+                &mut existing["default"]
             } else {
-                *existing = replacement;
+                existing
+            };
+            if append {
+                let list = slot.as_array_mut().ok_or_else(|| {
+                    format!("{path}: += appends to a list parameter, but this one is not a list")
+                })?;
+                match replacement {
+                    Value::Array(items) => list.extend(items),
+                    item => list.push(item),
+                }
+            } else {
+                *slot = replacement;
             }
             origins.insert(path.into(), origin.into());
             return Ok(());
@@ -854,6 +875,7 @@ pub fn expand_with(
     .to_string();
     let id = format!("preset-{}", &digest[7..39]);
     check_expansion(&nodes, "", 0)?;
+    check_selections(&nodes)?;
     let mut document = json!({"schema_version":1,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
     let parameters = flatten_parameters(
         name,
@@ -1410,17 +1432,28 @@ fn lower_leaf(
                     .cloned()
                     .unwrap_or_else(|| json!("senior"))
             });
-            let mut route = match route {
-                Value::String(name) if !name.is_empty() => json!({"alias":name}),
-                Value::Object(_) => route,
-                _ => {
-                    return Err(format!("node {id}: tier must be a name or route table"));
+            if route.is_array() {
+                if effort.is_some() {
+                    return Err(format!(
+                        "node {id}: route lists cannot be combined with effort"
+                    ));
                 }
-            };
-            if let Some(effort) = effort {
-                route["effort"] = effort;
+                map.insert("routes".into(), route);
+            } else {
+                let mut route = match route {
+                    Value::String(name) if !name.is_empty() => json!({"alias":name}),
+                    Value::Object(_) => route,
+                    _ => {
+                        return Err(format!(
+                            "node {id}: tier must be a name, route table or route list"
+                        ));
+                    }
+                };
+                if let Some(effort) = effort {
+                    route["effort"] = effort;
+                }
+                map.insert("route".into(), route);
             }
-            map.insert("route".into(), route);
         }
     } else {
         map.remove("tier");
@@ -1804,9 +1837,10 @@ impl StageBuilder<'_> {
                             index as usize,
                         )?;
                         passed.push(path.split('.').next().unwrap_or(path).to_owned());
+                        let append = if item["append"] == true { "+" } else { "" };
                         override_value(
                             &mut config,
-                            &format!("parameters.{path}"),
+                            &format!("parameters.{path}{append}"),
                             value,
                             &mut local,
                             &stage_origin(self.origins, path),
@@ -2017,6 +2051,103 @@ fn composite(
         node["inputs"] = selected_inputs(deps, outputs);
     }
     node
+}
+
+/// Output kinds a node can supply. Every node reports a result, findings, a
+/// verdict and the remaining window. `commit` needs write access or a pinned
+/// source (its own or inherited from an enclosing composite); `branch` needs
+/// write access, since a read-only node has no delivery receipt. Loops settle
+/// with a verdict only, and a composite supplies what it exports.
+fn produced(node: &Value, inherited: bool) -> Vec<String> {
+    if let Some(exports) = node.pointer("/composite/exports").and_then(Value::as_array) {
+        let mut kinds: Vec<String> = Vec::new();
+        for kind in exports
+            .iter()
+            .filter_map(|export| export["outputs"].as_array())
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !kinds.iter().any(|known| known == kind) {
+                kinds.push(kind.into());
+            }
+        }
+        return kinds;
+    }
+    let mut kinds: Vec<String> = ["result", "findings", "verdict", "remaining"]
+        .map(String::from)
+        .into();
+    if node["kind"] == "loop" {
+        return kinds;
+    }
+    let writes = node["access"] != "read_only" && !node["access"].is_null();
+    let sourced = inherited || node.get("source").is_some_and(|s| !s.is_null());
+    if writes || node["kind"] == "land" {
+        kinds.push("branch".into());
+    }
+    if writes || sourced || node["kind"] == "land" {
+        kinds.push("commit".into());
+    }
+    kinds
+}
+
+/// Nodes visible to a selection: the sibling list first, then enclosing scopes,
+/// each node paired with whether it inherits a pinned source.
+type Scope<'a> = Vec<(&'a Value, bool)>;
+
+fn check_selection(owner: &str, selected: &Value, scope: &Scope) -> Result<(), String> {
+    let Some(target) = selected["node"].as_str() else {
+        return Ok(());
+    };
+    // `previous.X` names body node X of the loop's earlier round.
+    let target = target.strip_prefix("previous.").unwrap_or(target);
+    let Some((source, inherited)) = scope.iter().find(|(node, _)| node["id"] == target) else {
+        return Ok(());
+    };
+    let available = produced(source, *inherited);
+    for kind in selected["outputs"].as_array().into_iter().flatten() {
+        let kind = kind.as_str().unwrap_or_default();
+        if !available.iter().any(|known| known == kind) {
+            return Err(format!(
+                "{owner} selects {kind} from {target}, which supplies only {}",
+                available.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an input or export that selects an output its source cannot
+/// supply, naming both nodes.
+fn check_selections(nodes: &[Value]) -> Result<(), String> {
+    check_scope(nodes, &Vec::new(), false)
+}
+
+fn check_scope<'a>(nodes: &'a [Value], outer: &Scope<'a>, inherited: bool) -> Result<(), String> {
+    let mut scope: Scope = nodes.iter().map(|node| (node, inherited)).collect();
+    scope.extend(outer.iter().copied());
+    for node in nodes {
+        let id = node["id"].as_str().unwrap_or_default();
+        for input in node["inputs"].as_array().into_iter().flatten() {
+            check_selection(&format!("node {id}"), input, &scope)?;
+        }
+        let pinned = inherited || node.get("source").is_some_and(|s| !s.is_null());
+        if let Some(children) = node.pointer("/composite/nodes").and_then(Value::as_array) {
+            let inner: Scope = children.iter().map(|child| (child, pinned)).collect();
+            for export in node
+                .pointer("/composite/exports")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                check_selection(&format!("composite {id} export"), export, &inner)?;
+            }
+            check_scope(children, &scope, pinned)?;
+        }
+        if let Some(children) = node.pointer("/loop/body").and_then(Value::as_array) {
+            check_scope(children, &scope, pinned)?;
+        }
+    }
+    Ok(())
 }
 
 fn check_expansion(nodes: &[Value], prefix: &str, depth: usize) -> Result<usize, String> {

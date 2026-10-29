@@ -1,10 +1,10 @@
 use super::*;
 use provenant_core::{
-    ActorId, CancelToken, ClaimId, Clock, DurationMicros, MonoTime, PathResolver, ProjectId,
-    RootInputs, StateRoot, TestClock, WaitBudget, WallTime,
+    ActorId, CancelToken, ClaimId, DurationMicros, MonoTime, PathResolver, ProjectId, RootInputs,
+    StateRoot, TestClock, WallTime,
 };
 use provenant_fabric_store::{
-    Error as StoreError, LandingRequest, PushPhase, Request as StoreRequest, ThreadWait,
+    Error as StoreError, LandingRequest, PushPhase, Request as StoreRequest,
 };
 use provenant_os::exec::{SystemExecutor, Termination};
 use std::{
@@ -31,7 +31,6 @@ struct LandingFixture {
     root: StateRoot,
     clock: TestClock,
     cancel: CancelToken,
-    backoff: ThreadWait,
 }
 impl LandingFixture {
     fn new() -> Self {
@@ -47,16 +46,13 @@ impl LandingFixture {
                 MonoTime::from_micros(0),
             ),
             cancel: CancelToken::new(),
-            backoff: ThreadWait,
         }
     }
 
     fn request(&self) -> StoreRequest<'_> {
         StoreRequest {
             clock: &self.clock,
-            budget: WaitBudget::cli(self.clock.mono_now(), 60).unwrap(),
             cancel: &self.cancel,
-            backoff: &self.backoff,
         }
     }
 }

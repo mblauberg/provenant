@@ -2,12 +2,11 @@
 //! `reconcile` and `telemetry stats`, and the provider seam that the
 //! same-binary guardian holder shares.
 use crate::{
-    Cancel, Condition, Dispatch, Lanes, Mode, Output, Part, Reconcile, Resume, Stats, Switch,
-    Target, Trace, limits,
+    Cancel, Condition, Dispatch, Lanes, Mode, Output, Part, PricesRefresh, Reconcile, Resume,
+    Stats, Switch, Target, Trace, limits,
 };
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId,
-    WaitBudget, WallTime,
+    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::{clock::SystemClock, fs::entropy_128};
@@ -204,6 +203,16 @@ impl Registry<'_> {
         let unsupported = |message: String| {
             Fail::new(Status::Refused, ErrorKind::ContinuationUnsupported, message)
         };
+        if prior
+            .applied_route
+            .as_ref()
+            .is_some_and(|route| route.extra.contains_key("host_native"))
+        {
+            return Err(unsupported(
+                "host-native does not support resume; dispatch a fresh lane with the prior result"
+                    .into(),
+            ));
+        }
         let adapter = prior
             .applied_route
             .as_ref()
@@ -282,8 +291,14 @@ impl run::Providers for Registry<'_> {
             .model_policy
             .effective(&model, route.account_key.as_deref(), now)
             .policy;
-        let assessment =
+        let mut assessment =
             assess_model_result(&policy, task, record, decoded, handoff, policy_attempt)?;
+        if route.extra.contains_key("host_native") {
+            // The host row is fresh-only. Provider-level policy retries would
+            // reconstruct a model route and lose its agent and provenance.
+            assessment.retry = None;
+            return Ok(assessment);
+        }
         if assessment.refusal.is_some() || assessment.retry.is_some() {
             return Ok(assessment);
         }
@@ -1126,14 +1141,7 @@ impl Session {
     }
 }
 fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::Request<'a>, Fail> {
-    Ok(run::Request {
-        clock,
-        // Each store transaction gets its own 30-second contention allowance,
-        // so provider launch or a long wait never expires a later write.
-        budget: WaitBudget::per_transaction(clock.mono_now(), 30)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?,
-        cancel,
-    })
+    Ok(run::Request { clock, cancel })
 }
 /// Shared Fabric identity/config, isolated Run custody for a lane's children.
 pub fn execution_state(
@@ -3420,12 +3428,10 @@ fn with_chair_index<T>(
         &provenant_fabric_runtime::chairs::Request<'_>,
     ) -> Result<T, provenant_fabric_runtime::chairs::Error>,
 ) -> Result<T, Fail> {
-    use provenant_fabric_runtime::chairs::{ChairIndex, Request, ThreadWait};
+    use provenant_fabric_runtime::chairs::{ChairIndex, Request};
     let index_call = Request {
         clock: call.clock,
-        budget: call.transaction_budget(),
         cancel: call.cancel,
-        backoff: &ThreadWait,
     };
     ChairIndex::open(&roots.state, &index_call)
         .and_then(|index| action(&index, &index_call))
@@ -4412,10 +4418,9 @@ fn candidates<'a>(
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         // The outer wait owns the deadline and retries contention between polls.
-        // Do not let an individual store read spend a separate 30-second budget.
+        // Under WAL a read rarely waits; when it does, the busy timeout bounds it.
         let call = run::Request {
             clock: &clock,
-            budget: WaitBudget::nonblocking(clock.mono_now()),
             cancel: &cancel,
         };
         let ids = match picks.since {
@@ -4457,9 +4462,13 @@ fn render_settled(
 ) -> Result<(Value, String), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let waits = settled_waits(&clock, &cancel, |call| {
-        session.store.lane_waits(lanes, call)
-    });
+    let waits = session.store.lane_waits(
+        lanes,
+        &run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        },
+    );
     Ok(render_lanes(
         lanes,
         &waits,
@@ -4467,19 +4476,6 @@ fn render_settled(
         session.context.state_root.as_path(),
         cooldowns,
     ))
-}
-/// Wait details are optional, and must not extend a completed wait or watch.
-fn settled_waits<T>(
-    clock: &SystemClock,
-    cancel: &CancelToken,
-    read: impl FnOnce(&run::Request<'_>) -> T,
-) -> T {
-    let call = run::Request {
-        clock,
-        budget: WaitBudget::nonblocking(clock.mono_now()),
-        cancel,
-    };
-    read(&call)
 }
 fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, String, bool), Fail> {
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
@@ -4542,7 +4538,6 @@ fn wait_command(
                     let cancel = CancelToken::new();
                     let call = run::Request {
                         clock: &clock,
-                        budget: WaitBudget::nonblocking(clock.mono_now()),
                         cancel: &cancel,
                     };
                     seen = Some(session.store.seen_cursor(&key, true, &call)?);
@@ -4568,7 +4563,6 @@ fn wait_command(
             let cancel = CancelToken::new();
             let entry = run::Request {
                 clock: &clock,
-                budget: WaitBudget::nonblocking(clock.mono_now()),
                 cancel: &cancel,
             };
             let mut latest = 0;
@@ -4737,7 +4731,7 @@ fn lanes_inner(
     let mut projects = std::collections::BTreeSet::new();
     let mut first = None;
     for target in &mut normalised.id {
-        let candidate = targets::resolve_with_budget(edge, target, true, wait_entry.is_some())?;
+        let candidate = targets::resolve(edge, target, true)?;
         if let Some(project) = candidate.project {
             projects.insert(project);
         }
@@ -4767,7 +4761,6 @@ fn lanes_inner(
     let call = if wait_entry.is_some() {
         run::Request {
             clock: &clock,
-            budget: WaitBudget::nonblocking(clock.mono_now()),
             cancel: &cancel,
         }
     } else {
@@ -6646,7 +6639,9 @@ fn stats_inner(
                 billing
             ));
         }
-        return Ok((json!({ "native_claude_subagents": native }), human));
+        let mut data = json!({ "native_claude_subagents": native });
+        attach_freshness(&prices, &mut data, &mut human)?;
+        return Ok((data, human));
     }
     let instant = |time: Option<jiff::Timestamp>| {
         time.map(|t| WallTime::from_micros(t.as_microsecond()))
@@ -6890,6 +6885,7 @@ fn stats_inner(
         ));
     }
     data["partial_signals"] = json!(partial);
+    attach_freshness(&prices, &mut data, &mut human)?;
     if by == Some(crate::StatsBy::Pr) {
         data["pr_attribution"] = json!({
             "merged_prs_read": merged_pr_count,
@@ -6905,6 +6901,29 @@ fn stats_inner(
         data["chair_error"] = Value::String(error);
     }
     Ok((data, human))
+}
+
+/// Report the sheet's review age in JSON and, once stale, in the human text.
+fn attach_freshness(
+    prices: &provenant_telemetry::PriceTable,
+    data: &mut Value,
+    human: &mut String,
+) -> Result<(), Fail> {
+    let today = jiff::Timestamp::from_microsecond(now(&SystemClock::new())?.as_micros())
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date();
+    let freshness = prices.freshness(today);
+    if freshness.stale {
+        human.push_str(&format!(
+            "price sheet reviewed {} days ago ({}), over the {}-day limit\nnext: review and refresh with `provenant telemetry prices refresh`\n",
+            freshness.age_days,
+            freshness.reviewed_at,
+            freshness.max_age_days.unwrap_or(0)
+        ));
+    }
+    data["price_freshness"] = json!(freshness);
+    Ok(())
 }
 
 fn grouped_token_count(
@@ -7209,6 +7228,188 @@ fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
 }
 
 /// Offline lane timeline: terminal attempts as Chrome Trace Event JSON.
+/// Load and validate the bundled price sheet text and table.
+fn load_price_sheet(
+    edge: &Edge<'_>,
+) -> Result<
+    (
+        provenant_telemetry::ConfiguredPrices,
+        provenant_telemetry::PriceTable,
+    ),
+    Fail,
+> {
+    let path = edge.assets.join("config/telemetry-prices.toml");
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        Fail::new(
+            Status::Error,
+            ErrorKind::Prices,
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    let config = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
+    let table = provenant_telemetry::validate_prices(&config)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
+    Ok((config, table))
+}
+
+/// Read one price document from a file or fetch it over HTTPS.
+fn price_document(
+    source: provenant_telemetry::refresh::Source,
+    file: Option<&Path>,
+    home: &Path,
+) -> Result<(Value, String), Fail> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    const LIMIT: usize = 64 * 1024 * 1024;
+    let io = |message: String| Fail::new(Status::Error, ErrorKind::Io, message);
+    let (bytes, origin) = if let Some(file) = file {
+        let bytes =
+            std::fs::read(file).map_err(|error| io(format!("{}: {error}", file.display())))?;
+        (bytes, format!("file:{}", file.display()))
+    } else {
+        let url = source.url();
+        let argv: Vec<std::ffi::OsString> = [
+            "curl",
+            "--disable",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--location",
+            "--proto",
+            "=https",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "60",
+            url,
+        ]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+        let mut options = ExecOptions::new(&argv, home, Duration::from_secs(65));
+        options.stdin = Some(b"");
+        options.stdout = StreamPolicy::Capture { limit: LIMIT };
+        options.stderr = StreamPolicy::Discard;
+        options.stop_on_output_limit = true;
+        let out = SystemExecutor::new(1)
+            .and_then(|executor| executor.execute(options))
+            .map_err(|error| io(format!("{url}: {error}")))?;
+        if out.timed_out || out.stdout.truncated || out.termination != Termination::Exit(0) {
+            return Err(io(format!("{url}: fetch failed")));
+        }
+        (out.stdout.bytes, url.to_owned())
+    };
+    let document = serde_json::from_slice(&bytes).map_err(|error| {
+        Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            format!("{origin}: {error}"),
+        )
+    })?;
+    Ok((document, origin))
+}
+
+pub fn prices_refresh(command: PricesRefresh, edge: &Edge<'_>) -> Reply {
+    let mut out = reply(
+        "telemetry prices refresh",
+        prices_refresh_inner(command, edge),
+    );
+    // A proposal awaiting review is not a failure, but is not "nothing to do".
+    if out.result.status == Status::Ok && out.result.data["clean"] == false {
+        out.result.status = Status::Pending;
+    }
+    out
+}
+/// True when both paths name one file, through symlinks, `..` or hard links.
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let resolve = |path: &Path| {
+        let name = path.file_name()?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::canonicalize(parent).ok().map(|p| p.join(name))
+    };
+    let resolved = |path: &Path| std::fs::canonicalize(path).ok().or_else(|| resolve(path));
+    if resolved(a).is_some_and(|a| Some(a) == resolved(b)) {
+        return true;
+    }
+    matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(a), Ok(b)) if a.dev() == b.dev() && a.ino() == b.ino())
+}
+fn prices_refresh_inner(command: PricesRefresh, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    use provenant_telemetry::refresh::{Source, propose};
+    let (sheet, _) = load_price_sheet(edge)?;
+    let out_path = edge.cwd.join(&command.out);
+    if same_file(&out_path, &edge.assets.join("config/telemetry-prices.toml")) {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "--out must not be the price sheet; the proposal never replaces it",
+        ));
+    }
+    let (primary, cross) = match command.source {
+        crate::PriceSource::Openrouter => (Source::Openrouter, Source::Litellm),
+        crate::PriceSource::Litellm => (Source::Litellm, Source::Openrouter),
+    };
+    let file = |source| match source {
+        Source::Openrouter => command.openrouter_file.as_deref(),
+        Source::Litellm => command.litellm_file.as_deref(),
+    };
+    let home = edge.home;
+    let (primary_doc, primary_origin) = price_document(primary, file(primary), home)?;
+    let (cross_doc, cross_origin) = price_document(cross, file(cross), home)?;
+    let clock = SystemClock::new();
+    let fetched_at = jiff::Timestamp::from_microsecond(now(&clock)?.as_micros())
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?;
+    let parse = |source: Source, document: &Value, origin: &str| {
+        source.parse(document).map_err(|error| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                format!("{origin}: {error}"),
+            )
+        })
+    };
+    let primary_rates = parse(primary, &primary_doc, &primary_origin)?;
+    let cross_rates = parse(cross, &cross_doc, &cross_origin)?;
+    let proposal = propose(&sheet, (primary, &primary_rates), (cross, &cross_rates));
+    let data = json!({
+        "primary": {"source": primary, "url": primary_origin},
+        "cross_check": {"source": cross, "url": cross_origin},
+        "fetched_at": fetched_at.to_string(),
+        "effective_from": fetched_at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string(),
+        "proposal": proposal,
+        "applied": false,
+        "proposal_file": command.out,
+    });
+    let text = serde_json::to_string_pretty(&data)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    std::fs::write(&out_path, format!("{text}\n")).map_err(|error| {
+        Fail::new(
+            Status::Error,
+            ErrorKind::Io,
+            format!("{}: {error}", out_path.display()),
+        )
+    })?;
+    let mut human = format!(
+        "{} proposed rate changes, {} discrepancies above threshold, {} models missing from {}\nproposal written to {} (price sheet not edited)\n",
+        proposal.changes.len(),
+        proposal.discrepancies.len(),
+        proposal.missing.len(),
+        plain_text(&primary_origin, 256),
+        command.out.display()
+    );
+    if proposal.is_clean() {
+        human.push_str("next: nothing to review\n");
+    } else {
+        human.push_str("next: review the proposal, then edit config/telemetry-prices.toml\n");
+    }
+    let mut data = data;
+    data["clean"] = json!(proposal.is_clean());
+    Ok((data, human))
+}
+
 pub fn trace(command: Trace, edge: &Edge<'_>) -> Reply {
     reply("telemetry trace", trace_inner(command, edge))
 }
@@ -7291,8 +7492,6 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
     let call = run::Request {
         clock: &clock,
         cancel: &cancel,
-        budget: WaitBudget::cli(clock.mono_now(), 1)
-            .map_err(|e| Fail::new(Status::Error, ErrorKind::Time, e.to_string()))?,
     };
     // A handoff only reads lanes. A fresh store has none; avoid paying for
     // database creation, WAL setup and schema migrations just to discover that.
@@ -7840,6 +8039,88 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|error| error.message)?;
+        let store = trace_store(&temp, &call)?;
+        let input = trace_run(44, AttemptId::from_bytes([45; 16]), clock.wall_now()?)?;
+        store.create(&input, &call)?;
+        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        record.applied_route = Some(run::RouteRecord {
+            extra: [("host_native".into(), json!("ci-fixer"))].into(),
+            provider: Some("claude".into()),
+            model: Some("claude/claude-sonnet-5-5".into()),
+            ..Default::default()
+        });
+        record.state = run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: run::Outcome::Succeeded,
+            exit_code: Some(0),
+            finished_at: clock.wall_now()?,
+            reason: None,
+        };
+        record.session = Some("native-session".into());
+        let root = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nstop_early_ok=false\nmax_continuations=2\n",
+        )?;
+        let registry = Registry {
+            roots: Some(&roots),
+            ..Default::default()
+        };
+        let error = registry
+            .check_continuable(&record)
+            .err()
+            .ok_or("host resume accepted")?;
+        assert_eq!(error.kind, ErrorKind::ContinuationUnsupported);
+        let mut decoded = run::Decoded {
+            outcome: run::Outcome::ModelUnavailable,
+            result: String::new(),
+            complete: false,
+            observed_route: None,
+            usage: Default::default(),
+            session: record.session.clone(),
+            reason: Some("provider capacity: Selected model is at capacity".into()),
+            partial_signals: Vec::new(),
+        };
+        let assessment = run::Providers::assess_result(
+            &registry,
+            &input.request.tasks[0],
+            &record,
+            &decoded,
+            None,
+            None,
+            1,
+        )?;
+        assert!(assessment.retry.is_none());
+        decoded.outcome = run::Outcome::Succeeded;
+        decoded.complete = true;
+        let handoff = provenant_records::handoff::Handoff::from_json(br#"{"schema_version":2,"status":"stopped_early","note":"CI remains red","remaining":["Repair tests"],"decisions":[],"verify":[]}"#)?;
+        let assessment = run::Providers::assess_result(
+            &registry,
+            &input.request.tasks[0],
+            &record,
+            &decoded,
+            Some(&handoff),
+            None,
+            1,
+        )?;
+        assert_eq!(
+            assessment.refusal.as_deref(),
+            Some("model reported unfinished work")
+        );
+        assert!(assessment.retry.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn capacity_and_quota_settlements_retry_within_their_bounds()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -8095,6 +8376,8 @@ mod tests {
             id: "empty".into(),
             reviewed_at: "2026-10-29".into(), // timebomb: allow fixed price-table review date, never compared with the clock
             units: "usd_microdollars_per_million_tokens".into(),
+            max_review_age_days: None,
+            discrepancy_threshold_bps: None,
             models: Vec::new(),
         })
         .unwrap();
@@ -9145,11 +9428,13 @@ mod tests {
         });
         let (replayed, _) = submit(&session, &edge, replay, &call).map_err(|f| f.message)?;
         assert_eq!(replayed.run_id, first.run_id);
-        let expired = run::Request {
-            budget: WaitBudget::nonblocking(clock.mono_now()),
+        let stopped = CancelToken::new();
+        stopped.cancel();
+        let cancelled = run::Request {
+            cancel: &stopped,
             ..call
         };
-        let failure = with_chair_index(&roots, &expired, |_, _| Ok(())).unwrap_err();
+        let failure = with_chair_index(&roots, &cancelled, |_, _| Ok(())).unwrap_err();
         assert_eq!(failure.status, Status::Error);
         with_chair_index(&roots, &call, |index, call| {
             assert_eq!(
@@ -10038,16 +10323,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn timeout_render_reads_wait_details_without_a_retry_budget() {
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let waits: Vec<run::LaneWait> = settled_waits(&clock, &cancel, |call| {
-            assert_eq!(call.budget.remaining(call.clock.mono_now()).as_micros(), 0);
-            Vec::new()
-        });
-        assert!(waits.is_empty());
-    }
     #[test]
     fn render_lanes_says_what_an_unstarted_lane_waits_for() -> Result<(), Box<dyn std::error::Error>>
     {

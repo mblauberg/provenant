@@ -416,16 +416,14 @@ impl Store {
         fence: &ClaimFence,
         request: &Request<'_>,
     ) -> Result<WorkClaim> {
-        request.retry(|| {
-            let row = by_fence(
-                &self.db,
-                project,
-                fence,
-                "work",
-                Some(request.clock.wall_now()?),
-            )?;
-            decode(&row.bytes)
-        })
+        let row = by_fence(
+            &self.db,
+            project,
+            fence,
+            "work",
+            Some(request.clock.wall_now()?),
+        )?;
+        decode(&row.bytes)
     }
     pub fn renew_claim(
         &self,
@@ -498,13 +496,31 @@ impl Store {
         limit: u64,
         request: &Request<'_>,
     ) -> Result<Page<WorkClaim>> {
+        request.check()?;
         let limit = page(0, limit)?;
-        request.retry(|| {
-            let mut stmt=self.db.prepare("SELECT substr(record,1,?4) FROM claims WHERE project=?1 AND kind='work' AND (?2 IS NULL OR id>?2) ORDER BY id LIMIT ?3")?;
-            let mut rows=stmt.query(params![project.to_string(),after.map(|id|id.to_string()),limit,MAX_RECORD_READ_BYTES])?;
-            let mut items=Vec::new(); let mut total=0; let mut truncated=false;
-            while let Some(row)=rows.next()? { let bytes:Vec<u8>=row.get(0)?; total+=bytes.len(); if total>MAX_PAGE_BYTES {truncated=true;break;} items.push(decode(&bytes)?); }
-            Ok(Page { extra: Default::default(), items,truncated})
+        let mut stmt=self.db.prepare("SELECT substr(record,1,?4) FROM claims WHERE project=?1 AND kind='work' AND (?2 IS NULL OR id>?2) ORDER BY id LIMIT ?3")?;
+        let mut rows = stmt.query(params![
+            project.to_string(),
+            after.map(|id| id.to_string()),
+            limit,
+            MAX_RECORD_READ_BYTES
+        ])?;
+        let mut items = Vec::new();
+        let mut total = 0;
+        let mut truncated = false;
+        while let Some(row) = rows.next()? {
+            let bytes: Vec<u8> = row.get(0)?;
+            total += bytes.len();
+            if total > MAX_PAGE_BYTES {
+                truncated = true;
+                break;
+            }
+            items.push(decode(&bytes)?);
+        }
+        Ok(Page {
+            extra: Default::default(),
+            items,
+            truncated,
         })
     }
 }

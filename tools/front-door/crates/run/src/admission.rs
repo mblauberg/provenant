@@ -8,7 +8,7 @@ use crate::{
     *,
 };
 use provenant_confinement::valid_read_only_writable;
-use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, GitOid, WaitBudget, WallTime};
+use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, GitOid, WallTime};
 use provenant_os::{
     fs::Directory,
     sys::resources::{self, MemorySample},
@@ -210,7 +210,7 @@ impl RunStore {
                 ) || matches!(lane.state, AttemptState::Running { .. })
             })
             .filter_map(|lane| {
-                let ticket = call.retry(|| self.ticket(&self.db, lane.attempt_id)).ok()?;
+                let ticket = self.ticket(&self.db, lane.attempt_id).ok()?;
                 let class = ticket.lane_class;
                 let waiting_for = if matches!(lane.state, AttemptState::Running { .. }) {
                     self.disk_pause_wait(lane)
@@ -478,13 +478,8 @@ impl RunStore {
         let mut refusal = None;
         let mut below_floor = 0_u32;
         loop {
-            let call = Request {
-                clock,
-                budget: WaitBudget::cli(clock.mono_now(), 30)
-                    .map_err(|_| RunError::Validation("admission budget"))?,
-                cancel,
-            };
-            let ticket = call.retry(|| self.ticket(&self.db, id))?;
+            let call = Request { clock, cancel };
+            let ticket = self.ticket(&self.db, id)?;
             let now = clock
                 .wall_now()
                 .map_err(|_| RunError::Validation("wall clock"))?;

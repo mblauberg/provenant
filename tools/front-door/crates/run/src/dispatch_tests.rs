@@ -52,7 +52,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
         .writer_registry
         .join("worktrees")
         .join(record.project_id.to_string());
-    let broken = worktrees.join("broken");
+    let broken = worktrees.join("broken").join(record.attempt_id.to_string());
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -72,7 +72,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     let lease = provenant_supervisor::custody::acquire_reader(
         Directory::open_anchor(&writer)?,
         RunStore::scope(&record),
-        call.budget,
+        call.lock_budget(),
         call.cancel,
         call.clock,
     )?;
@@ -117,7 +117,7 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
         .join("worktrees")
         .join(record.project_id.to_string());
     let unreadable = |name: &std::ffi::OsStr| -> TestResult {
-        let directory = worktrees.join(name);
+        let directory = worktrees.join(name).join(record.attempt_id.to_string());
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -132,6 +132,23 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
         "another worktree's unreadable reservation is not this attempt's"
     );
     let own = provenant_confinement::worktrees::state_dir_name(&worktree);
+    let own_slot = worktrees.join(&own);
+    let predecessor = own_slot.join(AttemptId::from_bytes([99; 16]).to_string());
+    std::fs::create_dir_all(&predecessor)?;
+    std::fs::write(
+        predecessor.join("reservation.json"),
+        b"malformed predecessor",
+    )?;
+    assert!(
+        store.custody_released(&record, &call)?,
+        "predecessor evidence is separate"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&own_slot, std::fs::Permissions::from_mode(0o0))?;
+    let observed = store.custody_released(&record, &call);
+    std::fs::set_permissions(&own_slot, std::fs::Permissions::from_mode(0o700))?;
+    assert!(!observed?, "an inaccessible own slot cannot prove release");
+    std::fs::remove_file(predecessor.join("reservation.json"))?;
     unreadable(&own)?;
     assert_eq!(store.writer_fence_listing()?.issues.len(), 2);
     assert!(
@@ -1954,8 +1971,12 @@ fn held_children_retain_busy_missing_and_recreated_custody_locks() -> TestResult
         let run = input();
         store.create(&run, &call)?;
         let directory = store.attempt_dir(run.run_id, run.attempts[0].attempt_id, false)?;
-        let reservation =
-            PublicationReservation::prepare(directory.try_clone()?, call.budget, &cancel, &clock)?;
+        let reservation = PublicationReservation::prepare(
+            directory.try_clone()?,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
         let identity = reservation.custody_metadata()?;
         for index in 0..crate::db::HELD_CHILD_LIMIT {
             store.hold_child(
@@ -2939,6 +2960,63 @@ fn settle_with(
     Ok(store.finish(id, &dir, &observed, &fake, &call)?)
 }
 
+#[test]
+fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
+    for (answer, expected) in [
+        ("plain answer", "plain answer"),
+        (
+            "credential ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "credential [REDACTED]",
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let dir = store.attempt_dir(run.run_id, id, false)?;
+        artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+        let mut observed = exit();
+        observed.scope = RunStore::scope(&store.record(id, &call)?);
+        seal_exit(&store, &observed)?;
+        let fake = Fake {
+            observed: Some(route()),
+            answer: Some(answer.into()),
+            ..Fake::default()
+        };
+        let record = store.finish(id, &dir, &observed, &fake, &call)?;
+        let artifact = record.result.ok_or("result")?;
+        assert_eq!(
+            artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
+            Some(expected.as_bytes())
+        );
+        assert!(
+            artifact.redacted,
+            "redacted means the filter was applied, including clean results"
+        );
+        assert_eq!(
+            artifact.digest,
+            CanonicalV1::file_digest(expected.as_bytes())
+        );
+        assert_eq!(artifact.bytes, expected.len() as u64);
+        let capture = store.stream_result(id, &call, None)?;
+        assert_eq!(capture.digest, artifact.digest.to_string());
+        assert_eq!(capture.tail, expected);
+    }
+    Ok(())
+}
+
 const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Parser done; renderer and tests remain.\"}\n```";
 
 #[test]
@@ -3399,11 +3477,7 @@ impl Clock for Stepped {
     }
 }
 fn stepped_call<'a>(clock: &'a Stepped, cancel: &'a CancelToken) -> Request<'a> {
-    Request {
-        clock,
-        budget: provenant_core::WaitBudget::cli(MonoTime::from_micros(0), 10).unwrap(),
-        cancel,
-    }
+    Request { clock, cancel }
 }
 /// Writer lanes ready to claim, each a lane of its own run.
 fn writers<const N: usize>(
@@ -4418,11 +4492,14 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
     drop(provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(custody_dir.path())?,
         observed.scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
-    let reservation = custody_dir.path().join("reservation.json");
+    let reservation = custody_dir
+        .path()
+        .join(observed.scope.attempt.to_string())
+        .join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
     let meta = attempt.metadata()?;
     value["launch_state"] = "never_spawned".into();
@@ -4438,7 +4515,8 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
     std::fs::write(reservation, serde_json::to_vec(&value)?)?;
     let recovery = provenant_supervisor::custody::acquire_recovery(
         Directory::open_anchor(custody_dir.path())?,
-        call.budget,
+        observed.scope,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;
@@ -4736,7 +4814,6 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     let system = provenant_os::clock::SystemClock::new();
     let spent = Request {
         clock: &system,
-        budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&system), 1)?,
         cancel: &cancel,
     };
     // A held custody lock is a live handoff: cancel leaves it untouched.
@@ -4748,7 +4825,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     let held = provenant_supervisor::fixture::acquire_writer(
         store.attempt_dir(batch.run_id, starting, false)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;
@@ -4769,7 +4846,8 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         }
     );
     assert!(
-        dir.metadata_at(std::ffi::OsStr::new("reservation.json"), false)
+        provenant_supervisor::custody::attempt_evidence(&dir, scope)?
+            .metadata_at(std::ffi::OsStr::new("reservation.json"), false)
             .is_ok()
     );
     drop(held);
@@ -5320,14 +5398,13 @@ fn cancel_requests_then_reconcile_settles_a_prepared_attempt_nobody_holds() -> T
     drop(provenant_supervisor::fixture::acquire_writer(
         store.attempt_dir(batch.run_id, orphan, false)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
     let system = provenant_os::clock::SystemClock::new();
     let spent = Request {
         clock: &system,
-        budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&system), 1)?,
         cancel: &cancel,
     };
     assert_eq!(
@@ -5347,7 +5424,7 @@ fn cancel_requests_then_reconcile_settles_a_prepared_attempt_nobody_holds() -> T
         }
     );
     assert!(
-        attempt
+        provenant_supervisor::custody::attempt_evidence(&attempt, scope)?
             .metadata_at(std::ffi::OsStr::new("reservation.json"), false)
             .is_ok()
     );
@@ -5404,7 +5481,8 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
             .as_path()
             .join("worktrees")
             .join(context.project_id.to_string())
-            .join("corrupt");
+            .join("corrupt")
+            .join(terminal.to_string());
         std::fs::create_dir_all(&custody)?;
         std::fs::write(custody.join("reservation.json"), b"corrupt")?;
         assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
@@ -5725,7 +5803,7 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
             drop(provenant_supervisor::fixture::acquire_writer(
                 store.attempt_dir(run.run_id, id, false)?,
                 RunStore::scope(&store.record(id, &call)?),
-                call.budget,
+                call.lock_budget(),
                 &cancel,
                 &clock,
             )?);
@@ -5783,7 +5861,7 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         let held = provenant_supervisor::fixture::acquire_writer(
             Directory::open_anchor(&custody)?,
             RunStore::scope(&store.record(id, &call)?),
-            call.budget,
+            call.lock_budget(),
             &cancel,
             &clock,
         )?;
@@ -5866,7 +5944,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     let held = provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(&custody)?,
         RunStore::scope(&store.record(id, &call)?),
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;
@@ -5882,7 +5960,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     )?;
     assert_eq!(std::fs::read_to_string(candidate.join("x.lock"))?, "keep");
     // An unreadable sibling must not hide this attempt's readable reservation.
-    let corrupt = custody.with_file_name("corrupt");
+    let corrupt = custody.with_file_name("corrupt").join(id.to_string());
     std::fs::create_dir_all(&corrupt)?;
     std::fs::write(corrupt.join("reservation.json"), b"corrupt")?;
     assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
@@ -6097,11 +6175,13 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     drop(provenant_supervisor::fixture::acquire_writer(
         attempt.try_clone()?,
         observed.scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
-    let reservation = path.join("reservation.json");
+    let reservation = path
+        .join(observed.scope.attempt.to_string())
+        .join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
     let meta = attempt.metadata()?;
     value["boot"] = "darwin:00000000-0000-0000-0000-000000000000".into();
@@ -6335,7 +6415,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     drop(provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(&custody)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
@@ -6388,7 +6468,9 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         )?;
     }
     // A launch summary alone does not prove the provider was never spawned.
-    let reservation = custody.join("reservation.json");
+    let reservation = custody
+        .join(scope.attempt.to_string())
+        .join("reservation.json");
     if reservation_case != ReservationCase::Missing {
         let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
         match reservation_case {
@@ -6432,20 +6514,26 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         ));
         assert_eq!(std::fs::read(&reservation).ok(), before);
     }
-    assert!(
-        store
-            .reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?
-            .contains(&(
-                id,
-                match evidence {
-                    1 => Reconciled::Held,
-                    2 if should_settle => Reconciled::Finished,
-                    _ => Reconciled::Uncertain {
-                        reason: UncertainReason::GuardianNotObservable
-                    },
-                }
-            ))
-    );
+    let reconciled =
+        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?;
+    if reservation_case == ReservationCase::DifferentAttempt {
+        assert!(
+            matches!(reconciled.as_slice(),
+            [(attempt, Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { .. } })] if *attempt == id),
+            "{reconciled:?}"
+        );
+    } else {
+        assert!(reconciled.contains(&(
+            id,
+            match evidence {
+                1 => Reconciled::Held,
+                2 if should_settle => Reconciled::Finished,
+                _ => Reconciled::Uncertain {
+                    reason: UncertainReason::GuardianNotObservable
+                },
+            }
+        )));
+    }
     if should_settle {
         assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
         assert!(!reservation.exists());
@@ -6566,11 +6654,13 @@ fn recover_rebooted_writer_inner(
     drop(provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(&custody)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
-    let reservation = custody.join("reservation.json");
+    let reservation = custody
+        .join(scope.attempt.to_string())
+        .join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
     let meta = attempt.metadata()?;
     let guardian = serde_json::json!({
@@ -6647,7 +6737,8 @@ fn recover_rebooted_writer_inner(
     if interrupted {
         let recovery = provenant_supervisor::custody::acquire_recovery(
             Directory::open_anchor(&custody)?,
-            call.budget,
+            scope,
+            call.lock_budget(),
             &cancel,
             &clock,
         )?;
@@ -6794,7 +6885,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     drop(provenant_supervisor::fixture::acquire_writer(
         store.attempt_dir(batch.run_id, orphan, false)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
@@ -6874,12 +6965,14 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
     drop(provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(&custody)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
     let meta = attempt.metadata()?;
-    let reservation = custody.join("reservation.json");
+    let reservation = custody
+        .join(scope.attempt.to_string())
+        .join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
     let fields = value.as_object_mut().ok_or("reservation")?;
     fields.insert("launch_state".into(), "never_spawned".into());
@@ -7751,7 +7844,6 @@ fn a_policy_retry_launches_for_no_launcher_before_its_sealed_time() -> TestResul
     clock.advance(provenant_core::DurationMicros::from_seconds(60)?)?;
     let later = Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;

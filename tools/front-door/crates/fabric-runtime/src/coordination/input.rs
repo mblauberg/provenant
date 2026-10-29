@@ -517,11 +517,12 @@ mod tests {
         ClaimInput, CoordinationApi, CoordinationError, CoordinationService, LandingInput,
         TaskInput,
     };
+    use provenant_core::ThreadPause;
     use provenant_core::{
         ActorId, CancelToken, Clock, MonoTime, PathResolver, ProjectId, RootInputs, TestClock,
         WallTime,
     };
-    use provenant_fabric_store::{Request, Store, ThreadWait};
+    use provenant_fabric_store::{Request, Store};
     use serde::de::DeserializeOwned;
     use serde_json::{Value, json};
     use std::path::{Path, PathBuf};
@@ -837,16 +838,14 @@ mod tests {
             WallTime::from_micros(2_000_000_000_000_000).expect("wall time"),
             MonoTime::from_micros(0),
         );
-        let backoff = ThreadWait;
+        let backoff = ThreadPause;
         let cancel = CancelToken::new();
         let budget = provenant_core::WaitBudget::mcp(clock.mono_now(), 5).expect("budget");
         let store = Store::open(
             &root,
             &Request {
                 clock: &clock,
-                budget,
                 cancel: &cancel,
-                backoff: &backoff,
             },
         )
         .expect("store");

@@ -546,10 +546,24 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
     process.holder(&holder, &mut |holder| {
         let holder = provenant_cli::run::HostHolder::new(holder);
         let disk = disk_guard::LaneDisk::default();
+        let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
+            provenant_confinement::redact::Redactor::new([]),
+            provenant_confinement::redact::Redactor::new([]),
+        ) else {
+            return fail(
+                "internal supervise",
+                Outcome::Error,
+                "REDACTION",
+                "cannot initialise capture redaction",
+                globals,
+            );
+        };
         let hooks = provenant_supervisor::GuardianHooks {
             disk: Some(&disk),
             holder: Some(&holder),
             nested_children: Some(&holder),
+            stdout_filter: Some(&mut stdout_filter),
+            stderr_filter: Some(&mut stderr_filter),
             ..Default::default()
         };
         match process.supervise(&descriptors, hooks) {
@@ -1001,6 +1015,11 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 provenant_cli::run::trace(cmd, edge)
             })
         }
+        Command::Telemetry(provenant_cli::Telemetry::Prices {
+            command: provenant_cli::Prices::Refresh(cmd),
+        }) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::prices_refresh(cmd, edge)
+        }),
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Console(cmd) => console::run(cmd, globals),
         Command::Quota { command } => {
@@ -1199,6 +1218,14 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     // No product installation, Git probe or provider access is needed to count.
     // Read-only catalogue and checkpoint observation must not record demand
     // telemetry, including on an otherwise empty state root.
+    let resolved = roots::resolve(globals, Workspace::Directory, Product::Optional).ok();
+    if let Some(timeout) = resolved.as_ref().and_then(|resolved| {
+        provenant_config::StoreSettings::read(resolved.roots.state.as_path())
+            .ok()?
+            .busy_timeout()
+    }) {
+        provenant_sqlite::set_busy_timeout(timeout);
+    }
     let usage_roots = if matches!(
         verb.as_str(),
         "workflow session show"
@@ -1213,7 +1240,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     ) {
         None
     } else {
-        roots::resolve(globals, Workspace::Directory, Product::Optional).ok()
+        resolved
     };
     let usage_project = usage_roots.as_ref().and_then(usage::project_id);
     let status = match parsed {

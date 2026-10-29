@@ -1982,7 +1982,7 @@ impl crate::RunStore {
         let _lock = attempt.lock(
             OsStr::new("worktree-settlement.lock"),
             provenant_os::fs::LockMode::Exclusive,
-            call.transaction_budget(),
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?;
@@ -2112,18 +2112,10 @@ impl crate::RunStore {
         let _writer = state.lock(
             OsStr::new("writer.lock"),
             LockMode::Exclusive,
-            call.transaction_budget(),
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?;
-        match state.metadata_at(OsStr::new("reservation.json"), false) {
-            Err(error) if error.is_not_found() => {}
-            _ => {
-                return Err(RunError::Validation(
-                    "worktree has another writer reservation",
-                ));
-            }
-        }
         let host = host.prepare(&writer, &request)?;
         host.clean(&writer)?;
         if host.head(&writer)? != head {

@@ -142,19 +142,29 @@ impl ProcessObserver for CensusGateObserver {
                 .ok_or_else(|| CensusError::ProcessList(io::Error::other("missing root")))?
                 .join("tracking-writer");
             std::fs::rename(
-                writer.join("reservation.json"),
+                writer
+                    .join(scope().attempt.to_string())
+                    .join("reservation.json"),
                 writer.join("reservation.saved"),
             )
             .map_err(CensusError::ProcessList)?;
-            std::fs::create_dir(writer.join("reservation.json"))
-                .map_err(CensusError::ProcessList)?;
+            std::fs::create_dir(
+                writer
+                    .join(scope().attempt.to_string())
+                    .join("reservation.json"),
+            )
+            .map_err(CensusError::ProcessList)?;
         }
 
         let Some(state_dir) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from) else {
             return Ok(census);
         };
         if let Some(root) = state_dir.parent()
-            && root.join("tracking-writer/reservation.json").is_dir()
+            && root
+                .join("tracking-writer")
+                .join(scope().attempt.to_string())
+                .join("reservation.json")
+                .is_dir()
         {
             use std::io::Write;
             std::fs::OpenOptions::new()
@@ -199,50 +209,6 @@ fn scope() -> Scope {
         generation: 1,
     }
 }
-fn advanced_attempt_is_readmitted_after_settlement(root: &Path) -> Result<()> {
-    let path = root.join("advanced-writer");
-    std::fs::create_dir(&path)?;
-    let clock = SystemClock::new();
-    let token = CancelToken::new();
-    let mut lease = fixture::acquire_writer(
-        Directory::open_anchor(&path)?,
-        scope(),
-        budget(&clock)?,
-        &token,
-        &clock,
-    )?;
-    let advanced = Scope {
-        attempt: AttemptId::from_bytes([3; 16]),
-        generation: 2,
-        ..scope()
-    };
-    fixture::advance_attempt(&mut lease, advanced)?;
-    lease.withdraw_unlaunched()?;
-    // Ownership still names the first attempt; the settled attempt may return.
-    fixture::acquire_writer(
-        Directory::open_anchor(&path)?,
-        Scope {
-            generation: 3,
-            ..advanced
-        },
-        budget(&clock)?,
-        &token,
-        &clock,
-    )?
-    .withdraw_unlaunched()?;
-    let stale = fixture::acquire_writer(
-        Directory::open_anchor(&path)?,
-        Scope {
-            generation: 4,
-            ..scope()
-        },
-        budget(&clock)?,
-        &token,
-        &clock,
-    );
-    assert!(matches!(stale, Err(CustodyError::Fenced)));
-    Ok(())
-}
 fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
     let path = root.join("writer");
     std::fs::create_dir(&path)?;
@@ -255,7 +221,11 @@ fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
         &token,
         &clock,
     )?;
-    assert!(path.join("reservation.json").is_file());
+    assert!(
+        path.join(scope().attempt.to_string())
+            .join("reservation.json")
+            .is_file()
+    );
     drop(lease);
     let result = fixture::acquire_writer(
         Directory::open_anchor(&path)?,
@@ -275,12 +245,18 @@ fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
     // Explicit recovery can clear it without fabricating an exit receipt.
     acquire_recovery(
         Directory::open_anchor(&path)?,
+        scope(),
         WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
         &token,
         &clock,
     )?
     .withdraw_prepared()?;
-    assert!(!path.join("reservation.json").exists());
+    assert!(
+        !path
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
+            .exists()
+    );
     let lease = fixture::acquire_writer(
         Directory::open_anchor(&path)?,
         scope(),
@@ -289,7 +265,10 @@ fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
         &clock,
     )?;
     lease.withdraw_unlaunched()?;
-    let prior_owner = std::fs::read(path.join("ownership.json"))?;
+    let prior_owner = std::fs::read(
+        path.join(scope().attempt.to_string())
+            .join("ownership.json"),
+    )?;
     let next = Scope {
         run: RunId::from_bytes([3; 16]),
         attempt: AttemptId::from_bytes([4; 16]),
@@ -303,9 +282,13 @@ fn writer_is_fenced_after_every_descriptor_closes(root: &Path) -> Result<()> {
         &clock,
     )?);
     // Crash after reservation publication, before replacing the reused owner.
-    std::fs::write(path.join("ownership.json"), prior_owner)?;
+    std::fs::write(
+        path.join(next.attempt.to_string()).join("ownership.json"),
+        prior_owner,
+    )?;
     acquire_recovery(
         Directory::open_anchor(&path)?,
+        next,
         budget(&clock)?,
         &token,
         &clock,
@@ -524,7 +507,11 @@ fn immediate_exit_identity_survives_absent_observation(root: &Path) -> Result<()
     )?;
     let (_writer, handle) = start(root, "immediate", "bytes", &[], CapturePlan::default())?;
     let exit = exited(&handle)?;
-    let reservation = std::fs::read_to_string(root.join("immediate-writer/reservation.json"))?;
+    let reservation = std::fs::read_to_string(
+        root.join("immediate-writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json"),
+    )?;
     assert!(
         !exit.unresolved_cleanup,
         "exit={exit:?}, reservation={reservation}"
@@ -584,10 +571,16 @@ fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
         );
         std::thread::park_timeout(Duration::from_millis(5));
     }
-    std::fs::remove_dir(root.join("tracking-writer/reservation.json"))?;
+    std::fs::remove_dir(
+        root.join("tracking-writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json"),
+    )?;
     std::fs::rename(
         root.join("tracking-writer/reservation.saved"),
-        root.join("tracking-writer/reservation.json"),
+        root.join("tracking-writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json"),
     )?;
     drop(held);
     let exit = exited(&handle)?;
@@ -675,7 +668,11 @@ fn normal_exit_and_terminal_beyond_capture_cap(root: &Path) -> Result<()> {
     assert!(
         !exit.unresolved_cleanup,
         "{exit:?}; reservation={:?}",
-        std::fs::read_to_string(root.join("normal-writer/reservation.json"))
+        std::fs::read_to_string(
+            root.join("normal-writer")
+                .join(scope().attempt.to_string())
+                .join("reservation.json")
+        )
     );
     #[cfg(target_os = "macos")]
     {
@@ -692,7 +689,12 @@ fn normal_exit_and_terminal_beyond_capture_cap(root: &Path) -> Result<()> {
         std::fs::read(root.join("normal-attempt/stdout.log"))?,
         b"a\0b"
     );
-    assert!(root.join("normal-writer/reservation.json").is_file());
+    assert!(
+        root.join("normal-writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
+            .is_file()
+    );
     Ok(())
 }
 fn cancelled_reader_preserves_healthy_custody_and_cancel_escalates(root: &Path) -> Result<()> {
@@ -734,7 +736,12 @@ fn cancelled_reader_preserves_healthy_custody_and_cancel_escalates(root: &Path) 
     );
     assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
     drop(writer);
-    assert!(root.join("cancel-writer/reservation.json").is_file());
+    assert!(
+        root.join("cancel-writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
+            .is_file()
+    );
     Ok(())
 }
 fn held_stop_ignores_lane_written_summary_and_cancel_request(root: &Path) -> Result<()> {
@@ -950,7 +957,7 @@ fn publication_failure_retains_the_lease_and_retries_without_overwrite(root: &Pa
     assert_eq!(std::fs::read(destination)?, bytes);
     Ok(())
 }
-fn never_spawned_cancel_is_published_and_the_fence_can_advance(root: &Path) -> Result<()> {
+fn never_spawned_cancel_is_published(root: &Path) -> Result<()> {
     let writer_path = root.join("prelaunch-writer");
     let attempt_path = root.join("prelaunch-attempt");
     std::fs::create_dir(&writer_path)?;
@@ -1006,15 +1013,6 @@ fn never_spawned_cancel_is_published_and_the_fence_can_advance(root: &Path) -> R
         serde_json::from_slice(&std::fs::read(attempt_path.join("process-exit.json"))?)?;
     assert_eq!(record["never_spawned"], true);
     assert!(!attempt_path.join("launch.json").exists());
-    let next = Scope {
-        attempt: AttemptId::from_bytes([3; 16]),
-        generation: 2,
-        ..scope()
-    };
-    fixture::advance_attempt(&mut writer, next)?;
-    assert_eq!(writer.scope(), next);
-    assert!(writer_path.join("reservation.json").exists());
-    assert!(fixture::advance_attempt(&mut writer, scope()).is_err());
     Ok(())
 }
 fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
@@ -1117,7 +1115,13 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
     assert_eq!(descendant.group_id, pid);
     let mut gate = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
     byte(&mut gate, b'R')?;
-    wait_for_descendant(&root.join("setsid-writer/reservation.json"), &descendant)?;
+    wait_for_descendant(
+        &root
+            .join("setsid-writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json"),
+        &descendant,
+    )?;
     drop(gate);
     let exit = exited(&handle)?;
     assert!(
@@ -1512,7 +1516,10 @@ fn nested_owner_stays_protected_when_native_custody_proof_is_uncertain(root: &Pa
     let mut gate = fixture::fixture_accept(&gate_listener, Duration::from_secs(5))?;
     byte(&mut gate, b'R')?;
     wait_for_descendant(
-        &root.join("nested-owner-writer/reservation.json"),
+        &root
+            .join("nested-owner-writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json"),
         &identity,
     )?;
     wait_for_registry_reads(&home, 2)?;
@@ -1582,7 +1589,11 @@ fn stale_complete_census_does_not_signal_a_late_shared_group_owner(root: &Path) 
     byte(&mut owner_channel, b'R')?;
     let owner_bytes = std::fs::read(home.join("s2-owner.json"))?;
     let owner: ProcessIdentity = serde_json::from_slice(&owner_bytes)?;
-    let reservation_bytes = std::fs::read(root.join("late-owner-writer/reservation.json"))?;
+    let reservation_bytes = std::fs::read(
+        root.join("late-owner-writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json"),
+    )?;
     let reservation: serde_json::Value = serde_json::from_slice(&reservation_bytes)?;
     let provider: ProcessIdentity = serde_json::from_value(
         reservation
@@ -1630,8 +1641,11 @@ fn stale_complete_census_does_not_signal_a_late_shared_group_owner(root: &Path) 
 }
 
 fn reservation_identity(writer_path: &Path, field: &str) -> Result<ProcessIdentity> {
-    let value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(writer_path.join("reservation.json"))?)?;
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        writer_path
+            .join(scope().attempt.to_string())
+            .join("reservation.json"),
+    )?)?;
     serde_json::from_value(
         value
             .get(field)
@@ -2084,6 +2098,63 @@ fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
     ));
     Ok(())
 }
+fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -> Result<()> {
+    let descendant_socket = root.join("descendant.sock");
+    let provider_socket = root.join("provider.sock");
+    let descendant_listener = UnixListener::bind(&descendant_socket)?;
+    let provider_listener = UnixListener::bind(&provider_socket)?;
+    let (writer, _handle) = start(
+        root,
+        "inherited",
+        "writer-lock-provider",
+        &[
+            descendant_socket.into_os_string(),
+            provider_socket.into_os_string(),
+        ],
+        CapturePlan::default(),
+    )?;
+    let mut descendant_gate =
+        fixture::fixture_accept(&descendant_listener, Duration::from_secs(5))?;
+    byte(&mut descendant_gate, b'R')?;
+    let descendant = process_identity(read_pid_line(&mut descendant_gate)?)?;
+    let mut provider_gate = fixture::fixture_accept(&provider_listener, Duration::from_secs(5))?;
+    byte(&mut provider_gate, b'R')?;
+    let writer_path = root.join("inherited-writer");
+    let guardian = reservation_identity(&writer_path, "guardian")?;
+    let provider = reservation_identity(&writer_path, "provider")?;
+    drop(writer);
+    fixture::signal_recorded_process(&guardian, libc::SIGKILL)?;
+    wait_for_identity_absence(&guardian)?;
+    drop(provider_gate);
+    wait_for_identity_absence(&provider)?;
+    let clock = SystemClock::new();
+    let retry = Scope {
+        attempt: AttemptId::from_bytes([9; 16]),
+        ..scope()
+    };
+    let admit = || {
+        fixture::acquire_writer(
+            Directory::open_anchor(&writer_path)?,
+            retry,
+            WaitBudget::nonblocking(provenant_core::Clock::mono_now(&clock)),
+            &CancelToken::new(),
+            &clock,
+        )
+    };
+    assert!(matches!(admit(), Err(CustodyError::Busy)));
+    assert!(!root.join("inherited-attempt/process-exit.json").exists());
+    drop(descendant_gate);
+    wait_for_identity_absence(&descendant)?;
+    admit()?.withdraw_unlaunched()?;
+    assert!(
+        writer_path
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
+            .exists()
+    );
+    Ok(())
+}
+
 fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> Result<()> {
     let path = root.join("crash.sock");
     let listener = UnixListener::bind(&path)?;
@@ -2103,6 +2174,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     let provider = process_identity(read_pid_line(&mut held)?)?;
     let locked = acquire_recovery(
         Directory::open_anchor(&writer_path)?,
+        scope(),
         WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
         &CancelToken::new(),
         &clock,
@@ -2118,6 +2190,7 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     wait_for_identity_absence(&provider)?;
     let recovery = acquire_recovery(
         Directory::open_anchor(&root.join("crash-writer"))?,
+        scope(),
         budget(&clock)?,
         &CancelToken::new(),
         &clock,
@@ -2134,7 +2207,12 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
             .is_err()
     );
     drop(recovery);
-    assert!(root.join("crash-writer/reservation.json").exists());
+    assert!(
+        root.join("crash-writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
+            .exists()
+    );
     Ok(())
 }
 fn capture_failure_never_requests_a_stop(root: &Path) -> Result<()> {
@@ -2258,10 +2336,6 @@ const CASES: &[Case] = &[
         descendant_journal_failure_is_reported,
     ),
     (
-        "advanced_attempt_is_readmitted_after_settlement",
-        advanced_attempt_is_readmitted_after_settlement,
-    ),
-    (
         "writer_is_fenced_after_every_descriptor_closes",
         writer_is_fenced_after_every_descriptor_closes,
     ),
@@ -2282,8 +2356,8 @@ const CASES: &[Case] = &[
         publication_failure_retains_the_lease_and_retries_without_overwrite,
     ),
     (
-        "never_spawned_cancel_is_published_and_the_fence_can_advance",
-        never_spawned_cancel_is_published_and_the_fence_can_advance,
+        "never_spawned_cancel_is_published",
+        never_spawned_cancel_is_published,
     ),
     (
         "terminal_frame_closes_provider_stdin",
@@ -2292,6 +2366,10 @@ const CASES: &[Case] = &[
     (
         "owner_death_keeps_guardian_and_writer_live",
         owner_death_keeps_guardian_and_writer_live,
+    ),
+    (
+        "retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive",
+        retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive,
     ),
     (
         "guardian_loss_never_invents_exit_or_releases_the_reservation",
@@ -2407,7 +2485,7 @@ fn settle_writers(root: &Path) -> Result<()> {
 
 fn run_case(name: &str) -> Result<()> {
     let root = provenant_os::fixture::short_tempdir("terminal-checkpoint.sock", |root| {
-        tempfile::Builder::new().prefix("s2-").tempdir_in(root)
+        tempfile::Builder::new().prefix("s").tempdir_in(root)
     })?;
     let cleanup = fixture::ProcessCleanupGuard::new(root.path());
     let case = CASES

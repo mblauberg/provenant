@@ -2,7 +2,7 @@
 use super::{Result, execute, successful};
 use crate::{emit, fail, roots};
 use provenant_cli::Globals;
-use provenant_core::{CancelToken, Clock, GitOid, ProjectId, WaitBudget, WallTime};
+use provenant_core::{CancelToken, GitOid, ProjectId, WallTime};
 use provenant_os::clock::SystemClock;
 use provenant_records::{CommandResult, Outcome};
 use provenant_run::{Contributions, PullRequest, Request};
@@ -82,7 +82,6 @@ impl Tracker {
         let call = Request {
             clock: &clock,
             cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
         };
         let db = Contributions::open(self.resolved.roots.state.as_path(), &call)?;
         let pr = self.pr(number);
@@ -136,7 +135,6 @@ impl Tracker {
         let call = Request {
             clock: &clock,
             cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
         };
         // A status observation must never create a store.
         let closed = if Contributions::open_read_only(self.resolved.roots.state.as_path(), &call)?
@@ -275,7 +273,6 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
         let call = Request {
             clock: &clock,
             cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
         };
         let project_bound = tracker.project.is_some();
         if bind_requested {

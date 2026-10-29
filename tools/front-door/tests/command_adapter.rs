@@ -315,6 +315,24 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
 }
 
 #[test]
+fn command_dispatch_launches_when_the_store_fails_fast() -> Result {
+    if !available()? {
+        return Ok(());
+    }
+    let rig = rig(json!({"pass":{"argv":["/bin/sh","-c","printf 'hello\\n'"]}}))?;
+    let cleanup = rig.process_cleanup();
+    let mut config: toml_edit::DocumentMut =
+        fs::read_to_string(rig.state.join("config.toml"))?.parse()?;
+    config["domains"]["fabric"]["limits"]["store_busy_timeout_ms"] = toml_edit::value(0);
+    fs::write(rig.state.join("config.toml"), config.to_string())?;
+    let submitted = dispatch(&rig, "pass", 10)?;
+    let lane = settled(&rig, attempt_id(&submitted)?)?;
+    assert_eq!(lane["state"], "succeeded", "{lane}");
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
 fn command_custom_shebang_runtime_keeps_credentials_and_writes_denied() -> Result {
     use std::os::unix::fs::PermissionsExt;
 

@@ -145,6 +145,16 @@ impl PathCheck {
         }
     }
 }
+impl From<rusqlite::Error> for RunError {
+    fn from(error: rusqlite::Error) -> Self {
+        if provenant_sqlite::is_busy(&error) {
+            Self::Contention
+        } else {
+            Self::Sqlite(error)
+        }
+    }
+}
+
 impl From<provenant_sqlite::CompanionFault> for PathCheck {
     fn from(fault: provenant_sqlite::CompanionFault) -> Self {
         use provenant_sqlite::CompanionFault;
@@ -179,10 +189,7 @@ pub enum RunError {
     Writer(#[from] provenant_confinement::worktrees::WorktreeError),
     #[error("local worktree {0} does not exist; create it with `provenant worktree create <name>`")]
     WorktreeMissing(std::path::PathBuf),
-    #[error(
-        "worktree {0} is not registered with Provenant; create it with \
-         `provenant worktree create --base <branch> <branch>`"
-    )]
+    #[error("worktree {0} is not listed by Git; run `git worktree list --porcelain`")]
     WorktreeUnregistered(std::path::PathBuf),
     #[error("writer Git ref lock {} already exists; check for a running Git process, then remove the stale lock before retrying", .0.display())]
     WriterRefLocked(std::path::PathBuf),
@@ -252,7 +259,7 @@ pub enum RunError {
         "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
     )]
     HostClock,
-    #[error("run store is contended or its call budget expired")]
+    #[error("run store stayed contended past its busy timeout")]
     Contention,
     #[error("run-store call was cancelled")]
     Cancelled,
@@ -261,7 +268,7 @@ pub enum RunError {
     #[error(transparent)]
     Filesystem(#[from] provenant_os::fs::FsError),
     #[error("run database operation failed")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(rusqlite::Error),
     #[error(transparent)]
     Decode(#[from] provenant_records::DecodeError),
     #[error(transparent)]

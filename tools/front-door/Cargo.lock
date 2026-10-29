@@ -509,6 +509,7 @@ dependencies = [
  "provenant-records",
  "provenant-routing",
  "provenant-run",
+ "provenant-sqlite",
  "provenant-supervisor",
  "provenant-telemetry",
  "provenant-workflow",

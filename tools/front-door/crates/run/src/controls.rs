@@ -315,7 +315,9 @@ mod reboot_tests {
             .state_root
             .as_path()
             .join(format!("runs/{}/attempts/{id}", run.run_id));
-        let reservation = path.join("reservation.json");
+        let evidence = path.join(id.to_string());
+        std::fs::create_dir_all(&evidence)?;
+        let reservation = evidence.join("reservation.json");
         let cause = if corrupt_reservation {
             std::fs::write(&reservation, b"corrupt reservation")?;
             "record is invalid"
@@ -451,7 +453,6 @@ mod lineage_tests {
             let call = Request {
                 clock: &clock,
                 cancel: &cancel,
-                budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
             };
             let store = RunStore::open(&execution, &call)?;
             let writer = WriterRequest {
@@ -608,7 +609,6 @@ mod lineage_tests {
         let call = Request {
             clock: &clock,
             cancel: &cancel,
-            budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
         };
         let store = RunStore::open(&execution, &call)?;
         original.request.tasks[0].writer = Some(WriterRequest {
@@ -872,6 +872,7 @@ impl RunStore {
                         Some(fence) => fence
                             .reservation
                             .parent()
+                            .and_then(std::path::Path::parent)
                             .ok_or_else(|| {
                                 RunError::unsafe_path(
                                     fence.reservation.clone(),
@@ -891,6 +892,7 @@ impl RunStore {
             };
             let recovery = match custody::acquire_recovery(
                 directory.try_clone()?,
+                Self::scope(record),
                 provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
                 call.cancel,
                 call.clock,
@@ -1028,6 +1030,7 @@ impl RunStore {
         };
         custody::acquire_recovery(
             directory,
+            Self::scope(record),
             provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
             call.cancel,
             call.clock,
@@ -1075,13 +1078,15 @@ impl RunStore {
                 Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(None),
                 Err(error) => return Err(error.into()),
             };
-            let stale = match custody.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
-                Err(error) if error.is_not_found() => false,
-                Ok(_) => {
+            let stale = match custody::reservation_present(&custody, Self::scope(record)) {
+                Ok(false) => false,
+                Ok(true) => {
                     let Some(slot) = &slot else {
                         return Ok(None);
                     };
-                    let path = slot.join("reservation.json");
+                    let path = slot
+                        .join(record.attempt_id.to_string())
+                        .join("reservation.json");
                     let scope = Self::scope(record);
                     if !self.writer_fences()?.iter().any(|fence| {
                         fence.reservation == path
@@ -1129,8 +1134,9 @@ impl RunStore {
             call,
         )?;
         if stale {
-            custody.unlink(std::ffi::OsStr::new("reservation.json"))?;
-            custody.sync()?;
+            let evidence = custody::attempt_evidence(&custody, Self::scope(record))?;
+            evidence.unlink(std::ffi::OsStr::new("reservation.json"))?;
+            evidence.sync()?;
         }
         self.set_temporary_retained(record.attempt_id, false, call)?;
         Ok(Some(Reconciled::Finished))
@@ -1151,21 +1157,22 @@ impl RunStore {
         target: &str,
         call: &Request<'_>,
     ) -> Result<()> {
+        call.check()?;
         let (project, actor) = (
             self.context.project_id.to_string(),
             self.context.actor_id.to_string(),
         );
-        let bound: String = call.retry(|| {
+        let bound: String = {
             self.db.execute(
                 "INSERT INTO cancellations VALUES (?1,?2,?3,?4) ON CONFLICT DO NOTHING",
                 params![project, actor, operation.as_str(), target],
             )?;
-            Ok(self.db.query_row(
+            self.db.query_row(
                 "SELECT target FROM cancellations WHERE project=?1 AND actor=?2 AND operation=?3",
                 params![project, actor, operation.as_str()],
                 |r| r.get(0),
-            )?)
-        })?;
+            )?
+        };
         if bound != target {
             return Err(RunError::OperationConflict);
         }
@@ -1566,13 +1573,13 @@ impl RunStore {
         // A replay, prepared or accepted, is answered by `create`, which
         // compares the request digest and adopts a prepared operation's IDs.
         if !replay {
-            let generation: i64 = call.retry(|| {
-                Ok(self.db.query_row(
+            let generation: i64 = {
+                self.db.query_row(
                     "SELECT COUNT(*) FROM continuations WHERE target=?1",
                     [input.prior.to_string()],
                     |r| r.get(0),
-                )?)
-            })?;
+                )?
+            };
             if u64::try_from(generation).ok() != Some(input.expected_generation) {
                 return Err(RunError::Conflict);
             }
@@ -1638,14 +1645,18 @@ impl RunStore {
     /// Up to `limit` runs needing recovery or terminal temporary cleanup in
     /// this project. Nonterminal work takes priority over temporary cleanup.
     pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
+        call.check()?;
         let limit = crate::db::sql_int(limit)?;
-        let ids: Vec<String> = call.retry(|| {
+        let ids: Vec<String> = {
             let mut query = self.db.prepare(
                 "SELECT run FROM attempts WHERE project=?1 AND terminal=0 GROUP BY run ORDER BY MIN(sequence) LIMIT ?2",
             )?;
-            let rows = query.query_map(params![self.context.project_id.to_string(), limit], |r| r.get(0))?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+            let rows = query
+                .query_map(params![self.context.project_id.to_string(), limit], |r| {
+                    r.get(0)
+                })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         let mut runs = ids
             .iter()
             .map(|id| RunId::parse(id).map_err(|_| RunError::Validation("run index ID")))
@@ -1656,33 +1667,32 @@ impl RunStore {
             }
         }
         if runs.len() < limit as usize {
-            call.retry(|| {
-                let mut query = self.db.prepare(
-                    "SELECT run FROM attempts WHERE project=?1 AND terminal=1 AND tmp_retained=1 GROUP BY run ORDER BY MIN(sequence) LIMIT ?2",
-                )?;
-                let mut rows = query.query(params![self.context.project_id.to_string(), limit])?;
-                while runs.len() < limit as usize {
-                    let Some(row) = rows.next()? else { break };
-                    let run = RunId::parse(&row.get::<_, String>(0)?)
-                        .map_err(|_| RunError::Validation("run index ID"))?;
-                    if runs.contains(&run) {
-                        continue;
-                    }
-                    runs.push(run);
+            let mut query = self.db.prepare(
+                "SELECT run FROM attempts WHERE project=?1 AND terminal=1 AND tmp_retained=1 GROUP BY run ORDER BY MIN(sequence) LIMIT ?2",
+            )?;
+            let mut rows = query.query(params![self.context.project_id.to_string(), limit])?;
+            while runs.len() < limit as usize {
+                let Some(row) = rows.next()? else { break };
+                let run = RunId::parse(&row.get::<_, String>(0)?)
+                    .map_err(|_| RunError::Validation("run index ID"))?;
+                if runs.contains(&run) {
+                    continue;
                 }
-                Ok(())
-            })?;
+                runs.push(run);
+            }
         }
         // A closed run whose reactions are still owed needs a drain too.
         if runs.len() < limit as usize {
-            let owed: Vec<String> = call.retry(|| {
+            let owed: Vec<String> = {
                 let mut query = self.db.prepare(
                     "SELECT run FROM reactions WHERE project=?1 AND pending=1 GROUP BY run ORDER BY MIN(rowid) LIMIT ?2",
                 )?;
                 let rows = query
-                    .query_map(params![self.context.project_id.to_string(), limit], |r| r.get(0))?;
-                Ok(rows.collect::<std::result::Result<_, _>>()?)
-            })?;
+                    .query_map(params![self.context.project_id.to_string(), limit], |r| {
+                        r.get(0)
+                    })?;
+                rows.collect::<std::result::Result<_, _>>()?
+            };
             for id in owed {
                 let run = RunId::parse(&id).map_err(|_| RunError::Validation("run index ID"))?;
                 if !runs.contains(&run) && runs.len() < limit as usize {
@@ -1724,7 +1734,7 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
-        let mut ids: Vec<String> = call.retry(|| {
+        let mut ids: Vec<String> = {
             let mut query = self
                 .db
                 .prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
@@ -1732,8 +1742,8 @@ impl RunStore {
                 params![run.to_string(), self.context.project_id.to_string()],
                 |r| r.get(0),
             )?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         for fence in self.writer_fences()? {
             if fence.scope.run == run && !ids.contains(&fence.scope.attempt.to_string()) {
                 ids.push(fence.scope.attempt.to_string());
@@ -1756,11 +1766,16 @@ impl RunStore {
         Ok(found)
     }
     fn withdraw_prepared_writer(&self, fence: &WriterFence, call: &Request<'_>) -> Result<bool> {
-        let directory = fence.reservation.parent().ok_or_else(|| {
-            RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
-        })?;
+        let directory = fence
+            .reservation
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| {
+                RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
+            })?;
         let recovery = custody::acquire_recovery(
             provenant_os::fs::Directory::open_anchor(directory)?,
+            fence.scope,
             provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
             call.cancel,
             call.clock,
@@ -1829,14 +1844,15 @@ impl RunStore {
         // handoff began and keeps a late reservation out.
         let attempt = dir()?;
         let unreserved =
-            custody::prove_unreserved(&attempt, call.transaction_budget(), call.cancel, call.clock)
+            custody::prove_unreserved(&attempt, scope, call.lock_budget(), call.cancel, call.clock)
                 .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
         let _recovery = match unreserved {
             Some(lease) => Held::Unreserved(lease),
             None => {
                 let recovery = match custody::acquire_recovery(
                     dir()?,
-                    call.transaction_budget(),
+                    scope,
+                    call.lock_budget(),
                     call.cancel,
                     call.clock,
                 ) {
@@ -1945,8 +1961,10 @@ impl RunStore {
             // Once released, preserved scratch must never enter normal cleanup.
             match self
                 .attempt_dir(record.run_id, id, false)
-                .and_then(|attempt| read_sealed(&attempt, "reservation.json", RECORD_LIMIT))
-            {
+                .and_then(|attempt| {
+                    let evidence = custody::attempt_evidence(&attempt, scope)?;
+                    read_sealed(&evidence, "reservation.json", RECORD_LIMIT)
+                }) {
                 Ok(Some(_)) => {
                     return Ok(Some(Reconciled::uncertain(
                         UncertainReason::GuardianNotObservable,
@@ -2006,9 +2024,9 @@ impl RunStore {
                 std::ffi::OsStr::new("writer.lock"),
                 provenant_os::fs::LockMode::Exclusive,
             )?;
-            match attempt.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
-                Ok(_) => return Err(RunError::Validation("attempt reservation retained")),
-                Err(error) if error.is_not_found() => {}
+            match custody::reservation_present(&attempt, scope) {
+                Ok(true) => return Err(RunError::Validation("attempt reservation retained")),
+                Ok(false) => {}
                 Err(error) => return Err(error.into()),
             }
             artifacts::remove_unreserved_terminal_temporary(&attempt)?;

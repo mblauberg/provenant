@@ -193,7 +193,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "recreated_worktree_accepts_writer_after_settlement",
             "create_list_and_remove_a_managed_worktree",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
-            "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations",
+            "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks",
             "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks",
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
@@ -205,16 +205,16 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "remove_by_name_deletes_a_branch_fully_contained_in_integration",
             "remove_resolves_directory_names_and_remote_integration_refs",
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
-            "dispatch_into_an_unregistered_worktree_names_the_create_command",
-            "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command",
-            "re_added_worktree_is_adopted_then_dispatchable",
+            "dispatch_into_git_worktree_without_prior_state",
+            "dispatch_into_git_worktree_beside_managed_tree",
+            "git_created_and_recreated_worktrees_are_dispatchable",
             "pr_land_merges_then_fetches_fast_forwards_and_prunes",
             "pr_land_prunes_the_selected_merged_worktree",
             "pr_land_from_lane_ignores_only_its_callers",
             "pr_land_refuses_incomplete_worker_census",
             "pr_land_canonicalises_quoted_worktree_paths",
-            "pr_land_recovers_only_abandoned_prepared_writer_leases",
-            "pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores",
+            "pr_land_uses_writer_lock_and_preserves_attempt_recovery_evidence",
+            "pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores",
             "pr_land_primary_with_separate_git_directory",
             "pr_land_out_of_tree_with_separate_git_directory",
             "pr_land_refuses_each_unsafe_step_and_reports_the_rest",
@@ -280,8 +280,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
                 "gc_refuses_bare_projects_and_their_linked_checkout_fallback" => gc_refuses_bare_projects_and_their_linked_checkout_fallback(),
                 "gc_reports_transient_and_preserves_unobserved_project_array" => gc_reports_transient_and_preserves_unobserved_project_array(),
-                "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations" => {
-                    scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations()
+                "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks" => {
+                    scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks()
                 }
                 "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks" => {
                     gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
@@ -310,8 +310,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_land_from_lane_ignores_only_its_callers" => crate::pr_land_tests::pr_land_from_lane_ignores_only_its_callers(),
                 "pr_land_refuses_incomplete_worker_census" => crate::pr_land_tests::pr_land_refuses_incomplete_worker_census(),
                 "pr_land_canonicalises_quoted_worktree_paths" => crate::pr_land_tests::pr_land_canonicalises_quoted_worktree_paths(),
-                "pr_land_recovers_only_abandoned_prepared_writer_leases" => crate::pr_land_tests::pr_land_recovers_only_abandoned_prepared_writer_leases(),
-                "pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores" => crate::pr_land_tests::pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores(),
+                "pr_land_uses_writer_lock_and_preserves_attempt_recovery_evidence" => crate::pr_land_tests::pr_land_uses_writer_lock_and_preserves_attempt_recovery_evidence(),
+                "pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores" => crate::pr_land_tests::pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores(),
                 "pr_land_refuses_each_unsafe_step_and_reports_the_rest" => {
                     crate::pr_land_tests::pr_land_refuses_each_unsafe_step_and_reports_the_rest()
                 }
@@ -347,14 +347,14 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_land_leaves_a_local_namesake_of_a_fork_branch_alone" => {
                     crate::pr_land_tests::pr_land_leaves_a_local_namesake_of_a_fork_branch_alone()
                 }
-                "dispatch_into_an_unregistered_worktree_names_the_create_command" => {
-                    dispatch_into_an_unregistered_worktree_names_the_create_command()
+                "dispatch_into_git_worktree_without_prior_state" => {
+                    dispatch_into_git_worktree_without_prior_state()
                 }
-                "dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command" => {
-                    dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command()
+                "dispatch_into_git_worktree_beside_managed_tree" => {
+                    dispatch_into_git_worktree_beside_managed_tree()
                 }
-                "re_added_worktree_is_adopted_then_dispatchable" => {
-                    re_added_worktree_is_adopted_then_dispatchable()
+                "git_created_and_recreated_worktrees_are_dispatchable" => {
+                    git_created_and_recreated_worktrees_are_dispatchable()
                 }
                 _ => escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root(),
             };
@@ -1098,11 +1098,7 @@ fn writer_call<'a>(
     clock: &'a provenant_os::clock::SystemClock,
     cancel: &'a provenant_core::CancelToken,
 ) -> Result<provenant_run::Request<'a>> {
-    Ok(provenant_run::Request {
-        clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
-        cancel,
-    })
+    Ok(provenant_run::Request { clock, cancel })
 }
 
 pub(super) fn open_writer_store(
@@ -1349,8 +1345,6 @@ fn await_terminal(
         let poll = provenant_run::Request {
             clock: call.clock,
             cancel: call.cancel,
-            budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 30)
-                .expect("valid terminal poll budget"),
         };
         match store.record(attempt, &poll) {
             Ok(record) if matches!(record.state, provenant_run::AttemptState::Terminal { .. }) => {
@@ -1367,7 +1361,6 @@ fn await_terminal(
         let poll = provenant_run::Request {
             clock: call.clock,
             cancel: call.cancel,
-            budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 30)?,
         };
         let temporary = store.temporary_path(attempt, &poll)?;
         let directory = temporary.parent().ok_or("attempt directory")?;
@@ -1839,7 +1832,7 @@ fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks() -> Result 
     Ok(())
 }
 
-fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> Result {
+fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks() -> Result {
     let mut rig = repository()?;
     fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
     git(&rig, &["add", ".gitignore"])?;
@@ -1864,7 +1857,7 @@ fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> 
     let registration = fs::read_dir(&project)?
         .find_map(|entry| {
             let path = entry.ok()?.path();
-            path.join("identity.json").is_file().then_some(path)
+            path.join("writer.lock").is_file().then_some(path)
         })
         .ok_or("registration")?;
     // launchd starts without a checkout as its working directory.
@@ -1904,7 +1897,10 @@ fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> 
         rig.state.join("config.toml"),
         b"schema_version=1\n[gc]\nfree_floor='1B'\n",
     )?;
-    fs::write(registration.join("reservation.json"), b"reserved")?;
+    let held = provenant_os::fs::Directory::open_anchor(&registration)?.try_lock_existing(
+        std::ffi::OsStr::new("writer.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
     let reserved = ok(&rig, &["gc", "--scheduled", "--idle-days", "1", "--json"])?;
     assert!(
         reserved["data"]["removed"]
@@ -1913,7 +1909,7 @@ fn scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations() -> 
             .is_empty()
     );
     assert!(cache.is_dir());
-    fs::remove_file(registration.join("reservation.json"))?;
+    drop(held);
     let dry = ok(
         &rig,
         &[
@@ -2016,7 +2012,7 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
         let states = fs::read_dir(project)?.collect::<std::io::Result<Vec<_>>>()?;
         let state = states
             .iter()
-            .find(|entry| entry.path().join("identity.json").is_file())
+            .find(|entry| entry.path().join("writer.lock").is_file())
             .ok_or("worktree registration")?
             .path();
         let directory = Directory::open_anchor(&state)?;
@@ -2044,6 +2040,18 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
             }
             _ => None,
         };
+        if writer == "live" {
+            let refused = command(&rig, &["worktree", "remove", "idle", "--json"])?;
+            let value = json(&refused)?;
+            assert_eq!(value["status"], "refused", "{value}");
+            assert_eq!(value["error"]["code"], "WORKTREE_LOCK_BUSY", "{value}");
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .ok_or("message")?
+                    .contains("lock busy")
+            );
+        }
         make_idle(&cache)?;
         let listed = ok(&rig, &["worktree", "list", "--json"])?;
         let listed_writer = listed["data"]
@@ -2057,8 +2065,8 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
         assert_eq!(
             listed_writer,
             match writer {
-                "live" => "live",
-                "free" => "free",
+                "live" | "live_reserved" => "busy",
+                "free" | "missing" | "reserved" => "free",
                 _ => "unknown",
             }
         );
@@ -2069,7 +2077,13 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
             }
             let result = ok(&rig, &args)?;
             assert_eq!(result["data"]["dry_run"], dry_run);
-            if writer == "free" {
+            if dry_run && writer == "missing" {
+                assert!(
+                    !state.join(lock).exists(),
+                    "preview must not create writer state"
+                );
+            }
+            if matches!(writer, "free" | "missing" | "reserved") {
                 assert_eq!(result["data"]["removed"][0]["reason"], "idle");
                 assert_eq!(cache.exists(), dry_run);
             } else {
@@ -2081,10 +2095,9 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
                 );
                 assert_eq!(
                     result["data"]["kept"][0]["reason"],
-                    // A reservation makes the listing unknown even when the
-                    // kernel lock is held; GC preserves that observation.
-                    if writer == "live" {
-                        "live"
+                    // Kernel contention is busy, independent of old records.
+                    if writer.starts_with("live") {
+                        "busy"
                     } else {
                         "unobservable"
                     }
@@ -2092,17 +2105,9 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
                 assert!(cache.is_dir());
             }
         }
-        if writer == "missing" {
-            assert!(!state.join(lock).exists(), "gc must not recreate the lock");
-        }
         drop(held);
         if writer.starts_with("live") {
             let _released = directory.try_lock_existing(lock, LockMode::Exclusive)?;
-        } else if writer == "missing" {
-            assert!(matches!(
-                directory.try_lock_existing(lock, LockMode::Exclusive),
-                Err(error) if error.is_not_found()
-            ));
         }
         rig.assert_legacy_unchanged()?;
     }
@@ -2233,6 +2238,7 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
     }));
     provenant_supervisor::custody::acquire_recovery(
         Directory::open_anchor(&state)?,
+        scope,
         provenant_core::WaitBudget::nonblocking(clock.mono_now()),
         &cancel,
         &clock,
@@ -2561,18 +2567,16 @@ fn merged_pruning_deletes_a_merged_branch_without_a_worktree() -> Result {
     rig.assert_legacy_unchanged()
 }
 
-fn dispatch_into_an_unregistered_worktree_names_the_create_command() -> Result {
-    unregistered_worktree_dispatch_is_refused(false)
+fn dispatch_into_git_worktree_without_prior_state() -> Result {
+    git_worktree_dispatch_is_accepted(false)
 }
 
-// Once another worktree is registered the project's state directory exists,
-// so the missing record is the foreign worktree's own.
-fn dispatch_into_an_unregistered_worktree_beside_registered_ones_names_the_create_command() -> Result
-{
-    unregistered_worktree_dispatch_is_refused(true)
+// Existing state for a sibling does not change Git membership.
+fn dispatch_into_git_worktree_beside_managed_tree() -> Result {
+    git_worktree_dispatch_is_accepted(true)
 }
 
-fn unregistered_worktree_dispatch_is_refused(register_sibling: bool) -> Result {
+fn git_worktree_dispatch_is_accepted(register_sibling: bool) -> Result {
     let rig = repository()?;
     if register_sibling {
         ok(
@@ -2584,41 +2588,19 @@ fn unregistered_worktree_dispatch_is_refused(register_sibling: bool) -> Result {
         &rig,
         &["worktree", "add", "-qb", "foreign", ".worktrees/foreign"],
     )?;
-    let prompt = rig.root.join("prompt.txt");
-    fs::write(&prompt, "hello")?;
-    let refused = command(
-        &rig,
-        &[
-            "dispatch",
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt path")?,
-            "--model",
-            "codex/id",
-            "--mode",
-            "worktree-write",
-            "--worktree",
-            ".worktrees/foreign",
-            "--operation-id",
-            "foreign",
-            "--json",
-        ],
+    let (_, context) = writer_context(&rig)?;
+    let request = provenant_run::resolve_writer(
+        context.state_root.as_path(),
+        &rig.project,
+        Path::new(".worktrees/foreign"),
     )?;
-    let value = json(&refused)?;
-    assert_eq!(code(&refused), 1, "{value}");
-    assert_eq!(value["status"], "refused", "{value}");
-    assert_eq!(value["error"]["code"], "WORKTREE_UNREGISTERED", "{value}");
-    let message = value["error"]["message"].as_str().ok_or("message")?;
-    assert!(
-        message.contains("provenant worktree create --base <branch> <branch>"),
-        "{message}"
-    );
+    provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+
     Ok(())
 }
 
-// A tree re-added with plain Git at a path Provenant registered earlier is a
-// stale registration: dispatch names it and the repair, and `worktree adopt`
-// from outside the tree makes the tree dispatchable.
-fn re_added_worktree_is_adopted_then_dispatchable() -> Result {
+// Git membership makes a recreated tree dispatchable without adoption.
+fn git_created_and_recreated_worktrees_are_dispatchable() -> Result {
     let rig = repository()?;
     ok(
         &rig,
@@ -2651,27 +2633,6 @@ fn re_added_worktree_is_adopted_then_dispatchable() -> Result {
             ],
         )?)
     };
-    let refused = dispatch("stale-before")?;
-    assert_eq!(refused["status"], "refused", "{refused}");
-    let message = refused["error"]["message"].as_str().ok_or("message")?;
-    assert!(message.contains("registration is stale"), "{message}");
-    assert!(
-        message.contains("provenant worktree adopt PATH --owner NAME"),
-        "{message}"
-    );
-
-    let adopted = ok(
-        &rig,
-        &[
-            "worktree",
-            "adopt",
-            ".worktrees/stale",
-            "--owner",
-            "chair",
-            "--json",
-        ],
-    )?;
-    assert_eq!(adopted["data"]["writer"], "free", "{adopted}");
     let (_, context) = writer_context(&rig)?;
     let request = provenant_run::resolve_writer(
         context.state_root.as_path(),
@@ -2679,8 +2640,7 @@ fn re_added_worktree_is_adopted_then_dispatchable() -> Result {
         Path::new(".worktrees/stale"),
     )?;
     provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
-    // Dispatch now gets past custody; whatever it reports is not the stale
-    // registration.
+    // Dispatch gets past custody without any registration repair.
     let after = dispatch("stale-after")?;
     let message = after["error"]["message"].as_str().unwrap_or_default();
     assert!(!message.contains("writer scope refused"), "{after}");
@@ -4725,12 +4685,9 @@ fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
     let (roots, context) = writer_context(&rig)?;
     let clock = provenant_os::clock::SystemClock;
     let cancel = provenant_core::CancelToken::new();
-    let backoff = provenant_fabric_store::ThreadWait;
     let request = provenant_fabric_store::Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 5)?,
         cancel: &cancel,
-        backoff: &backoff,
     };
     let store = provenant_fabric_store::Store::open(&roots.state, &request)?;
     let events = store.events(context.project_id, 0, 100, &request)?;

@@ -7,7 +7,7 @@ use crate::{
     AttemptRecord, AttemptState, Request, Result, RunError, RunStore, WriterDeliveryState,
     db::bytes, db::decode,
 };
-use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RunId, WaitBudget};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RunId};
 use provenant_records::run::ChairBinding;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -199,7 +199,8 @@ impl RunStore {
 
     /// Attempts of a run that still owe reactions.
     pub fn pending_reactions(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptId>> {
-        let ids: Vec<String> = call.retry(|| {
+        call.check()?;
+        let ids: Vec<String> = {
             let mut query = self.db.prepare(
                 "SELECT attempt FROM reactions WHERE run=?1 AND project=?2 AND pending=1 ORDER BY rowid",
             )?;
@@ -207,24 +208,24 @@ impl RunStore {
                 params![run.to_string(), self.context.project_id.to_string()],
                 |row| row.get(0),
             )?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         ids.into_iter()
             .map(|id| AttemptId::parse(&id).map_err(|_| RunError::Validation("reaction attempt")))
             .collect()
     }
 
     pub fn reaction(&self, attempt: AttemptId, call: &Request<'_>) -> Result<Option<Reaction>> {
-        let raw: Option<Vec<u8>> = call.retry(|| {
-            Ok(self
-                .db
+        call.check()?;
+        let raw: Option<Vec<u8>> = {
+            self.db
                 .query_row(
                     "SELECT payload FROM reactions WHERE attempt=?1 AND project=?2",
                     params![attempt.to_string(), self.context.project_id.to_string()],
                     |row| row.get(0),
                 )
-                .optional()?)
-        })?;
+                .optional()?
+        };
         raw.map(|raw| decode::<Reaction>(&raw)).transpose()
     }
 
@@ -270,14 +271,7 @@ impl RunStore {
         cancel: &CancelToken,
         step: &mut Step<'_>,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let fresh = || -> Result<Request<'_>> {
-            Ok(Request {
-                clock,
-                budget: WaitBudget::cli(clock.mono_now(), 30)
-                    .map_err(|_| RunError::Validation("call budget"))?,
-                cancel,
-            })
-        };
+        let fresh = || -> Result<Request<'_>> { Ok(Request { clock, cancel }) };
         if self.pending_reactions(run, &fresh()?)?.is_empty() {
             return Ok(());
         }

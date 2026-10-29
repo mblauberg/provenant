@@ -2598,6 +2598,55 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant telemetry prices`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "Prices",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant telemetry prices refresh`
+
+| Argument | Contract |
+|---|---|
+| `--source` | `{"defaults": ["openrouter"], "name": "source", "values": ["openrouter", "litellm"]}` |
+| `--openrouter-file` | `{"name": "openrouter_file"}` |
+| `--litellm-file` | `{"name": "litellm_file"}` |
+| `--out` | `{"defaults": ["telemetry-prices.proposed.json"], "name": "out"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "source",
+        "openrouter_file",
+        "litellm_file",
+        "out"
+      ],
+      "multiple": true,
+      "name": "PricesRefresh",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant quota`
 
 | Argument | Contract |
@@ -3203,31 +3252,6 @@ Accepted by every command, before or after the subcommand.
 |---|---|
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
-
-## `provenant worktree adopt`
-
-| Argument | Contract |
-|---|---|
-| `path` | `{"name": "path", "positional": true, "required": true}` |
-| `--owner` | `{"defaults": ["manual"], "name": "owner"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
-
-```json
-{
-  "groups": [
-    {
-      "arguments": [
-        "path",
-        "owner"
-      ],
-      "multiple": true,
-      "name": "Adopt",
-      "required": false
-    }
-  ]
-}
-```
 
 ## `provenant worktree create`
 

@@ -1,9 +1,15 @@
 # Fabric store
 
 One worker owns one `Store` connection at `<StateRoot>/fabric/fabric.sqlite3`.
-Supply a validated, local-filesystem state root, a core clock, cancellation token
-and bounded `WaitBudget` in `Request`. The store starts no threads. It creates
-private directories and files through supervisor, refuses observed symlinks and
+Supply a validated, local-filesystem state root, a core clock and a cancellation
+token in `Request`. Contention waits once, inside SQLite, for the busy timeout
+that `provenant-sqlite` sets at open; the store's advisory locks wait for the
+same bound, and a store still busy after it reports `Error::Busy`. An open
+holds `locks/fabric.sqlite3.init.lock` through file creation, the switch to WAL
+and migrations, because SQLite never calls its busy handler on that switch.
+Host-only databases lock in `fabric` itself, outside the lane-writable `locks`.
+The store starts no threads. It creates private directories and files through
+supervisor, refuses observed symlinks and
 non-private components, and uses SQLite WAL, FULL sync and foreign keys.
 The database and any `-wal`, `-shm` or `-journal` companions must be private
 regular files with one link, owned by the effective UID. Zero-link observations
@@ -56,7 +62,8 @@ previous state. Acknowledged answers never return. Pending answers remain
 eligible after restart or adapter failure. Mail read cursors stay independent.
 This uses the existing outbox without another schema migration.
 `offer_human_answers_once` instead uses bounded selected-key reads and one immediate
-transaction, with no busy retries, creation or migrations. Only queued records
+transaction, with no creation or migrations; its busy timeout is capped at the
+hook deadline. Only queued records
 transition; matching offered snapshots replay the committed record idempotently.
 The hook gives queued rows priority and then retries committed offers using
 migration 12's indexes.
@@ -75,7 +82,7 @@ queued-to-offered transition, rather than counting injections or replays.
 
 `Store::open_read_only` never creates, migrates or enables WAL. It opens the
 database, WAL and shared memory read-only (`readonly_shm=1`), starts one read
-snapshot and sets a SQLite progress deadline without busy retries. Missing or
+snapshot and sets a SQLite progress deadline, capping the busy timeout at it. Missing or
 uninitialised WAL shared memory fails closed. `read_human_answers` requires
 the migration-10 index and reads at most limit+1 pending rows for an exact
 host/project/session/actor. It leaves state, attempts and timestamps untouched.

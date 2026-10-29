@@ -22,6 +22,8 @@ const MAX_CACHE_DIRECTORY_ENTRIES: usize = 100_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheGcReason {
+    /// Writer flock contention, without evidence of a live process.
+    Busy,
     /// The recorded owner path no longer exists.
     Orphaned,
     /// Nothing under the cache was written since the idle threshold.
@@ -32,7 +34,7 @@ pub enum CacheGcReason {
     Tombstone,
     /// An existing owner outside the selected project; always kept.
     Foreign,
-    /// The owner's writer lock is held; always kept.
+    /// A process was observed live in the owner tree; always kept.
     Live,
     /// Writer exclusion cannot be established; always kept.
     Unobservable,
@@ -135,15 +137,15 @@ pub fn gc_worktree_cargo_caches(
     gc_worktree_cargo_caches_with_writer_guard(home, policy, |_| Err(WorkerState::Unknown))
 }
 
-type CacheWriterGuard<'a> = dyn FnMut(&Path) -> Result<LockGuard, WorkerState> + 'a;
+type CacheWriterGuard<'a> = dyn FnMut(&Path) -> Result<Option<LockGuard>, WorkerState> + 'a;
 
 /// Sweep caches while holding the owner's writer lock across idle or free-floor
 /// detachment.
-/// The guard must exclude writers and refuse missing or unobservable locks.
+/// The guard must establish writer exclusion or refuse unobservable state.
 pub fn gc_worktree_cargo_caches_with_writer_guard(
     home: &Path,
     policy: &CacheGcPolicy,
-    writer_guard: impl FnMut(&Path) -> Result<LockGuard, WorkerState>,
+    writer_guard: impl FnMut(&Path) -> Result<Option<LockGuard>, WorkerState>,
 ) -> Result<CacheGcReport, CacheGcError> {
     gc_caches_with_free_space(home, policy, writer_guard, |path| {
         provenant_os::fs::Directory::open_anchor(path)
@@ -155,7 +157,7 @@ pub fn gc_worktree_cargo_caches_with_writer_guard(
 fn gc_caches_with_free_space(
     home: &Path,
     policy: &CacheGcPolicy,
-    mut writer_guard: impl FnMut(&Path) -> Result<LockGuard, WorkerState>,
+    mut writer_guard: impl FnMut(&Path) -> Result<Option<LockGuard>, WorkerState>,
     mut free_space: impl FnMut(&Path) -> std::io::Result<u64>,
 ) -> Result<CacheGcReport, CacheGcError> {
     let mut report = CacheGcReport {
@@ -455,6 +457,7 @@ fn prune_worktree_cache(
                     bytes: 0,
                     reason: match state {
                         WriterState::Live => CacheGcReason::Live,
+                        WriterState::Busy => CacheGcReason::Busy,
                         _ => CacheGcReason::Unobservable,
                     },
                 });
@@ -480,7 +483,9 @@ fn prune_worktree_cache(
                 report.kept.push(CacheGcEntry {
                     path: cache_root.join(name),
                     bytes: 0,
-                    reason: if state == WorkerState::Live {
+                    reason: if state == WorkerState::Busy {
+                        CacheGcReason::Busy
+                    } else if state == WorkerState::Live {
                         CacheGcReason::Live
                     } else {
                         CacheGcReason::Unobservable
@@ -504,13 +509,17 @@ fn prune_worktree_cache(
                 std::process::id()
             ));
             let idle_guard = if matches!(reason, CacheGcReason::Idle | CacheGcReason::FreeFloor) {
-                match writer_guard(&original_owner.path) {
+                match writer_guard(&original_owner.path)
+                    .and_then(|guard| guard.ok_or(WorkerState::Unknown))
+                {
                     Ok(guard) => Some(guard),
                     Err(state) => {
                         report.kept.push(CacheGcEntry {
                             path: cache_root.join(name),
                             bytes: 0,
-                            reason: if state == WorkerState::Live {
+                            reason: if state == WorkerState::Busy {
+                                CacheGcReason::Busy
+                            } else if state == WorkerState::Live {
                                 CacheGcReason::Live
                             } else {
                                 CacheGcReason::Unobservable
@@ -1195,6 +1204,7 @@ mod tests {
                         }
                         locks
                             .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                            .map(Some)
                             .map_err(|_| WorkerState::Unknown)
                     },
                     |_| Ok(observations.next().unwrap_or(100)),
@@ -1277,6 +1287,7 @@ mod tests {
                         result.map_err(|_| WorkerState::Unknown)?;
                         locks
                             .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                            .map(Some)
                             .map_err(|_| WorkerState::Unknown)
                     },
                     |_| Ok(0),
@@ -1442,6 +1453,7 @@ mod tests {
             let path = cache(home, &"a".repeat(64), &owner)?;
             for (state, reason) in [
                 (WriterState::Live, CacheGcReason::Live),
+                (WriterState::Busy, CacheGcReason::Busy),
                 (WriterState::Unknown, CacheGcReason::Unobservable),
             ] {
                 for dry_run in [true, false] {
@@ -1493,6 +1505,7 @@ mod tests {
                 let report = gc_worktree_cargo_caches_with_writer_guard(home, &policy, |_| {
                     locks
                         .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                        .map(Some)
                         .map_err(|error| match error {
                             FsError::LockTimeout { .. } => WorkerState::Live,
                             _ => WorkerState::Unknown,
@@ -1589,6 +1602,7 @@ mod tests {
                 &mut |_| {
                     locks
                         .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                        .map(Some)
                         .map_err(|_| WorkerState::Unknown)
                 },
             )?;
@@ -1632,6 +1646,7 @@ mod tests {
                     if event == "readdir" {
                         let _writer = observed_locks
                             .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                            .map(Some)
                             .map_err(io::Error::other)?;
                     }
                     Ok(())
@@ -1640,6 +1655,7 @@ mod tests {
                     probed.store(true, Ordering::SeqCst);
                     locks
                         .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                        .map(Some)
                         .map_err(|_| WorkerState::Unknown)
                 },
             )?;
@@ -1694,6 +1710,7 @@ mod tests {
                     &mut |_| {
                         locks
                             .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                            .map(Some)
                             .map_err(|_| WorkerState::Unknown)
                     },
                 )?;
@@ -2109,6 +2126,7 @@ mod tests {
                     OsStr::new("writer.lock"),
                     provenant_os::fs::LockMode::Exclusive,
                 )
+                .map(Some)
                 .map_err(|_| WorkerState::Unknown)
         };
         let mut policy = CacheGcPolicy {

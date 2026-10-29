@@ -1886,7 +1886,7 @@ mod tests {
             words.extend(flags);
             invalid(&words);
         }
-        valid(&["worktree", "adopt", "../native", "--owner", "manual"]);
+        invalid(&["worktree", "adopt", "../native", "--owner", "manual"]);
         let Command::Lane(Lane::Deliver { accept_review, .. }) = valid(&[
             "lane",
             "deliver",

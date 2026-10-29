@@ -1,5 +1,5 @@
 //! GC composition for terminal provider state, including nested run stores.
-use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots, WaitBudget};
+use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_run::{ExecutionContext, ProviderStateGc, ProviderStateIssue, Request, RunStore};
 use std::{ffi::OsStr, path::Path};
@@ -107,7 +107,6 @@ fn collect_store(
         let (clock, cancel) = (SystemClock, CancelToken::new());
         let call = Request {
             clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 5)?,
             cancel: &cancel,
         };
         if let Some(reader) = RunStore::open_read_only(&context, &call)? {
@@ -212,7 +211,6 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
     let call = Request {
         clock: &clock,
         cancel: &cancel,
-        budget: WaitBudget::cli(clock.mono_now(), 5)?,
     };
     let store = RunStore::open(&context, &call)?;
     let (run, attempt, task) = (
@@ -257,9 +255,7 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
     );
     let index_call = provenant_fabric_runtime::chairs::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 30)?,
         cancel: &cancel,
-        backoff: &provenant_fabric_store::ThreadWait,
     };
     let index = provenant_fabric_runtime::chairs::ChairIndex::open(&roots.state, &index_call)?;
     index.submit(

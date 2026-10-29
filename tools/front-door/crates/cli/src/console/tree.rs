@@ -1,8 +1,6 @@
 //! Bounded host-local composition of indexed run stores.
 use super::Error;
-use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, ProjectId, RootInputs, Roots, WaitBudget,
-};
+use provenant_core::{ActorId, AttemptId, CancelToken, ProjectId, RootInputs, Roots};
 use provenant_os::clock::SystemClock;
 use provenant_run::{ExecutionContext, RunStore};
 use serde_json::{Value, json};
@@ -61,7 +59,6 @@ pub(super) fn read(
     while let Some((state, depth, owner)) = stores.pop_front() {
         let call = provenant_run::Request {
             clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Encode)?,
             cancel: &cancel,
         };
         let (owner_project, owner_attempt) = owner
@@ -247,7 +244,7 @@ pub(super) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId, Digest, OperationId, RunId, TaskId};
+    use provenant_core::{AttemptId, Clock, Digest, OperationId, RunId, TaskId};
     use provenant_records::CanonicalV1;
     use provenant_run::{CanonicalRequest, NewAttempt, PreparedRun};
 
@@ -266,7 +263,6 @@ mod tests {
         let cancel = CancelToken::new();
         let call = provenant_run::Request {
             clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
             cancel: &cancel,
         };
         let project = ProjectId::from_bytes([1; 16]);

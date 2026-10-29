@@ -941,6 +941,36 @@ pub enum Telemetry {
     Stats(Stats),
     /// Write attempts as a Chrome Trace Event file for ui.perfetto.dev
     Trace(Trace),
+    /// Maintain the telemetry price sheet
+    Prices {
+        #[command(subcommand)]
+        command: Prices,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum Prices {
+    /// Fetch market prices and write a proposed diff; never edits the sheet
+    Refresh(PricesRefresh),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum PriceSource {
+    Openrouter,
+    Litellm,
+}
+#[derive(Debug, Args)]
+pub struct PricesRefresh {
+    /// Primary source; the other is the cross-check (default openrouter)
+    #[arg(long, value_enum, default_value = "openrouter")]
+    pub source: PriceSource,
+    /// Read the OpenRouter models document from this file instead of fetching it
+    #[arg(long)]
+    pub openrouter_file: Option<PathBuf>,
+    /// Read the LiteLLM price document from this file instead of fetching it
+    #[arg(long)]
+    pub litellm_file: Option<PathBuf>,
+    /// Proposal file (default `telemetry-prices.proposed.json`)
+    #[arg(long, default_value = "telemetry-prices.proposed.json")]
+    pub out: PathBuf,
 }
 #[derive(Debug, Args)]
 pub struct Trace {
@@ -995,14 +1025,6 @@ pub struct Stats {
 pub enum Worktree {
     /// Build and publish a host-owned Cargo target seed from origin/main
     SeedBuild,
-    /// Record custody and ownership for an existing linked worktree
-    Adopt {
-        /// Existing linked worktree in this project
-        path: PathBuf,
-        /// Human or session owner label
-        #[arg(long, default_value = "manual")]
-        owner: Option<String>,
-    },
     /// Create a worktree on a new branch
     Create {
         /// New branch name

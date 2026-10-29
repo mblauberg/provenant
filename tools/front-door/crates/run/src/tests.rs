@@ -1,7 +1,7 @@
 use super::*;
 use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock as _, Digest, MonoTime, OperationId, ProjectId,
-    RootInputs, RunId, TaskId, TestClock, WaitBudget, WallTime,
+    RootInputs, RunId, TaskId, TestClock, WallTime,
 };
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::CanonicalV1;
@@ -129,11 +129,7 @@ pub(super) fn clock() -> TestClock {
     )
 }
 pub(super) fn call<'a>(clock: &'a TestClock, cancel: &'a CancelToken) -> Request<'a> {
-    Request {
-        clock,
-        budget: WaitBudget::cli(MonoTime::from_micros(0), 10).unwrap(),
-        cancel,
-    }
+    Request { clock, cancel }
 }
 pub(super) fn input() -> PreparedRun {
     let task = TaskId::from_bytes([3; 16]);
@@ -247,7 +243,6 @@ fn a_long_step_between_transactions_does_not_expire_later_store_writes() -> Test
     let cancel = CancelToken::new();
     let call = Request {
         clock: &clock,
-        budget: WaitBudget::per_transaction(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let store = RunStore::open(&context, &call)?;
@@ -256,15 +251,6 @@ fn a_long_step_between_transactions_does_not_expire_later_store_writes() -> Test
     let input = input();
     store.create(&input, &call)?;
     assert!(store.operation(&input.operation_id, &call)?.is_some());
-    // A single deadline for the whole operation is spent by that step.
-    let spent = Request {
-        budget: WaitBudget::cli(MonoTime::from_micros(0), 10)?,
-        ..call
-    };
-    assert!(matches!(
-        store.operation(&input.operation_id, &spent),
-        Err(RunError::Contention)
-    ));
     Ok(())
 }
 
@@ -473,13 +459,15 @@ fn database_initialisation_lock_preserves_wait_errors() -> TestResult {
         .try_lock(OsStr::new("run.sqlite3.lock"), LockMode::Exclusive)?;
     let request = Request {
         clock: &clock,
-        budget: WaitBudget::nonblocking(MonoTime::from_micros(0)),
         cancel: &cancel,
     };
-    let contended = matches!(
-        db::open_database(context.state_root.as_path(), "run.sqlite3", &request),
-        Err(RunError::Contention)
-    );
+    let contended =
+        provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || {
+            matches!(
+                db::open_database(context.state_root.as_path(), "run.sqlite3", &request),
+                Err(RunError::Contention)
+            )
+        });
     cancel.cancel();
     let cancelled = matches!(
         db::open_database(context.state_root.as_path(), "run.sqlite3", &request),
@@ -491,7 +479,6 @@ fn database_initialisation_lock_preserves_wait_errors() -> TestResult {
 
 #[test]
 fn reopening_a_current_store_does_not_wait_for_a_writer() -> TestResult {
-    use provenant_core::Clock;
     use provenant_os::clock::SystemClock;
 
     let temp = tempfile::tempdir()?;
@@ -500,7 +487,6 @@ fn reopening_a_current_store_does_not_wait_for_a_writer() -> TestResult {
     let cancel = CancelToken::new();
     let request = Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 1)?,
         cancel: &cancel,
     };
     let writer = RunStore::open(&context, &request)?;
@@ -1433,6 +1419,38 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
                     &call
                 )?
                 .complete
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn result_orphan_redaction_flag_describes_the_preserved_bytes() -> TestResult {
+    for (text, redacted) in [
+        ("clean orphan", true),
+        ("ghp_abcdefghijklmnopqrstuvwxyz0123456789", false),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        let id = input.attempts[0].attempt_id;
+        store.create(&input, &call)?;
+        seal_exit_fixture(&store, &input)?;
+        let dir = store.attempt_dir(input.run_id, id, false)?;
+        super::artifacts::seal(&dir, "result.md", text.as_bytes(), RESULT_LIMIT)?;
+        let mut facts = publication();
+        facts.redacted = true;
+        let record = store.recover_result_only(id, &facts, &exit(), &call)?;
+        let artifact = record.result.ok_or("result")?;
+        assert_eq!(artifact.redacted, redacted);
+        assert_eq!(artifact.digest, CanonicalV1::file_digest(text.as_bytes()));
+        assert_eq!(
+            super::artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
+            Some(text.as_bytes())
         );
     }
     Ok(())
