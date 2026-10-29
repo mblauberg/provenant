@@ -1977,6 +1977,40 @@ mod tests {
             panic!("lane deliver");
         };
         assert!(accept_review);
+        let Command::Output(output) = valid(&[
+            "output",
+            "11111111111111111111111111111111",
+            "--part",
+            "transcript",
+            "--to",
+            "saved.txt",
+        ])
+        .command
+        else {
+            panic!("output --to");
+        };
+        assert_eq!(output.to, Some(std::path::PathBuf::from("saved.txt")));
+        valid(&[
+            "output",
+            "11111111111111111111111111111111",
+            "--path",
+            "--part",
+            "stderr",
+        ]);
+        invalid(&[
+            "output",
+            "11111111111111111111111111111111",
+            "--path",
+            "--to",
+            "saved.txt",
+        ]);
+        invalid(&[
+            "output",
+            "11111111111111111111111111111111",
+            "--path",
+            "--tail",
+            "5",
+        ]);
         let Command::Resume(resume) = valid(&[
             "resume",
             "11111111111111111111111111111111",

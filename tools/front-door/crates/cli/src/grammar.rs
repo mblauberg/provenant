@@ -833,7 +833,7 @@ pub struct Lanes {
     /// Keep lanes submitted by this session (its agent label)
     #[arg(long, value_parser = session_label, conflicts_with = "all")]
     pub session: Option<String>,
-    /// Show every lane
+    /// Show every lane, newest first
     #[arg(long)]
     pub all: bool,
     /// Maximum lanes per page (1 to 100)
@@ -891,7 +891,7 @@ pub enum Part {
 }
 #[derive(Debug, Args)]
 pub struct Output {
-    /// Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; receipt also accepts a unique RUN or RUN/TASK
+    /// Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; a RUN or RUN/TASK reads its newest settled attempt, and receipt needs exactly one
     pub attempt: Attempt,
     /// Read a configured peer's own attempt, by label or host ID
     #[arg(long)]
@@ -899,6 +899,12 @@ pub struct Output {
     /// Which part to read
     #[arg(long, value_enum, default_value = "result")]
     pub part: Part,
+    /// Write the selected range to FILE, replacing it, instead of printing it
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["path", "trace"])]
+    pub to: Option<PathBuf>,
+    /// Print the attempt's artifact path for this part instead of its content
+    #[arg(long, conflicts_with_all = ["to", "trace", "offset", "tail", "max_bytes"])]
+    pub path: bool,
     /// Byte offset to start from
     #[arg(long, default_value = "0", conflicts_with = "tail")]
     pub offset: u64,
