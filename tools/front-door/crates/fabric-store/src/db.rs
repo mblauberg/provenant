@@ -83,6 +83,18 @@ impl Store {
         Self::open_local_delivery(root, deadline, false)
     }
 
+    /// Release the initial snapshot for a long-lived lane reader. Each SQL
+    /// observation sees fresh WAL commits and request budgets bound operations.
+    /// Call only on a store returned by `open_read_only`.
+    pub fn live_read_only(self) -> Result<Self> {
+        if !self.db.is_readonly("main")? {
+            return Err(Error::Invalid("expected read-only store"));
+        }
+        self.db.execute_batch("ROLLBACK")?;
+        self.db.progress_handler(0, None::<fn() -> bool>)?;
+        Ok(self)
+    }
+
     /// Open an existing store for bounded hook delivery updates.
     pub fn open_hook_delivery(
         root: &StateRoot,

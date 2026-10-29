@@ -11,7 +11,11 @@ pub(crate) fn identity(
     home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Result<(provenant_core::Roots, provenant_core::ProjectId, ActorId), EdgeError> {
-    let ctx = context::Context::open(roots, home, cwd)?;
+    let ctx = if in_lane() {
+        Context::open_read_only(roots, home, cwd)?
+    } else {
+        Context::open(roots, home, cwd)?
+    };
     Ok((ctx.roots, ctx.identity.project, ctx.identity.inbox.actor))
 }
 
@@ -504,6 +508,8 @@ pub enum Landing {
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
+    Relay(#[from] provenant_fabric_mcp::tools::ServiceError),
+    #[error(transparent)]
     Exec(#[from] provenant_os::exec::ExecError),
     #[error(transparent)]
     Coordination(#[from] CoordinationError),
@@ -619,6 +625,7 @@ impl Fabric {
         )
     }
 }
+#[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
 fn execute(
     cmd: Fabric,
     roots: provenant_core::Roots,
@@ -626,7 +633,11 @@ fn execute(
     cwd: &std::path::Path,
 ) -> Result<(Value, bool), EdgeError> {
     let seconds = cmd.wait();
-    let ctx = context::Context::open(roots, home, cwd)?;
+    let ctx = if in_lane() {
+        Context::open_read_only(roots, home, cwd)?
+    } else {
+        Context::open(roots, home, cwd)?
+    };
     if ctx.in_lane && !cmd.read_only() {
         return Err(CoordinationError::LaneMutation.into());
     }
@@ -637,19 +648,97 @@ fn execute(
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
     let backoff = ThreadPause;
-    let service = CoordinationService::for_identity(
-        &ctx.roots.state,
-        &ctx.identity,
-        &ctx.config,
-        &ctx.home,
-        &ctx.cwd,
-        &ctx.executor,
-        &clock,
-        &backoff,
-        &cancel,
-    )?;
+    let service = if ctx.in_lane {
+        let store = provenant_fabric_store::Store::open_read_only(
+            &ctx.roots.state,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .map_err(CoordinationError::from)?
+        .ok_or(CoordinationError::from(
+            provenant_fabric_store::Error::NotFound,
+        ))?
+        .live_read_only()
+        .map_err(CoordinationError::from)?;
+        CoordinationService::new(
+            store,
+            ctx.identity.project,
+            ctx.identity.inbox.actor,
+            &clock,
+            &backoff,
+        )
+    } else {
+        CoordinationService::for_identity(
+            &ctx.roots.state,
+            &ctx.identity,
+            &ctx.config,
+            &ctx.home,
+            &ctx.cwd,
+            &ctx.executor,
+            &clock,
+            &backoff,
+            &cancel,
+        )?
+    };
     let mutate = |input, operation: Operation| {
         json(service.mutate(input, &operation.operation_id, budget, &cancel)?)
+    };
+    let observe = |input: Mutation| -> Result<Value, EdgeError> {
+        if ctx.in_lane
+            && (ctx.remote_home()
+                || matches!(&input, Mutation::Landing(LandingInput::Verify { .. })))
+        {
+            use provenant_fabric_mcp::tools::ToolCall;
+            let waiting = matches!(
+                &input,
+                Mutation::Landing(LandingInput::Wait { .. })
+                    | Mutation::Events(EventsInput::Read {
+                        wait_seconds: Some(_),
+                        ..
+                    })
+            );
+            loop {
+                let mut observation = input.clone();
+                let seconds =
+                    (budget.remaining(clock.mono_now()).as_micros() / 1_000_000).clamp(1, 55);
+                match &mut observation {
+                    Mutation::Landing(LandingInput::Wait { wait_seconds, .. }) => {
+                        *wait_seconds = seconds
+                    }
+                    Mutation::Events(EventsInput::Read {
+                        wait_seconds: Some(wait_seconds),
+                        ..
+                    }) => *wait_seconds = seconds,
+                    _ => {}
+                }
+                let call = match observation {
+                    Mutation::Mail(input) => ToolCall::Mail(input, None),
+                    Mutation::Task(input) => ToolCall::Task(input, None),
+                    Mutation::Events(input) => ToolCall::Events(input, None),
+                    Mutation::Claim(input) => ToolCall::Claim(input, None),
+                    Mutation::Landing(input) => ToolCall::Landing(input, None),
+                };
+                let value = call.relay_within(
+                    &ctx.lane_relay_socket()?,
+                    &cancel,
+                    std::time::Duration::from_micros(
+                        budget.remaining(clock.mono_now()).as_micros(),
+                    ),
+                )?;
+                if !waiting
+                    || value["timed_out"] != true
+                    || budget.remaining(clock.mono_now()).as_micros() < 1_000_000
+                {
+                    return Ok(value);
+                }
+            }
+        }
+        match input {
+            Mutation::Mail(input) => json(service.mail(input, budget, &cancel)?),
+            Mutation::Task(input) => json(service.task(input, budget, &cancel)?),
+            Mutation::Events(input) => json(service.events(input, budget, &cancel)?),
+            Mutation::Claim(input) => json(service.claim(input, budget, &cancel)?),
+            Mutation::Landing(input) => json(service.landing(input, budget, &cancel)?),
+        }
     };
     let value = match cmd {
         Fabric::Identity
@@ -699,15 +788,11 @@ fn execute(
         }
         Fabric::Mail(Mail::Read(page)) => {
             ctx.page(page.limit)?;
-            json(service.mail(
-                MailInput::Read {
-                    extra: Default::default(),
-                    after: page.after,
-                    limit: page.limit,
-                },
-                budget,
-                &cancel,
-            )?)?
+            observe(Mutation::Mail(MailInput::Read {
+                extra: Default::default(),
+                after: page.after,
+                limit: page.limit,
+            }))?
         }
         Fabric::Mail(Mail::MarkRead { through, operation }) => mutate(
             Mutation::Mail(MailInput::MarkRead {
@@ -737,16 +822,12 @@ fn execute(
             limit,
         }) => {
             ctx.page(limit)?;
-            json(service.task(
-                TaskInput::List {
-                    extra: Default::default(),
-                    state: state.map(Into::into),
-                    after,
-                    limit,
-                },
-                budget,
-                &cancel,
-            )?)?
+            observe(Mutation::Task(TaskInput::List {
+                extra: Default::default(),
+                state: state.map(Into::into),
+                after,
+                limit,
+            }))?
         }
         Fabric::Task(Task::Claim {
             id,
@@ -798,24 +879,14 @@ fn execute(
         )?,
         Fabric::Events(Events::Read { page, wait }) => {
             ctx.page(page.limit)?;
-            let result = service.events(
-                EventsInput::Read {
-                    extra: Default::default(),
-                    after: page.after,
-                    limit: page.limit,
-                    wait_seconds: wait,
-                },
-                budget,
-                &cancel,
-            )?;
-            let timed_out = matches!(
-                result,
-                EventsResult::Read {
-                    timed_out: true,
-                    ..
-                }
-            );
-            return Ok((json(result)?, timed_out));
+            let result = observe(Mutation::Events(EventsInput::Read {
+                extra: Default::default(),
+                after: page.after,
+                limit: page.limit,
+                wait_seconds: wait,
+            }))?;
+            let timed_out = result["timed_out"].as_bool().unwrap_or(false);
+            return Ok((result, timed_out));
         }
         Fabric::Events(Events::Note { note, operation }) => {
             ctx.text(&note)?;
@@ -852,14 +923,10 @@ fn execute(
             }),
             operation,
         )?,
-        Fabric::Claim(Claim::Verify(fence)) => json(service.claim(
-            ClaimInput::Verify {
-                extra: Default::default(),
-                proof: fence.proof(),
-            },
-            budget,
-            &cancel,
-        )?)?,
+        Fabric::Claim(Claim::Verify(fence)) => observe(Mutation::Claim(ClaimInput::Verify {
+            extra: Default::default(),
+            proof: fence.proof(),
+        }))?,
         Fabric::Claim(Claim::Release { fence, operation }) => mutate(
             Mutation::Claim(ClaimInput::Release {
                 extra: Default::default(),
@@ -869,15 +936,11 @@ fn execute(
         )?,
         Fabric::Claim(Claim::List { after, limit }) => {
             ctx.page(limit)?;
-            json(service.claim(
-                ClaimInput::List {
-                    extra: Default::default(),
-                    after,
-                    limit,
-                },
-                budget,
-                &cancel,
-            )?)?
+            observe(Mutation::Claim(ClaimInput::List {
+                extra: Default::default(),
+                after,
+                limit,
+            }))?
         }
         Fabric::Landing(Landing::Acquire {
             reference,
@@ -907,14 +970,12 @@ fn execute(
             }),
             operation,
         )?,
-        Fabric::Landing(Landing::Verify(fence)) => json(service.landing(
-            LandingInput::Verify {
+        Fabric::Landing(Landing::Verify(fence)) => {
+            observe(Mutation::Landing(LandingInput::Verify {
                 extra: Default::default(),
                 proof: fence.proof()?,
-            },
-            budget,
-            &cancel,
-        )?)?,
+            }))?
+        }
         Fabric::Landing(Landing::Release { fence, operation }) => mutate(
             Mutation::Landing(LandingInput::Release {
                 extra: Default::default(),
@@ -927,24 +988,14 @@ fn execute(
             generation,
             wait,
         }) => {
-            let result = service.landing(
-                LandingInput::Wait {
-                    extra: Default::default(),
-                    reference,
-                    generation,
-                    wait_seconds: wait,
-                },
-                budget,
-                &cancel,
-            )?;
-            let timed_out = matches!(
-                result,
-                LandingResult::Waited {
-                    timed_out: true,
-                    ..
-                }
-            );
-            return Ok((json(result)?, timed_out));
+            let result = observe(Mutation::Landing(LandingInput::Wait {
+                extra: Default::default(),
+                reference,
+                generation,
+                wait_seconds: wait,
+            }))?;
+            let timed_out = result["timed_out"].as_bool().unwrap_or(false);
+            return Ok((result, timed_out));
         }
     };
     Ok((value, false))
@@ -980,6 +1031,7 @@ pub fn run(
                 EdgeError::Identity(_) | EdgeError::Invalid | EdgeError::Root(_) => {
                     (Outcome::Invalid, "invalid_input")
                 }
+                EdgeError::Relay(error) => (Outcome::Error, error.code()),
                 EdgeError::Config(_) => (Outcome::Invalid, "config"),
                 _ => (Outcome::Error, "io"),
             };
