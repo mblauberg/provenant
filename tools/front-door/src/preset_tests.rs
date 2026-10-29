@@ -1965,3 +1965,71 @@ fn synthesis_declares_and_requests_a_disposition_for_every_finding() {
     let prompt = synthesis["prompt"].as_str().unwrap();
     assert!(prompt.contains("findings block") && prompt.contains("\"disposition\""));
 }
+
+fn appending(overrides: &[&str]) -> Result<Expansion, String> {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "appending",
+            r#"
+stages = [{ id = "map", role = "scout" }]
+[parameters]
+tags = { type = "list", default = ["a"] }
+plain = ["x"]
+width = { type = "integer", default = 2 }
+[roles.scout]
+acceptance_checks = "${tags}"
+prompt = "Map ${prompt}"
+"#,
+        )
+        .unwrap();
+    let overrides: Vec<String> = overrides.iter().map(|item| (*item).to_owned()).collect();
+    expand(&layers, "appending", "brief", &overrides)
+}
+
+#[test]
+fn set_append_extends_list_parameters_and_refuses_scalars() {
+    let appended = appending(&[
+        "parameters.tags+=['b']",
+        "parameters.tags+='c'",
+        "parameters.plain+=['y']",
+    ])
+    .unwrap();
+    assert_eq!(
+        appended.document["nodes"][0]["acceptance_checks"],
+        json!(["a", "b", "c"])
+    );
+    assert_eq!(appended.origins["parameters.tags"], "--set");
+    let error = appending(&["parameters.width+=1"]).err().unwrap();
+    assert!(error.contains("parameters.width"), "{error}");
+    assert!(error.contains("not a list"), "{error}");
+}
+
+#[test]
+fn export_selecting_an_output_its_node_cannot_supply_names_both_nodes() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "typed",
+            r#"
+stages = [{ id = "look", role = "scout" }]
+exports = [{ node = "look", outputs = ["result", "commit"] }]
+[roles.scout]
+prompt = "Look at ${prompt}"
+"#,
+        )
+        .unwrap();
+    layers
+        .insert(
+            "repo",
+            "outer",
+            "stages = [{ id = \"inner\", preset = \"typed\" }]",
+        )
+        .unwrap();
+    let error = expand(&layers, "outer", "brief", &[]).err().unwrap();
+    assert!(error.contains("look"), "{error}");
+    assert!(error.contains("composite"), "{error}");
+    assert!(error.contains("commit"), "{error}");
+}

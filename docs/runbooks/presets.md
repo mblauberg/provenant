@@ -139,6 +139,11 @@ prompt = "Challenge unsupported claims and missing call sites.\n${prompt}"
 acceptance_checks = ["Every proposed change cites a relevant call site"]
 ```
 
+An `exports` or `inputs` entry may select only outputs its node supplies:
+every node supplies `result`, `findings`, `verdict` and `remaining`, while
+`branch` and `commit` need write access, a worktree or a pinned source.
+Expansion refuses a mismatch and names both nodes.
+
 Stages run in order and receive the preceding result. An entry can select
 other preceding outputs with `outputs = ["result", "findings", "commit"]`.
 `parallel` contains heterogeneous entries, each with its own role or preset;
@@ -185,6 +190,9 @@ Address a stage by its id instead of a path into its internals: on a stage
 that runs a preset, `--set 'council.risk_tags=["security"]'` sets that
 preset's parameter; on a role stage, `--set 'task.tier="junior"'` sets the
 entry field. A stage without an `id` is `s1`, `s2` and so on by position.
+`--set 'parameters.scope+=["docs"]'` appends to a list parameter instead of
+replacing it (a single value appends one item). It is refused on a scalar
+parameter, and on a role stage field.
 Parameters can be typed tables (`type`, `default`, `min`, `max`, `enum`,
 `doc`); `preset explain` prints them. A `[pattern]` table (`level`, `summary`,
 `citations`, `cost`, `select_when`, `tags`) says when a preset is worth using.
