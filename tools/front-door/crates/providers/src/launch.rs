@@ -289,6 +289,13 @@ pub(crate) fn rust_tools(
 ) {
     let cargo = input.home.join(".cargo");
     let rustup = input.home.join(".rustup");
+    // Subtree grants must anchor to existing directories. Keep this decision
+    // here so every adapter gets the same system-tool fallback on non-Rust
+    // hosts.
+    if !rust_tools_available(input.home) {
+        system_tools(access, runtime_reads, tool_exec_roots, env);
+        return;
+    }
     let cache = lane_cache(input);
     let target = cache.join("target");
     // The host prepares the writer cache itself under custody. Cargo
@@ -364,6 +371,25 @@ pub(crate) fn rust_tools(
     // Children inherit this profile, so exec stays confined; read and write
     // grants and the protected and credential denials are unchanged.
     tool_exec_roots.push(subtree(input.cwd));
+}
+
+fn rust_tools_available(home: &Path) -> bool {
+    home.join(".cargo/bin").is_dir() && home.join(".rustup/toolchains").is_dir()
+}
+
+#[cfg(test)]
+mod rust_tools_tests {
+    use super::rust_tools_available;
+
+    #[test]
+    fn missing_rust_home_directories_select_system_tools() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(!rust_tools_available(home.path()));
+        std::fs::create_dir_all(home.path().join(".cargo/bin")).unwrap();
+        assert!(!rust_tools_available(home.path()));
+        std::fs::create_dir_all(home.path().join(".rustup/toolchains")).unwrap();
+        assert!(rust_tools_available(home.path()));
+    }
 }
 
 /// Public TLS files and macOS developer tools, independent of whether Rust

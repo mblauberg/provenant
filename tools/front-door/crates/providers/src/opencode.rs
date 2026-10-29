@@ -225,23 +225,14 @@ fn prepare(
     ]);
     // Only lanes whose permissions allow bash can run the toolchain.
     if shell {
-        // Every subtree grant needs an existing directory at anchoring time,
-        // so a host without Rust keeps only the system tools.
-        let rust_installed = [".cargo/bin", ".rustup/toolchains"]
-            .iter()
-            .all(|path| input.home.join(path).is_dir());
-        if rust_installed {
-            crate::launch::rust_tools(
-                input,
-                access,
-                &mut runtime_reads,
-                &mut tool_exec_roots,
-                &mut env,
-                &mut setup,
-            );
-        } else {
-            crate::launch::system_tools(access, &mut runtime_reads, &mut tool_exec_roots, &mut env);
-        }
+        crate::launch::rust_tools(
+            input,
+            access,
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut env,
+            &mut setup,
+        );
         crate::launch::node_tools(
             input.home,
             access,
