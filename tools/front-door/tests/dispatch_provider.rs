@@ -161,6 +161,20 @@ fn fixture() -> Result {
         let fd: i32 = std::env::var("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")?.parse()?;
         let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
         assert_eq!(token, b"fixture-refreshed-token");
+        let mut prompt = String::new();
+        io::stdin().read_to_string(&mut prompt)?;
+        if prompt.contains("fixture host-native") {
+            let argument = |flag| {
+                args.windows(2)
+                    .find(|pair| pair[0] == flag)
+                    .map(|pair| &pair[1])
+            };
+            assert_eq!(argument("--agent").map(String::as_str), Some("ci-fixer"));
+            let agents: Value =
+                serde_json::from_str(argument("--agents").ok_or("agent definition")?)?;
+            assert_eq!(agents["ci-fixer"]["prompt"], "Repair failing CI checks.");
+            assert_eq!(argument("--effort").map(String::as_str), Some("medium"));
+        }
         assert_eq!(
             std::env::var("CLAUDE_CODE_AUTO_COMPACT_WINDOW")?.as_str(),
             "275000"
@@ -1567,17 +1581,308 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
 }
 
 fn claude_dispatch_refreshes_registered_account() -> Result {
+    claude_dispatch(false)
+}
+
+fn host_native_dispatch_uses_the_declared_agent_and_refuses_resume() -> Result {
+    if !graph_fixture_available()? {
+        writeln!(
+            io::stderr(),
+            "host_native_dispatch_uses_the_declared_agent_and_refuses_resume skipped: graph fixture unavailable"
+        )?;
+        return Ok(());
+    }
+    claude_dispatch(true)
+}
+
+fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
+    let can_launch = graph_fixture_available()?;
+    let rig = claude_fixture()?;
+    let cleanup = rig.process_cleanup();
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pools]\ngraph-test = [{{ model = 'claude/claude-sonnet-5-5' }}]"
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    assert_eq!(
+        code(&rig.execute(
+            &git,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Initial",
+            ],
+            None,
+        )?),
+        0
+    );
+    let created = rig.command(&[
+        "worktree",
+        "create",
+        "graph-repair",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(code(&created), 0, "{created:?}");
+    for path in [
+        ".cargo/bin",
+        ".cargo/registry",
+        ".cargo/git",
+        "Library/pnpm",
+        "Library/Caches/pnpm",
+        ".cache/node",
+        ".rustup/toolchains",
+        ".codex",
+        ".claude/hooks",
+        ".kiro/settings",
+        ".gemini/config",
+        ".cursor/extensions",
+        ".npm",
+    ] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(
+            &json!({"schema_version":1,"graph_id":"native-fallback","nodes":[
+                {"id":"repair","prompt":"reply OK","access":"worktree_write",
+                 "worktree":".worktrees/graph-repair","delivery":"none","routes":[
+                    {"adapter":"host-native","name":"absent"},
+                    {"alias":"graph-test","account":"pro"}
+                 ]}
+            ]}),
+        )?,
+    )?;
+    let started = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(code(&started), 0, "{started:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let status = rig.command(&["fabric", "graph", "status", "native-fallback", "--json"])?;
+        assert_eq!(code(&status), 0, "{status:?}");
+        let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+        let repair = &status["data"]["checkpoint"]["nodes"][0];
+        if status["data"]["status"] == "complete" {
+            let attempts = repair["attempts"].as_array().ok_or("attempts")?;
+            assert_eq!(attempts.len(), 2, "{status}");
+            assert_eq!(attempts[0]["outcome"], "adapter_unavailable", "{status}");
+            assert_eq!(attempts[0]["launched"], false, "{status}");
+            if can_launch {
+                assert_eq!(attempts[1]["launched"], true, "{status}");
+                assert_eq!(repair["state"], "succeeded", "{status}");
+            }
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{status}");
+        std::thread::park_timeout(std::time::Duration::from_millis(50));
+    }
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    assert_eq!(code(&lanes), 0, "{lanes:?}");
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let lanes = lanes["data"]["lanes"].as_array().ok_or("lanes")?;
+    assert_eq!(lanes.len(), 2);
+    let refused = lanes
+        .iter()
+        .find(|lane| lane["requested_route"]["provider"] == "host-native")
+        .ok_or("host-native attempt")?;
+    assert_eq!(refused["state"], "rejected", "{refused}");
+    assert_eq!(
+        refused["reason"],
+        "host-native absent is not configured in domains.fabric.host_native"
+    );
+    if !can_launch {
+        writeln!(
+            io::stderr(),
+            "unconfigured_host_native_repair_launches_alias_fallback: verified prepare refusal and alias fallback; launch assertion skipped: graph fixture unavailable"
+        )?;
+    }
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
+fn host_native_preparation_uses_the_provider_contract() -> Result {
+    use provenant_core::{AttemptId, Digest, OperationId, RunId, TaskId};
+    let rig = claude_fixture()?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.fabric.host_native.ci-fixer]\nkind = 'claude-agent'\nmodel = 'claude/claude-sonnet-5-5'\neffort = 'medium'\ndescription = 'Repair CI'\nprompt = 'Repair failing CI checks.'"
+    )?;
+    fs::write(
+        rig.home.join(".claude-pro/.credentials.json"),
+        serde_json::to_vec(
+            &json!({"claudeAiOauth":{"accessToken":"fixture-refreshed-token","expiresAt":jiff::Timestamp::now().as_millisecond() + 3_600_000}}),
+        )?,
+    )?;
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?;
+    let assets = rig.root.join("assets");
+    fs::create_dir(&assets)?;
+    let mut host = provenant_run::HostLaunchContext::from_environment(
+        &rig.state,
+        &rig.project,
+        provenant_os::git::git_executable()
+            .ok_or("git")?
+            .canonicalize()?,
+    );
+    host.executables
+        .insert("claude".into(), std::env::current_exe()?);
+    // Provider resolution must honour the host pin, even when captured PATH
+    // does not contain Claude. Command entries instead retain literal lookup.
+    host.executable_search_path = vec![rig.root.join("missing-bin")];
+    let registry = provenant_cli::run::Registry {
+        roots: Some(&roots),
+        home: Some(&rig.home),
+        cwd: Some(&rig.project),
+        assets: Some(&assets),
+        state_root: Some(&rig.state),
+        project_id: Some(binding.project_id()),
+        host: Some(&host),
+        ..Default::default()
+    };
+    let attempt_id = AttemptId::from_bytes([1; 16]);
+    let run_id = RunId::from_bytes([2; 16]);
+    let attempt = rig
+        .state
+        .join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let paths = provenant_run::LaunchPaths {
+        attempt_id,
+        run_id,
+        operation_id: OperationId::parse("host-preparation")?,
+        task_index: 0,
+        lane_depth: 1,
+        deadline_unix_ms: u64::MAX,
+        scratch: attempt.join("scratch"),
+        temporary: attempt.join("tmp"),
+        provider_state: attempt.join("provider-state"),
+    };
+    for path in [&paths.scratch, &paths.temporary, &paths.provider_state] {
+        fs::create_dir_all(path)?;
+    }
+    let task: provenant_run::TaskRequest = serde_json::from_value(json!({
+        "task_id":TaskId::from_bytes([3;16]), "prompt_digest":provenant_records::CanonicalV1::file_digest(b"fixture host-native"),
+        "route":{"kind":"adapter","provider":"host-native","name":"ci-fixer"}, "account":"pro", "fallback":[],
+        "authority_digest":Digest::from_bytes([4;32]), "provider_timeout_seconds":20, "delivery_id":null
+    }))?;
+    let mut absent = task.clone();
+    absent.route = provenant_run::RequestedRoute::Adapter {
+        extra: Default::default(),
+        provider: "host-native".into(),
+        name: "absent".into(),
+    };
+    let error =
+        provenant_run::Providers::prepare(&registry, &absent, "fixture host-native", &paths, None)
+            .err()
+            .ok_or("unconfigured host-native entry was accepted")?;
+    assert_eq!(
+        error,
+        "host-native absent is not configured in domains.fabric.host_native"
+    );
+    assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
+    let launch =
+        provenant_run::Providers::prepare(&registry, &task, "fixture host-native", &paths, None)?;
+    assert_eq!(launch.route.provider.as_deref(), Some("claude"));
+    assert_eq!(
+        launch.route.model.as_deref(),
+        Some("claude/claude-sonnet-5-5")
+    );
+    assert_eq!(launch.route.effort.as_deref(), Some("medium"));
+    assert_eq!(launch.route.extra["host_native"], "ci-fixer");
+    let argument = |flag| {
+        launch
+            .argv
+            .windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| &pair[1])
+    };
+    assert_eq!(
+        argument("--agent").and_then(|value| value.to_str()),
+        Some("ci-fixer")
+    );
+    let definition: Value = serde_json::from_str(
+        argument("--agents")
+            .and_then(|value| value.to_str())
+            .ok_or("agents")?,
+    )?;
+    assert_eq!(
+        definition["ci-fixer"]["prompt"],
+        "Repair failing CI checks."
+    );
+    assert!(String::from_utf8(launch.stdin)?.contains("fixture host-native"));
+    assert!(launch.secret_input.is_some());
+    assert!(launch.confinement.is_some());
+    // A nested result-policy fallback must not silently turn the named agent
+    // into an ordinary model route with different recovery semantics.
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[[domains.routing.model_policy.rules]]\nadapter='claude'\nmodel='claude/claude-sonnet-5-5'\n[domains.routing.model_policy.rules.policy.result]\ncheck=true\nfallback='claude/claude-opus-5-5'\nfallback_effort='high'"
+    )?;
+    let mut nested = paths;
+    nested.lane_depth = 2;
+    nested.temporary = attempt.join("nested-tmp");
+    nested.provider_state = attempt.join("nested-state");
+    nested.scratch = attempt.join("nested-scratch");
+    for path in [&nested.temporary, &nested.provider_state, &nested.scratch] {
+        fs::create_dir_all(path)?;
+    }
+    let error =
+        provenant_run::Providers::prepare(&registry, &task, "fixture host-native", &nested, None)
+            .err()
+            .ok_or("host agent was silently replaced by its provider's policy fallback")?;
+    assert_eq!(
+        error,
+        "host-native requires its configured model; use graph routes for non-native fallback"
+    );
+    Ok(())
+}
+
+fn claude_dispatch(host_native: bool) -> Result {
     let rig = claude_fixture()?;
     // Open-network Claude dispatch must not require a Rust installation.
     assert!(!rig.home.join(".cargo").exists());
     assert!(!rig.home.join(".rustup").exists());
     let cleanup = rig.process_cleanup();
     let account = rig.home.join(".claude-pro");
+    let route = if host_native {
+        writeln!(
+            OpenOptions::new()
+                .append(true)
+                .open(rig.state.join("config.toml"))?,
+            "\n[domains.fabric.host_native.ci-fixer]\nkind = 'claude-agent'\nmodel = 'claude/claude-sonnet-5-5'\neffort = 'medium'\ndescription = 'Repair CI'\nprompt = 'Repair failing CI checks.'"
+        )?;
+        json!({"kind":"adapter","provider":"host-native","name":"ci-fixer"})
+    } else {
+        json!({"kind":"model","provider":"claude","model":"claude-sonnet-5-5","effort":"medium"})
+    };
     let manifest = rig.root.join("manifest.json");
     fs::write(
         &manifest,
         serde_json::to_vec(
-            &json!({"schema_version":1,"tasks":[{"prompt":"reply OK","route":{"kind":"model","provider":"claude","model":"claude-sonnet-5-5","effort":"medium"},"account":"pro"}]}),
+            &json!({"schema_version":1,"tasks":[{"prompt":if host_native { "fixture host-native" } else { "reply OK" },"route":route,"account":"pro"}]}),
         )?,
     )?;
     let out = rig.command(&[
@@ -1616,6 +1921,30 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
     assert_eq!(lane["state"], "succeeded", "{lane}");
     assert_eq!(lane["account"], "pro");
     assert_eq!(lane["observed_route"]["model"], "claude/claude-sonnet-5-5");
+    if host_native {
+        assert_eq!(lane["requested_route"]["provider"], "host-native");
+        assert_eq!(lane["applied_route"]["host_native"], "ci-fixer");
+        assert_eq!(
+            lane["applied_route"]["source"],
+            "domains.fabric.host_native.ci-fixer"
+        );
+        let resumed = rig.command(&[
+            "resume",
+            lane["attempt_id"].as_str().ok_or("attempt")?,
+            "--prompt",
+            "continue",
+            "--no-fallback",
+            "--json",
+        ])?;
+        assert_eq!(
+            code(&resumed),
+            2,
+            "{}",
+            String::from_utf8_lossy(&resumed.stdout.bytes)
+        );
+        let refusal: Value = serde_json::from_slice(&resumed.stdout.bytes)?;
+        assert_eq!(refusal["error"]["code"], "CONTINUATION_UNSUPPORTED");
+    }
     assert!(account.join("refreshed").exists());
     let attempt = rig
         .state
@@ -3112,6 +3441,9 @@ fn main() -> ExitCode {
                 "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
                 "claude_dispatch_refreshes_registered_account",
+                "host_native_dispatch_uses_the_declared_agent_and_refuses_resume",
+                "host_native_preparation_uses_the_provider_contract",
+                "unconfigured_host_native_repair_launches_alias_fallback",
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_settlement_records_a_failed_advance_for_status",
                 "opencode_free_pool_cools_second_model",
@@ -3155,6 +3487,15 @@ fn main() -> ExitCode {
                     }
                     "claude_dispatch_refreshes_registered_account" => {
                         claude_dispatch_refreshes_registered_account()
+                    }
+                    "host_native_dispatch_uses_the_declared_agent_and_refuses_resume" => {
+                        host_native_dispatch_uses_the_declared_agent_and_refuses_resume()
+                    }
+                    "host_native_preparation_uses_the_provider_contract" => {
+                        host_native_preparation_uses_the_provider_contract()
+                    }
+                    "unconfigured_host_native_repair_launches_alias_fallback" => {
+                        unconfigured_host_native_repair_launches_alias_fallback()
                     }
                     "graph_settlement_advances_writer_and_account_routed_review" => {
                         graph_settlement_advances_writer_and_account_routed_review()

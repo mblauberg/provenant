@@ -665,6 +665,27 @@ could not read, truncated captures and `slices_complete: false`.
   `::real_git_stat_and_slices_match_the_whole_patch`
 - Owner: `crates/run/src/git_context.rs`
 
+## Host-native launch rows
+
+The optional `host-native` adapter selects a named
+`domains.fabric.host_native` entry. Its `AdapterSpec::launch` row refuses task
+model and effort selectors and session resume; model and effort are configured
+on the entry. `claude-agent` is the first kind and delegates preparation to
+Claude before adding its inline `--agents` definition and `--agent` selector.
+The same provider admission, accounts, network/access confinement, prompt
+transport, decoder and writer delivery apply. Applied route provenance retains
+the entry name and configuration source alongside the actual provider route.
+Host-native attempts retain model-policy result refusals but do not automatically
+retry as ordinary model routes or resume a session. Explicit resume may fall
+back to a fresh named launch under the existing resume policy.
+- Why: optional host features must declare their lane contract and keep its
+  confinement and provenance through execution and recovery.
+- Test: `crates/records/src/adapters.rs::host_native_declares_a_fresh_named_writer_contract`;
+  `tests/dispatch_provider.rs::host_native_preparation_uses_the_provider_contract`;
+  `::host_native_dispatch_uses_the_declared_agent_and_refuses_resume`;
+  `crates/cli/src/run.rs::host_native_attempts_do_not_resume_implicitly_or_explicitly`
+- Owner: `crates/records/src/adapters.rs`, `crates/cli/src/run/provider.rs`
+
 ## Launch prompts
 
 Launch prompts are bounded to 1 MiB. Argv adapters take up to 64 KiB; a

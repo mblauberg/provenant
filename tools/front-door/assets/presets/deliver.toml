@@ -42,7 +42,7 @@ spec = { type = "string", default = "", doc = "Issue number or file holding the 
 checks = { type = "list", default = [], doc = "Check names the CI gates require; empty uses the branch's required checks." }
 ci_timeout_seconds = { type = "integer", default = 7200, min = 1, max = 604800, doc = "How long each CI gate waits for checks on one head." }
 max_iterations = { type = "integer", default = 3, min = 1, max = 32, doc = "Repair rounds before the loop pauses and asks to stop, extend or accept." }
-repair_tier = { type = "string", default = "senior", doc = "Routing tier for each repair agent." }
+repair_tier = { default = "senior", doc = "Routing pool, route table or ordered route tables for each repair agent." }
 decision_session = { type = "string", default = "", doc = "Inbox session for the exhaustion and land asks. Empty pauses an exhausted loop for graph resume, and fails a land whose tier asks." }
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }

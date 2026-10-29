@@ -396,6 +396,13 @@ binding to the writer, so it judges the newest repaired head; a verdict gate
 and a `land` node merge that head under the host's tier policy. No model runs
 while a gate is pending. `max_iterations` bounds the rounds; exhaustion raises
 the loop ask when `decision_session` is set and otherwise pauses the graph.
+The repairer's tier selector may supply ordered routes with a named
+`host-native` entry. Each such route requires a later non-native fallback,
+checked before graph execution.
+Fallback retains the existing rule that a launched writer never switches routes.
+A host-native repair's delivered commit passes through the same CI gate before
+review or land; a host completion status cannot replace that observation.
+See [host-native repairs](../runbooks/presets.md#host-native-repairs).
 The same session is bound to the land node's `session`, so a nested `deliver`
 still asks it, and the chair lands by hand; with none, a tier that asks fails
 the land node with guidance to land by hand. A repository preset layer never

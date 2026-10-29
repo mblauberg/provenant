@@ -12,6 +12,9 @@ pub struct FabricConfig {
     /// Host-configured argv selected by adapter route name.
     #[serde(default)]
     pub commands: BTreeMap<String, CommandConfig>,
+    /// Optional bounded host features, selected by a host-native route name.
+    #[serde(default)]
+    pub host_native: BTreeMap<String, HostNativeConfig>,
     #[serde(default, deserialize_with = "deserialize_ssh_executable")]
     pub ssh_executable: Option<std::path::PathBuf>,
     pub home_hosts: BTreeMap<String, HostId>,
@@ -31,6 +34,20 @@ pub struct CommandConfig {
     /// Absolute interpreter paths, granted execution only.
     #[serde(default)]
     pub runtimes: Vec<std::path::PathBuf>,
+}
+
+/// Only verified headless interfaces belong here. Each kind reuses its
+/// provider's launch, account, confinement and output contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum HostNativeConfig {
+    ClaudeAgent {
+        model: String,
+        #[serde(default)]
+        effort: Option<String>,
+        description: String,
+        prompt: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -468,6 +485,26 @@ impl DomainConfig for FabricConfig {
                 reject(format!("commands.{name}"));
             }
         }
+        for (name, native) in &self.host_native {
+            let HostNativeConfig::ClaudeAgent {
+                model,
+                effort,
+                description,
+                prompt,
+            } = native;
+            let text =
+                |value: &str, max| !value.is_empty() && value.len() <= max && !value.contains('\0');
+            if !crate::graph::valid_identifier(name)
+                || !model
+                    .strip_prefix("claude/")
+                    .is_some_and(|id| text(id, 256))
+                || effort.as_deref().is_some_and(|value| !text(value, 64))
+                || !text(description, 1024)
+                || !text(prompt, 65_536)
+            {
+                reject(format!("host_native.{name}"));
+            }
+        }
         for (name, peer) in &self.peers {
             if crate::identity::validate_label(name).is_err()
                 || peer.destination.is_empty()
@@ -761,12 +798,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn host_native_entries_are_opt_in_and_validate_their_declared_kind() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["host_native"] = serde_json::json!({"ci-fixer": {
+            "kind": "claude-agent", "model": "claude/claude-sonnet-5-5",
+            "effort": "medium", "description": "Repair CI", "prompt": "Fix the failing checks."
+        }});
+        let parsed: FabricConfig = serde_json::from_value(value.clone()).unwrap();
+        let errors = parsed.validate();
+        assert!(errors.is_empty(), "{errors:?}");
+        for (field, invalid) in [
+            ("model", "codex/model"),
+            ("effort", ""),
+            ("description", ""),
+            ("prompt", "bad\0prompt"),
+        ] {
+            let mut invalid_value = value.clone();
+            invalid_value["host_native"]["ci-fixer"][field] = invalid.into();
+            let parsed: FabricConfig = serde_json::from_value(invalid_value).unwrap();
+            assert!(
+                parsed
+                    .validate()
+                    .iter()
+                    .any(|error| error.field == "host_native.ci-fixer"),
+                "{field}"
+            );
+        }
+        value["host_native"]["ci-fixer"]["kind"] = "unverified-fixer".into();
+        assert!(serde_json::from_value::<FabricConfig>(value).is_err());
+    }
+
     fn config() -> FabricConfig {
         let host = HostId::from_bytes([1; 16]);
         FabricConfig {
             agent_label: "agent".into(),
             client_label: "agent".into(),
             commands: BTreeMap::new(),
+            host_native: BTreeMap::new(),
             home_hosts: BTreeMap::new(),
             peers: BTreeMap::from([(
                 "worker".into(),

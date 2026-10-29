@@ -28,10 +28,11 @@ pub(super) fn prepare(
         paths,
         resume,
         |name| match registry.host {
-            Some(host) if matches!(task.route, run::RequestedRoute::Adapter { .. }) => {
+            Some(host) if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if provider == "command") => {
                 find_command_on_path(name, &host.executable_search_path)
             }
-            None if matches!(task.route, run::RequestedRoute::Adapter { .. }) => {
+            None if matches!(&task.route, run::RequestedRoute::Adapter { provider, .. } if provider == "command") =>
+            {
                 let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
                 find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
             }
@@ -99,6 +100,64 @@ fn prepare_with(
     locate: impl Fn(&str) -> Result<PathBuf, String>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
 ) -> Result<run::PreparedLaunch, String> {
+    if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
+        && provider == "host-native"
+    {
+        AdapterSpec::get(provider)
+            .ok_or("unknown adapter")?
+            .check_launch(&provenant_records::LaunchRequest {
+                resume: resume.is_some(),
+                write: task.writer.is_some() || !task.access.write_roots.is_empty(),
+                network: task.access.network,
+                ..Default::default()
+            })
+            .map_err(|error| error.to_string())?;
+        let roots = registry.roots.ok_or("routing context is unavailable")?;
+        let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+            .map_err(|error| error.to_string())?;
+        let native = config.domains.fabric.host_native.get(name).ok_or_else(|| {
+            format!("host-native {name} is not configured in domains.fabric.host_native")
+        })?;
+        let provenant_fabric_runtime::config::HostNativeConfig::ClaudeAgent {
+            model,
+            effort,
+            description,
+            prompt,
+        } = native;
+        let mut delegated = task.clone();
+        delegated.route = run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "claude".into(),
+            model: model.clone(),
+            effort: effort.clone(),
+        };
+        let mut launch = prepare_candidates(
+            registry,
+            &delegated,
+            prompt_text,
+            paths,
+            None,
+            &locate,
+            fixture_token,
+            false,
+        )?;
+        if launch.route.model.as_deref() != Some(model) {
+            return Err("host-native requires its configured model; use graph routes for non-native fallback".into());
+        }
+        let agents = serde_json::json!({name: {"description": description, "prompt": prompt}});
+        launch.argv.extend([
+            "--agents".into(),
+            agents.to_string().into(),
+            "--agent".into(),
+            name.into(),
+        ]);
+        launch.route.source = Some(format!("domains.fabric.host_native.{name}"));
+        launch
+            .route
+            .extra
+            .insert("host_native".into(), name.clone().into());
+        return Ok(launch);
+    }
     prepare_candidates(
         registry,
         task,

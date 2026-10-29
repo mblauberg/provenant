@@ -66,6 +66,8 @@ struct Host {
     writer_report: Option<String>,
     /// The attempts each launch was asked to route away from.
     distinct: Vec<(String, Vec<String>)>,
+    routes: Vec<(String, GraphRoute)>,
+    host_native_unavailable: bool,
 }
 
 impl CiStatus for Host {
@@ -138,12 +140,25 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
         &mut self,
         key: &AttemptKey,
         node: NodeInput<'_>,
-        _: &GraphRoute,
+        route: &GraphRoute,
         access: AccessMode,
         _: Option<&str>,
         replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
         self.launched.push(key.node_id.clone());
+        self.routes.push((key.node_id.clone(), route.clone()));
+        if self.host_native_unavailable && route.adapter.as_deref() == Some("host-native") {
+            return Ok(AttemptObservation::Terminal {
+                attempt_ref: Some(format!("fixture/{}", key.node_id)),
+                outcome: AttemptOutcome::AdapterUnavailable,
+                launched: false,
+                result: None,
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+            });
+        }
         self.prompts
             .push((key.node_id.clone(), node.prompt.to_owned()));
         self.sources
@@ -227,6 +242,84 @@ fn progress<'a>(checkpoint: &'a GraphCheckpoint, id: &str) -> &'a NodeProgress {
 
 fn commit(n: usize) -> String {
     format!("{n:040x}")
+}
+
+const HOST_REPAIR: &str =
+    "parameters.repair_tier=[{adapter='host-native',name='ci-fixer'},{alias='senior'}]";
+
+#[test]
+fn repair_tiers_keep_role_effort_and_lists_require_per_route_effort() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "deliver",
+            "[roles.repairer]\ntier='junior'\neffort='high'\n",
+        )
+        .unwrap();
+    let args = ["parameters.worktree='/repo/lane'".into()];
+    let expanded = expand(&layers, "deliver", "approved brief", &args).unwrap();
+    let fix = &expanded.document["nodes"][1]["composite"]["nodes"][1]["loop"]["body"][0];
+    assert_eq!(fix["route"], json!({"alias":"junior","effort":"high"}));
+    let args = [
+        args[0].clone(),
+        "roles.repairer.tier=[{adapter='host-native',name='ci-fixer'},{alias='senior'}]".into(),
+    ];
+    let error = expand(&layers, "deliver", "approved brief", &args).unwrap_err();
+    assert!(
+        error.contains("route lists cannot be combined with effort"),
+        "{error}"
+    );
+}
+
+#[test]
+fn deliver_falls_back_when_the_host_repairer_is_absent() {
+    let document = deliver(&[HOST_REPAIR]);
+    let mut host = Host {
+        ci: VecDeque::from([Ci::Fail("tests", "test failure")]),
+        host_native_unavailable: true,
+        ..Default::default()
+    };
+    let run = drive(&document, &mut host, &mut Journal::default());
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint);
+    let fixes: Vec<_> = host
+        .routes
+        .iter()
+        .filter(|(id, _)| id.contains("fix"))
+        .map(|(_, route)| route)
+        .collect();
+    assert_eq!(fixes.len(), 2);
+    assert_eq!(fixes[0].adapter.as_deref(), Some("host-native"));
+    assert_eq!(fixes[1].alias.as_deref(), Some("senior"));
+    assert_eq!(host.lands, [("lane/write".into(), commit(2))]);
+}
+
+#[test]
+fn a_successful_host_repair_still_waits_for_ci_on_its_pushed_head() {
+    let document = deliver(&[HOST_REPAIR, "parameters.max_iterations=1"]);
+    let mut host = Host {
+        ci: VecDeque::from([
+            Ci::Fail("tests", "before repair"),
+            Ci::Fail("tests", "after repair"),
+        ]),
+        ..Default::default()
+    };
+    let run = drive(&document, &mut host, &mut Journal::default());
+    assert_eq!(run.status, GraphStatus::Paused, "{:?}", run.checkpoint);
+    let repair = progress(&run.checkpoint, "ci--repair--r1--fix");
+    assert_eq!(repair.state, NodeState::Succeeded);
+    assert_eq!(
+        repair.attempts[0].route.adapter.as_deref(),
+        Some("host-native")
+    );
+    let gate = progress(&run.checkpoint, "ci--repair--r1--check")
+        .ci
+        .as_ref()
+        .unwrap();
+    assert_eq!(gate.head_sha.as_deref(), Some(commit(2).as_str()));
+    assert_eq!(gate.state, CiState::Failed);
+    assert!(host.lands.is_empty());
+    assert!(!host.launched.iter().any(|id| id.starts_with("review--")));
 }
 
 #[test]

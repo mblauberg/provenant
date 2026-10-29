@@ -203,6 +203,16 @@ impl Registry<'_> {
         let unsupported = |message: String| {
             Fail::new(Status::Refused, ErrorKind::ContinuationUnsupported, message)
         };
+        if prior
+            .applied_route
+            .as_ref()
+            .is_some_and(|route| route.extra.contains_key("host_native"))
+        {
+            return Err(unsupported(
+                "host-native does not support resume; dispatch a fresh lane with the prior result"
+                    .into(),
+            ));
+        }
         let adapter = prior
             .applied_route
             .as_ref()
@@ -281,8 +291,14 @@ impl run::Providers for Registry<'_> {
             .model_policy
             .effective(&model, route.account_key.as_deref(), now)
             .policy;
-        let assessment =
+        let mut assessment =
             assess_model_result(&policy, task, record, decoded, handoff, policy_attempt)?;
+        if route.extra.contains_key("host_native") {
+            // The host row is fresh-only. Provider-level policy retries would
+            // reconstruct a model route and lose its agent and provenance.
+            assessment.retry = None;
+            return Ok(assessment);
+        }
         if assessment.refusal.is_some() || assessment.retry.is_some() {
             return Ok(assessment);
         }
@@ -8022,6 +8038,88 @@ mod tests {
         ));
         Ok(())
     }
+    #[test]
+    fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|error| error.message)?;
+        let store = trace_store(&temp, &call)?;
+        let input = trace_run(44, AttemptId::from_bytes([45; 16]), clock.wall_now()?)?;
+        store.create(&input, &call)?;
+        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        record.applied_route = Some(run::RouteRecord {
+            extra: [("host_native".into(), json!("ci-fixer"))].into(),
+            provider: Some("claude".into()),
+            model: Some("claude/claude-sonnet-5-5".into()),
+            ..Default::default()
+        });
+        record.state = run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: run::Outcome::Succeeded,
+            exit_code: Some(0),
+            finished_at: clock.wall_now()?,
+            reason: None,
+        };
+        record.session = Some("native-session".into());
+        let root = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nstop_early_ok=false\nmax_continuations=2\n",
+        )?;
+        let registry = Registry {
+            roots: Some(&roots),
+            ..Default::default()
+        };
+        let error = registry
+            .check_continuable(&record)
+            .err()
+            .ok_or("host resume accepted")?;
+        assert_eq!(error.kind, ErrorKind::ContinuationUnsupported);
+        let mut decoded = run::Decoded {
+            outcome: run::Outcome::ModelUnavailable,
+            result: String::new(),
+            complete: false,
+            observed_route: None,
+            usage: Default::default(),
+            session: record.session.clone(),
+            reason: Some("provider capacity: Selected model is at capacity".into()),
+            partial_signals: Vec::new(),
+        };
+        let assessment = run::Providers::assess_result(
+            &registry,
+            &input.request.tasks[0],
+            &record,
+            &decoded,
+            None,
+            None,
+            1,
+        )?;
+        assert!(assessment.retry.is_none());
+        decoded.outcome = run::Outcome::Succeeded;
+        decoded.complete = true;
+        let handoff = provenant_records::handoff::Handoff::from_json(br#"{"schema_version":2,"status":"stopped_early","note":"CI remains red","remaining":["Repair tests"],"decisions":[],"verify":[]}"#)?;
+        let assessment = run::Providers::assess_result(
+            &registry,
+            &input.request.tasks[0],
+            &record,
+            &decoded,
+            Some(&handoff),
+            None,
+            1,
+        )?;
+        assert_eq!(
+            assessment.refusal.as_deref(),
+            Some("model reported unfinished work")
+        );
+        assert!(assessment.retry.is_none());
+        Ok(())
+    }
+
     #[test]
     fn capacity_and_quota_settlements_retry_within_their_bounds()
     -> Result<(), Box<dyn std::error::Error>> {

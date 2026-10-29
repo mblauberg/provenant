@@ -1852,6 +1852,8 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
         ids,
         provenant_records::ADAPTER_SPECS
             .iter()
+            // Host-native entries delegate to an existing registered provider.
+            .filter(|spec| spec.id != provenant_records::Harness::HostNative)
             .map(|spec| spec.name)
             .collect()
     );

@@ -1123,6 +1123,7 @@ mod tests {
             agent_label: "fixture".into(),
             client_label: "fixture".into(),
             commands: Default::default(),
+            host_native: Default::default(),
             ssh_executable: None,
             home_hosts: Default::default(),
             peers: Default::default(),
