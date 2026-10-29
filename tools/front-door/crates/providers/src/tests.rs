@@ -4009,7 +4009,10 @@ fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
                 }
             }
             for key in ["PNPM_HOME", "npm_config_store_dir", "pnpm_config_store_dir"] {
-                assert!(launch.env.iter().all(|(k, _)| k != key), "{id} {access:?} {key}");
+                assert!(
+                    launch.env.iter().all(|(k, _)| k != key),
+                    "{id} {access:?} {key}"
+                );
             }
         }
     }
