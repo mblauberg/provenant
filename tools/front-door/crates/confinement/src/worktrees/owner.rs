@@ -257,11 +257,7 @@ pub fn adopt(
     }
     // Adoption replaces any earlier registration at this path, so a stale or
     // mismatched record is repaired here. It still needs the writer lock and
-    // an observed-free tree, and never takes either from a live writer.
-    let observed = context.workers.observe_roots(std::slice::from_ref(&path));
-    if observed.get(&path) != Some(&WorkerState::Free) {
-        return Err(live_refusal(context.workers, &path));
-    }
+    // no reservation, and never takes either from a live writer.
     let name = state_dir_name(&path);
     match context.project_state.mkdir(&name, 0o700) {
         Ok(()) => context.project_state.sync()?,
@@ -281,6 +277,16 @@ pub fn adopt(
         Err(error) => return Err(error.into()),
     };
     ensure_unreserved(&state)?;
+    // As for other mutations, an incomplete native census is not evidence of
+    // a writer. The exclusive lock and absent reservation establish custody.
+    let observed = context.workers.observe_roots(std::slice::from_ref(&path));
+    match observed.get(&path).copied().unwrap_or(WorkerState::Unknown) {
+        WorkerState::Live => return Err(live_refusal(context.workers, &path)),
+        WorkerState::Unknown if context.workers.requires_complete_census() => {
+            return Err(WorktreeError::IncompleteCensus);
+        }
+        WorkerState::Free | WorkerState::Unknown => {}
+    }
     worktree.repo().revalidate()?;
     save_owner(&worktree, owner)?;
     write_identity(

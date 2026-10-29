@@ -128,6 +128,17 @@ pub enum LockMode {
     Exclusive,
 }
 
+/// The outcome of probing a lock file owned by another program.
+#[derive(Debug)]
+pub enum ForeignLock {
+    /// No such file: nothing can hold it.
+    Absent,
+    /// Another open file description holds a conflicting lock.
+    Held,
+    /// Locked here until the guard drops.
+    Acquired(LockGuard),
+}
+
 /// Successful publication status. An unconfirmed directory sync means the
 /// new entry is already visible and must not be retried as an absent write.
 #[derive(Debug)]
@@ -637,6 +648,41 @@ impl Directory {
     /// creates a missing lock or changes its contents, mode or timestamps.
     pub fn try_lock_existing(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
         self.lock_existing_with_timeout(name, mode, Duration::ZERO, &CancelToken::new())
+    }
+
+    /// Probe a lock file another program owns, such as Cargo's `.cargo-lock`,
+    /// with one nonblocking flock through a read-only descriptor. It never
+    /// creates the file, follows a link or changes it. Only a regular file
+    /// can be probed; anything else is refused, so it is never read as idle.
+    pub fn try_flock_foreign(&self, name: &OsStr, mode: LockMode) -> Result<ForeignLock> {
+        let name = component(name)?;
+        let path = self.path.join(name);
+        let file = match os::open_read(&self.file, name) {
+            Ok(file) => file,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                return Ok(ForeignLock::Absent);
+            }
+            Err(source) => return Err(error("open foreign lock", &path)(source)),
+        };
+        if !file
+            .metadata()
+            .map_err(error("fstat foreign lock", &path))?
+            .is_file()
+        {
+            return Err(FsError::NotRegular {
+                name: path.as_os_str().into(),
+            });
+        }
+        loop {
+            match os::try_flock(&file, mode) {
+                Ok(()) => return Ok(ForeignLock::Acquired(LockGuard { _file: file })),
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                    return Ok(ForeignLock::Held);
+                }
+                Err(source) if source.raw_os_error() == Some(errno::EINTR) => {}
+                Err(source) => return Err(error("flock foreign lock", &path)(source)),
+            }
+        }
     }
 
     /// Acquire an existing stable lock through a read-only descriptor, waiting

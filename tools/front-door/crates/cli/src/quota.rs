@@ -1387,6 +1387,7 @@ mod tests {
         }))?;
         let mut entries = provenant_providers::accounts::Settings {
             entries: [("codex-work".into(), registration)].into(),
+            ..Default::default()
         };
         let account = AccountScope {
             adapter: "codex".into(),

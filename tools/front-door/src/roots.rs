@@ -19,6 +19,14 @@ pub enum RootError {
     Home,
     #[error("project must be a Git checkout")]
     Checkout,
+    #[error(
+        "session save requires a Git checkout from the working directory or --project PATH; change to the project checkout or pass --project PATH"
+    )]
+    SessionProjectMissing,
+    #[error(
+        "working directory resolves to {cwd}, but --project resolves to {selected}; change directory to the intended project or correct --project PATH"
+    )]
+    SessionProjectMismatch { cwd: PathBuf, selected: PathBuf },
     #[error("invalid state root: {0}")]
     State(#[from] provenant_core::RootError),
 }
@@ -60,6 +68,10 @@ pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf,
     Ok(path)
 }
 fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
+    git_project_path(path, "--show-toplevel")
+}
+
+fn git_project_path(path: &Path, field: &str) -> Result<PathBuf, RootError> {
     let git = provenant_os::git::git_executable().ok_or(RootError::Checkout)?;
     let argv: Vec<OsString> = [
         git.as_os_str(),
@@ -70,7 +82,8 @@ fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
         OsStr::new("-c"),
         OsStr::new("core.hooksPath=/dev/null"),
         OsStr::new("rev-parse"),
-        OsStr::new("--show-toplevel"),
+        OsStr::new("--path-format=absolute"),
+        OsStr::new(field),
     ]
     .into_iter()
     .map(OsStr::to_owned)
@@ -118,6 +131,22 @@ fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
     }
     Ok(fs::canonicalize(root)?)
 }
+
+fn session_project(selected: Option<&Path>) -> Result<PathBuf, RootError> {
+    let cwd = git_checkout(&std::env::current_dir()?).ok();
+    let Some(selected) = selected else {
+        return cwd.ok_or(RootError::SessionProjectMissing);
+    };
+    let selected =
+        selected_project(Some(selected), true).map_err(|_| RootError::SessionProjectMissing)?;
+    if let Some(cwd) = cwd
+        && git_project_path(&cwd, "--git-common-dir")?
+            != git_project_path(&selected, "--git-common-dir")?
+    {
+        return Err(RootError::SessionProjectMismatch { cwd, selected });
+    }
+    Ok(selected)
+}
 /// Validate caller-selected roots before composing any leaf. This creates no
 /// state and does not require a product installation for an unavailable owner.
 pub fn validate_globals(globals: &provenant_cli::Globals) -> Result<(), RootError> {
@@ -138,6 +167,8 @@ pub enum Workspace<'a> {
     Project,
     /// The Git checkout holding the selected or working directory.
     Checkout,
+    /// Session saves require a checkout and reject conflicting selections.
+    SessionSave,
     /// The home directory, for host-wide commands.
     Home,
     /// A canonical directory the command has already chosen.
@@ -194,6 +225,7 @@ pub fn resolve(
             home()?,
         ),
         Workspace::Checkout => (selected_project(globals.project.as_deref(), true)?, home()?),
+        Workspace::SessionSave => (session_project(globals.project.as_deref())?, home()?),
         Workspace::At(path) => (path.to_owned(), home()?),
     };
     let assets = match installed {

@@ -5082,6 +5082,7 @@ fn registration_org_refuses_a_different_org_and_upgrades_legacy_records() {
         hidden: false,
         order: None,
         headline: None,
+        settings: Default::default(),
     };
     assert_eq!(entry.check_org(Some("a")).unwrap().as_deref(), Some("a"));
     assert_eq!(entry.check_org(None).unwrap(), None);
@@ -5135,4 +5136,80 @@ fn account_display_fields_validate() {
         toml_edit::de::from_str::<accounts::Settings>(&format!("{base}headline = \"daily\"\n"))
             .is_err()
     );
+}
+
+#[test]
+fn shared_settings_refuse_identity_credential_and_hook_keys() {
+    let mut settings = accounts::Settings::default();
+    assert!(settings.settings_error().is_none());
+    settings.shared_settings = Some(accounts::SharedSettings {
+        source: None,
+        keys: Some(vec!["outputStyle".into(), "includeCoAuthoredBy".into()]),
+    });
+    assert!(settings.settings_error().is_none());
+    for key in [
+        "apiKeyHelper",
+        "forceLoginMethod",
+        "oauthAccount",
+        "hooks",
+        "authtoken",
+        "AUTHTOKEN",
+        "refreshtoken",
+        "token2",
+        "oauth2",
+    ] {
+        settings.shared_settings = Some(accounts::SharedSettings {
+            source: None,
+            keys: Some(vec!["outputStyle".into(), key.into()]),
+        });
+        assert!(settings.settings_error().is_some(), "{key}");
+    }
+    settings.shared_settings = Some(accounts::SharedSettings {
+        source: None,
+        keys: Some(vec!["refreshtoken".into()]),
+    });
+    let message = settings.settings_error().unwrap();
+    assert!(
+        message.contains("`refreshtoken`") && message.contains("`token`"),
+        "{message}"
+    );
+    settings.shared_settings = None;
+    let mut entry = accounts::Registration {
+        adapter: "claude".into(),
+        label: "work".into(),
+        key: "k".into(),
+        org_fingerprint: None,
+        directory: "/home/u/.claude-work".into(),
+        plan: None,
+        priority: None,
+        billing_anchor: None,
+        limits: None,
+        display_name: None,
+        hidden: false,
+        order: None,
+        headline: None,
+        settings: Default::default(),
+    };
+    entry.settings.insert("outputStyle".into(), "x".into());
+    entry.settings.insert("model".into(), "y".into());
+    settings.entries.insert("claude-work".into(), entry);
+    // `model` is not on the allow-list.
+    assert!(settings.settings_error().is_some());
+    settings
+        .entries
+        .get_mut("claude-work")
+        .unwrap()
+        .settings
+        .remove("model");
+    assert!(settings.settings_error().is_none());
+    settings
+        .entries
+        .get_mut("claude-work")
+        .unwrap()
+        .settings
+        .insert(
+            "env".into(),
+            serde_json::json!({"ANTHROPIC_AUTH_TOKEN": "x"}),
+        );
+    assert!(settings.settings_error().is_some());
 }

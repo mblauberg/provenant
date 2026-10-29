@@ -194,6 +194,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "create_list_and_remove_a_managed_worktree",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations",
+            "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks",
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
             "gc_refuses_bare_projects_and_their_linked_checkout_fallback",
@@ -282,6 +283,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_reports_transient_and_preserves_unobserved_project_array" => gc_reports_transient_and_preserves_unobserved_project_array(),
                 "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations" => {
                     scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_reservations()
+                }
+                "gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks" => {
+                    gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks()
                 }
                 "remove_a_managed_worktree_deletes_its_legacy_lane_cache" => {
                     remove_a_managed_worktree_deletes_its_legacy_lane_cache()
@@ -1761,6 +1765,80 @@ fn gc_reports_transient_and_preserves_unobserved_project_array() -> Result {
         normal_preview["data"]["skipped_transient"],
         serde_json::json!([])
     );
+    Ok(())
+}
+
+fn gc_trims_lane_build_directories_to_the_cap_and_spares_held_locks() -> Result {
+    use provenant_os::fs::{Directory, ForeignLock, LockMode};
+
+    let rig = repository()?;
+    fs::write(rig.project.join(".gitignore"), ".worktrees/\ntarget/\n")?;
+    git(&rig, &["add", ".gitignore"])?;
+    git(&rig, &["commit", "-qm", "ignore output"])?;
+    ok(&rig, &["worktree", "create", "idle", "--json"])?;
+    let worktree = rig.project.join(".worktrees/idle");
+    let cache = prepare_lane_cache(&rig, &worktree, "idle")?;
+    let profile = |name: &str, age: u64| -> Result<PathBuf> {
+        let dir = cache.join("target").join(name);
+        fs::create_dir_all(dir.join("deps"))?;
+        for lock in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
+            fs::write(dir.join(lock), b"")?;
+        }
+        fs::write(dir.join("deps/payload"), vec![1; 65_536])?;
+        let when = std::time::SystemTime::now() - Duration::from_secs(age);
+        // Recency is the newest write anywhere below the directory, locks included.
+        for lock in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
+            fs::File::open(dir.join(lock))?.set_modified(when)?;
+        }
+        for path in [dir.join("deps/payload"), dir.join("deps"), dir.clone()] {
+            fs::File::open(path)?.set_modified(when)?;
+        }
+        Ok(dir)
+    };
+    let stale = profile("debug", 3_000)?;
+    let building = profile("release", 2_000)?;
+    let fresh = profile("fast", 1_000)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        b"schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes=100000\n",
+    )?;
+    // A running Cargo holds its profile's lock: the directory is never taken.
+    let held = Directory::open_anchor(&building)?;
+    let ForeignLock::Acquired(_cargo) =
+        held.try_flock_foreign(std::ffi::OsStr::new(".cargo-lock"), LockMode::Exclusive)?
+    else {
+        return Err("the fixture lock is already held".into());
+    };
+    let names = |value: &Value| -> Vec<String> {
+        value
+            .as_array()
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(|path| path.as_str()?.rsplit('/').next().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // Over the cap, the least recently used goes first, the one Cargo holds
+    // is skipped, and the next oldest goes until the cap is met.
+    let preview = ok(&rig, &["gc", "--dry-run", "--json"])?;
+    let dirs = &preview["data"]["build_dirs"];
+    assert_eq!(names(&dirs["removed"]), ["debug", "fast"], "{dirs}");
+    assert_eq!(names(&dirs["busy"]), ["release"], "{dirs}");
+    assert!(stale.join("deps/payload").is_file() && fresh.is_dir());
+    let applied = ok(&rig, &["gc", "--apply", "--json"])?;
+    let dirs = &applied["data"]["build_dirs"];
+    assert_eq!(names(&dirs["removed"]), ["debug", "fast"], "{dirs}");
+    assert_eq!(names(&dirs["busy"]), ["release"], "{dirs}");
+    assert!(dirs["bytes"].as_u64().ok_or("bytes")? >= 2 * 65_536);
+    let remaining = dirs["cache_bytes"].as_u64().ok_or("cache_bytes")?;
+    assert!((65_536..=100_000).contains(&remaining), "{dirs}");
+    assert!(!stale.exists() && !fresh.exists() && building.is_dir());
+    let text = command(&rig, &["gc", "--apply"])?;
+    let text = String::from_utf8(text.stdout.bytes)?;
+    assert!(text.contains("lane build director(ies)"), "{text}");
+    assert!(text.contains("bytes of lane build output remain"), "{text}");
     Ok(())
 }
 

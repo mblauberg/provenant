@@ -78,6 +78,81 @@ An existing `CARGO_BUILD_JOBS` in the submitting environment takes precedence;
 a brief can also set it inside the lane. Pressure and slots are checked before
 lane admission, not continuously during a build.
 
+### Lane build output
+
+Lane builds are set up to stay small. Every lane gets `CARGO_INCREMENTAL=0`
+and `CARGO_PROFILE_DEV_DEBUG=line-tables-only`, so a lane's target holds no
+incremental sessions and carries line tables instead of full debug information.
+On `provenant-core` this measured about 65 MB against 76 to 85 MB with
+incremental compilation on, and the size did not grow on rebuild. The repository's
+`Cargo.toml` is unchanged. Override either default in `[domains.fabric.lanes]`:
+
+```toml
+[domains.fabric.lanes]
+cargo_incremental = true       # CARGO_INCREMENTAL=1
+cargo_debug = "full"           # CARGO_PROFILE_DEV_DEBUG
+build_dir_max_bytes = 21474836480
+build_dir_grace_seconds = 900
+build_dir_survey_interval_seconds = 300
+```
+
+`cargo_debug` takes any Cargo `debug` level: `none`, `line-directives-only`,
+`line-tables-only`, `limited`, `full`, `0`, `1`, `2`, `true` or `false`. A
+value already in the lane environment takes precedence over both settings.
+
+Fabric also collects idle build output. A Cargo profile directory in a lane
+cache (`target/debug`, `target/<triple>/release`, or the same under
+`target-lint/`) is idle when a non-blocking exclusive `flock` succeeds on all of
+its `.cargo-lock`, `.cargo-build-lock` and `.cargo-artifact-lock`. Cargo holds
+all three while it builds, so a directory with any of them held is never
+removed. Idle directories go least recently used first, judged by the newest
+modification time below each, until the allocated bytes of all profile
+directories, idle and busy alike, are within `build_dir_max_bytes` (20 GiB by
+default) and free space on the cache volume is at least `gc.free_floor`. When
+busy directories alone exceed the cap, the sweep removes every eligible idle
+directory and the total stays over. The lock files are removed last. Space
+outside profile directories (`target/doc`, Cargo homes, other lane files) is
+not counted or collected here.
+
+Free locks do not prove a directory is unused: test and run binaries keep
+executing after Cargo drops its locks, and Cargo can open a lock file just
+before it takes the lock. The grace does not cover Cargo opening an existing
+lock file without writing anything; the `flock` probe covers that case. A directory whose newest modification is within
+`build_dir_grace_seconds` (15 minutes by default) is therefore never removed,
+and neither is one written after the sweep measured it. These directories still
+count toward the cap and are reported as `recent`. Set the grace to 0 to turn
+the protection off. The grace protects only recently written directories: a test or run binary that runs longer than the grace without writing under `target/` is unprotected unless a Cargo lock is still held.
+
+Collection runs on three events:
+
+- when a lane settles;
+- when lane admission finds free space below `gc.free_floor`, at most about
+  once a minute while the lane waits;
+- in `provenant gc`, including the scheduled sweep, `--pressure` and
+  `--dry-run`, which previews without taking the lock.
+
+The walk that measures the caches takes no lock, and a sweep that finds the cap
+and the floor already met stops there. Only removal holds the host admission
+lock, so no lane is admitted mid-removal; it probes each candidate again under
+that lock. A settling lane waits at most 5 seconds for it.
+
+Settlement does not walk the caches every time. It walks only when free space is
+below `gc.free_floor`, when the last walk is older than
+`build_dir_survey_interval_seconds` (5 minutes by default), or when that walk
+found the total within 10% of the cap. The last result is kept in the state
+root, and a settlement that finds another walk running skips. `provenant gc`
+always walks. While free space stays below the floor, each settlement walks,
+because reclaiming is the point.
+
+`provenant gc` reports the directories removed or reclaimable, the bytes
+reclaimed, how many bytes of lane build output remain and how many directories
+were busy or recent. The JSON form has the same fields under `build_dirs`
+(`removed`, `bytes`, `cache_bytes`, `busy`, `recent`, `errors`); the summary form has
+`build_dirs_removed`, `build_dir_bytes_reclaimed` and `build_dir_bytes`.
+A directory that Cargo is building in is skipped and counted as busy; a later
+event collects it once Cargo has finished. A collection skipped because another
+sweep or an admission holds the host ledger is reported as an alert.
+
 ## Knob registry
 
 `config/harness-knobs.json` owns the workflow knob registry and presets.
@@ -462,8 +537,39 @@ Each Claude account directory must be exactly `~/.claude-<label>`, already exist
 and be signed in separately. Labels and directories must be distinct, with no
 nested account directories. The current `CLAUDE_CONFIG_DIR` must match a
 registration. When unset, `~/.claude` is the sign-in source only; it cannot be
-registered or used as a switch target. Credentials and settings are never copied
-between directories.
+registered or used as a switch target. Credentials and identity are never
+copied between directories. Provenant's own hooks, skills and MCP entry, and
+the allow-listed shared settings below, are kept identical in every registered
+directory by `install`, `accounts register` and `accounts sync` (see the
+[install runbook](install.md#account-sync)).
+
+Shared Claude settings are configured under `[domains.accounts]`:
+
+```toml
+[domains.accounts.shared_settings]
+source = "/Users/me/.claude/settings.json"   # default: ~/.claude/settings.json when it exists
+keys = ["permissions", "env", "statusLine", "enabledPlugins",
+        "outputStyle", "includeCoAuthoredBy", "cleanupPeriodDays"]   # the default allow-list
+
+[domains.accounts.entries.claude-work.settings]   # wins over the source for this account
+outputStyle = "verbose"
+```
+
+`source` is a JSON file; with no source file and no per-account `settings`,
+nothing is synced. Only keys in `keys` are synced, and a per-account `settings`
+key must be in `keys`. Identity and credential keys (`apiKeyHelper`,
+`awsAuthRefresh`, `awsCredentialExport`, `forceLoginMethod`,
+`forceLoginOrgUUID`, `otelHeadersHelper`) and `hooks` are refused even when
+listed. So is any key, or variable name inside `env`, that contains an `auth`,
+`credential`, `token`, `oauth`, `secret` or `password` word, an `api key`,
+`access key` or `private key` pair, or, after lower-casing and dropping
+separators and digits, any of `token`, `secret`, `password`, `passwd`,
+`credential`, `oauth`, `apikey`, `authtoken`, `privatekey`, `session`,
+`cookie` or `bearer`. The substring rule also catches glued names such as
+`ANTHROPICAUTHTOKEN`, `token2` and `oauth2`, and accepts some false positives;
+the one exemption is the default key `includeCoAuthoredBy`. The message names
+the key and the rule that matched. A refused configuration stops install,
+upgrade and sync, never uninstall.
 
 ```sh
 provenant config set chair.switch_accounts '["work-spare","personal-spare"]'
