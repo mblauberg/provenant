@@ -1439,6 +1439,38 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
 }
 
 #[test]
+fn result_orphan_redaction_flag_describes_the_preserved_bytes() -> TestResult {
+    for (text, redacted) in [
+        ("clean orphan", true),
+        ("ghp_abcdefghijklmnopqrstuvwxyz0123456789", false),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        let id = input.attempts[0].attempt_id;
+        store.create(&input, &call)?;
+        seal_exit_fixture(&store, &input)?;
+        let dir = store.attempt_dir(input.run_id, id, false)?;
+        super::artifacts::seal(&dir, "result.md", text.as_bytes(), RESULT_LIMIT)?;
+        let mut facts = publication();
+        facts.redacted = true;
+        let record = store.recover_result_only(id, &facts, &exit(), &call)?;
+        let artifact = record.result.ok_or("result")?;
+        assert_eq!(artifact.redacted, redacted);
+        assert_eq!(artifact.digest, CanonicalV1::file_digest(text.as_bytes()));
+        assert_eq!(
+            super::artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
+            Some(text.as_bytes())
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

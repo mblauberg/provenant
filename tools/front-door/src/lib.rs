@@ -546,10 +546,24 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
     process.holder(&holder, &mut |holder| {
         let holder = provenant_cli::run::HostHolder::new(holder);
         let disk = disk_guard::LaneDisk::default();
+        let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
+            provenant_confinement::redact::Redactor::new([]),
+            provenant_confinement::redact::Redactor::new([]),
+        ) else {
+            return fail(
+                "internal supervise",
+                Outcome::Error,
+                "REDACTION",
+                "cannot initialise capture redaction",
+                globals,
+            );
+        };
         let hooks = provenant_supervisor::GuardianHooks {
             disk: Some(&disk),
             holder: Some(&holder),
             nested_children: Some(&holder),
+            stdout_filter: Some(&mut stdout_filter),
+            stderr_filter: Some(&mut stderr_filter),
             ..Default::default()
         };
         match process.supervise(&descriptors, hooks) {
