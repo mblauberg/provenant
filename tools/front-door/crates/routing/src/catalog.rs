@@ -361,39 +361,6 @@ impl RoutingConfig {
         }
         warnings
     }
-    pub fn model_policy_fallback_warnings(&self, catalogue: &Catalogue) -> Vec<String> {
-        let mut warnings = Vec::new();
-        let mut inspect = |policy: &crate::ModelPolicy, field: &str| {
-            if let Some(model) = policy.result.fallback.as_ref() {
-                let entry = catalogue.model(model);
-                let reason = if entry.is_none() {
-                    Some("unknown model")
-                } else if policy
-                    .result
-                    .fallback_effort
-                    .as_ref()
-                    .is_some_and(|effort| {
-                        !entry.is_some_and(|entry| entry.efforts.contains(effort))
-                    })
-                {
-                    Some("unsupported effort")
-                } else {
-                    None
-                };
-                if let Some(reason) = reason {
-                    warnings.push(format!(
-                        "warning: domains.routing.{field}.result.fallback: {} ({reason}); dropped",
-                        model.as_str()
-                    ));
-                }
-            }
-        };
-        inspect(&self.model_policy.defaults, "model_policy.defaults");
-        for (index, rule) in self.model_policy.rules.iter().enumerate() {
-            inspect(&rule.policy, &format!("model_policy.rules.{index}"));
-        }
-        warnings
-    }
     /// Suggest a cheaper route in the applied tier. Exact models and custom
     /// pools use the model's highest bundled implementation tier.
     pub fn opus_writer_advisory(
@@ -1518,54 +1485,32 @@ mod tests {
     }
 
     #[test]
-    fn model_policy_fallbacks_are_warned_and_reconciled() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn model_policy_fallbacks_are_reported_for_the_effective_route()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut config = RoutingConfig::default();
         config.model_policy.defaults.result.fallback =
             Some(ModelId::parse("codex/not-catalogued")?);
         assert!(config.validate().is_empty());
-        assert!(
+        let effective =
             config
-                .model_policy_fallback_warnings(&Catalogue::bundled()?)
-                .len()
-                == 1
-        );
-        let effective = config.model_policy.effective(
-            &ModelId::parse("codex/gpt-6-luna")?,
-            None,
-            provenant_core::WallTime::from_unix_seconds(1).expect("valid policy instant"),
-        );
+                .model_policy
+                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, provenant_core::WallTime::from_unix_seconds(1)?);
         assert!(effective.policy.result.fallback.is_none());
+        assert_eq!(
+            effective.dropped_fallback,
+            Some((ModelId::parse("codex/not-catalogued")?, "unknown model"))
+        );
 
         config.model_policy.defaults.result.fallback = Some(ModelId::parse("codex/gpt-6-luna")?);
         config.model_policy.defaults.result.fallback_effort = Some("unsupported".into());
         assert!(config.validate().is_empty());
-        assert!(
+        let effective =
             config
-                .model_policy_fallback_warnings(&Catalogue::bundled()?)
-                .len()
-                == 1
-        );
-        config.model_policy.rules.push(crate::ModelPolicyRule {
-            schedule: crate::Schedule {
-                expires: Some(provenant_core::WallTime::from_unix_seconds(1)?),
-                ..Default::default()
-            },
-            policy: crate::ModelPolicy {
-                result: crate::ResultPolicy {
-                    fallback: Some(ModelId::parse("codex/not-catalogued")?),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-        assert!(config.validate().is_empty());
+                .model_policy
+                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, provenant_core::WallTime::from_unix_seconds(1)?);
         assert_eq!(
-            config
-                .model_policy_fallback_warnings(&Catalogue::bundled()?)
-                .len(),
-            2
+            effective.dropped_fallback,
+            Some((ModelId::parse("codex/gpt-6-luna")?, "unsupported effort"))
         );
         Ok(())
     }

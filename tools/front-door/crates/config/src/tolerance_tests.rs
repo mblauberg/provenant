@@ -163,6 +163,34 @@ fn boundary_sections_keep_invalid_known_input_as_hard_errors() {
 }
 
 #[test]
+fn malformed_ancestor_refuses_standalone_and_aggregate_boundary_reads() {
+    const STRICT: DomainSections<Domains> =
+        DomainSections::new(&[
+            DomainSection::new::<Settings>("sample", defaults).with_boundary_checks()
+        ]);
+    let dir = tempfile::tempdir().unwrap();
+    let roots = roots(dir.path());
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "schema_version=1\ndomains=false\n",
+    )
+    .unwrap();
+    #[derive(Debug, Default, Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Defaulted {
+        count: u64,
+    }
+    let error = read_domain::<Defaulted>(dir.path(), "sample").unwrap_err();
+    assert!(error.to_string().contains("domains"), "{error}");
+    let text = b"schema_version=1\ndomains=false\n";
+    assert!(load_with_domains(&roots, Some(&text[..]), &STRICT).is_err());
+    // A non-boundary section still recovers, as the aggregate does.
+    assert!(
+        crate::loader::read_settings::<Defaulted>(dir.path(), "domains.sample", |_| Ok(())).is_ok()
+    );
+}
+
+#[test]
 fn unknown_row_fields_warn_without_discarding_valid_policy() {
     let dir = tempfile::tempdir().unwrap();
     let roots = roots(dir.path());

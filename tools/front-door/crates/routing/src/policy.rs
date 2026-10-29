@@ -494,24 +494,23 @@ impl<'de> Deserialize<'de> for ModelPolicies {
         })
     }
 }
+/// Why a result fallback cannot run on the catalogue, or `None` when it can.
+fn fallback_problem(result: &ResultPolicy, catalogue: &crate::Catalogue) -> Option<&'static str> {
+    let model = result.fallback.as_ref()?;
+    let Some(entry) = catalogue.model(model) else {
+        return Some("unknown model");
+    };
+    result
+        .fallback_effort
+        .as_ref()
+        .is_some_and(|effort| !entry.efforts.contains(effort))
+        .then_some("unsupported effort")
+}
 fn warn_invalid_fallback(policy: &ModelPolicy, field: &str, catalogue: &crate::Catalogue) {
     let Some(model) = policy.result.fallback.as_ref() else {
         return;
     };
-    let entry = catalogue.model(model);
-    let reason = if entry.is_none() {
-        Some("unknown model")
-    } else if policy
-        .result
-        .fallback_effort
-        .as_ref()
-        .is_some_and(|effort| !entry.is_some_and(|entry| entry.efforts.contains(effort)))
-    {
-        Some("unsupported effort")
-    } else {
-        None
-    };
-    if let Some(reason) = reason {
+    if let Some(reason) = fallback_problem(&policy.result, catalogue) {
         let _ = writeln!(
             std::io::stderr().lock(),
             "warning: domains.routing.{field}.result.fallback: {} ({reason}); effective fallback checked after overlays",
@@ -537,6 +536,9 @@ pub struct EffectiveModelPolicy {
     #[serde(flatten)]
     pub policy: ModelPolicy,
     pub sources: Vec<String>,
+    /// The result fallback that the effective policy rejected, and why.
+    #[serde(skip)]
+    pub dropped_fallback: Option<(ModelId, &'static str)>,
 }
 impl ModelPolicies {
     pub fn effective(
@@ -565,25 +567,23 @@ impl ModelPolicies {
             .into(),
         ];
         self.apply_rules(&mut policy, &mut sources, model, account, now);
-        if let Some(fallback) = policy.result.fallback.as_ref() {
-            let valid = crate::Catalogue::bundled()
-                .ok()
-                .and_then(|catalogue| {
-                    catalogue.model(fallback).map(|entry| {
-                        policy
-                            .result
-                            .fallback_effort
-                            .as_ref()
-                            .is_none_or(|effort| entry.efforts.contains(effort))
-                    })
-                })
-                .unwrap_or(false);
-            if !valid {
+        let mut dropped_fallback = None;
+        if let Some(model) = policy.result.fallback.clone() {
+            let problem = crate::Catalogue::bundled()
+                .map_or(Some("catalogue unavailable"), |catalogue| {
+                    fallback_problem(&policy.result, &catalogue)
+                });
+            if let Some(reason) = problem {
                 policy.result.fallback = None;
                 policy.result.fallback_effort = None;
+                dropped_fallback = Some((model, reason));
             }
         }
-        EffectiveModelPolicy { policy, sources }
+        EffectiveModelPolicy {
+            policy,
+            sources,
+            dropped_fallback,
+        }
     }
 
     fn apply_rules(
@@ -1144,6 +1144,17 @@ mod tests {
         assert_eq!(
             effective.policy.result.fallback_effort.as_deref(),
             Some("high")
+        );
+        assert!(effective.dropped_fallback.is_none());
+        let other = policies.effective(
+            &ModelId::parse("codex/gpt-6-luna")?,
+            Some("other"),
+            at(0),
+        );
+        assert!(other.policy.result.fallback.is_none());
+        assert_eq!(
+            other.dropped_fallback,
+            Some((ModelId::parse("codex/gpt-6-luna")?, "unsupported effort"))
         );
         Ok(())
     }
