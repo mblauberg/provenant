@@ -215,8 +215,13 @@ pub fn hook_context_with(
     let client = client
         .map(|harness| format!(" --client {}", harness.spec().name))
         .unwrap_or_default();
+    // `--project` names this hook's checkout, so the save does not depend on the
+    // directory the agent is in when it runs.
     let save = match commands.runnable(&format!("workflow session save {}", session.as_str())) {
-        Some(command) => format!("{command} --file <checkpoint.md>{client}"),
+        Some(command) => format!(
+            "{command} --file <checkpoint.md>{client}{}",
+            commands.project_flag()
+        ),
         None => format!(
             "no runnable command is shown because this hook's --state-dir path cannot be shown safely; run workflow session save {} --file <checkpoint.md>{client} with that --state-dir, since without it the save goes to the default store",
             session.as_str()
