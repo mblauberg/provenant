@@ -15,6 +15,7 @@ const DIRECT: &[&str] = &[
     "rusqlite",
     "serde",
     "serde_json",
+    "serde-saphyr",
     "sha2",
     "thiserror",
     "toml_edit",

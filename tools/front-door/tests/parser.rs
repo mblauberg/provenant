@@ -887,7 +887,7 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
 #[test]
 fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Result {
     use std::{fs, os::unix::fs::symlink};
-    let mut rig = TestRig::new()?;
+    let rig = TestRig::new()?;
     let alias = rig.root.join("legacy-alias");
     symlink(rig.home.join(".agents"), &alias)?;
     let out = rig.execute_os(
@@ -901,29 +901,10 @@ fn state_refuses_legacy_aliases_and_checks_select_the_caller_checkout() -> Resul
         None,
     )?;
     assert_eq!(code(&out), 2);
-    let invalid = rig.command(&["check", "harness", "--json"])?;
-    assert_eq!(code(&invalid), 0);
-    rig.env.push(("GIT_DIR".into(), "/invalid/redirect".into()));
-    let check = rig.command(&["check", "harness", "--json"])?;
-    assert_eq!(code(&check), 0);
-    let value: serde_json::Value = serde_json::from_slice(&check.stdout.bytes)?;
-    assert_eq!(value["command"], "check harness");
     let fake = rig.project.join("fake");
     fs::create_dir_all(fake.join("scripts"))?;
     fs::write(fake.join(".git"), "not a Git worktree file")?;
     fs::write(fake.join("HARNESS.md"), "# fixture")?;
-    let invalid = rig.execute_os(
-        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &[
-            "--project".into(),
-            fake.clone().into_os_string(),
-            "check".into(),
-            "harness".into(),
-            "--json".into(),
-        ],
-        None,
-    )?;
-    assert_eq!(code(&invalid), 2);
     let invalid_project = rig.execute_os(
         std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
         &[

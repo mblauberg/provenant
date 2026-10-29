@@ -22,6 +22,8 @@ exceptions = [
   # Already in the approved transitive set and lockfile through hashbrown.
   # Keep this exception version-scoped; no additional crate or feature is enabled.
   { crate = "foldhash@=0.2.0", allow = ["Zlib"] },
+  # Required by serde-saphyr for UTF-16 reader support.
+  { crate = "encoding_rs@=0.8.42", allow = ["BSD-3-Clause"] },
 ]
 
 [bans]
@@ -30,7 +32,10 @@ multiple-versions = "deny"
 # not a wildcard for the transitive dependencies of an approved direct crate.
 allow = [
   "aho-corasick",
+  "annotate-snippets",
   "anstyle",
+  "arraydeque",
+  "autocfg",
   "bitflags",
   "block-buffer",
   "cc",
@@ -40,9 +45,12 @@ allow = [
   "clap_derive",
   "clap_lex",
   "const-oid",
+  "core_detect",
   "cpufeatures",
   "crypto-common",
   "digest",
+  "encoding_rs",
+  "encoding_rs_io",
   "equivalent",
   "errno",
   "fallible-iterator",
@@ -51,6 +59,7 @@ allow = [
   "find-msvc-tools",
   "foldhash",
   "getrandom",
+  "granit-parser",
   "hashbrown",
   "hashlink",
   "heck",
@@ -67,6 +76,8 @@ allow = [
   "linux-raw-sys",
   "log",
   "memchr",
+  "multiversion_no_op",
+  "num-traits",
   "once_cell",
   "pkg-config",
   "portable-atomic",
@@ -97,13 +108,16 @@ allow = [
   "rusqlite",
   "rustix",
   "rustversion",
+  "scopeguard",
   "serde",
+  "serde-saphyr",
   "serde_core",
   "serde_derive",
   "serde_json",
   "serde_spanned",
   "sha2",
   "shlex",
+  "simdutf8",
   "smallvec",
   "syn",
   "tempfile",
@@ -115,6 +129,7 @@ allow = [
   "toml_writer",
   "typenum",
   "unicode-ident",
+  "unicode-width",
   "vcpkg",
   "winnow",
   "zmij",
@@ -125,9 +140,11 @@ allow = [
 # libsqlite3-sys builds bundled SQLite; the others probe compiler/platform
 # capabilities or generate bindings/tables/macros on the supported targets.
 allow-build-scripts = [
+  { name = "encoding_rs" },
   { name = "getrandom" },
   { name = "libc" },
   { name = "libsqlite3-sys" },
+  { name = "num-traits" },
   { name = "portable-atomic" },
   { name = "portable-atomic-util" },
   { name = "proc-macro2" },

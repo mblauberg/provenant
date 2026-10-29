@@ -54,7 +54,7 @@ cross-tracker routes, not a second current-work owner.
 ### Specifications
 
 - Owns: `non-derivable-intent`
-- Drift gate: Rust harness asset checks for retained runtime-graph projections;
+- Drift gate: harness asset checks for retained runtime-graph projections;
   other prose is review-checked
 
 ### Merge policy
@@ -92,7 +92,7 @@ Documentation claims sit in three tiers, and the third is deliberate:
 ## Ambient doctrine rules
 
 These rules keep the always-loaded files small. They are review-owned; the
-Rust harness asset checks enforce the machine-checkable subset.
+Harness asset checks enforce the machine-checkable subset.
 
 1. `AGENTS.md` and `HARNESS.md` are the only ambient doctrine owners.
    `AGENTS.md` stays minimal; `HARNESS.md` is the compact constitution for
@@ -151,7 +151,7 @@ Rust harness asset checks enforce the machine-checkable subset.
 8. A skill behaviour change runs its fixtures with and without the skill and
    records the difference for the reviewer; frozen comparative evals are
    conditional. See [skill-craft](skills/skill-craft/SKILL.md).
-9. Re-run `provenant check harness` and the applicable targeted checks.
+9. Re-run `scripts/check-harness` and the applicable targeted checks.
 
 Split a skill when its triggers, artifacts or completion gates differ
 meaningfully and a single-entrypoint branch selector cannot keep them
@@ -248,10 +248,12 @@ For a pull request branch, run only focused Rust crate tests. Hosted CI runs the
 ```sh
 provenant check config
 provenant check install
-provenant check harness
+scripts/check-harness
 provenant check release
 git diff --check
 ```
+
+The harness check requires Python 3 and PyYAML (`python3 -m pip install PyYAML==6.0.2`). It scans repository assets, not installed skill roots. Run `scripts/test-check-harness` to exercise its fixture tests.
 
 Use `provenant check writing PATHS --rules general` for prose, with
 `--rules academic` or `--rules legal` where they apply. Git pre-push
