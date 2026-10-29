@@ -13,7 +13,48 @@ pub struct LaneBuildSettings {
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
+    /// `CARGO_INCREMENTAL` for lanes; off unless set.
+    pub cargo_incremental: Option<bool>,
+    /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
+    pub cargo_debug: Option<String>,
+    /// Cap on the allocated bytes of all lane Cargo profile directories, idle
+    /// and busy. Collection removes idle ones, least recently used first; when
+    /// busy directories alone exceed the cap it removes every eligible idle
+    /// directory and stays over.
+    pub build_dir_max_bytes: Option<u64>,
+    /// Seconds after its newest write during which a profile directory is
+    /// never removed, even with its Cargo locks free: test and run binaries
+    /// execute after Cargo drops its locks, and Cargo may be opening its lock
+    /// files. Only recent writes are protected: a binary that runs longer than the
+    /// grace without writing is unprotected unless a Cargo lock is held. 15
+    /// minutes unless set.
+    pub build_dir_grace_seconds: Option<u64>,
+    /// Seconds between walks of the lane caches by settlement-triggered
+    /// collection. Within it, a settlement skips the walk unless free space is
+    /// below the floor or the last walk found the total near the cap. 5
+    /// minutes unless set.
+    pub build_dir_survey_interval_seconds: Option<u64>,
 }
+/// Cargo's accepted `debug` levels, including the legacy numeric and boolean forms.
+const CARGO_DEBUG_LEVELS: [&str; 10] = [
+    "none",
+    "line-directives-only",
+    "line-tables-only",
+    "limited",
+    "full",
+    "0",
+    "1",
+    "2",
+    "true",
+    "false",
+];
+/// Lane build output cap when `build_dir_max_bytes` is unset.
+pub const DEFAULT_BUILD_DIR_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+/// Recency grace for lane build output when `build_dir_grace_seconds` is unset.
+pub const DEFAULT_BUILD_DIR_GRACE_SECONDS: u64 = 15 * 60;
+/// Interval between settlement-triggered walks when
+/// `build_dir_survey_interval_seconds` is unset.
+pub const DEFAULT_BUILD_DIR_SURVEY_INTERVAL_SECONDS: u64 = 5 * 60;
 /// The asset's -1 sentinel selects the host-dependent default.
 pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -87,7 +128,35 @@ impl LaneBuildSettings {
         {
             invalid.push("cargo_build_jobs");
         }
+        if self
+            .cargo_debug
+            .as_deref()
+            .is_some_and(|level| !CARGO_DEBUG_LEVELS.contains(&level))
+        {
+            invalid.push("cargo_debug");
+        }
         invalid
+    }
+    /// Incremental compilation is off by default: its sessions grow without
+    /// bound in a lane's target and are rarely reused.
+    pub fn incremental(&self) -> bool {
+        self.cargo_incremental.unwrap_or(false)
+    }
+    /// Line tables keep backtraces useful at a fraction of full debug info.
+    pub fn debug_level(&self) -> &str {
+        self.cargo_debug.as_deref().unwrap_or("line-tables-only")
+    }
+    pub fn build_dir_cap(&self) -> u64 {
+        self.build_dir_max_bytes
+            .unwrap_or(DEFAULT_BUILD_DIR_MAX_BYTES)
+    }
+    pub fn build_dir_grace_seconds(&self) -> u64 {
+        self.build_dir_grace_seconds
+            .unwrap_or(DEFAULT_BUILD_DIR_GRACE_SECONDS)
+    }
+    pub fn build_dir_survey_interval_seconds(&self) -> u64 {
+        self.build_dir_survey_interval_seconds
+            .unwrap_or(DEFAULT_BUILD_DIR_SURVEY_INTERVAL_SECONDS)
     }
     pub fn build_limit(&self, total_bytes: u64) -> u64 {
         self.max_concurrent_builds
@@ -352,8 +421,28 @@ mod build_tests {
         let settings = LaneBuildSettings {
             max_concurrent_builds: Some(3),
             cargo_build_jobs: Some(7),
+            ..LaneBuildSettings::default()
         };
         assert_eq!(settings.build_limit(boundary), 3);
         assert_eq!(settings.jobs(), 7);
+    }
+    #[test]
+    fn cargo_profile_defaults_and_overrides() {
+        let settings = LaneBuildSettings::default();
+        assert!(!settings.incremental());
+        assert_eq!(settings.debug_level(), "line-tables-only");
+        assert_eq!(settings.build_dir_cap(), 20 * 1024 * 1024 * 1024);
+        assert_eq!(settings.build_dir_grace_seconds(), 900);
+        let settings: LaneBuildSettings = toml_edit::de::from_str(
+            "cargo_incremental = true\ncargo_debug = \"full\"\nbuild_dir_max_bytes = 5\nbuild_dir_grace_seconds = 0",
+        )
+        .unwrap();
+        assert!(settings.incremental());
+        assert_eq!(settings.debug_level(), "full");
+        assert_eq!(settings.build_dir_cap(), 5);
+        assert_eq!(settings.build_dir_grace_seconds(), 0);
+        assert!(settings.invalid_keys().is_empty());
+        let invalid: LaneBuildSettings = toml_edit::de::from_str("cargo_debug = \"loud\"").unwrap();
+        assert_eq!(invalid.invalid_keys(), ["cargo_debug"]);
     }
 }

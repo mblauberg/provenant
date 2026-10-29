@@ -7075,6 +7075,69 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
 }
 
 #[test]
+fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResult {
+    struct Disk {
+        free: Cell<u64>,
+        reclaims: Cell<u32>,
+        helps: bool,
+    }
+    impl Resources for Disk {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Ok(MemorySample {
+                total_bytes: 100,
+                available_bytes: 100,
+            })
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(self.free.get())
+        }
+        fn reclaim_disk(&self, _: &Directory) -> bool {
+            self.reclaims.set(self.reclaims.get() + 1);
+            if self.helps {
+                self.free.set(100);
+            }
+            self.helps
+        }
+    }
+    for helps in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let context = context(temp.path())?;
+        let registry = temp.path().canonicalize()?.join("registry");
+        std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
+        std::fs::write(registry.join("config.toml"), "[gc]\nfree_floor='100B'\n")?;
+        let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..Default::default()
+        });
+        let run = lane(102, true);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let disk = Disk {
+            free: Cell::new(40),
+            reclaims: Cell::new(0),
+            helps,
+        };
+        let result = store.admit(id, &attempt, &disk, &clock, &cancel);
+        assert_eq!(disk.reclaims.get(), 1, "one attempt per refusal window");
+        if helps {
+            assert_eq!(result?.state, AttemptState::Running);
+        } else {
+            assert!(matches!(
+                result,
+                Err(RunError::DiskFloor {
+                    free: 40,
+                    floor: 100
+                })
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
     struct Disk(u64);
     impl Resources for Disk {
