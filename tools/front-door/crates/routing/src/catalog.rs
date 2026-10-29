@@ -5,6 +5,7 @@ use crate::{
 };
 use provenant_config::{DomainConfig, DomainSection, Profile, SectionError};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,8 +224,8 @@ impl From<FixedDeadline> for String {
 /// profile, reset reference and override selectors.
 pub struct RoutingConfig {
     pub model_policy: crate::ModelPolicies,
-    /// Replace the catalogue classes and pool preference for writer advice.
-    pub writer_advisory: Option<WriterAdvisory>,
+    /// Override the bundled writer advice; omitted fields keep the bundled values.
+    pub writer_advisory: Option<WriterAdvisoryOverride>,
     /// Silence the advisory for Opus implementation lanes.
     pub suppress_opus_writer_warning: bool,
     pub capacity_cooldown_seconds: u64,
@@ -400,10 +401,10 @@ impl RoutingConfig {
         catalogue: &Catalogue,
         route: &crate::ResolvedRoute,
     ) -> Option<String> {
-        let advice = self
-            .writer_advisory
-            .as_ref()
-            .unwrap_or(&catalogue.writer_advisory);
+        let advice = match &self.writer_advisory {
+            Some(user) => Cow::Owned(user.merged(&catalogue.writer_advisory)),
+            None => Cow::Borrowed(&catalogue.writer_advisory),
+        };
         let applied = format!("{}/{}", route.adapter, route.model);
         if self.suppress_opus_writer_warning
             || !advice.warn_models.iter().any(|id| id.as_str() == applied)
@@ -976,7 +977,7 @@ fn default_weight() -> u8 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WriterAdvisory {
-    /// Display label for the warning class; omitted labels use generic writer advice.
+    /// Display label for the warning class; without one the advice says generic writer.
     #[serde(default)]
     pub label: Option<String>,
     pub warn_models: Vec<ModelId>,
@@ -1011,6 +1012,45 @@ impl WriterAdvisory {
                 code: "selector",
             });
         }
+    }
+}
+
+/// A `[writer_advisory]` table. Each field the user omits keeps its bundled value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriterAdvisoryOverride {
+    pub label: Option<String>,
+    pub warn_models: Option<Vec<ModelId>>,
+    pub cheaper_models: Option<Vec<ModelId>>,
+    pub pool_priority: Option<Vec<String>>,
+}
+impl WriterAdvisoryOverride {
+    fn merged(&self, bundled: &WriterAdvisory) -> WriterAdvisory {
+        WriterAdvisory {
+            label: self.label.clone().or_else(|| bundled.label.clone()),
+            warn_models: self
+                .warn_models
+                .clone()
+                .unwrap_or_else(|| bundled.warn_models.clone()),
+            cheaper_models: self
+                .cheaper_models
+                .clone()
+                .unwrap_or_else(|| bundled.cheaper_models.clone()),
+            pool_priority: self
+                .pool_priority
+                .clone()
+                .unwrap_or_else(|| bundled.pool_priority.clone()),
+        }
+    }
+    /// Checks only what the user wrote. Omitted fields are empty here, which is valid.
+    fn validate(&self, prefix: &str, errors: &mut Vec<SectionError>) {
+        WriterAdvisory {
+            label: self.label.clone(),
+            warn_models: self.warn_models.clone().unwrap_or_default(),
+            cheaper_models: self.cheaper_models.clone().unwrap_or_default(),
+            pool_priority: self.pool_priority.clone().unwrap_or_default(),
+        }
+        .validate(prefix, errors);
     }
 }
 
@@ -1296,7 +1336,8 @@ mod tests {
         let changed_advice = changed
             .opus_writer_advisory(&catalogue, &route)
             .ok_or("class override missing")?;
-        assert!(changed_advice.starts_with("advisory: Writer route codex/gpt-6.1-sol"));
+        // The omitted label inherits the bundled "Opus" class label.
+        assert!(changed_advice.starts_with("advisory: Opus writer route codex/gpt-6.1-sol"));
         assert!(
             changed_advice.contains("cheaper senior route claude/claude-sonnet-5-5"),
             "must not recommend the applied model: {changed_advice}"
@@ -1304,6 +1345,146 @@ mod tests {
         // Familiar spelling on an uncatalogued ID supplies no class evidence.
         route.model = "unknown-opus".into();
         assert!(config.opus_writer_advisory(&catalogue, &route).is_none());
+        Ok(())
+    }
+
+    fn request_for(id: &str) -> Result<RouteRequest, RoutingError> {
+        Ok(RouteRequest {
+            intent: Default::default(),
+            choice: RouteChoice::Model(ModelId::parse(id)?),
+            effort: None,
+            confidential: false,
+            allow_free: false,
+            fallback: Fallback::None,
+        })
+    }
+
+    #[test]
+    fn bundled_opus_writer_advice_names_exact_routes() -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let config = RoutingConfig::default();
+        let context = RoutingContext {
+            policy_account_hint: None,
+            catalogue: &catalogue,
+            config: &config,
+            registry: REGISTRY,
+            availability: &[],
+            quota: &[],
+            capacity_cooldowns: &[],
+            access: &[],
+            now: provenant_core::WallTime::from_micros(0)?,
+            host: "test-host",
+        };
+        // Each receipt names the pool that selected the route; `None` uses pool priority.
+        let rows: [(&str, Option<&str>, Option<&str>); 8] = [
+            (
+                "claude/claude-opus-5-5",
+                None,
+                Some(
+                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper principal route codex/gpt-6.1-sol effort=high (silence with domains.routing.suppress_opus_writer_warning = true)",
+                ),
+            ),
+            (
+                "claude/claude-opus-5-5",
+                Some("senior"),
+                Some(
+                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper senior route codex/gpt-6.1-sol effort=medium (silence with domains.routing.suppress_opus_writer_warning = true)",
+                ),
+            ),
+            (
+                "claude/claude-opus-5-5",
+                Some("junior"),
+                Some(
+                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper junior route codex/gpt-6.1-terra effort=low (silence with domains.routing.suppress_opus_writer_warning = true)",
+                ),
+            ),
+            (
+                "claude/claude-opus-5-5",
+                Some("design"),
+                Some(
+                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper design route claude/claude-sonnet-5-5 effort=high (silence with domains.routing.suppress_opus_writer_warning = true)",
+                ),
+            ),
+            (
+                "claude/claude-opus-5-5",
+                Some("writing"),
+                Some(
+                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper writing route agy/claude-sonnet-4-6 (silence with domains.routing.suppress_opus_writer_warning = true)",
+                ),
+            ),
+            (
+                "claude/claude-opus-5-5",
+                Some("utility"),
+                Some(
+                    "advisory: Opus writer route claude/claude-opus-5-5; consider cheaper utility route codex/gpt-6-luna effort=low (silence with domains.routing.suppress_opus_writer_warning = true)",
+                ),
+            ),
+            (
+                "agy/claude-opus-4-6-thinking",
+                None,
+                Some(
+                    "advisory: Opus writer route agy/claude-opus-4-6-thinking; consider cheaper senior route codex/gpt-6.1-sol effort=medium (silence with domains.routing.suppress_opus_writer_warning = true)",
+                ),
+            ),
+            // Only exact catalogued IDs carry Opus class evidence.
+            ("claude/claude-opus-5", None, None),
+        ];
+        for (model, pool, expected) in rows {
+            let mut route = resolve(&request_for(model)?, &context)?;
+            route.effort = Some("high".into());
+            route.pool_selection = pool.map(|pool| provenant_records::RouteSelectionReceipt {
+                extra: Default::default(),
+                pool: pool.into(),
+                candidates: vec![],
+                roll: 0,
+                total_weight: 1,
+                pick: format!("{}/{}", route.adapter, route.model),
+                reason: None,
+                redraws: vec![],
+            });
+            let advisory = config.opus_writer_advisory(&catalogue, &route);
+            assert_eq!(advisory.as_deref(), expected, "{model} via {pool:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn partial_writer_advisory_override_keeps_bundled_classes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let base = RoutingConfig::default();
+        let context = RoutingContext {
+            policy_account_hint: None,
+            catalogue: &catalogue,
+            config: &base,
+            registry: REGISTRY,
+            availability: &[],
+            quota: &[],
+            capacity_cooldowns: &[],
+            access: &[],
+            now: provenant_core::WallTime::from_micros(0)?,
+            host: "test-host",
+        };
+        let mut route = resolve(&request_for("claude/claude-opus-5-5")?, &context)?;
+        route.effort = Some("high".into());
+        let advice = |toml: &str| -> Result<Option<String>, Box<dyn std::error::Error>> {
+            let config: RoutingConfig = toml_edit::de::from_str(toml)?;
+            assert!(config.validate().is_empty(), "{toml}");
+            Ok(config.opus_writer_advisory(&catalogue, &route))
+        };
+        let label_only = advice("[writer_advisory]\nlabel = \"Principal\"\n")?.ok_or("label")?;
+        assert!(
+            label_only.starts_with("advisory: Principal writer route claude/claude-opus-5-5; consider cheaper principal route codex/gpt-6.1-sol"),
+            "{label_only}"
+        );
+        let pool_only =
+            advice("[writer_advisory]\npool_priority = [\"design\"]\n")?.ok_or("pool")?;
+        assert!(
+            pool_only.contains("Opus writer route claude/claude-opus-5-5; consider cheaper design route claude/claude-sonnet-5-5 effort=high"),
+            "{pool_only}"
+        );
+        let emptied = advice("[writer_advisory]\nwarn_models = []\n")?;
+        assert!(emptied.is_none(), "an empty warn list silences the class");
         Ok(())
     }
 

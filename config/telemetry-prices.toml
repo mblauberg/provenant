@@ -202,7 +202,7 @@ provider = "opencode"
 model = "opencode/opencode-go/deepseek-v4.1-flash"
 billing = "subscription"
 sources = ["https://opencode.ai/docs/go/"]
-# Base rate; the peak adjustment is owned by routing/assets/model-policy.toml.
+# Base rate; the peak adjustment is owned by tools/front-door/crates/routing/assets/model-policy.toml.
 [models.rates]
 uncached_input = 150000
 cache_read = 3000

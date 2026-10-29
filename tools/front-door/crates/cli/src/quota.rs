@@ -889,7 +889,7 @@ fn execute(
         .as_second();
     let path = roots.state.as_path().join("quota/report.json");
     let report_path = path.to_str().ok_or(EdgeError::Path)?.to_owned();
-    let policies = provenant_providers::quota_policies(registry);
+    let policies = provenant_providers::scheduling_policies(&settings, registry);
     let configured = effects.accounts()?;
     let detected = detections(registry, &configured);
     let query = QuotaQuery {
