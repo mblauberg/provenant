@@ -611,17 +611,22 @@ undone: `declared_stop` (its final answer ends with a single, valid `handoff`
 schema v2 block with status `stopped_early` or `blocked`, and nothing after it),
 `provider_stop` (the provider reported a stop reason other
 than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
-`terminal_reason` other than `completed`) and `uncommitted_work`. Prose is never
-read, and a quoted, repeated or trailing-text block is no flag. A declared stop
-(`stopped_early` or `blocked`) changes an otherwise `succeeded` outcome to
-`review_required`; other outcomes remain unchanged. The settled outcome is what
-the graph reads: `tools/front-door/src/fabric.rs` maps any outcome other than
-`succeeded`, including `review_required`, to a failed graph node attempt.
+`terminal_reason` other than `completed`), `uncommitted_work`, and
+`handoff_missing` (a model lane, meaning any route other than a model-less
+adapter such as `command`, settled without a valid final handoff). A failed
+lane never carries `handoff_missing`; a redaction failure flips the outcomes
+that would into `failed`. Prose is never read, and a quoted, repeated or
+trailing-text block is no flag. A declared stop (`stopped_early` or `blocked`)
+changes an otherwise `succeeded` outcome to
+`review_required`; other outcomes remain unchanged. A failed, cancelled or lost
+lane whose final answer declares a stop records `declared_stop` (with any
+provider stop it already reported) and no other partial signal. The settled outcome is
+what the graph reads: `tools/front-door/src/fabric.rs` maps any outcome other
+than `succeeded`, including `review_required`, to a failed graph node attempt.
 Delivery is gated on the outcome before the stop, so a lane that succeeded
 before stopping still delivers its partial work once its publication is
 durable. The reason carries a `partial finish (...)` note, and `lanes` shows
-`(partial)` beside the state, the signals, and a `provenant resume` hint. A
-failed lane carries no flag. Every
+`(partial)` beside the state, the signals, and a `provenant resume` hint. Every
 launch prompt asks for the same final `handoff` block on every finish. Its JSON
 has `schema_version: 2`, `status` (`done`, `stopped_early`, `blocked`), `note`,
 `remaining[]`, `decisions[]` and `verify[]`. Unknown fields are retained. The

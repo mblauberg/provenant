@@ -520,7 +520,13 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                         .message
                         .unwrap_or_else(|| "provider model unavailable".into()),
                 }
-            } else if error.kind == "provider.internal" && error.status == Some(529) {
+            } else if error.kind == "provider.internal"
+                && (error.status == Some(529)
+                    || (error.status == Some(500)
+                        && error.message.as_deref().is_some_and(|message| {
+                            message.to_ascii_lowercase().contains("overloaded")
+                        })))
+            {
                 E::ModelOverloaded {
                     message: error
                         .message
@@ -599,8 +605,12 @@ mod tests {
                 message: "Overloaded".into()
             }]
         );
+        assert_eq!(
+            decode(br#"{"type":"error","error":{"type":"provider.internal","status":500,"message":"Overloaded"}}"#).unwrap(),
+            vec![E::ModelOverloaded { message: "Overloaded".into() }]
+        );
         for raw in [
-            br#"{"type":"error","error":{"type":"provider.internal","status":500,"message":"Overloaded"}}"#.as_slice(),
+            br#"{"type":"error","error":{"type":"provider.internal","status":500,"message":"UnexpectedStatus: 500"}}"#.as_slice(),
             br#"{"type":"error","error":{"type":"unknown","status":529,"message":"Overloaded"}}"#.as_slice(),
         ] {
             assert_eq!(decode(raw).unwrap(), vec![E::Error]);

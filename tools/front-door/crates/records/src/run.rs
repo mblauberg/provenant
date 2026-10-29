@@ -801,6 +801,8 @@ pub struct AttemptRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartialSignal {
+    /// A successful final answer did not include a valid final handoff.
+    HandoffMissing,
     /// The final answer ends with a valid `handoff` block whose status is
     /// `stopped_early` or `blocked`: the lane's statement that work remains.
     DeclaredStop,
@@ -812,6 +814,7 @@ pub enum PartialSignal {
 impl PartialSignal {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::HandoffMissing => "handoff_missing",
             Self::DeclaredStop => "declared_stop",
             Self::ProviderStop => "provider_stop",
             Self::UncommittedWork => "uncommitted_work",
