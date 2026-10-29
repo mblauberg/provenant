@@ -10,6 +10,7 @@ pub mod fs;
 pub mod git;
 pub mod home;
 mod identity;
+pub mod lane_ports;
 pub mod pid;
 pub mod provider_fence;
 pub mod scratch;

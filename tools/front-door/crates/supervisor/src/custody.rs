@@ -572,6 +572,9 @@ pub struct ProviderCommand {
     pub config_environment: Vec<OsString>,
     pub argv: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
+    /// Port space the guardian leases one block from for the provider's
+    /// lifetime; the block is added to the provider's environment.
+    pub lane_ports: Option<provenant_os::lane_ports::Plan>,
     pub cwd: PathBuf,
     pub stdin: Vec<u8>,
     pub secret_input: Option<provenant_os::exec::SecretInput>,

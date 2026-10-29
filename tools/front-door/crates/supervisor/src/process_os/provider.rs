@@ -274,7 +274,7 @@ fn spawn_identified(
     boot: &str,
     permit: Permit,
     secret: Option<&child::SecretPipe>,
-    provider_lease: Option<&provenant_os::fs::LockGuard>,
+    provider_lease: [Option<&provenant_os::fs::LockGuard>; 2],
 ) -> io::Result<(Child, ProcessIdentity, Permit)> {
     let observer =
         super::census::NativeProcessObserver::for_boot(boot).map_err(io::Error::other)?;
@@ -288,7 +288,7 @@ fn spawn_identified(
         command.pre_exec(move || identity_gate(channel.as_raw_fd()));
     }
     let mut pass = vec![lease.handoff_file().as_fd()];
-    if let Some(lease) = provider_lease {
+    for lease in provider_lease.into_iter().flatten() {
         pass.push(lease.handoff_file().as_fd());
     }
     if let Some(pipe) = secret {
@@ -526,7 +526,7 @@ impl ProviderGroup {
             boot,
             permit,
             secret.as_ref(),
-            spec.inherited_lease,
+            [spec.inherited_lease, spec.inherited_ports],
         )?;
         drop(secret);
         drop(priority_writer);
@@ -1177,6 +1177,7 @@ mod tests {
                 input: false,
                 secret_input: None,
                 inherited_lease: None,
+                inherited_ports: None,
                 process_group: false,
                 capture_stdout: true,
                 capture_stderr: false,
@@ -1254,6 +1255,7 @@ mod tests {
                 input: false,
                 secret_input: None,
                 inherited_lease: None,
+                inherited_ports: None,
                 process_group: false,
                 capture_stdout: true,
                 capture_stderr: false,

@@ -1434,8 +1434,24 @@ impl RunStore {
             Some(rest) if rest.starts_with('/') => model.to_owned(),
             _ => format!("{provider}/{model}"),
         };
+        let lane_ports = match plan
+            .confinement
+            .as_ref()
+            .filter(|c| c.writer.is_some())
+            .map(|c| lane_port_plan(&c.state_root))
+            .transpose()
+        {
+            Ok(plan) => plan.flatten(),
+            Err(error) => {
+                lease
+                    .withdraw_unlaunched()
+                    .map_err(|e| HandOff::Uncertain(e.to_string()))?;
+                return Err(local(&error));
+            }
+        };
         let command = ProviderCommand {
             provider_lease: plan.provider_lease,
+            lane_ports,
             resolved_route: route,
             permission_plan_digest: task.authority_digest,
             task: task.task_id,
@@ -1527,6 +1543,25 @@ fn retry_keeps_account_pin(
             RequestedRoute::Model { provider, .. } => original_provider == Some(provider.as_str()),
             _ => original_provider.is_none(),
         }
+}
+
+/// The configured lane port space, or none when allocation is switched off.
+/// Writer lanes only: read-only lanes run no servers.
+fn lane_port_plan(
+    state: &std::path::Path,
+) -> std::io::Result<Option<provenant_os::lane_ports::Plan>> {
+    let settings = provenant_config::LaneBuildSettings::read(state)?;
+    let blocks = settings.lane_port_blocks();
+    if blocks == 0 {
+        return Ok(None);
+    }
+    let narrow = |value: u64| u32::try_from(value).map_err(std::io::Error::other);
+    Ok(Some(provenant_os::lane_ports::Plan {
+        state: state.to_owned(),
+        base: narrow(settings.lane_port_base_value())?,
+        size: narrow(settings.lane_port_block_size())?,
+        blocks: narrow(blocks)?,
+    }))
 }
 
 #[cfg(test)]
