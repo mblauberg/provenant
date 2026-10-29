@@ -378,19 +378,18 @@ pub fn run_wait(
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: the closure runs between fork and exec and only calls
-        // prctl, which is async-signal-safe and touches no shared state.
-        unsafe {
-            command.pre_exec(|| {
-                // A child must not outlive a shim that was killed outright
-                // (SIGKILL cannot be forwarded), or it would keep building
-                // without the slot the shim held.
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        let hook = || {
+            // A child must not outlive a shim that was killed outright
+            // (SIGKILL cannot be forwarded), or it would keep building
+            // without the slot the shim held.
+            // SAFETY: prctl is async-signal-safe and touches no shared state.
+            if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        };
+        // SAFETY: the hook runs between fork and exec and only calls prctl.
+        unsafe { command.pre_exec(hook) };
     }
     let forward = forward::Forward::install();
     let mut child = command.spawn()?;
