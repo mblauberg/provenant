@@ -364,22 +364,6 @@ enum QuotaMenu {
             .joined(separator: " · ")
     }
 
-    private static func mark(_ kind: Attention) -> String {
-        switch kind {
-        case .inputRequired: "questionmark"
-        case .failed: "xmark"
-        case .stalled: "pause.fill"
-        }
-    }
-
-    private static func tint(_ kind: Attention) -> MenuTint {
-        switch kind {
-        case .inputRequired: .blue
-        case .failed: .red
-        case .stalled: .orange
-        }
-    }
-
     /// A menu grows to its widest item, so free text is kept to one short line.
     static func clip(_ text: String, _ limit: Int = 60) -> String {
         let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""

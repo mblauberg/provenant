@@ -263,15 +263,6 @@ struct QuotaReport {
         try project(decoder().decode(QuotaWireReport.self, from: data))
     }
 
-    static func decodeEnvelope(_ data: Data, command: String) throws -> QuotaReport {
-        let envelope = try decoder().decode(QuotaEnvelope<QuotaWireReport>.self, from: data)
-        guard envelope.schemaVersion == schemaVersion, envelope.command == command, envelope.status == "ok" else {
-            throw invalid("unexpected quota command envelope")
-        }
-        guard let report = envelope.data else { throw invalid(envelope.error ?? "quota command returned no report") }
-        return try project(report)
-    }
-
     static func project(_ wire: QuotaWireReport) throws -> QuotaReport {
         guard wire.schemaVersion == schemaVersion else { throw invalid("unsupported report version") }
         guard !wire.reportPath.isEmpty, wire.reportPath.hasPrefix("/") else { throw invalid("report path is not absolute") }
@@ -360,12 +351,6 @@ struct QuotaWireRowDisplay: Decodable, Sendable {
     let hidden: Bool?
     let order: UInt64?
     let headline: String?
-}
-private struct QuotaEnvelope<Payload: Decodable>: Decodable {
-    let schemaVersion: UInt64
-    let command, status: String
-    let data: Payload?
-    let error: String?
 }
 struct QuotaWireCoverage: Decodable, Sendable { let total, known: UInt64 }
 struct QuotaWireAccount: Decodable, Sendable {

@@ -24,7 +24,10 @@ extension CLI {
             let wire = try CLIClient.decode(run, command: "quota \(operation)", as: QuotaWireReport.self)
             return (launcher, .report(try QuotaReport.project(wire)))
         } catch {
-            let message = (error as? ClientError)?.message ?? error.localizedDescription
+            var message = (error as? ClientError)?.message ?? error.localizedDescription
+            if run.status == 127 && !launcher.custom {
+                message += ". Check that the login shell's PATH reaches it, or set PROVENANT_BIN."
+            }
             return fail(run.status == 127 ? nil : launcher, "response", message)
         }
     }
@@ -59,11 +62,4 @@ extension CLI {
             return .failure(Failure(message: "The report\(path.isEmpty ? "" : " field \(path)") \(why)"))
         }
     }
-
-    static func decodeEnvelope(_ data: Data, command: String) -> Result<QuotaReport, Failure> {
-        do { return .success(try QuotaReport.decodeEnvelope(data, command: command)) } catch {
-            return .failure(Failure(message: "The quota command returned an unreadable response: \(error.localizedDescription)"))
-        }
-    }
-
 }

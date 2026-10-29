@@ -1,7 +1,14 @@
 import XCTest
+import ProvenantKit
 @testable import QuotaMenuBar
 
 final class ReportTests: XCTestCase {
+    /// A `quota show` envelope, decoded through the same path the menu uses.
+    private func decodeShow(_ json: String) throws -> QuotaReport {
+        let run = CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false, out: Data(json.utf8), err: "")
+        return try QuotaReport.project(CLIClient.decode(run, command: "quota show", as: QuotaWireReport.self))
+    }
+
     func testPanelEventIsRetainedDuringRefresh() {
         XCTAssertEqual(Trigger.panel.queued(after: nil), .panel)
         XCTAssertEqual(Trigger.panel.queued(after: .power), .panel)
@@ -68,7 +75,7 @@ final class ReportTests: XCTestCase {
           }
         }
         """#
-        let report = try QuotaReport.decodeEnvelope(Data(json.utf8), command: "quota show")
+        let report = try decodeShow(json)
         let account = try XCTUnwrap(report.accounts.first)
         XCTAssertEqual(account.planTitle, "Max 5x")
         XCTAssertEqual(account.fingerprint, "0123456789abcdef")
@@ -117,7 +124,7 @@ final class ReportTests: XCTestCase {
         let exhaustedGlobal = json
             .replacingOccurrences(of: #""pool": "primary", "used_basis_points": 5000"#, with: #""pool": "primary", "used_basis_points": 10000"#)
             .replacingOccurrences(of: #""pool": "gpt-5-codex.primary", "used_basis_points": 10000"#, with: #""pool": "gpt-5-codex.primary", "used_basis_points": 0"#)
-        let exhaustedReport = try QuotaReport.decodeEnvelope(Data(exhaustedGlobal.utf8), command: "quota show")
+        let exhaustedReport = try decodeShow(exhaustedGlobal)
         let exhaustedCodex = try XCTUnwrap(exhaustedReport.accounts.first { $0.provider == "codex" })
         XCTAssertEqual(exhaustedCodex.binding(now: exhaustedReport.generatedAt)?.pace.state, "exhausted")
 
@@ -151,7 +158,7 @@ final class ReportTests: XCTestCase {
           }
         }
         """#
-        let report = try QuotaReport.decodeEnvelope(Data(json.utf8), command: "quota show")
+        let report = try decodeShow(json)
         let account = try XCTUnwrap(report.accounts.first)
         let now = report.generatedAt
         XCTAssertEqual(account.binding(now: now)?.name, "weekly")

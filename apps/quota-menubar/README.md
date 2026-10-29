@@ -83,7 +83,7 @@ Run the fixture's deterministic checks with `python3 -m unittest discover -s app
 .build/debug/quota-menubar --render Fixtures/tall.json tall.png
 ```
 
-The report fixtures use the same versioned raw report shape written by `quota tick`. `current.json` covers available, credit-only, exhausted, stale and authentication-required account rows, plus source-only statuses. `tall.json` holds 24 accounts; a menu taller than the screen scrolls as any macOS menu does. `lanes.json` holds one lane of each kind that needs attention.
+The report fixtures use the same versioned raw report shape written by `quota tick`. `current.json` covers available, credit-only, exhausted, stale and authentication-required account rows, plus source-only statuses. `tall.json` holds 24 accounts; a menu taller than the screen scrolls as any macOS menu does.
 
 ## Start at login
 
