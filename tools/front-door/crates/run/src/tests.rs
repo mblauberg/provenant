@@ -695,7 +695,8 @@ fn streamed_handoff_redacts_decoded_strings_before_graph_continuation() -> TestR
     done.result = &text;
     store.publish_terminal(id, 1, &done, &exit(), &call)?;
     let result = store.stream_result(id, &call, None)?;
-    let handoff = result.handoff
+    let handoff = result
+        .handoff
         .map_err(std::io::Error::other)?
         .ok_or("streamed handoff")?;
     assert!(!handoff.fenced().contains(secret));
