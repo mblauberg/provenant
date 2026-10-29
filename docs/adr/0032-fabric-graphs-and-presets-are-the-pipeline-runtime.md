@@ -13,8 +13,8 @@ restart behaviour, and a crash could launch a step twice or lose its place.
 ## Decision
 
 A bounded Fabric graph is the one runtime for multi-step agent work. Nodes are
-ordinary run attempts, command gates, decide nodes, plan expansions and land
-nodes. A preset is not a second engine: it is data (stages, roles, typed
+run attempts (tasks and syntheses), deterministic gates on verdicts, budgets
+or CI, decide nodes, plan expansions, loops, composites and land nodes. A preset is not a second engine: it is data (stages, roles, typed
 parameters) that lowers through one path into an ordinary graph, which the graph
 owner submits. `--explain` shows the lowered graph.
 

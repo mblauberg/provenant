@@ -33,8 +33,9 @@ attempt, so a review leg is judged by what actually ran
 
 ## Consequences
 
-Retuning capacity or adding a model is a data change. Tests assert resolver
-outcomes, not catalogue contents. The [routing spec](../specs/routing.md) owns
+Retuning capacity or adding a model is a data change. Bundled pool contents
+are pinned by catalogue tests and the policy golden, so a data change updates
+those in the same commit. The [routing spec](../specs/routing.md) owns
 the rules and the [routing runbook](../runbooks/model-routing.md) owns use.
 Changing the confidentiality rule, or treating free models differently from
 paid ones in eligibility, amends this ADR.
