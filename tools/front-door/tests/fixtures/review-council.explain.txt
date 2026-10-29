@@ -27,8 +27,9 @@ lenses  role=- tier=- family=any kind=composite access=read_only worktree=-
     reference: skill:code-review/references/lenses/tests.md <digest>
     read_roots: ["<project>","<root>/skills"]
   exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]},{"node":"lens-conventions-readability","outputs":["result","findings"]},{"node":"lens-tests","outputs":["result","findings"]}]
-verify  role=review.verify tier=senior family=cross kind=- access=read_only worktree=-
+verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
   read_roots: ["<project>"]
+  source: {"node":"subject","type":"node"}
   inputs: [{"node":"lenses","outputs":["result"]}]
 synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
   read_roots: ["<project>"]

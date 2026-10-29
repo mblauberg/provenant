@@ -657,7 +657,7 @@ fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
         .find("synthesis  role=review.synthesis")
         .ok_or("no synthesis")?;
     assert!(lens < verify && verify < synthesis, "{text}");
-    assert!(text.contains("family=cross"), "{text}");
+    assert!(text.contains("family=cross_preferred"), "{text}");
     assert!(text.contains("family=distinct_from_writer"), "{text}");
     golden("review-council.explain.txt", &text)?;
     Ok(())

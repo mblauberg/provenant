@@ -319,7 +319,7 @@ negative `until` verdict starts the next round.
 
 Configure host limits for the full expansion before running. This example
 requires seven nodes and a dependency depth of six. The default host depth
-limit is 32, which covers two rounds. Composite nesting counts against the
+limit is 64, which covers two rounds of the bundled `big-batch` review loop. Composite nesting counts against the
 same limit. To allow many more rounds, raise it:
 
 ```toml
@@ -476,7 +476,7 @@ wall_time_seconds = 7200
 Limits also include `routes_per_node`, `node_prompt_bytes`,
 `graph_prompt_bytes`, `expansion_depth`, `fan_out_width`, `continuations` and `concurrency`.
 The defaults are 16 routes, 256 KiB per node prompt, 4 MiB per graph,
-expansion depth 32 and fan-out 32. Set concurrency to 0 to use host lane caps.
+expansion depth 64 and fan-out 32. Set concurrency to 0 to use host lane caps.
 Fan-out counts direct dependants of a node; expansion depth is the longest
 dependency chain in edges, with root nodes at depth 0.
 Budget fields are optional; unset fields have no budget. Costs are in US dollars.

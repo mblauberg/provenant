@@ -6,8 +6,9 @@
 #   extends        parent role; the child's keys replace the parent's.
 #   kind, tier, access, outputs, inputs   copied onto the node.
 #   family         "any", "distinct_from_writer" (route away from the model
-#                  family that served the stage's writer) or "cross" (recorded
-#                  on the node; the stage's route selects another family).
+#                  family that served the stage's writer) or "cross_preferred"
+#                  (recorded on the node, not enforced; the stage's route
+#                  should select another family).
 #   card           short text always placed at the head of the brief.
 #   references     [{ ref = "skill:<skill>/<path>", when = "<hint>", inline = bool }]
 #                  The compiler resolves each against the release root, records
@@ -203,9 +204,10 @@ references = [
 tier = "${verifier_tier}"
 fallback_tier = "senior"
 access = "read_only"
-# Cross-family is a routing property: the graph's distinct_from only separates
-# a node from its writer, so point this route at another model family.
-family = "cross"
+# Cross-family is a preference the route has to honour: the graph's
+# distinct_from only separates a node from its writer, so point this route at
+# another model family. Explain shows the constraint as cross_preferred.
+family = "cross_preferred"
 worktree = "${worktree}"
 card = "You falsify review findings. A finding stands only if you cannot break it."
 prompt = """
@@ -214,9 +216,12 @@ Try to falsify every finding against the pinned commit: reproduce it, look for
 the code or test that contradicts it, and check it against the spec. Re-emit
 every finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your
 evidence. Add any finding the lenses missed and mark it NEW. Do not edit files.
+End with a findings block (schema_version 1) whose entries keep each finding's
+id and add "verification": "upheld", "falsified" or "unverifiable".
 """
 
 [roles."review.synthesis"]
+dispositions = ["accepted", "rejected", "deferred"]
 tier = "senior"
 kind = "synthesise"
 access = "read_only"
@@ -228,12 +233,16 @@ Reconcile independent review findings against evidence for: ${prompt}
 Do not take a majority vote. Weigh each finding by its evidence and, where a
 verifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one
 disposition with a one-line reason: accepted (must be fixed), rejected
-(evidence refutes it) or deferred (valid, not for this change). Emit one exact
+(evidence refutes it) or deferred (valid, not for this change). End with a
+fenced findings block (schema_version 1) with one entry per finding id; each
+entry carries "disposition" (accepted, rejected or deferred) and "reason".
+A finding without a disposition is incomplete. Emit one exact
 VERDICT: PASS only when no accepted finding remains and acceptance evidence is
 satisfied, otherwise VERDICT: FAIL.
 """
 
 [roles."review.evaluator"]
+dispositions = ["accepted", "rejected", "deferred"]
 tier = "${evaluator}"
 kind = "synthesise"
 access = "read_only"
@@ -243,7 +252,9 @@ prompt = """
 Evaluate the implementation of: ${prompt}
 Spec (acceptance criteria): ${spec}
 Weigh the lens findings against the evidence. Give every finding exactly one
-disposition with a one-line reason: accepted, rejected or deferred. Emit one
+disposition with a one-line reason: accepted, rejected or deferred. End with a
+fenced findings block (schema_version 1) with one entry per finding id; each
+entry carries "disposition" and "reason". Emit one
 exact VERDICT: PASS only when no accepted finding remains, otherwise
 VERDICT: FAIL.
 """

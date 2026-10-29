@@ -163,10 +163,10 @@ A dotted name is a variant, so an undefined `lens.house` uses `lens`.
 | --- | --- |
 | `card` | Short text placed first in the brief |
 | `references` | `{ ref = "skill:SKILL/PATH", when = "HINT", inline = false }`. The compiler resolves the reference against the release `skills/` directory, records its content digest in the graph and lists it in the brief with its `when` hint. `inline = true` puts the text in the brief. An unknown reference, a `..` part or a link leaving `skills/` is refused. |
-| `family` | `any`, `distinct_from_writer` (see below) or `cross`, which records on the node that its route should serve another model family. |
+| `family` | `any`, `distinct_from_writer` (see below) or `cross_preferred`, which records on the node that its route should serve another model family (a preference; the scheduler does not enforce it). |
 | `fallback_tier` | Used, and recorded as a substitution, when `tier` names a route the routing configuration does not define. |
 
-Each node carries `role` and `role_digest`, and `run --explain` lists every
+Provenance (origins, roles with digests and substituted routes) is kept in the graph document's `provenance` field. A role's `dispositions` list declares the values a synthesis must give each finding (`disposition` and `reason` in its findings block). Each node carries `role` and `role_digest` (a hash of the whole effective role and its reference digests), and `run --explain` lists every
 reference with its digest, so editing a reference changes the digest. A node
 that uses references may read the release `skills/` directory, read-only. A
 role grants no authority: access, write scope and routing come from the stage.
@@ -178,7 +178,7 @@ substitution. `--set parameters.external=0` opts out of external scouts, which
 the origins record. The same applies to `verifier_tier` in `review-council`:
 define a route named `verifier` in another model family. The graph's
 `distinct_from` separates only a node from its writer, so cross-family review
-is a routing property for now.
+is a routing property for now, shown by `explain` as `cross_preferred`.
 
 ## Review and source subjects
 

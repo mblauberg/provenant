@@ -13,9 +13,6 @@ stages = [
   ] } },
 ]
 
-[limits]
-expansion_depth = 64
-
 [pattern]
 level = "recommended"
 summary = "Scout, parallel writer lanes with lenses, a combined council, a principal refactor and bounded repair."

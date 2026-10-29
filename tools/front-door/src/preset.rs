@@ -839,6 +839,23 @@ pub fn expand_with(
             document[key] = interpolate(value, &parameters, prompt, 1)?;
         }
     }
+    let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
+    let substitutions = layers.substitutions.take();
+    for (role, used) in &roles {
+        origins.insert(
+            format!("roles.{role}"),
+            used["origin"].as_str().unwrap_or("").into(),
+        );
+    }
+    // Provenance rides in the graph document so it is hashed into the graph
+    // identity and retained with the run: where each value came from, which
+    // roles (with digests) were used and any route substituted.
+    document["provenance"] = json!({
+        "preset": name,
+        "origins": origins,
+        "roles": roles,
+        "substitutions": substitutions,
+    });
     if serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
         .len()
@@ -857,19 +874,10 @@ pub fn expand_with(
         )
         .filter(|shapes| !shapes.is_empty()),
         document,
-        origins: {
-            let mut origins = origins;
-            for (role, used) in layers.used_roles.borrow().iter() {
-                origins.insert(
-                    format!("roles.{role}"),
-                    used["origin"].as_str().unwrap_or("").into(),
-                );
-            }
-            origins
-        },
+        origins,
         repo_files,
-        roles: layers.used_roles.take().into_iter().collect(),
-        substitutions: layers.substitutions.take(),
+        roles,
+        substitutions,
     })
 }
 
@@ -1065,6 +1073,7 @@ fn lower_leaf(
             "family",
             "fallback_tier",
             "purpose",
+            "dispositions",
         ]
         .contains(&key.as_str())
         {
@@ -1139,7 +1148,7 @@ fn lower_leaf(
         brief.push_str(&task);
         let listed: Vec<String> = references
             .iter()
-            .filter(|(_, _, inline)| !inline)
+            .filter(|(reference, _, inline)| !inline && reference.path.is_some())
             .map(|(reference, when, _)| {
                 let location = reference
                     .path
@@ -1157,7 +1166,10 @@ fn lower_leaf(
             brief.push_str("\n\nReferences to read when relevant:\n");
             brief.push_str(&listed.join("\n"));
         }
-        for (reference, _, _) in references.iter().filter(|(_, _, inline)| *inline) {
+        for (reference, _, _) in references
+            .iter()
+            .filter(|(reference, _, inline)| *inline || reference.path.is_none())
+        {
             brief.push_str("\n\n");
             brief.push_str(&reference.text);
         }
@@ -1165,8 +1177,10 @@ fn lower_leaf(
     }
     match family.as_ref().and_then(Value::as_str) {
         None | Some("" | "any") => {}
-        Some("cross") => {
-            map.insert("family".into(), json!("cross"));
+        Some("cross_preferred") => {
+            // Recorded as a preference: routing does not yet exclude the
+            // families of upstream attempts, so this is not enforced.
+            map.insert("family".into(), json!("cross_preferred"));
         }
         Some("distinct_from_writer") => {
             map.entry("distinct_from")
@@ -1174,7 +1188,7 @@ fn lower_leaf(
         }
         Some(other) => {
             return Err(format!(
-                "node {id}: unknown family constraint {other}; use any, cross or distinct_from_writer"
+                "node {id}: unknown family constraint {other}; use any, cross_preferred or distinct_from_writer"
             ));
         }
     }
@@ -1185,12 +1199,13 @@ fn lower_leaf(
                 json!({"ref": reference.name, "when": when, "digest": reference.digest})
             })
             .collect();
+        // The whole effective profile (prompt, tier, access, kind, outputs,
+        // inline flags and the rest) plus the content digests of references.
         let digest = provenant_records::CanonicalV1::file_digest(
             &serde_json::to_vec(&json!({
                 "role": role,
                 "chain": resolved.chain,
-                "card": card,
-                "family": family,
+                "profile": resolved.profile,
                 "references": recorded,
             }))
             .map_err(|e| e.to_string())?,
@@ -2116,7 +2131,7 @@ pub(crate) fn bind_run_context(
     Ok(())
 }
 
-/// The family constraint a node carries: `any`, `cross` or `distinct_from_writer`.
+/// The family constraint a node carries: `any`, `cross_preferred` (recorded, not enforced) or `distinct_from_writer`.
 fn family(node: &Value) -> String {
     if let Some(family) = node["family"].as_str() {
         family.into()

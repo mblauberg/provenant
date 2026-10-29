@@ -3,7 +3,7 @@ stages = [
   { id = "lenses", parallel = [
     { id = "lens", for_each = "${lenses}", role = "lens.${item.name}" },
   ], source = { type = "node", node = "subject" } },
-  { id = "verify", role = "review.verify", count = "${verifiers}" },
+  { id = "verify", role = "review.verify", count = "${verifiers}", source = { type = "node", node = "subject" } },
   { id = "synthesis", role = "review.synthesis" },
 ]
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict", "commit"] }]

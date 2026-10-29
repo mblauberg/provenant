@@ -198,15 +198,7 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
-        let mut limits = config.limits.clone();
-        // A preset may raise the expansion depth for its own graph.
-        if let Some(depth) = document
-            .limits
-            .as_ref()
-            .and_then(|limits| limits["expansion_depth"].as_u64())
-        {
-            limits.expansion_depth = depth as usize;
-        }
+        let limits = config.limits.clone();
         let inspection = document
             .inspect(&limits)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -329,15 +321,7 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
-        let mut limits = config.limits.clone();
-        // A preset may raise the expansion depth for its own graph.
-        if let Some(depth) = document
-            .limits
-            .as_ref()
-            .and_then(|limits| limits["expansion_depth"].as_u64())
-        {
-            limits.expansion_depth = depth as usize;
-        }
+        let limits = config.limits.clone();
         let mut owner = PresetOwner::default();
         let mut journal = PresetJournal::default();
         let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &config.budget)
@@ -1312,9 +1296,10 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
         .collect();
     assert_eq!(ids, ["subject", "lenses", "verify", "synthesis"]);
     let verify = node(&expanded.document, "verify");
-    assert_eq!(verify["family"], "cross");
+    assert_eq!(verify["family"], "cross_preferred");
+    assert_eq!(verify["source"], json!({"type": "node", "node": "subject"}));
     assert_eq!(verify["route"]["alias"], "verifier");
-    assert_eq!(verify["depends_on"], json!(["lenses"]));
+    assert_eq!(verify["depends_on"], json!(["lenses", "subject"]));
     let synthesis = node(&expanded.document, "synthesis");
     assert_eq!(synthesis["depends_on"], json!(["verify", "subject"]));
     assert!(
@@ -1786,4 +1771,108 @@ fn composite_dependencies_and_inputs_take_parameters() {
     assert_eq!(run["inputs"][0]["node"], "scope");
     let _: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(result.document).unwrap();
+}
+
+#[test]
+fn bundled_presets_fit_the_default_host_depth_limit() {
+    // The documents' own `limits` are ignored by the host, so check against
+    // the default host limits only.
+    let limits = provenant_fabric_runtime::config::GraphConfig::default().limits;
+    for name in ["big-batch", "scope-then-run", "review-council"] {
+        let document = bundled_fixture(name);
+        let inspection = document.inspect(&limits).unwrap();
+        assert_eq!(inspection.limit_reason, None, "{name}");
+    }
+}
+
+#[test]
+fn cross_family_is_recorded_as_a_preference_not_an_enforced_constraint() {
+    let expanded = expand(
+        &Layers::empty(),
+        "review-council",
+        "the change",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    let verify = node(&expanded.document, "verify");
+    assert_eq!(verify["family"], "cross_preferred");
+    assert!(verify.get("distinct_from").is_none());
+}
+
+#[test]
+fn role_digest_covers_the_whole_effective_profile() {
+    let digest = |roles: &str| {
+        let mut layers = Layers::empty();
+        layers.roles.add("repo", roles).unwrap();
+        let expanded = expand(&layers, "scout-swarm", "brief", &[]).unwrap();
+        expanded.roles["scout.codebase"]["digest"].clone()
+    };
+    let base = digest("");
+    for change in [
+        "prompt = 'different'",
+        "tier = 'senior'",
+        "access = 'worktree_write'",
+        "kind = 'synthesise'",
+        "outputs = ['result', 'commit']",
+        "references = [{ ref = 'skill:scope/references/scout-areas.md', when = 'always', inline = false }]",
+    ] {
+        let changed = digest(&format!("[roles.\"scout.codebase\"]\n{change}\n"));
+        assert_ne!(base, changed, "{change}");
+    }
+}
+
+#[test]
+fn embedded_references_are_inlined_when_there_is_no_skills_root() {
+    let expanded = expand(
+        &Layers::empty(),
+        "scope-then-run",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    let scope = node(&expanded.document, "scope");
+    let prompt = scope["prompt"].as_str().unwrap();
+    // architect.md and critic.md are listed, not inline, in the role.
+    assert!(prompt.contains("# Architect"), "{prompt}");
+    assert!(prompt.contains("# Critic"), "{prompt}");
+}
+
+#[test]
+fn substitutions_and_origins_travel_in_the_retained_graph_document() {
+    let mut layers = Layers::empty();
+    layers.known_routes = Some(["senior".to_owned()].into());
+    let expanded = expand(
+        &layers,
+        "scout-swarm",
+        "brief",
+        &["parameters.external=2".into()],
+    )
+    .unwrap();
+    let provenance = &expanded.document["provenance"];
+    assert_eq!(provenance["substitutions"][0]["requested"], "web");
+    assert_eq!(provenance["origins"]["parameters.external"], "--set");
+    assert!(provenance["roles"]["scout.external"]["digest"].is_string());
+    // It survives a typed round trip, as retention does.
+    let typed: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expanded.document.clone()).unwrap();
+    let again = serde_json::to_value(&typed).unwrap();
+    assert_eq!(again["provenance"], *provenance);
+}
+
+#[test]
+fn synthesis_declares_and_requests_a_disposition_for_every_finding() {
+    let expanded = expand(
+        &Layers::empty(),
+        "review-council",
+        "the change",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    let synthesis = node(&expanded.document, "synthesis");
+    assert_eq!(
+        synthesis["dispositions"],
+        json!(["accepted", "rejected", "deferred"])
+    );
+    let prompt = synthesis["prompt"].as_str().unwrap();
+    assert!(prompt.contains("findings block") && prompt.contains("\"disposition\""));
 }
