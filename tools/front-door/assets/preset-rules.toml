@@ -1,0 +1,5 @@
+[select]
+default = { preset = "single" }
+
+[select.by_readiness]
+underspecified = { preset = "scope-then-run" }

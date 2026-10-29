@@ -1,5 +1,4 @@
-//! Per-user scheduled lane cache collection, published by the install receipt.
-use provenant_config::GcSettings;
+//! Platform seam for the per-user host tick scheduler, published by the install receipt.
 use provenant_fabric_runtime::peer_agent::{self, AgentError, launchctl, utf8, xml};
 use serde::Serialize;
 use std::{
@@ -7,18 +6,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const LABEL: &str = "dev.provenant.gc";
+pub const LABEL: &str = "dev.provenant.tick";
 
 pub fn plist(home: &Path) -> PathBuf {
-    home.join("Library/LaunchAgents/dev.provenant.gc.plist")
+    home.join("Library/LaunchAgents/dev.provenant.tick.plist")
 }
 
-pub fn render(program: &Path, state: &Path, settings: &GcSettings) -> Result<Vec<u8>, AgentError> {
+pub fn render(program: &Path, state: &Path, search: &OsStr) -> Result<Vec<u8>, AgentError> {
     let program = xml(utf8(program)?);
-    let stdout = xml(utf8(&state.join("gc/stdout.log"))?);
-    let stderr = xml(utf8(&state.join("gc/stderr.log"))?);
+    let stdout = xml(utf8(&state.join("tick/stdout.log"))?);
+    let stderr = xml(utf8(&state.join("tick/stderr.log"))?);
     let state = xml(utf8(state)?);
-    let idle_days = settings.idle_days;
+    let search = xml(utf8(Path::new(search))?);
     Ok(format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -28,21 +27,17 @@ pub fn render(program: &Path, state: &Path, settings: &GcSettings) -> Result<Vec
   <key>ProgramArguments</key>
   <array>
     <string>{program}</string>
-    <string>gc</string>
-    <string>--scheduled</string>
-    <string>--apply</string>
-    <string>--idle-days</string>
-    <string>{idle_days}</string>
+    <string>tick</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>{search}</string>
     <key>PROVENANT_STATE_DIR</key>
     <string>{state}</string>
   </dict>
   <key>StartInterval</key>
-  <integer>86400</integer>
+  <integer>60</integer>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
@@ -66,7 +61,7 @@ pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Insta
     if !enabled || !peer_agent::eligible(state, home) {
         return Installed::Skipped;
     }
-    let result = provenant_config::private_directory(&state.join("gc"), true)
+    let result = provenant_config::private_directory(&state.join("tick"), true)
         .map_err(|error| std::io::Error::other(error).into())
         .and_then(|_| bootstrap_with(home, changed, launchctl));
     match result {
@@ -114,9 +109,22 @@ fn bootstrap_with(
 }
 
 pub fn stop(home: &Path) -> Result<(), AgentError> {
-    let service = format!("gui/{}/{LABEL}", provenant_os::fs::effective_uid());
-    if launchctl(&["print".as_ref(), service.as_ref()], home)?.0 {
-        let (ok, error) = launchctl(&["bootout".as_ref(), service.as_ref()], home)?;
+    stop_with(home, LABEL, launchctl)
+}
+
+/// Retire the former scheduler even when its plist has already disappeared.
+pub fn retire_gc(home: &Path) -> Result<(), AgentError> {
+    stop_with(home, "dev.provenant.gc", launchctl)
+}
+
+fn stop_with(
+    home: &Path,
+    label: &str,
+    mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> Result<(), AgentError> {
+    let service = format!("gui/{}/{label}", provenant_os::fs::effective_uid());
+    if run(&["print".as_ref(), service.as_ref()], home)?.0 {
+        let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
         if !ok {
             return Err(AgentError::Launchctl("bootout", error));
         }
@@ -128,6 +136,25 @@ pub fn stop(home: &Path) -> Result<(), AgentError> {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn retiring_gc_unloads_the_old_label_and_propagates_bootout_failure() {
+        let mut calls = Vec::new();
+        stop_with(Path::new("/home"), "dev.provenant.gc", |args, _| {
+            calls.push((args[0].to_owned(), args[1].to_owned()));
+            Ok((true, String::new()))
+        })
+        .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "print");
+        assert_eq!(calls[1].0, "bootout");
+        assert!(calls[1].1.to_string_lossy().ends_with("/dev.provenant.gc"));
+        let error = stop_with(Path::new("/home"), "dev.provenant.gc", |args, _| {
+            Ok((args[0] == "print", "busy".into()))
+        })
+        .unwrap_err();
+        assert!(matches!(error, AgentError::Launchctl("bootout", _)));
+    }
 
     #[test]
     fn bootstrap_keeps_an_unchanged_service_and_retries_after_bootout() {
@@ -153,37 +180,25 @@ mod tests {
 
     #[test]
     fn plist_renders_interval_arguments_state_logs_and_xml_escaping() {
-        let settings = GcSettings {
-            idle_days: 14,
-            free_floor: Some("20G".into()),
-            ..GcSettings::default()
-        };
         let text = String::from_utf8(
-            render(Path::new("/bin/a&b"), Path::new("/state/a<b"), &settings).unwrap(),
+            render(
+                Path::new("/bin/a&b"),
+                Path::new("/state/a<b"),
+                OsStr::new("/usr/bin:/opt/a&b"),
+            )
+            .unwrap(),
         )
         .unwrap();
-        assert!(text.contains("<string>dev.provenant.gc</string>"));
-        assert!(text.contains("<key>StartInterval</key>\n  <integer>86400</integer>"));
+        assert!(text.contains("<string>dev.provenant.tick</string>"));
+        assert!(text.contains("<key>StartInterval</key>\n  <integer>60</integer>"));
         assert!(text.contains("<string>/bin/a&amp;b</string>"));
-        assert!(text.contains("<string>--scheduled</string>"));
-        assert!(text.contains("<string>--apply</string>"));
-        assert!(text.contains("<string>--idle-days</string>\n    <string>14</string>"));
-        assert!(
-            !text.contains("--free-floor"),
-            "the collector must read the live shared floor"
-        );
+        assert!(text.contains("<string>tick</string>"));
         assert!(text.contains("<key>PROVENANT_STATE_DIR</key>"));
+        assert!(text.contains("<string>/usr/bin:/opt/a&amp;b</string>"));
         for path in ["stdout.log", "stderr.log"] {
-            assert!(text.contains(&format!("<string>/state/a&lt;b/gc/{path}</string>")));
+            assert!(text.contains(&format!("<string>/state/a&lt;b/tick/{path}</string>")));
         }
         assert!(!text.contains("KeepAlive"));
         assert!(text.contains("<key>RunAtLoad</key>\n  <true/>"));
-        let temp = tempfile::tempdir().unwrap();
-        let state = temp.path().join("new/state");
-        let defaults = String::from_utf8(
-            render(Path::new("/bin/provenant"), &state, &GcSettings::default()).unwrap(),
-        )
-        .unwrap();
-        assert!(!defaults.contains("--free-floor"));
     }
 }

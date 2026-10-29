@@ -218,6 +218,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 provenant_config::inspect_config(&roots, &provenant_cli::domains::SECTIONS)?;
             Ok(provenant_cli::check::config_page(
                 inspection,
+                crate::pool_effort_warnings(&roots),
                 ("config", selector),
                 &page,
             )?)

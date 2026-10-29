@@ -768,9 +768,13 @@ pub(crate) fn resolve_dispatch(
     availability: &[AvailabilityRecord],
     access: &[AccessContext<'_>],
     host: &str,
-    excluded_families: Option<&[String]>,
+    excluded_families: Option<(&[String], bool)>,
 ) -> Result<provenant_records::ResolvedRoute, String> {
     let catalogue = Catalogue::bundled().map_err(|error| error.to_string())?;
+    let (excluded_families, required) = match excluded_families {
+        Some((families, required)) => (Some(families), required),
+        None => (None, false),
+    };
     let excluded: Vec<ModelId> = catalogue
         .models()
         .iter()
@@ -792,7 +796,12 @@ pub(crate) fn resolve_dispatch(
     );
     let exhausted =
         matches!(&selected, Err(error) if error.starts_with("no eligible pool member:"));
-    if !excluded.is_empty() && exhausted {
+    if required && exhausted {
+        Err(format!(
+            "no route outside model families {} and family separation is required",
+            excluded_families.unwrap_or_default().join(", ")
+        ))
+    } else if !excluded.is_empty() && exhausted {
         resolve_dispatch_excluding(
             request,
             roots,
@@ -2141,7 +2150,7 @@ mod route_tests {
         let path = roots.state.as_path().join("config.toml");
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/claude-haiku-5-5',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=0}]\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=0}]\n",
         )?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let catalogue = super::Catalogue::bundled()?;
@@ -2155,7 +2164,7 @@ mod route_tests {
             catalogue_revision: catalogue.revision().into(),
             account_key: Some("go".into()),
             observed_models: vec![
-                "opencode-go/claude-haiku-5-5".into(),
+                "opencode-go/minimax-m3.1-flash".into(),
                 "opencode-go/glm-5.3-flash".into(),
             ],
             observed_unix_seconds: now,
@@ -2197,7 +2206,9 @@ mod route_tests {
             name: None,
             request: super::RouteRequest {
                 read_heavy: false,
-                model: Some(super::Model("opencode/opencode-go/claude-haiku-5-5".into())),
+                model: Some(super::Model(
+                    "opencode/opencode-go/minimax-m3.1-flash".into(),
+                )),
                 route: None,
                 effort: None,
                 confidential: false,
@@ -2206,15 +2217,15 @@ mod route_tests {
             },
         });
         match super::execute(&preview, &roots, 0) {
-            Err(error) => assert!(error.to_string().contains("$15")),
+            Err(error) => assert!(error.to_string().contains("$20")),
             Ok(_) => panic!("preview must refuse the model"),
         }
         let error = resolve(&request(
-            Some("opencode/opencode-go/claude-haiku-5-5"),
+            Some("opencode/opencode-go/minimax-m3.1-flash"),
             None,
         )?)
         .unwrap_err();
-        assert!(error.contains("claude-haiku-5-5") && error.contains("$15"));
+        assert!(error.contains("minimax-m3.1-flash") && error.contains("$20"));
         let error = resolve(&request(Some("opencode/opencode-go/unlisted"), None)?).unwrap_err();
         assert!(error.contains("opencode-go/unlisted") && error.contains("unknown"));
         let fallback = |model: Option<&str>, route: Option<&str>| -> Result<(), Box<dyn Error>> {
@@ -2235,31 +2246,31 @@ mod route_tests {
             );
             Ok(())
         };
-        fallback(Some("opencode/opencode-go/claude-haiku-5-5"), None)?;
+        fallback(Some("opencode/opencode-go/minimax-m3.1-flash"), None)?;
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/claude-haiku-5-5',weight=1}]\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1}]\n",
         )?;
         fallback(None, Some("test"))?;
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/claude-haiku-5-5',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n",
         )?;
         let error = resolve(&request(None, Some("test"))?).unwrap_err();
         assert!(
-            error.contains("claude-haiku-5-5") && error.contains("glm-5.3-flash"),
+            error.contains("minimax-m3.1-flash") && error.contains("glm-5.3-flash"),
             "{error}"
         );
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/claude-haiku-5-5',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=0}]\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=0}]\n",
         )?;
         let selected = resolve(&request(None, Some("test"))?)?;
         assert_eq!(selected.model, "opencode-go/glm-5.3-flash");
         assert!(
             selected.pool_selection.as_ref().unwrap().redraws[0]
                 .reason
-                .contains("$15")
+                .contains("$20")
         );
         let mut candidate = selected.clone();
         candidate.model = "opencode-go/unlisted".into();
@@ -2268,11 +2279,11 @@ mod route_tests {
                 .unwrap_err()
                 .contains("unknown")
         );
-        candidate.model = "opencode-go/claude-haiku-5-5".into();
+        candidate.model = "opencode-go/minimax-m3.1-flash".into();
         assert!(
             super::check_dispatch_candidate(&roots, &candidate)
                 .unwrap_err()
-                .contains("$15")
+                .contains("$20")
         );
         Ok(())
     }
@@ -2714,7 +2725,7 @@ mod route_tests {
                 &availability,
                 &access,
                 "fixture",
-                Some(excluded),
+                Some((excluded, false)),
             )
         };
         let first = resolve(&[])?;
@@ -2732,6 +2743,23 @@ mod route_tests {
             .and_then(|row| row.family.clone())
             .ok_or("family")?;
         assert_ne!(family, other);
+        let all = [family.clone(), other.clone()];
+        let refused = super::resolve_dispatch(
+            &request,
+            &roots,
+            None,
+            ("fixture", 0),
+            &availability,
+            &access,
+            "fixture",
+            Some((&all, true)),
+        )
+        .err()
+        .ok_or("a required separation must not substitute")?;
+        assert!(
+            refused.contains("family separation is required"),
+            "{refused}"
+        );
         let fallback = resolve(&[family, other])?;
         assert!(matches!(
             fallback.readiness,
@@ -2747,7 +2775,7 @@ mod route_tests {
             &availability[..1],
             &access,
             "fixture",
-            Some(&["openai".into()]),
+            Some((&["openai".into()], false)),
         )?;
         assert_eq!(deferred.adapter, "claude");
         assert!(matches!(

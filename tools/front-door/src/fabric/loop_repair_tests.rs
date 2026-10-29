@@ -128,9 +128,11 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         integration_branch: None,
         factory: &factory,
         integration_base: None,
+        network: None,
         budget,
         cancel: &cancel,
         prices: None,
+        tick: false,
     };
     for holder in [&fixture.settled, &second_holder] {
         let mut owner = RoundOwner {
@@ -260,9 +262,11 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         integration_branch: None,
         factory: &factory,
         integration_base: None,
+        network: None,
         budget,
         cancel: &cancel,
         prices: None,
+        tick: false,
     };
     assert_eq!(owner.node_ask(scope)?, None);
     let service = InboxService::open(

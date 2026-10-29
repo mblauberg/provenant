@@ -372,16 +372,35 @@ declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
 roles and presets inside bounded repair. Existing `loop.body` configuration
 also remains available. Planner fragments do not resolve named presets.
 
-Bundled `scout-swarm`, `generator-evaluator`, `review-council`, `big-batch`
-and `scope-then-run` express scouting, implementation with evaluating lenses,
-combined review, a full batch, and scouting and scoping before a run
-respectively. Scouts use junior tiers and remain read-only;
+Bundled `scout-swarm`, `generator-evaluator`, `review-council`, `big-batch`,
+`scope-then-run` and `deliver` express scouting, implementation with
+evaluating lenses, combined review, a full batch, scouting and scoping before
+a run, and delivery through CI to land respectively. Scouts use junior tiers and remain read-only;
 implementation uses senior tiers; the end-of-batch refactor uses principal.
 The implementation lens challenges redundancy, test quality, cleanup and
 rigid over-engineering. Junior reviews on senior or principal work are
 advisory. Counted acceptance reviews must meet the author's tier under
 `HARNESS.md`; add principal coverage for high-risk areas and principal-authored
 refactors. Synthesis reconciles evidence rather than taking a majority vote.
+
+`deliver` runs a `write.implement` writer with `delivery = "pr"`, then a
+composite `ci` holding a CI gate bound to the writer's pushed head and a
+repair loop the gate routes to on failure. Each loop round runs a fresh
+`repairer` that `continues` the writer's branch, whose inputs are the failed
+gate's findings (check names with log excerpts), the writer's `result` and
+`remaining` in every round and the previous repair's, never a transcript,
+followed by the CI gate again. The composite
+succeeds on either path. A `review-council` then reviews a `head` source
+binding to the writer, so it judges the newest repaired head; a verdict gate
+and a `land` node merge that head under the host's tier policy. No model runs
+while a gate is pending. `max_iterations` bounds the rounds; exhaustion raises
+the loop ask when `decision_session` is set and otherwise pauses the graph.
+The same session is bound to the land node's `session`, so a nested `deliver`
+still asks it; with none, a tier that asks fails the land node with guidance
+to land by hand. Preset leaves may set `continues`, `land` and
+`kind = "land"`. A preset's top-level `decision_session` sets the graph's
+decision session; an empty value, here, on a loop or as a land session, leaves
+it unset.
 
 Preset TOML files are named `NAME.toml` under
 `$XDG_CONFIG_HOME/provenant/presets/` (or `~/.config/provenant/presets/`)
@@ -437,6 +456,13 @@ apply.
   settlement, writer exclusion and delivery.
 - Test: `src/preset_tests.rs::bundled_expansions_match_golden_graphs`,
   `::layering_composition_and_refusals`, `::named_presets_inherit_and_cycles_are_refused`,
+  `src/preset_deliver_tests.rs::a_red_gate_repairs_from_the_failure_excerpt_and_the_repaired_head_is_reviewed_and_landed`,
+  `::an_exhausted_repair_loop_asks_the_decision_session_or_pauses`,
+  `::pending_ci_runs_no_model_and_status_shows_the_waiting_gate`,
+  `::remaining_work_at_the_end_of_a_long_report_reaches_every_repair_round`,
+  `::reviewers_route_away_from_the_writer_and_every_repair_author`,
+  `::a_council_pinned_to_the_writer_commit_never_lands_the_repaired_head`,
+  `::deliver_nests_inside_another_preset`,
   `crates/cli/src/lib.rs::tests::preset_runs_accept_graph_controls_without_dispatch_writer_mode`.
 - Owner: `src/preset.rs`, `src/fabric.rs`
 
@@ -464,12 +490,21 @@ the host's `[domains.fabric.graph] allowed_read_roots` list. A planner
 fragment may not add `read_roots`, change `source` or change `role` relative
 to its planner node.
 
+A graph document may set a top-level `network` of `"on"` or `"off"`. Every
+node lane the graph launches receives that network reach; without it, lanes
+default to open network. `run --network` binds it into a preset graph, with an
+explicit `--preset` or under automatic selection. Automatic selection refuses
+single-lane flags a graph cannot apply, such as `--account`, `--effort`,
+`--write-root` and `--host`, before it selects a preset, and its `next:` names
+`--model` or `--route`.
+
 An optional `source` pins a node's subject before its first attempt:
 
 ```json
 {"type":"commit","commit":"0123456789abcdef0123456789abcdef01234567"}
 {"type":"node","node":"implementation"}
 {"type":"integration"}
+{"type":"head","node":"write"}
 ```
 
 The explicit commit must be a full object ID. A node binding selects the
@@ -485,11 +520,37 @@ attempted fails if the integration branch has moved, and a rerun starts a new
 graph. A retry writer whose pin is an ancestor of its HEAD continues; a
 diverged HEAD is refused.
 
-A node may set `distinct_from = "writer"`. The runtime walks the source chain
-to the nearest writer node and gives the owner that node's attempt refs. The
-owner excludes those attempts' model families from route selection and
-refuses a route that cannot satisfy the constraint. Without a writing source
+A head binding names an upstream writer that delivers `pr` or `push` and does
+not itself continue another writer. When the node becomes ready it pins the
+newest commit delivered by that writer or by any upstream writer that
+`continues` it, such as the repair rounds of a CI loop. It is the single-chain
+counterpart of an integration binding: a review that follows a variable number
+of repairs reviews the head the land node will merge, which `acceptance_error`
+checks. Inside a composite or loop body the writer name resolves through the
+enclosing scopes. Validation refuses a head binding to any other node.
+
+A node may set `distinct_from = "writer"` or `"dependencies"`. For `writer` the
+runtime walks the source chain to the nearest writer node. When that writer is
+reached through a head binding, the attempts of every upstream writer that
+continues it count too, since each authored the pinned head; for `dependencies`
+it takes every transitive dependency's attempt, composite members included. It gives the owner those
+attempt refs, and the owner excludes their model families from route
+selection. `distinct_strength` is `prefer` (default) or `require`. Under
+prefer, when no route outside the families is ready the owner substitutes one;
+under require the attempt is refused before launch. An exact `model` route
+has no substitute: under require, a model in an excluded family, or of unknown
+family, is refused before submission as `adapter_unavailable`, so a later
+route in the node's list may still run. After each terminal
+attempt the scheduler resolves the applied family and stores a `separation`
+record on the node (`strength`, `excluded`, `applied`, `outcome` of
+`separated`, `unavailable` or `unconstrained`). With no known upstream family
 the constraint is a no-op.
+
+A node may declare `dispositions`, a list of allowed values. At settlement its
+findings block must parse and every finding must carry a `disposition` from
+the list and a non-empty `reason`, and every finding ID selected from an input's
+`findings` must appear exactly once; otherwise the attempt settles as
+`task_failed` and `advance_error` names the first offending finding.
 
 A writer source requires an existing registered worktree. Under writer
 exclusion, a clean ancestor worktree advances to the pinned commit with a
@@ -504,8 +565,42 @@ namespace rules.
 
 - Why: scouting can share read access while combined review and repair retain
   one immutable Git subject.
+- Test: `crates/fabric-runtime/src/graph/land_tests.rs::a_head_source_reviews_the_newest_continuation_and_lands_it`;
+  `::a_head_source_inside_a_composite_names_an_outer_writer`;
+  `::a_head_source_must_name_an_upstream_writer`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`,
   `crates/confinement/src/worktrees.rs`
+
+### Writer continuation
+
+A writer may set `continues` to an upstream writer whose `delivery` is `pr`
+or `push`. The continuing writer is a repair: it reuses that writer's
+worktree and delivery branch, so its commits update the same pull request.
+It must declare the same `worktree` explicitly, must have the target as an
+ancestor, takes no `delivery` of its own and cannot itself be continued.
+Writers sharing a worktree already run one at a time. At launch the runtime
+reads the branch the target delivered and hands it to the host with `push`
+delivery. A target that recorded no delivery branch fails the continuing
+node before it launches. The host refuses a worktree whose branch differs
+from the bound branch, then pushes the lane head to that branch without
+force, so the remote refuses a non-fast-forward update and the delivery
+fails at the push stage with the branch unchanged. The lane boundary is
+unchanged: lanes never push, and only the host writes branch configuration.
+
+The repair brief is ordinary `inputs`: the upstream gate's `findings` and the
+writer's `result`, so failed checks reach the repair as generic findings.
+Inside a loop body a continuing writer pushes every round, unlike other body
+writers. In a composite, `continues` follows the same local-name rules as
+`source`.
+
+- Why: a repair must land on the reviewed PR, not open a second branch, and
+  the host must never rewrite a branch someone else moved.
+- Test: `crates/fabric-runtime/src/graph/land_tests.rs::repair_reuses_the_writer_worktree_and_pushes_only_to_its_branch`;
+  `::a_repair_without_a_delivered_branch_fails_before_launch`;
+  `::continuation_and_land_wiring_is_checked_before_launch`;
+  `crates/run/src/delivery_tests.rs::host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch`.
+- Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/fabric.rs`,
+  `crates/run/src/delivery.rs`
 
 ### Synthesise agents
 
@@ -531,23 +626,76 @@ count requires at least the configured positive count. Budget gates must check
 settled attempt usage at evaluation time against the effective host budgets, including saved
 extensions, and fail on unknown or partial usage for a configured metric.
 CI gates check the configured pull request or branch through the host's check
-status interface. Explicitly named checks must pass. Without named checks, the
+status interface. A string `condition.target` names that pull request or branch.
+`condition.target = { node = "write" }` instead resolves the upstream node's
+delivered branch and pins its current head SHA. The target must be an upstream
+dependency exposing a delivered branch. The host queries checks for that exact
+SHA and checks the branch again before accepting a result. A newer push supersedes the
+pin, discards stale check evidence and restarts the timeout for the new head;
+a result for the previous head must not pass the gate. An observation without
+a head SHA keeps the pinned head and restarts nothing; only a different known
+SHA supersedes it. Explicitly named checks
+must pass. Without named checks, the
 host uses required checks from branch protection or rulesets if resolvable;
 otherwise every reported check must pass or be skipped, with at least one pass.
-The evidence records the applied policy. Failed checks fail; missing or unavailable
-checks fail with reason `unavailable`. Pending checks leave the gate waiting,
+The evidence records the applied policy. Failed checks fail. Checks still
+registering, including explicitly named checks that have not appeared, leave
+the gate waiting; an unavailable host or API, or an invalid check policy, fails
+with reason `unavailable`. Pending checks leave the gate waiting,
 and fail with reason `timeout` after the configured timeout (two hours by
-default). The checkpoint retains the first observation time, last state and
-check summary. Timeout uses the host's monotonic clock, so wall clock changes do
-not affect it. If the host boot changes or the monotonic clock moves backwards,
+default). The checkpoint retains the first observation time, last state,
+`head_sha`, check names, elapsed seconds and check summary. The compact and full
+graph status show a running CI gate's check names, head SHA and elapsed time.
+Status refreshes elapsed time from the same host boot's monotonic clock without
+querying CI or saving a new checkpoint. Timeout uses the host's monotonic clock,
+so wall clock changes do not affect it. If the host boot changes or the monotonic clock moves backwards,
 the gate re-anchors its timeout to the new host stamp. The checkpoint retains
 the re-anchor count; after three re-anchors, another such change settles the
 gate as `timeout` with a reason naming the re-anchor limit. Replay restores
 waiting without querying the host; explicit graph advance, resume and attempt
-settlement re-evaluate the gate. Graph status reads
-the saved snapshot, and there is no automatic background re-check.
+settlement re-evaluate the gate. Graph status reads the saved snapshot.
+Pending CI gates persist their next `wake_at` and observation count in the
+checkpoint. The graph's `wake_at` is the earliest running CI deadline or open
+node ask deadline. The host's `provenant tick` advances only due graphs, checks
+the deadline again under the graph journal lock, and honours each gate's own
+deadline when several gates share a graph. Terminal and cancelled graphs do
+not wake. Restart resumes from the stored deadlines without an in-process timer.
+
+`domains.fabric.graph.ci_poll_backoff` controls `initial_seconds` and
+`max_seconds`, both zero by default, making pending gates eligible on every tick. A positive
+initial delay doubles after each pending observation up to the maximum, capped
+by the remaining CI timeout.
+`domains.fabric.graph.ci_poll_overrides.<node_id>` overrides that policy for a
+named gate. Host configuration inspection reports effective values and their
+origins. Explicit advancement can re-check a gate before its deadline.
+For example, set both `initial_seconds = 60` and `max_seconds = 300` in
+`[domains.fabric.graph.ci_poll_backoff]` to poll after 60, 120, 240 and then
+300 seconds of continued waiting, rounded up to the next tick.
+On macOS, one `dev.provenant.tick` LaunchAgent runs every 60 seconds and at
+login. It also attempts GC daily, with the next daily deadline persisted under
+`tick/cadence.json`; `gc.schedule = false` disables that task alone.
+Daily collection runs in a detached one-shot worker under the collector's
+existing lock, so slow fetches and cache walks do not delay the next tick.
+`tick/gc-result.json` retains its queued, running, complete or failed state;
+spawn failures stay due and are retried on the next tick.
+Ticks detect interrupted workers through the worker lock and retain an error;
+skipped projects and failed upstream observations are reported as incomplete.
+Notice batch flushing and opportunistic quota refresh are reserved tick tasks with
+no effect until their respective implementations land. Scheduler installation
+is a platform seam; a Linux timer is deferred.
 Gates must save their decision before dependants run and retain it on replay,
 even if budgets change. Gates expose `PASS` or `FAIL` as their typed verdict.
+The CI observation also carries `failed_checks`, each with a `name`, optional
+`url` and `excerpt`. `condition.failed_checks_max_bytes` defaults to 16384 bytes
+and `condition.max_failed_checks` defaults to 20; values in the project graph
+override those built-in defaults. Checkpoint `ci.failed_checks_policy` records
+the effective byte and count values and whether each came from the condition
+or the default layer. The byte cap includes the encoded failed
+check records, and `truncated` records omitted or shortened evidence. Both caps
+are evidence retention policy and may be adjusted per gate. Failed CI gates
+map those checks into typed `findings` outputs, allowing a repair node to
+select them with `inputs = [{ node = "ci", outputs = ["findings"] }]`. A passing
+gate has no failure findings. Gates never launch a model or create an attempt.
 
 A failure target named by `on_fail` must depend on its gate, so ordinary cycle
 and edge limits cover the failure path. Only that target may follow a failed
@@ -621,6 +769,9 @@ Within a body, ordinary dependencies and inputs refer to nodes in the current
 round. An input named `previous.NODE` selects the preceding round's output
 using the existing output selectors and bounded untrusted-data handoff. It
 adds the corresponding cross-round dependency and is omitted in round one.
+An input naming a node outside the body, resolved through the enclosing
+scopes, selects that node's output in every round and adds the dependency;
+in round one it merges with the loop's own selection of the same node.
 Every later round waits for the preceding `until` gate. A failed `until`
 starts the next round; a passing gate succeeds the wrapper and skips unused
 rounds. A failed task, synthesise node or other gate fails the loop rather
@@ -765,6 +916,63 @@ graph advance compares the deadline with the host wall clock itself.
   `src/fabric/loop_repair_tests.rs::bound_loop_inbox_keeps_original_actor_under_another_client`.
 - Owner: `crates/fabric-runtime/src/graph/asks.rs`, `src/fabric.rs`
 
+### Land nodes
+
+A node with `kind: "land"` and `access: "read_only"` declares a `land`
+object: `node`, an upstream writer whose `delivery` is `pr`; `tier`, one of
+`routine`, `substantial`, `crucial` or `terminal`; and an optional inbox
+`session` that falls back to the graph's `decision_session`. It takes no
+prompt, route, worktree, inputs, delivery, `required_verdict`, `on_fail` or
+`continues`. Its ancestors must include a verdict gate and a CI gate that
+each follow the writer. Land nodes are refused in loop bodies.
+
+When ready, the node pins the branch and newest commit delivered by the
+writer and the writers that continue it. A passing verdict gate after the
+writer must have reviewed that head: each of its inputs judged the head
+through its pinned `source` commit or, without one, as the newest head of the
+writer's chain upstream of it. A composite input has no subject of its own, so
+it resolves to the member that exported its verdict, recursively: a council
+pinned to an earlier head never vouches for a later one that merely precedes
+its boundary. Otherwise the node fails without calling the
+host and names the heads that were reviewed, so a failed gate whose `on_fail`
+reaches the land, or a review that predates a continuation, never lands. It
+then resolves the host's tier policy
+and saves both in the node's `land` record with the layer the policy came
+from (`default`, `config` or `project`). With policy `auto` the record says
+the policy authorised the land. With `ask` it raises ask `NODE.ask-N` with
+options `land` and `hold`; an answer of `land` records the ask ID and the
+answering actor, `hold` fails the node, and any other answer asks again as a
+decide node does. A tier that asks with no session fails the node and names
+`provenant land` for a manual land. Once authorised, the host lands through
+the same path as `provenant land N --head HEAD`: it finds the open PR for the
+branch, checks CI once, merges with `--match-head-commit` and runs the usual
+cleanup, so the repository's own merge requirements still apply. A merged PR
+succeeds the node with verdict `LANDED`, the branch and head as outputs and an
+excerpt that names who or what authorised it. Pending checks, an unknown merge
+state or an unavailable PR keep the node running and save a retry deadline,
+spaced by the node's CI poll backoff, that host tick wake discovery includes; a
+moved head, failed checks, a closed PR or a refused merge fail it. A waiting
+land node does not count toward `concurrency`, and a paused graph does not
+land.
+
+- Why: delivery should finish without a chair for routine work while crucial
+  work still waits for a person, under one policy the host owns.
+- Test: `crates/fabric-runtime/src/graph/land_tests.rs::an_auto_tier_lands_the_newest_delivered_head_through_the_host`;
+  `::a_crucial_tier_raises_a_land_ask_and_lands_on_its_answer`;
+  `::a_hold_answer_fails_the_land_without_merging`;
+  `::a_configured_policy_overrides_the_default_and_records_its_source`;
+  `::an_ask_tier_without_a_session_fails_with_guidance`;
+  `::a_pending_land_is_observed_again_and_a_refusal_fails_the_node`;
+  `::a_pending_land_persists_a_retry_deadline_that_survives_restart`;
+  `::a_failed_review_routed_to_land_never_calls_the_host`;
+  `::a_review_of_an_earlier_head_never_lands_a_continuation`;
+  `::a_composite_verdict_binds_to_the_head_its_producer_reviewed`;
+  `::a_loop_body_cannot_land`;
+  `crates/fabric-runtime/src/config.rs::land_policy_layers_project_then_host_then_default`;
+  `src/pr/land.rs::graph_land_tests::a_land_report_maps_to_a_graph_observation`.
+- Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/pr/land.rs`,
+  `src/fabric.rs`
+
 ### Plan expansion and honest-stop continuation
 
 A read-only `plan` node must declare `plan.kinds` and a positive
@@ -878,8 +1086,12 @@ invalid final block yields an empty list and warning.
 The separate `required_verdict` contract checks for its exact line across the
 complete redacted stream. Writers can also provide a branch or commit.
 
-A node's `inputs` list selects `result`, `verdict`, `findings`, `branch` or
-`commit` from named direct dependencies. Each dependency and output selector
+A node's `inputs` list selects `result`, `verdict`, `findings`, `branch`,
+`commit` or `remaining` from named direct dependencies. `remaining` is the
+closing window, at most 2048 canonical bytes starting on a line boundary, of a
+report whose `result` excerpt was cut short, so remaining work a final report
+states last survives; it is null when the excerpt holds the whole report, so
+select it with `result`. Each dependency and output selector
 may occur only once. The selected data is rendered into its brief, which is
 bounded by the effective per-node prompt byte limit. If the node prompt leaves
 no room for the block, or the selected outputs do not fit, the node fails
@@ -932,7 +1144,8 @@ can hold:
 | Stored text | Canonical cap |
 | --- | --- |
 | Result excerpt (composite) | 4096 (65536) bytes |
-| Findings list | 9216 bytes, otherwise the block is invalid |
+| Task findings list | 9216 bytes, otherwise the block is invalid |
+| CI failed checks | `failed_checks_max_bytes` per gate, 16384 bytes by default; at most `max_failed_checks`, 20 by default |
 | Warning | 512 bytes each, at most 4 |
 | Verdict, path, branch, commit, gate reason, CI summary, PR URL | 1024 bytes each |
 | Advance error, expansion pause, loop reason | 2048 bytes each |
@@ -1151,7 +1364,11 @@ the exact graph head. A matching sealed marker also permits recreating an absent
 publication ref at that same head. A different marker, a different ref head or
 a symbolic ref refuses. Alternatively,
 the graph uses its existing remote integration branch, and opens one PR. Its body
-contains bounded commit messages, run and attempt IDs, gate decisions and skipped nodes. The checkpoint
+contains bounded commit messages, run and attempt IDs, gate decisions and skipped nodes.
+Graph review-council attempts render as the same `Independent review` rows used
+by `pr open`, with each review role, model family and recorded verdict. The rows
+include lens, verification and synthesis attempts, including retries, while
+subject-framing tasks remain ordinary node evidence. The checkpoint
 records the PR URL and successful final delivery;
 replay observes it. A failed final delivery keeps its advance error and remains
 eligible for advancement or manual resume. Neither conflicts nor unknown

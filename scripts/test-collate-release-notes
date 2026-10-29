@@ -1,10 +1,13 @@
 #!/bin/sh
 set -eu
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_INDEX_FILE GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 script=$(cd "$(dirname "$0")" && pwd -P)/collate-release-notes
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL \
   GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
+PATH="/usr/bin:/bin:$PATH"
+export PATH
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-release-notes.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 git -C "$tmp" init -q
@@ -81,4 +84,36 @@ if "$script" --check > "$tmp/out" 2> "$tmp/err"; then
   exit 1
 fi
 grep -F 'fragment is empty' "$tmp/err" > /dev/null
-echo 'release notes normalisation and warning checks passed'
+rm -f "$dir/empty.md"
+
+# A release cut records one milestone when a session is known, and a missing
+# logger cannot turn a completed cut into a failure.
+rm -f "$dir"/*.md
+printf 'Intro.\n' > "$dir/_intro.md"
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/provenant" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >> "$PROVENANT_LOG_CALLS"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --file ]; then cat "$2" >> "$PROVENANT_LOG_CALLS"; fi
+  shift
+done
+[ "${PROVENANT_LOG_FAIL:-}" != 1 ]
+EOF
+chmod +x "$tmp/bin/provenant"
+export PROVENANT_SESSION_ID=session-test
+export PROVENANT_LOG_CALLS="$tmp/log-calls"
+PATH="$tmp/bin:$PATH" "$script" v1.2.3
+[ "$(grep -c '^chair$' "$PROVENANT_LOG_CALLS")" -eq 1 ]
+grep -qxF 'release-v1.2.3' "$PROVENANT_LOG_CALLS"
+grep -qxF 'session-test' "$PROVENANT_LOG_CALLS"
+rm -f "$tmp/log-calls"
+printf 'Intro.\n' > "$dir/_intro.md"
+PROVENANT_LOG_FAIL=1 PATH="$tmp/bin:$PATH" "$script" v1.2.5
+[ -f docs/release-notes/v1.2.5.md ]
+rm -f "$tmp/log-calls"
+printf 'Intro.\n' > "$dir/_intro.md"
+unset PROVENANT_SESSION_ID
+PATH="$tmp/bin:$PATH" "$script" v1.2.4
+[ ! -e "$tmp/log-calls" ]
+echo 'release notes normalisation, warning and milestone checks passed'

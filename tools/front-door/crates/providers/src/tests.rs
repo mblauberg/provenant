@@ -2172,6 +2172,66 @@ fn claude_network_on_without_complete_rust_keeps_public_system_tools()
     Ok(())
 }
 
+/// A host without Rust still lets every shell lane run checked-in scripts,
+/// read Git's global ignore and attributes, and gives writers Git's helpers.
+#[test]
+fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::{NetworkAccess, snapshot::render};
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let git = home.join(".config/git");
+    std::fs::create_dir_all(&git)?;
+    std::fs::write(git.join("ignore"), "")?;
+    let core = home.join("Cellar/git/1.0/libexec/git-core");
+    std::fs::create_dir_all(&core)?;
+    let git_executable = home.join("Cellar/git/1.0/bin/git");
+    for (adapter, access) in [
+        ("claude", Access::ReadOnly),
+        ("codex", Access::ReadOnly),
+        ("codex", Access::WorktreeWrite),
+    ] {
+        let mut route = route(adapter, "fixture-model");
+        route.account_key = None;
+        let authentication = (adapter == "codex").then_some("login");
+        let plan = fixture_network_plan(access, authentication, NetworkAccess::Open);
+        let mut input = fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            (adapter == "claude").then_some(&token),
+        );
+        input.home = &home;
+        input.provenant.git = &git_executable;
+        let launch = match adapter {
+            "claude" => claude::Claude.prepare(input)?,
+            _ => crate::codex::Codex.prepare(input)?,
+        };
+        assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
+        let spec = &launch.profile.spec;
+        assert!(
+            spec.runtime_reads
+                .contains(&crate::launch::exact(git.join("ignore"))),
+            "{adapter} {access:?}"
+        );
+        assert_eq!(
+            spec.tool_exec_roots
+                .contains(&crate::launch::subtree(&core)),
+            access == Access::WorktreeWrite,
+            "{adapter} {access:?}"
+        );
+        let profile = render(plan.permissions(), &launch.profile, &home)?;
+        assert!(
+            profile.contains("(allow process-exec (subpath \"/fixture/repo\"))"),
+            "{adapter} {access:?}: repository execution missing from\n{profile}"
+        );
+    }
+    Ok(())
+}
+
 /// Exercises the actual Seatbelt file-open decision without a provider login
 /// or an external HTTPS service. An inherited lane cannot install a nested
 /// sandbox; CI requires this probe instead of accepting that limitation.

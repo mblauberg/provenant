@@ -6,6 +6,8 @@ use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+mod ci;
+
 #[derive(Deserialize)]
 struct View {
     state: String,
@@ -96,57 +98,48 @@ impl Line {
     }
 }
 
-/// Valid JSON is meaningful even when gh exits non-zero for pending or failed
-/// checks. Missing, malformed or interrupted output is unavailable, not zero.
-fn counts(project: &Path, number: &str) -> Option<Vec<Check>> {
-    let output = execute(
-        project,
-        &["gh", "pr", "checks", number, "--json", "name,bucket"],
-        false,
-    )
-    .ok()?;
-    serde_json::from_slice(&output.stdout.bytes).ok()
-}
-
-/// Graph gates use the same bounded check reader as `pr status`. gh returns
-/// non-zero for pending and failed checks, so valid JSON is authoritative.
+/// Graph gates read checks for an exact head and recheck the target afterwards.
 pub(crate) fn observe_ci(
     project: &Path,
     target: &str,
     names: &[String],
+    failed_checks_max_bytes: usize,
+    max_failed_checks: usize,
 ) -> provenant_fabric_runtime::graph::CiObservation {
-    observe_ci_with(
-        names,
-        || required_checks(project, target),
-        || counts(project, target),
-        || mergeable(project, target),
-    )
-}
-
-/// `gh pr view` mergeable state: `MERGEABLE`, `CONFLICTING` or `UNKNOWN`.
-fn mergeable(project: &Path, target: &str) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Merge {
-        mergeable: String,
-    }
-    let output = execute(
+    ci::observe(
         project,
-        &["gh", "pr", "view", target, "--json", "mergeable"],
-        false,
+        target,
+        names,
+        failed_checks_max_bytes,
+        max_failed_checks,
     )
-    .ok()?;
-    serde_json::from_slice::<Merge>(&output.stdout.bytes)
-        .ok()
-        .map(|merge| merge.mergeable)
 }
 
+/// A conflicting pull request never starts CI, so say so rather than report
+/// its checks as missing. A settled result keeps its state.
+fn mark_conflict(
+    observation: &mut provenant_fabric_runtime::graph::CiObservation,
+    read_mergeable: impl FnOnce() -> Option<String>,
+) {
+    use provenant_fabric_runtime::graph::CiState;
+    if !matches!(observation.state, CiState::Passed | CiState::Failed)
+        && read_mergeable().as_deref() == Some("CONFLICTING")
+    {
+        observation.state = CiState::Conflict;
+        observation
+            .summary
+            .push_str(" next: rebase the branch onto its base and push");
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes this module without libtest.
 fn observe_ci_with(
     names: &[String],
     resolve: impl FnOnce() -> Option<Vec<String>>,
     read_checks: impl FnOnce() -> Option<Vec<Check>>,
     read_mergeable: impl FnOnce() -> Option<String>,
 ) -> provenant_fabric_runtime::graph::CiObservation {
-    use provenant_fabric_runtime::graph::CiState;
     let required = if names.is_empty() {
         resolve().map(|names| ("branch-required", names))
     } else {
@@ -158,16 +151,7 @@ fn observe_ci_with(
             .as_ref()
             .map(|(policy, names)| (*policy, names.as_slice())),
     );
-    // A conflicting pull request never starts CI, so say so rather than
-    // report its checks as missing.
-    if !matches!(observation.state, CiState::Passed | CiState::Failed)
-        && read_mergeable().as_deref() == Some("CONFLICTING")
-    {
-        observation.state = CiState::Conflict;
-        observation
-            .summary
-            .push_str(" next: rebase the branch onto its base and push");
-    }
+    mark_conflict(&mut observation, read_mergeable);
     observation
 }
 
@@ -230,18 +214,6 @@ pub(super) fn required_policy(
     if owner.is_empty() || name.is_empty() {
         return None;
     }
-    let encode = |value: &str| -> String {
-        value
-            .bytes()
-            .map(|b| {
-                if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                    (b as char).to_string()
-                } else {
-                    format!("%{b:02X}")
-                }
-            })
-            .collect()
-    };
     let repo = format!("repos/{}/{}", encode(owner), encode(name));
     let branch = encode(&base.branch);
     let get = |path: &str, paginate: bool| -> Option<Vec<u8>> {
@@ -273,6 +245,19 @@ pub(super) fn required_policy(
         repository: repo,
         checks: parse_required_checks(protection.as_ref(), &pages)?,
     })
+}
+
+fn encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 // A ruleset can mark a branch protected without classic branch protection.
@@ -362,6 +347,10 @@ fn summarise_ci(
             extra: Default::default(),
             state: CiState::Unavailable,
             summary: format!("policy={policy} checks unavailable"),
+            head_sha: None,
+            failed_checks: Vec::new(),
+            check_names: Vec::new(),
+            truncated: false,
         };
     };
     let selected: Vec<&Check> = match required {
@@ -411,6 +400,10 @@ fn summarise_ci(
         summary: format!(
             "policy={policy}{selection} checks={passed}/{total} fail={failed} pending={pending} skipped={skipped} missing={missing}{next}"
         ),
+        head_sha: None,
+        failed_checks: Vec::new(),
+        check_names: selected.iter().map(|check| check.name.clone()).collect(),
+        truncated: false,
     }
 }
 fn open_numbers(project: &Path) -> Result<Vec<u64>> {

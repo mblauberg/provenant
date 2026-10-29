@@ -6,9 +6,11 @@
 #   extends        parent role; the child's keys replace the parent's.
 #   kind, tier, access, outputs, inputs   copied onto the node.
 #   family         "any", "distinct_from_writer" (route away from the model
-#                  family that served the stage's writer) or "cross_preferred"
-#                  (recorded on the node, not enforced; the stage's route
-#                  should select another family).
+#                  family that served the stage's writer), "cross_preferred"
+#                  (route away from the families of every upstream attempt,
+#                  substituting with a recorded note when none is ready) or
+#                  "cross_required" (the same, failing instead of substituting).
+#   family_strength  "prefer" or "require" for any of the above.
 #   card           short text always placed at the head of the brief.
 #   references     [{ ref = "skill:<skill>/<path>", when = "<hint>", inline = bool }]
 #                  The compiler resolves each against the release root, records
@@ -207,9 +209,9 @@ references = [
 tier = "${verifier_tier}"
 fallback_tier = "senior"
 access = "read_only"
-# Cross-family is a preference the route has to honour: the graph's
-# distinct_from only separates a node from its writer, so point this route at
-# another model family. Explain shows the constraint as cross_preferred.
+# Cross-family is a preference by default: the scheduler excludes the families
+# of the lens attempts and records which separation applied. A project can
+# require it with family = "cross_required" in .provenant/roles.toml.
 family = "cross_preferred"
 worktree = "${worktree}"
 card = "You falsify review findings. A finding stands only if you cannot break it."

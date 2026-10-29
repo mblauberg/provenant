@@ -228,7 +228,7 @@ ownership and reinstall leaves dangling links for manual cleanup.
 
 ### LaunchAgents
 
-On macOS with the default root, install owns the peer-agent and GC LaunchAgents.
+On macOS with the default root, install owns the peer-agent and host-tick LaunchAgents.
 They join the preview and receipt; publication refuses symlinks at the plist
 or any parent and stages with `O_NOFOLLOW | O_EXCL`. The peer agent's PATH
 never includes a directory inside a registered project's worktree. A failed
@@ -237,7 +237,7 @@ adopted only if its bytes match the template exactly.
 - Why: a LaunchAgent runs unattended at login with the user's authority.
 - Test: `crates/config/src/managed_tests.rs::peer_agent_refuses_symlinked_plist_and_parent_before_writes`;
   `crates/fabric-runtime/src/peer_agent.rs::provider_path_skips_a_registered_project_and_clones_nested_in_it`
-- Owner: `crates/config/src/managed.rs`, `src/gc_agent.rs`
+- Owner: `crates/config/src/managed.rs`, `src/tick_agent.rs`
 
 ### Re-apply is the recovery
 

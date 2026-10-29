@@ -1435,7 +1435,7 @@ fn install_compacts_routine_output_and_keeps_json_actions_once() -> Result {
     assert!(text.contains("MCP); 1 targets"), "{text}");
     assert!(!text.contains("changed links"), "{text}");
     assert!(!text.contains("peer agent:"), "{text}");
-    assert!(!text.contains("scheduled gc:"), "{text}");
+    assert!(!text.contains("host tick:"), "{text}");
     assert!(
         report["data"]["outcome"]["actions"]
             .as_array()

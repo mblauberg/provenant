@@ -837,6 +837,135 @@ fn factory(
         workers,
     })
 }
+
+/// Wake only expired journals. The snapshot is a discovery hint; the deadline
+/// is checked again while holding the same journal lock as explicit advance.
+pub(crate) fn tick_graphs(
+    resolved: &crate::roots::Resolved,
+    now: provenant_core::WallTime,
+    workers: &'static dyn WorkerObserver,
+) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
+    let mut report = crate::tick::Graphs::default();
+    for binding in provenant_config::registered_projects(&resolved.roots)? {
+        let project = binding.project_id();
+        let ids = match FileJournal::graph_ids(&resolved.roots.state, project) {
+            Ok(ids) => ids,
+            Err(error) => {
+                report.errors.push(format!("{project}: {error}"));
+                continue;
+            }
+        };
+        for id in ids {
+            let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
+                let Some(checkpoint) =
+                    FileJournal::read_checkpoint(&resolved.roots.state, project, &id)?
+                else {
+                    return Ok(false);
+                };
+                if !graph_wake_due(&checkpoint, now) {
+                    return Ok(false);
+                }
+                let clock = SystemClock::new();
+                let cancel = CancelToken::new();
+                let budget = WaitBudget::cli(clock.mono_now(), 55)?;
+                let mut journal = match FileJournal::open(
+                    &resolved.roots.state,
+                    project,
+                    &id,
+                    WaitBudget::nonblocking(clock.mono_now()),
+                    &cancel,
+                    &clock,
+                ) {
+                    Ok(journal) => journal,
+                    Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+                        provenant_os::fs::FsError::LockTimeout { .. },
+                    )) => return Ok(false),
+                    Err(error) => return Err(error.into()),
+                };
+                let Some(checkpoint) = journal.load(&id)? else {
+                    return Ok(false);
+                };
+                if !graph_wake_due(&checkpoint, clock.wall_now()?) {
+                    return Ok(false);
+                }
+                // Execution can be rebound to another worktree by a manual
+                // resume, so resolve it only after acquiring journal custody.
+                let Some(execution) =
+                    FileJournal::pending_execution(&resolved.roots.state, project, &id)?
+                else {
+                    return Ok(false);
+                };
+                let context =
+                    Context::open(resolved.roots.clone(), &resolved.home, &execution.directory)?;
+                if context.identity.project != project || context.in_lane {
+                    return Err(EdgeError::Invalid.into());
+                }
+                let factory = Factory {
+                    project_attribution: crate::usage::attribution_enabled(&context.roots),
+                    context,
+                    clock: SystemClock::new(),
+                    backoff: ThreadWait,
+                    executor: SystemExecutor::new(4)?,
+                    home: resolved.home.clone(),
+                    cwd: execution.directory,
+                    assets: resolved.assets.clone(),
+                    host_launch: None,
+                    mcp_project: None,
+                    workers,
+                };
+                let mut owner = BoundGraphOwner {
+                    factory: &factory,
+                    integration_base: execution.integration_base,
+                    integration_branch: execution.document.integration_branch.clone(),
+                    network: graph_network(&execution.document)?,
+                    budget,
+                    cancel: &cancel,
+                    prices: None,
+                    tick: true,
+                };
+                let config = &factory.context.config.graph;
+                advance_with_budget(
+                    &execution.document,
+                    &mut owner,
+                    &mut journal,
+                    &config.limits,
+                    &config.budget,
+                )?;
+                Ok(true)
+            })();
+            match result {
+                Ok(true) => {
+                    report.advanced += 1;
+                    if let Err(error) =
+                        FileJournal::set_advance_error(&resolved.roots.state, project, &id, None)
+                    {
+                        report.errors.push(format!("{project}/{id}: {error}"));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let reason = error.to_string();
+                    let _ = FileJournal::set_advance_error(
+                        &resolved.roots.state,
+                        project,
+                        &id,
+                        Some(&reason),
+                    );
+                    report.errors.push(format!("{project}/{id}: {reason}"));
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
+fn graph_wake_due(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    now: provenant_core::WallTime,
+) -> bool {
+    !checkpoint.cancelled && checkpoint.wake_at.is_some_and(|deadline| now >= deadline)
+}
 pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObserver) -> u8 {
     let result = (|| -> Result<Vec<HostHealth>, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
@@ -2933,9 +3062,13 @@ struct BoundGraphOwner<'a> {
     factory: &'a Factory,
     integration_base: Option<provenant_core::GitOid>,
     integration_branch: Option<String>,
+    /// The graph's explicit network reach for every node lane, such as
+    /// `run --network off` bound before automatic preset selection.
+    network: Option<provenant_cli::Switch>,
     budget: WaitBudget,
     cancel: &'a CancelToken,
     prices: Option<Result<provenant_telemetry::PriceTable, String>>,
+    tick: bool,
 }
 
 /// The inbox request for a stored graph ask. The checkpoint keeps the rendered
@@ -3495,9 +3628,11 @@ fn advance_graphs_after_settlement(
                 factory: &factory,
                 integration_base: execution.integration_base,
                 integration_branch: execution.document.integration_branch.clone(),
+                network: graph_network(&execution.document)?,
                 budget,
                 cancel: &cancel,
                 prices: None,
+                tick: false,
             };
             let graph_config = &factory.context.config.graph;
             advance_with_budget(
@@ -4194,13 +4329,84 @@ impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
         &mut self,
         target: &str,
         checks: &[String],
+        failed_checks_max_bytes: usize,
+        max_failed_checks: usize,
     ) -> provenant_fabric_runtime::graph::CiObservation {
-        crate::pr::status::observe_ci(&self.factory.cwd, target, checks)
+        crate::pr::status::observe_ci(
+            &self.factory.cwd,
+            target,
+            checks,
+            failed_checks_max_bytes,
+            max_failed_checks,
+        )
+    }
+}
+
+// Review roles come from the shared role library. The framing role
+// `plan.review` prepares the subject and is not an independent review.
+fn graph_review_node(document: &provenant_fabric_runtime::graph::GraphDocument, id: &str) -> bool {
+    document.nodes.iter().any(|node| {
+        node.id == id
+            && node.access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+            && node.role.as_deref().is_some_and(|role| {
+                role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
+            })
+    })
+}
+
+#[cfg(test)]
+mod graph_review_tests {
+    #[test]
+    fn expanded_review_roles_include_lenses_verification_and_synthesis()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::{config::GraphLimits, graph::GraphDocument};
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "review-rows",
+            "nodes": [{
+                "id": "council", "kind": "composite", "access": "read_only",
+                "composite": {
+                    "nodes": [
+                        {"id":"subject", "role":"plan.review", "access":"read_only", "prompt":"Frame"},
+                        {"id":"lens", "role":"lens.correctness-spec", "access":"read_only", "prompt":"Review"},
+                        {"id":"verify", "role":"review.verify", "access":"read_only", "prompt":"Verify"},
+                        {"id":"synthesis", "role":"review.synthesis", "access":"read_only", "prompt":"Reconcile"},
+                        {"id":"other", "role":"plan", "access":"read_only", "prompt":"Plan"},
+                        {"id":"writer", "role":"review.verify", "access":"worktree_write", "worktree":"lane", "prompt":"Write"}
+                    ],
+                    "exports": [{"node":"synthesis","outputs":["result"]}]
+                }
+            }]
+        }))?;
+        let expanded = document.expanded(&GraphLimits::default())?;
+        for suffix in ["lens", "verify", "synthesis"] {
+            assert!(super::graph_review_node(
+                &expanded,
+                &format!("council--{suffix}")
+            ));
+        }
+        for suffix in ["subject", "other", "writer"] {
+            assert!(!super::graph_review_node(
+                &expanded,
+                &format!("council--{suffix}")
+            ));
+        }
+        Ok(())
     }
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
+    fn respect_ci_wake(&self) -> bool {
+        self.tick
+    }
+    fn ci_poll_backoff(&self, node_id: &str) -> provenant_fabric_runtime::graph::CiPollBackoff {
+        let config = &self.factory.context.config.graph;
+        config
+            .ci_poll_overrides
+            .get(node_id)
+            .copied()
+            .unwrap_or(config.ci_poll_backoff)
+    }
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
         let branch =
             self.integration_branch
@@ -4254,6 +4460,30 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         self.factory.clock.wall_now().ok()
     }
+    fn land_policy(
+        &self,
+        tier: provenant_records::workflow::RiskTier,
+    ) -> provenant_fabric_runtime::config::LandChoice {
+        let project = self.factory.context.identity.project.to_string();
+        self.factory
+            .context
+            .config
+            .graph
+            .land
+            .choose(Some(&project), tier)
+    }
+    fn land(
+        &mut self,
+        request: provenant_fabric_runtime::graph::LandRequest<'_>,
+    ) -> Result<provenant_fabric_runtime::graph::LandObservation, Self::Error> {
+        Ok(crate::pr::land::graph_land(
+            &self.factory.cwd,
+            self.factory.context.roots.state.as_path(),
+            request.branch,
+            request.head,
+            self.factory.workers,
+        ))
+    }
     fn cost_unknown_reason(&mut self) -> Option<String> {
         let graph_budget = &self.factory.context.config.graph.budget;
         if graph_budget.per_graph.cost_usd.is_none() && graph_budget.per_node.cost_usd.is_none() {
@@ -4287,6 +4517,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             cancel: self.cancel,
         };
         let mut body = format!("Graph {}\n\n", document.graph_id);
+        let mut reviews = Vec::new();
         for node in &checkpoint.nodes {
             if let Some(summary) = node.deterministic_summary() {
                 body.push_str(&summary);
@@ -4304,7 +4535,41 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 "Node {}: attempt {id}, run {}\n\n",
                 node.id, attempt.run_id
             ));
+            if graph_review_node(document, &node.id) {
+                // Retain each launched review route, including failed attempts
+                // before a successful retry. These are evidence, not a verdict.
+                for review in &node.attempts {
+                    let Some(reference) = review.attempt_ref.as_deref() else {
+                        continue;
+                    };
+                    let (_, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+                    let id = id.parse().map_err(|_| FacadeError::StateCorrupt)?;
+                    let record = session.service().status(id, &call).map_err(run_error)?;
+                    let mut facts = provenant_cli::run::recorded_attempt_facts(&record);
+                    facts.role = document
+                        .nodes
+                        .iter()
+                        .find(|spec| spec.id == node.id)
+                        .and_then(|spec| spec.role.clone())
+                        .or(facts.role);
+                    // Each row describes its own result, including failed
+                    // routes before a retry. Never borrow a later verdict.
+                    facts.verdict = record.result.as_ref().and_then(|_| {
+                        let captured = session.store.stream_result(id, &call, None).ok()?;
+                        (!captured.verdict_invalid)
+                            .then_some(captured.verdict)?
+                            .map(String::from)
+                    });
+                    facts.head = node
+                        .source_commit
+                        .as_deref()
+                        .and_then(|head| provenant_core::GitOid::parse(head).ok())
+                        .or(facts.head);
+                    reviews.push(facts);
+                }
+            }
         }
+        body.push_str(&provenant_cli::pr_body::independent_review_rows(&reviews));
         let url = provenant_run::HostDeliveryContext::capture()
             .deliver_graph_pr(
                 &self.factory.cwd,
@@ -4343,6 +4608,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             prices.as_ref().ok(),
             cost_unknown_reason,
         ))
+    }
+
+    fn attempt_families(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        self.writer_families(attempts)
     }
 
     fn observe_or_start(
@@ -4408,6 +4677,29 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 },
                 None => Some(node.context),
             };
+            let excluded_families = self.writer_families(node.distinct_from_attempts)?;
+            // An exact route cannot be substituted, so required separation is
+            // decided here, before any worktree advance or submission. An
+            // accepted operation is observed as it was launched.
+            if !accepted
+                && let Some(model) = &route.model
+                && exact_route_refused(
+                    &exact_model(route.adapter.as_deref(), model),
+                    &excluded_families,
+                    node.require_distinct,
+                )
+            {
+                return Ok(AttemptObservation::Terminal {
+                    attempt_ref: None,
+                    outcome: AttemptOutcome::AdapterUnavailable,
+                    launched: false,
+                    result: None,
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: None,
+                });
+            }
             if !accepted && let (Some(path), Some(commit)) = (worktree, node.source_commit) {
                 let head = commit.parse().map_err(|_| FacadeError::InvalidInput)?;
                 provenant_confinement::worktrees::with_context(
@@ -4450,12 +4742,21 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 } else {
                     String::new()
                 };
+                // A continuing writer pushes only to the branch it continues.
+                if let Some(bound) = replay.branch
+                    && bound != branch
+                {
+                    return Err(FacadeError::DispatchRefused {
+                        reason: format!(
+                            "graph writer worktree is on {branch}, not the continued branch {bound}"
+                        ),
+                    });
+                }
                 provenant_run::HostDeliveryContext::destination(mode.clone(), &branch)
                     .map_err(run_error)?
             } else {
                 None
             };
-            let excluded_families = self.writer_families(node.distinct_from_attempts)?;
             let input = SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id,
@@ -4487,11 +4788,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             provenant_records::run::RequestedRoute::Model {
                                 extra: Default::default(),
                                 provider: adapter.clone(),
-                                model: if model.contains('/') {
-                                    model.clone()
-                                } else {
-                                    format!("{adapter}/{model}")
-                                },
+                                model: exact_model(Some(adapter), model),
                                 effort: route.effort.clone(),
                             }
                         }
@@ -4502,6 +4799,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                 effort: route.effort.clone(),
                                 excluded_families,
                                 distinct_families: true,
+                                require_distinct: node.require_distinct,
                             }
                         }
                         None => provenant_records::run::RequestedRoute::Named {
@@ -4541,7 +4839,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         })
                         .collect(),
                     write_root: Vec::new(),
-                    network: None,
+                    network: self.network,
                     capability: Vec::new(),
                 },
                 self.factory.context.roots.state.as_path(),
@@ -4702,6 +5000,39 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 }
+/// A graph document's optional top-level `network` (`"on"` or `"off"`),
+/// applied to every node lane it launches.
+fn graph_network(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<Option<provenant_cli::Switch>, FacadeError> {
+    match document.extra.get("network") {
+        None => Ok(None),
+        Some(value) => match value.as_str() {
+            Some("on") => Ok(Some(provenant_cli::Switch::On)),
+            Some("off") => Ok(Some(provenant_cli::Switch::Off)),
+            _ => Err(FacadeError::InvalidInput),
+        },
+    }
+}
+
+/// A graph route's exact model in `ADAPTER/ID` form.
+fn exact_model(adapter: Option<&str>, model: &str) -> String {
+    match adapter {
+        Some(adapter) if !model.contains('/') => format!("{adapter}/{model}"),
+        _ => model.to_owned(),
+    }
+}
+
+/// Whether required family separation refuses an exact route before launch.
+/// As for routed reviews, a model whose family is unknown is treated as
+/// excluded once any family is.
+fn exact_route_refused(model: &str, excluded_families: &[String], require_distinct: bool) -> bool {
+    require_distinct
+        && !excluded_families.is_empty()
+        && provenant_cli::run::model_family(model)
+            .is_none_or(|family| excluded_families.contains(&family))
+}
+
 impl Factory {
     fn graph(
         &self,
@@ -4815,13 +5146,19 @@ impl Factory {
                 .as_str(),
         };
         if matches!(input, GraphInput::Status { .. }) {
-            let checkpoint = FileJournal::read_checkpoint(
+            let mut checkpoint = FileJournal::read_checkpoint(
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,
             )
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
+            if let (Ok(boot), Ok(now)) = (
+                self.clock.boot_identity(),
+                self.clock.host_monotonic_micros(),
+            ) {
+                graph_status_elapsed(&mut checkpoint, &boot, now);
+            }
             let mut run = graph_snapshot(checkpoint);
             let sidecar_error = FileJournal::read_advance_error(
                 &self.context.roots.state,
@@ -4876,9 +5213,11 @@ impl Factory {
                 factory: self,
                 integration_base,
                 integration_branch: document.integration_branch.clone(),
+                network: graph_network(document)?,
                 budget,
                 cancel,
                 prices: None,
+                tick: false,
             };
             let graph_config = &self.context.config.graph;
             let run = if resume {
@@ -4960,9 +5299,11 @@ impl Factory {
                 factory: self,
                 integration_base: None,
                 integration_branch: None,
+                network: None,
                 budget,
                 cancel,
                 prices: None,
+                tick: false,
             };
             if provenant_fabric_runtime::graph::close_resolved_asks(
                 &mut checkpoint,
@@ -4981,6 +5322,32 @@ impl Factory {
             }
         }
         Ok(graph_snapshot(checkpoint))
+    }
+}
+
+/// Refresh display time without querying CI or changing the durable checkpoint.
+fn graph_status_elapsed(
+    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    boot: &str,
+    now: u64,
+) {
+    use provenant_fabric_runtime::graph::{CiState, NodeState};
+    for node in &mut checkpoint.nodes {
+        if node.state != NodeState::Running {
+            continue;
+        }
+        let Some(ci) = &mut node.ci else {
+            continue;
+        };
+        let Some(first) = &ci.first_observed_stamp else {
+            continue;
+        };
+        if ci.state == CiState::Pending
+            && first.boot_identity == boot
+            && now >= first.host_monotonic_micros
+        {
+            ci.elapsed_seconds = (now - first.host_monotonic_micros) / 1_000_000;
+        }
     }
 }
 
@@ -5186,7 +5553,7 @@ pub(crate) fn publish_preset_graph(
     Ok(scratch.join("graphs").join(filename))
 }
 
-fn graph_human(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
+pub(crate) fn graph_human(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
     let members: std::collections::BTreeSet<_> = run
         .checkpoint
         .nodes
@@ -5195,10 +5562,24 @@ fn graph_human(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
         .collect();
     let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
     for node in &run.checkpoint.nodes {
-        if members.contains(&node.id) || node.round.is_some() {
+        let waiting_ci = node.ci.as_ref().filter(|ci| {
+            node.state == provenant_fabric_runtime::graph::NodeState::Running
+                && ci.state == provenant_fabric_runtime::graph::CiState::Pending
+        });
+        if (members.contains(&node.id) || node.round.is_some()) && waiting_ci.is_none() {
             continue;
         }
         human.push_str(&format!("  {}: {:?}", node.id, node.state));
+        if let Some(ci) = waiting_ci {
+            human.push_str(&format!(
+                " {}",
+                graph_ci_waiting(
+                    ci.elapsed_seconds,
+                    ci.check_names.iter().map(String::as_str),
+                    ci.head_sha.as_deref(),
+                )
+            ));
+        }
         if !node.children.is_empty() {
             human.push_str(&format!(" ({} members)", node.children.len()));
         }
@@ -5211,6 +5592,26 @@ fn graph_human(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
         human.push_str(&format!("Advance error: {error}\n"));
     }
     human
+}
+
+fn graph_ci_waiting<'a>(
+    elapsed_seconds: u64,
+    check_names: impl Iterator<Item = &'a str>,
+    head_sha: Option<&str>,
+) -> String {
+    let names = check_names.collect::<Vec<_>>().join(", ");
+    let mut detail = format!(
+        "CI waiting elapsed={elapsed_seconds}s checks={}",
+        if names.is_empty() {
+            "awaiting registration"
+        } else {
+            &names
+        },
+    );
+    if let Some(head) = head_sha {
+        detail.push_str(&format!(" head={head}"));
+    }
+    detail
 }
 
 /// Preset waiting advances the retained immutable graph, including CI gates.
@@ -5326,7 +5727,25 @@ fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                     (
                         text(node, "id").unwrap_or_default(),
                         text(node, "state").unwrap_or_else(|| "unknown".into()),
-                        text(node, "advance_error"),
+                        text(node, "advance_error").or_else(|| {
+                            let ci = node.get("ci")?;
+                            if text(node, "state").as_deref() != Some("running")
+                                || text(ci, "state").as_deref() != Some("pending")
+                            {
+                                return None;
+                            }
+                            let names = ci.get("check_names").and_then(serde_json::Value::as_array);
+                            Some(graph_ci_waiting(
+                                ci.get("elapsed_seconds")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0),
+                                names
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(serde_json::Value::as_str),
+                                ci.get("head_sha").and_then(serde_json::Value::as_str),
+                            ))
+                        }),
                     )
                 })
                 .collect()
@@ -6204,6 +6623,58 @@ mod graph_ask_inbox_tests {
 #[cfg(test)]
 mod result_tests {
     #[test]
+    fn graph_status_shows_waiting_ci_checks_head_and_live_elapsed() {
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "graph_id": "delivery",
+                "plan_digest": "digest",
+                "nodes": [{
+                    "id": "ci", "state": "running", "worktree": null, "attempts": [],
+                    "ci": {
+                        "state": "pending", "summary": "2 pending checks",
+                        "head_sha": "abc123", "check_names": ["build", "tests"],
+                        "elapsed_seconds": 10,
+                        "first_observed_stamp": {
+                            "boot_identity": "boot-a", "host_monotonic_micros": 1_000_000
+                        }
+                    }
+                }]
+            }))
+            .unwrap();
+        let mut display = checkpoint.clone();
+        super::graph_status_elapsed(&mut display, "boot-a", 66_000_000);
+        let run = super::graph_snapshot(display);
+        let expected = "CI waiting elapsed=65s checks=build, tests head=abc123";
+        assert!(super::graph_human(&run).contains(expected));
+        let summary = super::graph_summary(&serde_json::to_value(&run).unwrap());
+        assert_eq!(summary.lines[1], format!("ci running: {expected}"));
+        assert_eq!(
+            summary.next.as_deref(),
+            Some("provenant fabric graph status delivery")
+        );
+        assert_eq!(checkpoint.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 10);
+
+        let mut nested = run.clone();
+        let mut parent = nested.checkpoint.nodes[0].clone();
+        parent.id = "deliver".into();
+        parent.children = vec!["ci".into()];
+        parent.ci = None;
+        nested.checkpoint.nodes.push(parent);
+        assert!(super::graph_human(&nested).contains(expected));
+
+        for (boot, now) in [("boot-b", 66_000_000), ("boot-a", 0)] {
+            let mut display = checkpoint.clone();
+            super::graph_status_elapsed(&mut display, boot, now);
+            assert_eq!(display.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 10);
+        }
+        assert_eq!(
+            super::graph_ci_waiting(0, std::iter::empty(), None),
+            "CI waiting elapsed=0s checks=awaiting registration"
+        );
+    }
+
+    #[test]
     fn graph_usage_maps_attempt_telemetry_and_prices() {
         fn usage_record(
             model: &str,
@@ -6530,6 +7001,10 @@ mod peer_tests {
         include!("fabric/loop_repair_tests.rs");
     }
 
+    mod tick_tests {
+        include!("fabric/tick_tests.rs");
+    }
+
     struct SettlementFixture {
         rig: crate::worktree_tests::support::TestRig,
         roots: provenant_core::Roots,
@@ -6554,6 +7029,18 @@ mod peer_tests {
         record: &provenant_run::AttemptRecord,
         head: provenant_core::GitOid,
         outcome: Outcome,
+        call: &provenant_run::Request<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        publish_routed(rig, store, record, head, outcome, "fixture/model", call)
+    }
+
+    fn publish_routed(
+        rig: &crate::worktree_tests::support::TestRig,
+        store: &RunStore,
+        record: &provenant_run::AttemptRecord,
+        head: provenant_core::GitOid,
+        outcome: Outcome,
+        model: &str,
         call: &provenant_run::Request<'_>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let attempt = rig
@@ -6618,8 +7105,8 @@ mod peer_tests {
             call.clock,
         )?);
         let route = provenant_run::RouteRecord {
-            provider: Some("fixture".into()),
-            model: Some("fixture/model".into()),
+            provider: model.split_once('/').map(|(adapter, _)| adapter.into()),
+            model: Some(model.into()),
             ..Default::default()
         };
         store.publish_terminal(
@@ -6861,9 +7348,11 @@ mod peer_tests {
             factory: &factory,
             integration_base: None,
             integration_branch: None,
+            network: None,
             budget,
             cancel: &cancel,
             prices: None,
+            tick: false,
         };
         let actor = graph_owner.actor();
         let route = serde_json::from_value(
@@ -6902,6 +7391,7 @@ mod peer_tests {
                     },
                     read_roots: &[],
                     distinct_from_attempts: &[],
+                    require_distinct: false,
                     source_commit: None,
                     title: "inspect",
                     prompt: "Review the slice",
@@ -6912,6 +7402,7 @@ mod peer_tests {
                 None,
                 graph::Replay {
                     delivery: None,
+                    branch: None,
                     stored_ref: None,
                     launch_actor: &actor,
                 },
@@ -7311,9 +7802,11 @@ mod peer_tests {
                 factory: &factory,
                 integration_base: None,
                 integration_branch: None,
+                network: None,
                 budget,
                 cancel: &cancel,
                 prices: None,
+                tick: false,
             };
             let run = graph::advance_with_budget(
                 &document,
@@ -7420,9 +7913,11 @@ mod peer_tests {
             factory: &factory,
             integration_base: None,
             integration_branch: None,
+            network: None,
             budget,
             cancel: &cancel,
             prices: None,
+            tick: false,
         };
         let run = graph::advance_with_budget(
             &document,
@@ -7498,6 +7993,154 @@ mod peer_tests {
                 .iter()
                 .any(|warning| warning == "result artifact is missing")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn exact_route_in_an_excluded_family_is_refused_before_launch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::exact_route_in_an_excluded_family_is_refused_before_launch",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        struct Seed(String);
+        impl AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String {
+                "fixture".into()
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending {
+                    attempt_ref: Some(self.0.clone()),
+                })
+            }
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadWait,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let call = provenant_run::Request {
+            clock: &factory.clock,
+            cancel: &cancel,
+            budget,
+        };
+        // The upstream attempt ran in the OpenAI family.
+        let upstream = provenant_run::Resume {
+            prior: fixture.settled.attempt_id,
+            expected_generation: 0,
+            operation_id: "graph-exact-upstream".parse()?,
+            run_id: RunId::from_bytes([53; 16]),
+            attempt_id: AttemptId::from_bytes([54; 16]),
+            prompt: "continue".into(),
+            created_at: factory.clock.wall_now()?,
+        };
+        fixture.store.resume_fresh(&upstream, "fixture", &call)?;
+        let record = fixture.store.record(upstream.attempt_id, &call)?;
+        let head = fixture
+            .store
+            .record(fixture.settled.attempt_id, &call)?
+            .head
+            .ok_or("head")?;
+        publish_routed(
+            &fixture.rig,
+            &fixture.store,
+            &record,
+            head,
+            Outcome::Succeeded,
+            "codex/gpt-6-luna",
+            &call,
+        )?;
+        let id = "exact-separation";
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":id,"nodes":[
+                {"id":"author","prompt":"work","access":"read_only",
+                    "route":{"adapter":"fixture","model":"fixture/model"}},
+                {"id":"verifier","prompt":"verify","access":"read_only","depends_on":["author"],
+                    "distinct_from":"dependencies","distinct_strength":"require",
+                    "route":{"adapter":"codex","model":"gpt-6.1-terra"}}
+            ]
+        }))?;
+        let mut journal = graph::FileJournal::open(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            directory: fixture.rig.project.clone(),
+            document: document.clone(),
+        })?;
+        graph::advance_with_budget(
+            &document,
+            &mut Seed(format!(
+                "{}/{}",
+                factory.context.identity.host, upstream.attempt_id
+            )),
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let mut owner = BoundGraphOwner {
+            factory: &factory,
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            budget,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let run = graph::advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        assert_eq!(run.checkpoint.nodes[0].state, graph::NodeState::Succeeded);
+        let verifier = &run.checkpoint.nodes[1];
+        assert_eq!(verifier.state, graph::NodeState::Failed, "{verifier:?}");
+        let attempt = &verifier.attempts[0];
+        assert!(!attempt.launched);
+        assert_eq!(attempt.attempt_ref, None, "the exact route was submitted");
+        assert_eq!(
+            attempt.outcome,
+            Some(graph::AttemptOutcome::AdapterUnavailable)
+        );
+        let separation = verifier.separation.as_ref().ok_or("separation")?;
+        assert_eq!(separation.strength, graph::FamilyStrength::Require);
+        assert_eq!(separation.excluded, ["openai"]);
+        assert_eq!(separation.outcome, graph::SeparationOutcome::Unavailable);
         Ok(())
     }
 

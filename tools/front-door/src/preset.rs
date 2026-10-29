@@ -90,6 +90,7 @@ impl Layers {
                 "scope-then-run",
                 include_str!("../assets/presets/scope-then-run.toml"),
             ),
+            ("deliver", include_str!("../assets/presets/deliver.toml")),
         ] {
             layers
                 .insert("bundled", name, text)
@@ -834,9 +835,18 @@ pub fn expand_with(
         "",
         &origins,
     )?;
-    for key in ["limits", "integration_branch", "delivery"] {
+    for key in [
+        "limits",
+        "integration_branch",
+        "delivery",
+        "decision_session",
+    ] {
         if let Some(value) = config.get(key) {
-            document[key] = interpolate(value, &parameters, prompt, 1)?;
+            let value = interpolate(value, &parameters, prompt, 1)?;
+            // An empty knob, such as an unset decision session, means unset.
+            if value != "" {
+                document[key] = value;
+            }
         }
     }
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
@@ -1071,9 +1081,12 @@ fn lower_leaf(
             "card",
             "references",
             "family",
+            "family_strength",
             "fallback_tier",
             "purpose",
             "dispositions",
+            "continues",
+            "land",
         ]
         .contains(&key.as_str())
         {
@@ -1081,6 +1094,12 @@ fn lower_leaf(
         }
     }
     map.insert("id".into(), json!(id));
+    // An empty land session, such as an unset decision session, means unset.
+    if let Some(land) = map.get_mut("land").and_then(Value::as_object_mut)
+        && land.get("session").is_some_and(|session| session == "")
+    {
+        land.remove("session");
+    }
     // The brief: card, then the task, then reference text. References are
     // resolved against the release root and their digests recorded.
     let mut references = Vec::new();
@@ -1132,6 +1151,7 @@ fn lower_leaf(
         .map(|card| card.as_str().map(str::to_owned).ok_or("card must be text"))
         .transpose()?;
     let family = map.remove("family");
+    let family_strength = map.remove("family_strength");
     map.remove("purpose");
     let fallback_tier = map.remove("fallback_tier");
     if card.is_some() || !references.is_empty() {
@@ -1177,10 +1197,15 @@ fn lower_leaf(
     }
     match family.as_ref().and_then(Value::as_str) {
         None | Some("" | "any") => {}
-        Some("cross_preferred") => {
-            // Recorded as a preference: routing does not yet exclude the
-            // families of upstream attempts, so this is not enforced.
-            map.insert("family".into(), json!("cross_preferred"));
+        Some("cross_preferred" | "cross_required") => {
+            // The scheduler excludes the families of every upstream attempt.
+            // `cross_required` fails the attempt rather than substitute one.
+            map.entry("distinct_from")
+                .or_insert_with(|| json!("dependencies"));
+            if family.as_ref().and_then(Value::as_str) == Some("cross_required") {
+                map.entry("distinct_strength")
+                    .or_insert_with(|| json!("require"));
+            }
         }
         Some("distinct_from_writer") => {
             map.entry("distinct_from")
@@ -1188,7 +1213,18 @@ fn lower_leaf(
         }
         Some(other) => {
             return Err(format!(
-                "node {id}: unknown family constraint {other}; use any, cross_preferred or distinct_from_writer"
+                "node {id}: unknown family constraint {other}; use any, cross_preferred, cross_required or distinct_from_writer"
+            ));
+        }
+    }
+    match family_strength.as_ref().and_then(Value::as_str) {
+        None | Some("") => {}
+        Some(strength @ ("prefer" | "require")) => {
+            map.insert("distinct_strength".into(), json!(strength));
+        }
+        Some(other) => {
+            return Err(format!(
+                "node {id}: unknown family_strength {other}; use prefer or require"
             ));
         }
     }
@@ -1244,8 +1280,11 @@ fn lower_leaf(
     }
     if let Some(value) = map.get("distinct_from")
         && value != "writer"
+        && value != "dependencies"
     {
-        return Err(format!("node {id}: distinct_from must be \"writer\""));
+        return Err(format!(
+            "node {id}: distinct_from must be \"writer\" or \"dependencies\""
+        ));
     }
     let mut dependencies = deps.to_vec();
     if let Some(explicit) = map.remove("depends_on") {
@@ -1273,7 +1312,7 @@ fn lower_leaf(
     }
     let control = matches!(
         map.get("kind").and_then(Value::as_str),
-        Some("gate" | "loop" | "composite")
+        Some("gate" | "loop" | "composite" | "land")
     );
     if !control {
         map.entry("prompt").or_insert_with(|| json!(prompt));
@@ -1389,6 +1428,7 @@ fn build_stages(
                 "limits",
                 "integration_branch",
                 "delivery",
+                "decision_session",
                 "pattern",
             ]
             .contains(&key.as_str())
@@ -1624,6 +1664,14 @@ impl StageBuilder<'_> {
                     self.prompt,
                     index as usize,
                 )?;
+                if spec
+                    .get("decision_session")
+                    .is_some_and(|session| session == "")
+                {
+                    spec.as_object_mut()
+                        .ok_or("loop must be a table")?
+                        .remove("decision_session");
+                }
                 spec["body"] = json!(children);
                 let mut node = json!({"id":id,"kind":"loop","access":"read_only","depends_on":deps,"loop":spec});
                 if !deps.is_empty() {
@@ -2019,6 +2067,7 @@ pub(crate) fn bind_run_context(
     request: &provenant_cli::Dispatch,
     directory: &Path,
     policy: &ReadRoots,
+    selection_source: &str,
 ) -> Result<(), String> {
     if let Some(concurrency) = request.concurrency {
         if expansion.document.get("limits").is_none() {
@@ -2026,12 +2075,19 @@ pub(crate) fn bind_run_context(
         }
         expansion.document["limits"]["concurrency"] = json!(concurrency);
     }
+    // An explicit network reach binds every node lane the graph launches.
+    if let Some(network) = request.access.network {
+        expansion.document["network"] = json!(match network {
+            provenant_cli::Switch::On => "on",
+            provenant_cli::Switch::Off => "off",
+        });
+    }
     let nodes = expansion.document["nodes"]
         .as_array_mut()
         .ok_or("missing graph nodes")?;
     visit_nodes(nodes, &mut |node| {
         let container = node.get("composite").is_some() || node.get("loop").is_some();
-        if !container && node["kind"] != "gate" {
+        if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {
             let writer = node["access"] == "worktree_write";
             if writer
                 && node
@@ -2098,6 +2154,10 @@ pub(crate) fn bind_run_context(
         }
         Ok(())
     })?;
+    // The graph context is the single carrier of run labels; the scheduler
+    // adds graph and node identity to each submitted task.
+    expansion.document["context"]["preset"] = expansion.document["provenance"]["preset"].clone();
+    expansion.document["context"]["selection_source"] = json!(selection_source);
     expansion.document["graph_id"] = json!("");
     // An integration source resolves at run time, so fold the current head into
     // the identity: a moved branch must never reuse a completed graph.
@@ -2127,18 +2187,22 @@ pub(crate) fn bind_run_context(
         identity.extend_from_slice(format!("\nintegration-head:{head}").as_bytes());
     }
     let digest = provenant_records::CanonicalV1::file_digest(&identity).to_string();
-    expansion.document["graph_id"] = json!(format!("preset-{}", &digest[7..39]));
+    let graph_id = format!("preset-{}", &digest[7..39]);
+    expansion.document["graph_id"] = json!(graph_id);
     Ok(())
 }
 
-/// The family constraint a node carries: `any`, `cross_preferred` (recorded, not enforced) or `distinct_from_writer`.
+/// The family constraint a node carries: `any`, `distinct_from_writer`,
+/// `cross_preferred` or `cross_required`, with `+require` when a writer
+/// separation is strict.
 fn family(node: &Value) -> String {
-    if let Some(family) = node["family"].as_str() {
-        family.into()
-    } else if node["distinct_from"] == "writer" {
-        "distinct_from_writer".into()
-    } else {
-        "any".into()
+    let required = node["distinct_strength"] == "require";
+    match node["distinct_from"].as_str() {
+        Some("dependencies") if required => "cross_required".into(),
+        Some("dependencies") => "cross_preferred".into(),
+        Some("writer") if required => "distinct_from_writer+require".into(),
+        Some("writer") => "distinct_from_writer".into(),
+        _ => "any".into(),
     }
 }
 
@@ -2232,6 +2296,13 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
         "Graph {}\nLimits: {}\nExecution: {}\n",
         expansion.document["graph_id"], limits, metrics
     );
+    if let Some(context) = expansion.document.get("context") {
+        human.push_str(&format!(
+            "Preset selection: {} ({})\n",
+            context["preset"].as_str().unwrap_or("-"),
+            context["selection_source"].as_str().unwrap_or("-")
+        ));
+    }
     if let Some(shape) = &expansion.review_shape {
         human.push_str(&format!("Review shape: {shape}\n"));
     }
@@ -2301,7 +2372,50 @@ pub fn command(command: provenant_cli::Preset, globals: &provenant_cli::Globals)
         let layers = configured(globals)?;
         match command {
             Preset::List => Ok(json!({"presets": layers.listing()})),
-            Preset::Explain { name } => layers.explain(&name),
+            Preset::Explain {
+                name: Some(name), ..
+            } => layers.explain(&name),
+            Preset::Explain {
+                name: None,
+                risk,
+                kind,
+                paths,
+                size,
+                ready,
+                underspecified,
+            } => {
+                let resolved = crate::roots::resolve(
+                    globals,
+                    crate::roots::Workspace::Project,
+                    crate::roots::Product::Optional,
+                )
+                .map_err(|error| error.to_string())?;
+                let selection = crate::preset_select::select(
+                    Some(&resolved.project.join(".provenant/preset-rules.toml")),
+                    &crate::preset_select::SelectionContext {
+                        risk,
+                        kind,
+                        paths,
+                        size,
+                        ready: underspecified.then_some(false).or(ready.then_some(true)),
+                    },
+                    None,
+                )?;
+                Ok(json!({
+                    "preset": selection.choice.preset,
+                    "parameters": selection.choice.parameters,
+                    "source": selection.source.as_str(),
+                    "matched": selection.matched,
+                    "reason": match selection.source {
+                        crate::preset_select::PresetSelectionSource::Readiness => "readiness rule matched an underspecified task",
+                        crate::preset_select::PresetSelectionSource::Rule => "the highest-precedence matching selector rule was used",
+                        crate::preset_select::PresetSelectionSource::Default => "no selector rule matched; the bundled or repo default applies",
+                        crate::preset_select::PresetSelectionSource::Override => "an explicit preset override was used",
+                        crate::preset_select::PresetSelectionSource::Triage => "the future triage source selected this preset",
+                        crate::preset_select::PresetSelectionSource::Experiment => "the future experiment source selected this preset",
+                    }
+                }))
+            }
             Preset::Show { name, roles: true } => layers.roles_view(name.as_deref()),
             Preset::Show { name: None, .. } => Err("preset show needs a preset name".into()),
             Preset::Show {
@@ -2336,30 +2450,97 @@ fn params_file(path: &Path) -> Result<Vec<(String, Value)>, String> {
         .collect())
 }
 
+fn prompt_ready(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    let named_surface = [
+        "module", "surface", "crate", "package", "command", "src/", "docs/",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let risk_value = lower
+        .split_once("risk tier:")
+        .and_then(|(_, value)| value.split_whitespace().next())
+        .unwrap_or("")
+        .trim_matches(['.', ',', ';']);
+    let risk_is_set = !matches!(risk_value, "" | "?" | "tbd" | "unknown" | "unset");
+    let design_is_set = [
+        "design decision is settled",
+        "design decisions are resolved",
+        "design decision: resolved",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    lower.contains("acceptance criteria")
+        && named_surface
+        && risk_is_set
+        && lower.contains("verification")
+        && design_is_set
+        && ["test", "verify", "check"]
+            .iter()
+            .any(|marker| lower.contains(marker))
+}
+
 pub fn run(
     request: provenant_cli::Dispatch,
     globals: &provenant_cli::Globals,
     workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> u8 {
     let result = (|| -> Result<Expansion, String> {
-        let name = request.preset.as_deref().ok_or("missing preset")?;
-        let path = request
-            .input
-            .prompt_file
-            .as_ref()
-            .ok_or("preset requires --prompt-file")?;
-        let mut file = provenant_os::fs::FileHandle::open_source(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        let bytes = file
-            .read_bounded(1_048_576)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        let prompt = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
-        let params = match &request.preset_params_file {
-            Some(path) => params_file(path)?,
-            None => Vec::new(),
+        let bytes = if let Some(path) = &request.input.prompt_file {
+            let mut file = provenant_os::fs::FileHandle::open_source(path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            file.read_bounded(1_048_576)
+                .map_err(|e| format!("{}: {e}", path.display()))?
+        } else if request.input.prompt_stdin {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .lock()
+                .take(1_048_577)
+                .read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            if bytes.len() > 1_048_576 {
+                return Err("prompt exceeds 1048576 bytes".into());
+            }
+            bytes
+        } else {
+            return Err("preset selection requires a prompt input".into());
         };
+        let prompt = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
         let directory = crate::roots::selected_project(globals.project.as_deref(), false)
             .map_err(|e| e.to_string())?;
+        let rules_path = directory.join(".provenant/preset-rules.toml");
+        let size = match bytes.len() {
+            0..=16_384 => "small",
+            16_385..=65_536 => "medium",
+            _ => "large",
+        };
+        let ready = prompt_ready(prompt);
+        let selection = crate::preset_select::select(
+            Some(&rules_path),
+            &crate::preset_select::SelectionContext {
+                risk: request.risk_tier.clone(),
+                kind: request.task_kind.clone(),
+                paths: request.selection_paths.clone(),
+                size: Some(size.into()),
+                ready: Some(ready),
+            },
+            request.preset.as_deref(),
+        )?;
+        let name = selection.choice.preset.as_str();
+        let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
+        match &request.preset_params_file {
+            Some(path) => params_file(path)?,
+            None => Vec::new(),
+        }
+        .into_iter()
+        .for_each(|(key, value)| {
+            if let Some(existing) = params.iter_mut().find(|(name, _)| name == &key) {
+                existing.1 = value;
+            } else {
+                params.push((key, value));
+            }
+        });
         let roots = crate::roots::resolve(
             globals,
             crate::roots::Workspace::Project,
@@ -2417,7 +2598,13 @@ pub fn run(
             &config.domains.fabric.graph.allowed_read_roots,
             &policy_roots,
         );
-        bind_run_context(&mut expansion, &request, &directory, &policy)?;
+        bind_run_context(
+            &mut expansion,
+            &request,
+            &directory,
+            &policy,
+            selection.source.as_str(),
+        )?;
         Ok(expansion)
     })();
     match result {
@@ -2454,5 +2641,24 @@ pub fn run(
                 ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    #[allow(unused_imports)] // The worktree driver includes this module without libtest.
+    use super::prompt_ready;
+
+    #[test]
+    fn readiness_requires_acceptance_risk_verification_and_design_markers() {
+        let ready = "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. Verification uses cargo test. Design decision is settled.";
+        assert!(prompt_ready(ready));
+        assert!(!prompt_ready("Improve the run command when possible."));
+        assert!(!prompt_ready(
+            "Acceptance criteria and tests are present in src/run.rs. Risk tier: low. Verification uses cargo test, but the design remains open."
+        ));
+        assert!(!prompt_ready(
+            "Acceptance criteria in src/run.rs. Risk tier: TBD. Verification uses cargo test. Design decision is settled."
+        ));
     }
 }

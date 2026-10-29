@@ -3430,3 +3430,113 @@ fn delivery_cancellation_stops_its_running_git_child()
     )?;
     Ok(())
 }
+
+#[test]
+fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let project = root.join("project");
+    let lane = root.join("lane");
+    let remote = root.join("remote.git");
+    for path in [&home, &project] {
+        std::fs::create_dir(path)?;
+    }
+    let environment = vec![
+        ("HOME".into(), home.into_os_string()),
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+    ];
+    let host = HostDeliveryContext::new(environment.clone());
+    let executor = SystemExecutor::new(1)?;
+    let git_executable = provenant_os::git::git_executable().ok_or("git executable")?;
+    let git =
+        |cwd: &Path, args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
+            let argv: Vec<OsString> = std::iter::once(git_executable.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
+            options.env = Some(&environment);
+            let output = executor.execute(options)?;
+            assert_eq!(
+                output.termination,
+                Termination::Exit(0),
+                "{}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+            Ok(String::from_utf8(output.stdout.bytes)?.trim().into())
+        };
+    let remote_path = remote.to_str().ok_or("remote")?;
+    git(&project, &["init", "-q"])?;
+    git(&project, &["config", "user.name", "Fixture"])?;
+    git(
+        &project,
+        &["config", "user.email", "fixture@example.invalid"],
+    )?;
+    git(&project, &["commit", "--allow-empty", "-qm", "Initial"])?;
+    git(&project, &["init", "--bare", "-q", remote_path])?;
+    git(&project, &["remote", "add", "origin", remote_path])?;
+    git(&project, &["push", "-q", "origin", "HEAD:refs/heads/base"])?;
+    // Someone else moved the delivery branch to a commit the lane lacks.
+    git(&project, &["commit", "--allow-empty", "-qm", "Elsewhere"])?;
+    git(
+        &project,
+        &["push", "-q", "origin", "HEAD:refs/heads/published/lane"],
+    )?;
+    let elsewhere = git(&project, &["rev-parse", "HEAD"])?;
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "lane",
+            lane.to_str().ok_or("lane")?,
+            "HEAD~1",
+        ],
+    )?;
+    let writer = WriterRequest {
+        extra: Default::default(),
+        project,
+        worktree: lane.clone(),
+    };
+    let request = WriterDeliveryRequest {
+        extra: Default::default(),
+        mode: DeliveryMode::Push,
+        remote: "origin".into(),
+        branch: "published/lane".into(),
+        open_pr: false,
+    };
+    let host = host.prepare(&writer, &request)?;
+    std::fs::write(lane.join("change"), "a repair on a stale base")?;
+    git(&lane, &["add", "change"])?;
+    git(&lane, &["commit", "-qm", "Repair"])?;
+    let fixture = root.join("store");
+    std::fs::create_dir(&fixture)?;
+    let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    let store = RunStore::open(&tests::context(&fixture)?, &call)?;
+    let mut input = tests::input();
+    input.request.tasks[0].writer = Some(writer.clone());
+    input.request.tasks[0].deliver = Some(request.clone());
+    store.create(&input, &call)?;
+    let attempt = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
+    let receipt = deliver_once(&host, &writer, &request, &attempt, "fixture receipt")?;
+    assert!(
+        matches!(
+            receipt.state,
+            WriterDeliveryState::Failed {
+                stage: WriterDeliveryStage::Push,
+                ..
+            }
+        ),
+        "{receipt:?}"
+    );
+    assert!(
+        git(&lane, &["ls-remote", "origin", "refs/heads/published/lane"])?
+            .starts_with(elsewhere.as_str())
+    );
+    Ok(())
+}

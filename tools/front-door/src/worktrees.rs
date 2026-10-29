@@ -368,6 +368,42 @@ fn gc_failure<'a>(data: &'a GcData, message: &str, detailed: bool) -> CommandRes
     result
 }
 
+/// Daily tick task, using the same collection policy and custody as explicit GC.
+pub(crate) fn scheduled_gc(
+    globals: &Globals,
+    idle_days: u64,
+    workers: &dyn WorkerObserver,
+) -> Result<(), String> {
+    let command = Gc {
+        scheduled: true,
+        pressure: false,
+        free_floor: None,
+        dry_run: false,
+        apply: true,
+        idle_days,
+    };
+    let data = gc(&command, globals, workers).map_err(|error| error.to_string())?;
+    if !data.provider_state.errors.is_empty() || !data.chair_logs.errors.is_empty() {
+        return Err("retention incomplete; next: provenant gc --apply".into());
+    }
+    let upstream_failures = data
+        .worktree_cleanup
+        .iter()
+        .filter(|project| project.upstream_error.is_some())
+        .count();
+    if !data.unobserved_projects.is_empty()
+        || upstream_failures > 0
+        || !data.build_dirs.errors.is_empty()
+    {
+        return Err(format!(
+            "retention incomplete: {} unobserved project(s), {upstream_failures} upstream observation failure(s), {} build-cache error(s); next: provenant gc --apply",
+            data.unobserved_projects.len(),
+            data.build_dirs.errors.len()
+        ));
+    }
+    Ok(())
+}
+
 /// `provenant gc`: remove orphaned and idle lane caches, sparing any whose
 /// worktree has a live or unobservable writer.
 pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {

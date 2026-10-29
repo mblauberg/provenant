@@ -38,6 +38,13 @@ peer_seconds = 30
 graph_timeout_seconds = 14400
 bundle_bytes = 67108864
 
+[graph]
+ci_poll_overrides = {}
+
+[graph.ci_poll_backoff]
+initial_seconds = 0 # eligible on every tick; set both values for a longer backoff
+max_seconds = 0
+
 [graph.limits]
 continuations = 2
 nodes = 512
@@ -55,3 +62,8 @@ unknown_usage = "warn"
 
 [graph.budget.per_node]
 [graph.budget.per_graph]
+
+# Graph `land` node policy per risk tier: "auto" or "ask". An unset tier uses
+# the built-in default (routine and substantial auto, crucial and terminal ask).
+# Per-project values go under [graph.land.projects."PROJECT_ID"].
+[graph.land]

@@ -12,7 +12,8 @@ mod console;
 mod disk;
 mod disk_guard;
 mod fabric;
-mod gc_agent;
+mod tick;
+mod tick_agent;
 
 mod chair_log_retention;
 mod gc_support;
@@ -28,7 +29,15 @@ mod pr;
 #[cfg(test)]
 mod pr_land_tests;
 mod preset;
+#[cfg(test)]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree test driver includes this library without the test harness"
+)]
+mod preset_deliver_tests;
 mod preset_roles;
+mod preset_select;
 #[cfg(test)]
 #[allow(
     dead_code,
@@ -187,6 +196,41 @@ fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> prove
         })
         .collect();
     provenant_cli::Summary::new(headline, rows, None)
+}
+/// Single-lane flags a preset graph cannot honour. An explicit `--preset`
+/// rejects them at parse time; automatic selection refuses them here rather
+/// than drop them silently. `--network`, `--read-root` and `--worktree` bind
+/// into the graph instead.
+fn preset_ignored_flags(request: &provenant_cli::Dispatch) -> Vec<&'static str> {
+    let route = &request.route;
+    let access = &request.access;
+    [
+        ("--account", request.account.is_some()),
+        ("--effort", route.effort.is_some()),
+        ("--fallback", !route.fallback.is_empty()),
+        ("--confidential", route.confidential),
+        ("--allow-free", route.allow_free),
+        ("--read-heavy", route.read_heavy),
+        ("--host", request.host.is_some()),
+        ("--branch", request.branch.is_some()),
+        ("--worktree-branch", request.worktree_branch.is_some()),
+        ("--deliver", request.deliver.is_some()),
+        ("--deliver-remote", request.deliver_remote.is_some()),
+        ("--deliver-branch", request.deliver_branch.is_some()),
+        ("--open-pr", request.open_pr),
+        ("--write-root", !access.write_root.is_empty()),
+        ("--capability", !access.capability.is_empty()),
+        ("--knob", !request.knobs.is_empty()),
+        ("--task-id", request.task_id.is_some()),
+        ("--delivery-id", request.delivery_id.is_some()),
+        ("--head", request.head.is_some()),
+        ("--base", request.base.is_some()),
+        ("--title", request.title.is_some()),
+        ("--build-heavy", request.build_heavy),
+    ]
+    .into_iter()
+    .filter_map(|(flag, set)| set.then_some(flag))
+    .collect()
 }
 fn fail(
     command: &str,
@@ -417,6 +461,29 @@ fn config_command(
             fail(command, status, "CONFIG", &error.to_string(), globals)
         }
     }
+}
+/// Unsupported pool efforts are advisory at load and remain visible in
+/// routine diagnostics with the origin recorded for each configured value.
+pub(crate) fn pool_effort_warnings(roots: &provenant_core::Roots) -> Vec<String> {
+    let Ok(config) = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+    else {
+        return Vec::new();
+    };
+    let Ok(catalogue) = provenant_routing::Catalogue::bundled() else {
+        return Vec::new();
+    };
+    config
+        .domains
+        .routing
+        .pool_effort_warnings_with_sources(&catalogue, |key| match config.origins.get(key) {
+            Some(provenant_config::Origin::User { .. }) => {
+                format!("config.toml ({key})")
+            }
+            Some(provenant_config::Origin::Compiled { profile }) => {
+                format!("compiled {profile:?} profile ({key})")
+            }
+            None => format!("compiled defaults ({key})"),
+        })
 }
 /// Registered account settings, read through the binary's domain aggregate.
 fn account_settings(
@@ -675,6 +742,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 Err(error) => fail(&inv.leaf, Outcome::Error, "SETTLEMENT", &error, globals),
             }
         }
+        Command::Internal(provenant_cli::Internal::TickGc) => {
+            tick::gc_worker(globals, process.workers())
+        }
         Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => match provenant_cli::provider_updates::housekeep(
@@ -799,7 +869,32 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }
         }
         Command::Preset(cmd) => preset::command(cmd, globals),
-        Command::Run(cmd) if cmd.preset.is_some() => preset::run(*cmd, globals, process.workers()),
+        Command::Run(cmd)
+            if cmd.preset.is_some()
+                || (cmd.input.manifest.is_none()
+                    && (cmd.input.prompt_file.is_some() || cmd.input.prompt_stdin)
+                    && cmd.route.model.is_none()
+                    && cmd.route.route.is_none()) =>
+        {
+            let ignored = preset_ignored_flags(&cmd);
+            if cmd.preset.is_none() && !ignored.is_empty() {
+                return fail_with_repair(
+                    &inv.leaf,
+                    Outcome::Invalid,
+                    "preset",
+                    &format!(
+                        "automatic preset selection cannot apply {}",
+                        ignored.join(", ")
+                    ),
+                    Some(
+                        "Add --model or --route to run one lane with these flags, or remove them \
+                         and let preset selection choose the graph.",
+                    ),
+                    globals,
+                );
+            }
+            preset::run(*cmd, globals, process.workers())
+        }
         Command::Run(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::run(*cmd, edge);
             if let Err(error) =
@@ -991,6 +1086,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }
         Command::Worktree(worktree) => worktrees::run(worktree, globals, process.workers()),
         Command::Pr(command) => pr::run(command, globals, process.workers()),
+        Command::Tick => tick::run(globals, process.workers()),
         Command::Gc(command) => worktrees::run_gc(command, globals, process.workers()),
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
         Command::Bench(command) => bench::run(command, globals),

@@ -465,7 +465,12 @@ fn land_wait_is_bounded_and_requires_the_exact_head() -> Result {
             format!(r#"[{{"name":"build","bucket":"{bucket}"}}]"#),
         )?;
         let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=1s", "--json"])?;
-        assert_eq!(code(&output), exit);
+        assert_eq!(
+            code(&output),
+            exit,
+            "{}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
         let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
         assert_eq!(report["error"]["code"], expected, "{report}");
         no_merge(&rig)?;
@@ -552,8 +557,10 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 "headRepositoryOwner",
                 "isCrossRepository",
                 "isDraft",
+                "mergeCommit",
                 "mergeStateStatus",
                 "mergeable",
+                "mergedAt",
                 "number",
                 "reviewDecision",
                 "state",
@@ -615,7 +622,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             }
             fs::write("head-read", "")?;
         }
-        "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository" => {
+        "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository,title,mergeCommit,mergedAt" => {
             let state = if Path::new("merged").exists() { "MERGED" } else { "OPEN" };
             write!(io::stdout(), r#"{{"state":"{state}","baseRefName":"main","headRefName":"feature","isCrossRepository":false}}"#)?;
         }

@@ -24,19 +24,30 @@ pub struct ReviewReviewer {
     #[serde(default)]
     pub distinct_families: bool,
 }
+/// Declarative selector shared by review shapes and pipeline presets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ReviewSelect {
-    pub default: String,
-    pub by_risk: BTreeMap<String, String>,
-    pub by_kind: BTreeMap<String, String>,
-    pub by_paths: BTreeMap<String, String>,
+pub struct Select<T> {
+    pub default: T,
+    pub by_risk: BTreeMap<String, T>,
+    pub by_kind: BTreeMap<String, T>,
+    pub by_paths: BTreeMap<String, T>,
+    pub by_size: BTreeMap<String, T>,
+    pub by_readiness: BTreeMap<String, T>,
 }
-impl Default for ReviewSelect {
+impl<T: Default> Default for Select<T> {
     fn default() -> Self {
-        bundled().select
+        Self {
+            default: T::default(),
+            by_risk: BTreeMap::new(),
+            by_kind: BTreeMap::new(),
+            by_paths: BTreeMap::new(),
+            by_size: BTreeMap::new(),
+            by_readiness: BTreeMap::new(),
+        }
     }
 }
+pub type ReviewSelect = Select<String>;
 impl Default for ReviewConfig {
     fn default() -> Self {
         bundled()
@@ -70,6 +81,8 @@ fn bundled() -> ReviewConfig {
             by_risk: select.by_risk,
             by_kind: select.by_kind,
             by_paths: select.by_paths,
+            by_size: BTreeMap::new(),
+            by_readiness: BTreeMap::new(),
         },
     }
 }
@@ -78,18 +91,38 @@ pub struct ReviewSelection<'a> {
     pub source: &'static str,
     pub shape: &'a ReviewShape,
 }
-impl ReviewConfig {
-    pub fn select_shape<'a>(
-        &'a self,
-        override_name: Option<&'a str>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selection<T> {
+    pub value: T,
+    pub source: &'static str,
+    pub matched: Option<String>,
+}
+impl<T: Clone> Select<T> {
+    pub fn select(
+        &self,
+        override_value: Option<&T>,
         risk: Option<&str>,
         kind: Option<&str>,
         paths: &[String],
-    ) -> Result<ReviewSelection<'a>, String> {
-        let selected = if let Some(name) = override_name {
-            (name, "override")
-        } else if let Some((_, name)) = self
-            .select
+        size: Option<&str>,
+        ready: Option<bool>,
+    ) -> Selection<T> {
+        let selected = if let Some(value) = override_value {
+            (value, "override", None)
+        } else if let Some(ready) = ready
+            && let Some(value) =
+                self.by_readiness
+                    .get(if ready { "ready" } else { "underspecified" })
+        {
+            (
+                value,
+                "readiness",
+                Some(format!(
+                    "readiness:{}",
+                    if ready { "ready" } else { "underspecified" }
+                )),
+            )
+        } else if let Some((pattern, value)) = self
             .by_paths
             .iter()
             .filter(|(pattern, _)| paths.iter().any(|path| path_matches(pattern, path)))
@@ -99,21 +132,49 @@ impl ReviewConfig {
                     .then_with(|| b.cmp(a))
             })
         {
-            (name.as_str(), "by_paths")
-        } else if let Some(name) = risk.and_then(|r| self.select.by_risk.get(r)) {
-            (name.as_str(), "by_risk")
-        } else if let Some(name) = kind.and_then(|k| self.select.by_kind.get(k)) {
-            (name.as_str(), "by_kind")
+            (value, "by_paths", Some(format!("by_paths:{pattern}")))
+        } else if let Some((key, value)) = risk.and_then(|key| self.by_risk.get_key_value(key)) {
+            (value, "by_risk", Some(format!("by_risk:{key}")))
+        } else if let Some((key, value)) = kind.and_then(|key| self.by_kind.get_key_value(key)) {
+            (value, "by_kind", Some(format!("by_kind:{key}")))
+        } else if let Some((key, value)) = size.and_then(|key| self.by_size.get_key_value(key)) {
+            (value, "by_size", Some(format!("by_size:{key}")))
         } else {
-            (self.select.default.as_str(), "default")
+            (&self.default, "default", None)
         };
+        Selection {
+            value: selected.0.clone(),
+            source: selected.1,
+            matched: selected.2,
+        }
+    }
+}
+impl ReviewConfig {
+    pub fn select_shape<'a>(
+        &'a self,
+        override_name: Option<&'a str>,
+        risk: Option<&str>,
+        kind: Option<&str>,
+        paths: &[String],
+    ) -> Result<ReviewSelection<'a>, String> {
+        let selected = self.select.select(
+            override_name.map(str::to_owned).as_ref(),
+            risk,
+            kind,
+            paths,
+            None,
+            Some(true),
+        );
         let shape = self
             .shapes
-            .get(selected.0)
-            .ok_or_else(|| format!("unknown review shape '{}'", selected.0))?;
+            .get(&selected.value)
+            .ok_or_else(|| format!("unknown review shape '{}'", selected.value))?;
         Ok(ReviewSelection {
-            name: selected.0,
-            source: selected.1,
+            name: self
+                .shapes
+                .get_key_value(&selected.value)
+                .map_or("", |(name, _)| name),
+            source: selected.source,
             shape,
         })
     }
@@ -279,6 +340,76 @@ mod tests {
         assert_eq!(
             review.select_shape(None, None, None, &paths).unwrap().name,
             "deep"
+        );
+    }
+
+    #[test]
+    fn generic_select_supports_size_and_readiness_rules() {
+        let select = Select {
+            default: "single".to_owned(),
+            by_risk: BTreeMap::from([("critical".into(), "review-council".into())]),
+            by_kind: BTreeMap::from([("docs".into(), "chain".into())]),
+            by_paths: BTreeMap::from([("src/**".into(), "fan-out".into())]),
+            by_size: BTreeMap::from([("large".into(), "big-batch".into())]),
+            by_readiness: BTreeMap::from([("underspecified".into(), "scope-then-run".into())]),
+        };
+        let paths = vec!["src/lib.rs".to_owned()];
+        assert_eq!(
+            select
+                .select(
+                    None,
+                    Some("critical"),
+                    Some("docs"),
+                    &paths,
+                    Some("large"),
+                    Some(false)
+                )
+                .value,
+            "scope-then-run"
+        );
+        assert_eq!(
+            select
+                .select(
+                    None,
+                    Some("critical"),
+                    Some("docs"),
+                    &paths,
+                    Some("large"),
+                    Some(true)
+                )
+                .value,
+            "fan-out"
+        );
+        assert_eq!(
+            select
+                .select(None, None, None, &[], Some("large"), Some(true))
+                .value,
+            "big-batch"
+        );
+        assert_eq!(
+            select
+                .select(
+                    None,
+                    Some("critical"),
+                    Some("docs"),
+                    &[],
+                    Some("large"),
+                    Some(true)
+                )
+                .value,
+            "review-council"
+        );
+        assert_eq!(
+            select
+                .select(None, None, Some("docs"), &[], Some("large"), Some(true))
+                .value,
+            "chain"
+        );
+        assert_eq!(
+            select
+                .select(None, None, None, &[], None, Some(true))
+                .source,
+            "default"
         );
     }
 

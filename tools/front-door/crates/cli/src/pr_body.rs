@@ -225,23 +225,60 @@ fn evidence(lines: &[&str], body: &Body<'_>) -> String {
         }
         out.push_str(&format!("| {} |\n", cells.join(" | ")));
     }
-    let attempt_row = |label: &str, facts: &AttemptFacts| {
-        format!(
-            "| {label} | {} | {}; route {} | {} | none |\n",
-            code(&format!(
-                "provenant output {} --part result",
-                facts.attempt_id
-            )),
-            exit_text(facts),
-            facts.route,
-            code(&head_text(facts)),
-        )
-    };
     out.push_str(&attempt_row("Writer attempt", body.author));
     for review in body.reviews {
         out.push_str(&attempt_row("Independent review", review));
     }
     out
+}
+
+/// Graph delivery and `pr open` use the same attempt evidence rows.
+pub fn independent_review_rows(reviews: &[AttemptFacts]) -> String {
+    if reviews.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "## Independent review\n\n| Check | Evidence | Result | Head | Notes |\n| --- | --- | --- | --- | --- |\n",
+    );
+    for review in reviews {
+        text.push_str(&attempt_row("Independent review", review));
+    }
+    text
+}
+
+fn attempt_row(label: &str, facts: &AttemptFacts) -> String {
+    let mut notes = Vec::new();
+    if let Some(role) = &facts.role {
+        notes.push(format!("role {}", code(role).replace('|', "\\|")));
+    }
+    if facts.role.is_some() || facts.verdict.is_some() {
+        let model = facts.route.split('@').next().unwrap_or(&facts.route);
+        let family = crate::run::model_family(model);
+        notes.push(format!("family {}", family.as_deref().unwrap_or("unknown")));
+        notes.push(format!(
+            "verdict {}",
+            facts
+                .verdict
+                .as_deref()
+                .map(|verdict| verdict.strip_prefix("VERDICT: ").unwrap_or(verdict))
+                .unwrap_or("not recorded")
+        ));
+    }
+    let notes = if notes.is_empty() {
+        "none".into()
+    } else {
+        notes.join("; ")
+    };
+    format!(
+        "| {label} | {} | {}; route {} | {} | {notes} |\n",
+        code(&format!(
+            "provenant output {} --part result",
+            facts.attempt_id
+        )),
+        exit_text(facts),
+        facts.route,
+        code(&head_text(facts)),
+    )
 }
 
 fn review(lines: &[&str], body: &Body<'_>) -> String {
@@ -269,7 +306,14 @@ fn review(lines: &[&str], body: &Body<'_>) -> String {
         ),
         (
             "Reviewer role",
-            join(&|_| "independent review lane".into(), "none recorded"),
+            join(
+                &|r| {
+                    r.role
+                        .clone()
+                        .unwrap_or_else(|| "independent review lane".into())
+                },
+                "none recorded",
+            ),
         ),
         (
             "Independence from authorship/implementation context",
@@ -373,6 +417,8 @@ mod tests {
             state: "succeeded".into(),
             exit_code: Some(0),
             route: route.into(),
+            role: None,
+            verdict: None,
             head: GitOid::parse(head).ok(),
             branch: Some("feat/thing".into()),
             delivery_id: None,
@@ -426,6 +472,40 @@ mod tests {
         assert_eq!(&harness[2..4], ["`scripts/check-harness`", "pending"]);
         assert!(text.contains("| Writer attempt |"));
         assert!(text.contains("| Independent review |"));
+    }
+
+    #[test]
+    fn graph_reviews_use_the_same_receipt_rows_as_pr_open() {
+        let author = facts(1, "writer/model@high", HEAD);
+        let mut reviews = [
+            facts(2, "codex/gpt-6.1-terra@high", HEAD),
+            facts(3, "claude/claude-opus-5-5@high", REVIEWED),
+            facts(4, "codex/gpt-6.1-sol@high", HEAD),
+        ];
+        for (facts, (role, verdict)) in reviews.iter_mut().zip([
+            ("lens.correctness-spec", "FAIL"),
+            ("review.verify", "PASS"),
+            ("review.synthesis", "PASS"),
+        ]) {
+            facts.role = Some(role.into());
+            facts.verdict = Some(format!("VERDICT: {verdict}"));
+        }
+        let opened = fill(TEMPLATE, &body(&author, &reviews)).unwrap();
+        let graph = independent_review_rows(&reviews);
+        assert_eq!(graph, include_str!("fixtures/graph-independent-review.md"));
+        let rows: Vec<_> = graph
+            .lines()
+            .filter(|line| line.starts_with("| Independent review |"))
+            .collect();
+        assert_eq!(rows.len(), 3);
+        for row in rows {
+            assert!(opened.contains(row), "{row}");
+        }
+        assert!(graph.contains(&format!("`{REVIEWED}`")));
+        assert!(graph.contains("role `lens.correctness-spec`; family openai; verdict FAIL"));
+        assert!(graph.contains("role `review.verify`; family anthropic; verdict PASS"));
+        assert!(graph.contains("role `review.synthesis`; family openai; verdict PASS"));
+        assert!(independent_review_rows(&[]).is_empty());
     }
 
     #[test]

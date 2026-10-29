@@ -40,6 +40,8 @@ struct Report {
     /// Why `managed` could not be read, when it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     managed_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 fn executable(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
@@ -210,6 +212,7 @@ fn local(home: &Path, roots: &provenant_core::Roots) -> Result<Report, Box<dyn s
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
         managed,
         managed_error,
+        warnings: crate::pool_effort_warnings(roots),
     })
 }
 fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, Box<dyn std::error::Error>> {
@@ -273,6 +276,10 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
     match inspect(globals, host.as_deref()) {
         Ok(report) => {
             let mut text = String::new();
+            for warning in &report.warnings {
+                text.push_str(warning);
+                text.push('\n');
+            }
             for row in &report.claude {
                 let state = serde_json::to_value(row.signin.state)
                     .ok()

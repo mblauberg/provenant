@@ -733,18 +733,29 @@ fn project_worktree(directory: &Path, projects: &Projects) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-#[allow(clippy::print_stderr)]
 fn provider_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
+    resolved_executables(
+        search,
+        projects,
+        provenant_records::ADAPTER_SPECS
+            .iter()
+            .filter(|spec| spec.peer_bootstrap)
+            .map(|spec| spec.binary),
+    )
+}
+
+#[allow(clippy::print_stderr)]
+fn resolved_executables<'a>(
+    search: &OsStr,
+    projects: &Projects,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Vec<PathBuf> {
     let mut executables = Vec::new();
     // Resolve only through absolute PATH directories. Never turn a relative
     // shell entry into an absolute agent search directory by canonicalising it.
     // A project-local directory (direnv's `PATH_add`) would lend the agent
     // everything it holds, so it is skipped and the search continues.
-    for name in provenant_records::ADAPTER_SPECS
-        .iter()
-        .filter(|spec| spec.peer_bootstrap)
-        .map(|spec| spec.binary)
-    {
+    for name in names {
         if let Some(program) = std::env::split_paths(search)
             .filter(|dir| dir.is_absolute())
             .filter(|dir| {
@@ -768,6 +779,35 @@ fn provider_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
         }
     }
     executables
+}
+
+/// Fixed system directories and resolved host tools, excluding project worktrees.
+pub fn scheduler_path(
+    program: &Path,
+    roots: &Roots,
+    registry_name: RegistryName,
+) -> Result<OsString, AgentError> {
+    let search = std::env::var_os("PATH").unwrap_or_default();
+    let projects = Projects::registered(roots, registry_name);
+    let mut executables = scheduler_executables(&search, &projects);
+    executables.extend(provenant_os::git::git_executable());
+    let bin = program
+        .parent()
+        .ok_or_else(|| AgentError::Path(program.into()))?;
+    sanitised_path(bin, &executables)
+}
+
+fn scheduler_executables(search: &OsStr, projects: &Projects) -> Vec<PathBuf> {
+    // Tick can unblock any configured adapter, including adapters whose
+    // sign-in is not managed by peer bootstrap.
+    resolved_executables(
+        search,
+        projects,
+        provenant_records::ADAPTER_SPECS
+            .iter()
+            .map(|spec| spec.binary)
+            .chain(["gh"]),
+    )
 }
 
 pub fn install_plist(
@@ -1212,6 +1252,49 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"#!/bin/sh\n").unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn scheduler_path_includes_providers_and_github_outside_project_worktrees() {
+        use super::*;
+        let (_temp, base, roots) = project_roots();
+        let project = base.join("project");
+        let providers = base.join("providers");
+        let other_provider = base.join("other-provider");
+        let github = base.join("github");
+        bind(&roots, &project);
+        for path in [
+            project.join("bin/codex"),
+            project.join("bin/gh"),
+            providers.join("codex"),
+            other_provider.join("cursor-agent"),
+            github.join("gh"),
+        ] {
+            provider(&path);
+        }
+        let search = std::env::join_paths([
+            project.join("bin"),
+            providers.clone(),
+            other_provider.clone(),
+            github.clone(),
+        ])
+        .unwrap();
+        let projects = Projects::registered(&roots, name);
+        let executables = scheduler_executables(&search, &projects);
+        assert_eq!(
+            executables,
+            vec![
+                providers.join("codex"),
+                other_provider.join("cursor-agent"),
+                github.join("gh")
+            ]
+        );
+        let path = sanitised_path(Path::new("/install/bin"), &executables).unwrap();
+        let entries = std::env::split_paths(&path).collect::<Vec<_>>();
+        assert!(entries.contains(&providers));
+        assert!(entries.contains(&other_provider));
+        assert!(entries.contains(&github));
+        assert!(!entries.contains(&project.join("bin")));
     }
 
     #[test]
