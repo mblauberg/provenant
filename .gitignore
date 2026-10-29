@@ -30,3 +30,4 @@ config/installation.json
 # Machine-local Fabric coordination state.
 .agent-fabric/
 .fabric-trial/
+.provenant/scratch/
