@@ -505,6 +505,24 @@ pub struct ResumeRequest {
     registry: std::path::PathBuf,
 }
 
+impl ResumeRequest {
+    pub fn parse(raw: &str) -> Result<Self> {
+        serde_json::from_str(raw).map_err(|_| RunError::Validation("settlement resume request"))
+    }
+    pub fn roots(&self) -> &crate::RootSeed {
+        &self.roots
+    }
+    pub fn project(&self) -> provenant_core::ProjectId {
+        self.project
+    }
+    pub fn actor(&self) -> provenant_core::ActorId {
+        self.actor
+    }
+    pub fn run(&self) -> provenant_core::RunId {
+        self.run
+    }
+}
+
 impl crate::RunStore {
     pub(crate) fn queue_reconcile(
         &self,

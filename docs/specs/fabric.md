@@ -210,6 +210,10 @@ attempt ID. Graphs advance, then the dispatching chair's inbox receives one
 note of at most 300 bytes (attempt, outcome, `(partial)`, model, staged
 recovery, head, pull request), then the chair's session log gains a
 `lane_settled` entry. Notices report outcomes and never instruct. A lane
+Reactions are at-least-once and exactly-once in effect: the first pass freezes
+the payload in a receipt, and both the normal path and crash recovery drain
+unfinished receipts for the run. The chair log goes to the session in
+`PROVENANT_SESSION_ID`, else the session the chair saved. A lane
 dispatched by a lane has no chair and stays quiet, and read-only lanes notify
 only when `[domains.fabric.lanes.settlement] notice_read_only` is set; `notice`
 and `chair_log` switch the other two reactions.

@@ -3336,10 +3336,12 @@ fn graph_result_warning(error: &provenant_run::RunError) -> &'static str {
 }
 
 /// The one post-settlement seam. Every settlement, including a partial or
-/// stopped-early one, passes through here once. The reactions run in order,
-/// each isolated from the others: graphs advance, the chair is notified, then
-/// the chair log is appended. A staged successor launches around them, and a
-/// delayed retry runs them before its wait rather than after it.
+/// stopped-early one, passes through here once, and crash recovery drains the
+/// same reactions through `settlement::drain_run`. A staged successor launches
+/// around the reactions, and a delayed retry reacts before its wait. A failed
+/// launch or reaction never stops the other, and the first error in time order
+/// is reported. The reactions run in order: graphs advance, the chair is
+/// notified, then the chair log is appended.
 pub(crate) fn advance_settled_graphs(
     holder: &provenant_cli::run::HostHolder<'_>,
     workers: &'static dyn WorkerObserver,
@@ -3347,39 +3349,26 @@ pub(crate) fn advance_settled_graphs(
     let Some(settled) = holder.settled()? else {
         return Ok(());
     };
-    let mut reacted = None;
-    provenant_cli::run::launch_policy_successor(&settled, || {
-        reacted = Some(settlement_reactions(&settled, workers));
-    })
-    .map_err(std::io::Error::other)?;
-    reacted.unwrap_or_else(|| settlement_reactions(&settled, workers))
+    crate::settlement::seam(
+        |before| provenant_cli::run::launch_policy_successor(&settled, before),
+        || settlement_reactions(&settled, workers),
+    )
 }
 
 fn settlement_reactions(
     settled: &provenant_run::HolderContext,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut first_error = advance_graphs_after_settlement(settled, workers).err();
-    let reports = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let Some(host) = &settled.launch else {
-            return Ok(());
-        };
-        let roots = crate::roots::child(
-            &settled.roots.home,
-            &settled.roots.checkout,
-            host.configuration_root.clone(),
-        )?;
-        let Some(facts) = crate::settlement::Facts::read(settled, &roots)? else {
-            return Ok(());
-        };
-        let notice = facts.post_notice();
-        let log = facts.append_chair_log();
-        notice.and(log)
-    })();
-    if let Err(error) = reports {
-        first_error.get_or_insert(error);
-    }
-    first_error.map_or(Ok(()), Err)
+    let graphs = advance_graphs_after_settlement(settled, workers);
+    let reports = crate::settlement::drain_run(&crate::settlement::Subject {
+        home: settled.roots.home.clone(),
+        checkout: settled.roots.checkout.clone(),
+        state_root: settled.roots.state_root.clone(),
+        project: settled.project_id,
+        actor: settled.actor_id,
+        run: settled.run_id,
+    });
+    graphs.and(reports)
 }
 
 fn advance_graphs_after_settlement(
