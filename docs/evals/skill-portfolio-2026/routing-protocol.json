@@ -46,7 +46,7 @@
   "dataset": {
     "cases": 18,
     "id": "skill-portfolio-routing-holdout-20260719-v6",
-    "path": "routing-holdout.yaml",
+    "path": "predecessor/routing-holdout-20260719.yaml",
     "split": "current-catalogue-holdout"
   },
   "evaluation_id": "skill-portfolio-routing-20260719-fabric-v7",

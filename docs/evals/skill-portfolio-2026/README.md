@@ -10,21 +10,25 @@ Detailed provider events and usage remain local run-owned evidence.
 
 | Dataset | Planned schedule | Result | Disposition |
 |---|---:|---|---|
-| [Current 26-owner holdout](routing-holdout.yaml) | 18 cases x 2 families x 3 trials | Not run | Catalogue holdout only; no current evaluation protocol has been frozen. |
+| [Current 28-owner holdout](routing-holdout.yaml) | 18 cases x 2 families x 3 trials | Not run | Catalogue holdout only; no current evaluation protocol has been frozen. |
 
 The current holdout names the live consolidated owners `ui-ux-design`,
-`skill-craft` and `autopilot`. It also tests the positive `setup-repo` trigger
+`skill-craft`, `session` and `tracker`. The 30 October 2026 skills rework
+retired `autopilot`, `work-map`, `grill-me` and `prototype` (their behaviour
+moved into `session`, `tracker` and `scope`) and renamed `tdd` to
+`test-design`; the previous holdout is kept at
+[predecessor/routing-holdout-20260719.yaml](predecessor/routing-holdout-20260719.yaml). It also tests the positive `setup-repo` trigger
 against the negative boundary for ordinary mechanics in an already-configured
-repository. Its 26-owner count is checked against `skills/*/SKILL.md` by the
+repository. Its 28-owner count (20 in `skills/`, 8 in `library/`) is checked against `*/SKILL.md` by the
 live catalogue tests; it is not a rewrite of the frozen protocol.
 
-The [frozen protocol](routing-protocol.json) remains evaluation v7's original
+The [frozen protocol](routing-protocol.json) (bound to the archived 19 July holdout) remains evaluation v7's original
 33-owner, 19 July artifact, including its source revision, identity and
 daemon-era route. It is retained as planned-unexecuted historical evidence.
 
 No semantic result file exists because no provider-backed model attempt started.
 The semantic holdout remains provider-dependent and not run. A deliberate
-current run must freeze a 26-owner protocol for the direct-provider batch path
+current run must freeze a 28-owner protocol for the direct-provider batch path
 and retain the actual route metadata. Do not reuse v7's retired
 bootstrap-authority or provider-action assumptions.
 
@@ -48,7 +52,7 @@ and [predecessor result](predecessor/routing-result-20260714.json) preserve the
 original binding to commit `1ddfe24858b362decb1c507b87a466df26d205eb` at
 `docs/evals/skill-portfolio-2026`. They evaluated retired owner names including
 `frontend-review`, `skill-audit`, `skill-authoring` and `autonomous-lab`; they
-do not establish current 26-owner routing behaviour.
+do not establish current 28-owner routing behaviour.
 Gemini 3.1 Pro High through `agy` and Grok 4.5 XHigh through `cursor-agent`
 each completed three no-retry trials in that predecessor run.
 

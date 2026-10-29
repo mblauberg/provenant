@@ -120,9 +120,9 @@
   "current_routing_regression": {
     "attempts_started": 0,
     "cases": 17,
-    "catalogue_owner_count": 25,
+    "catalogue_owner_count": 28,
     "dataset": "routing-holdout.yaml",
-    "evaluation_id": "skill-portfolio-catalogue-20260821-live",
+    "evaluation_id": "skill-portfolio-catalogue-20260830-live",
     "infrastructure_fixture": {
       "path": "tests/fixtures/current-routing-eval/dispatch_fixture.py",
       "route": "provider-free",
