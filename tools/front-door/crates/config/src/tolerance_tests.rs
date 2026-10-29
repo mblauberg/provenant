@@ -202,8 +202,8 @@ fn inspection_keeps_warnings_alongside_a_boundary_error() {
 fn malformed_authority_knobs_refuse_instead_of_granting_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let roots = roots(dir.path());
-    // `lanes.publish` defaults to true: recovering a malformed `false` would
-    // hand an open-network writer the gh login the user withheld.
+    // `lanes.publish` hands an open-network writer the gh login: a malformed
+    // value must refuse rather than recover to either side.
     for value in [
         "'lanes.publish'='false'",
         "'lanes.publish'=0",
@@ -226,10 +226,10 @@ fn malformed_authority_knobs_refuse_instead_of_granting_defaults() {
     }
     let config = load(
         &roots,
-        Some(&b"schema_version=1\n[knobs]\n'lanes.publish'=false\n"[..]),
+        Some(&b"schema_version=1\n[knobs]\n'lanes.publish'=true\n"[..]),
     )
     .unwrap();
-    assert_eq!(config.knobs["lanes.publish"].value, false);
+    assert_eq!(config.knobs["lanes.publish"].value, true);
     // A non-authority knob still recovers with a warning naming it.
     let config = load(
         &roots,
