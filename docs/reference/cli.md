@@ -1987,7 +1987,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "worktree", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "read_root", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id", "wait"], "name": "preset"}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
 | `--set` | `{"name": "preset_set", "repeatable": true}` |
 | `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
 | `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
@@ -2013,7 +2013,7 @@ bounds are null. Positional arguments have no long flag.
 | `--network` | `{"name": "network", "values": ["on", "off"]}` |
 | `--capability` | `{"bounds": [0, 16], "name": "capability", "repeatable": true}` |
 | `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "name": "provider_timeout"}` |
-| `--concurrency` | `{"bounds": [1, 16], "conflicts": ["prompt_file", "prompt_stdin"], "name": "concurrency", "requires": ["manifest"]}` |
+| `--concurrency` | `{"bounds": [1, 16], "name": "concurrency"}` |
 | `--knob` | `{"name": "knobs", "repeatable": true}` |
 | `--host` | `{"name": "host"}` |
 | `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "name": "worktree_branch"}` |
@@ -2033,11 +2033,12 @@ bounds are null. Positional arguments have no long flag.
 ```json
 {
   "constraints": [
-    "single prompt requires exactly one of model or route",
+    "single prompt requires exactly one of model or route, or a named preset",
     "operation-id is generated when omitted; supply it for planned retries",
     "manifest conflicts with per-task route, access, metadata and provider-timeout",
-    "concurrency requires manifest",
-    "worktree, or a peer writer's branch, is required with, and only valid for, worktree-write",
+    "concurrency requires manifest or preset",
+    "single-task worktree, or a peer writer's branch, requires worktree-write",
+    "preset worktree bindings require an existing registered worktree",
     "fallback conflicts with a writer and has at most two distinct models",
     "prompt and manifest inputs are at most 1 MiB"
   ],
@@ -2200,7 +2201,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "worktree", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "read_root", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id", "wait"], "name": "preset"}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
 | `--set` | `{"name": "preset_set", "repeatable": true}` |
 | `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
 | `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
@@ -2227,7 +2228,7 @@ bounds are null. Positional arguments have no long flag.
 | `--network` | `{"name": "network", "values": ["on", "off"]}` |
 | `--capability` | `{"bounds": [0, 16], "name": "capability", "repeatable": true}` |
 | `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "name": "provider_timeout"}` |
-| `--concurrency` | `{"bounds": [1, 16], "conflicts": ["prompt_file", "prompt_stdin"], "name": "concurrency", "requires": ["manifest"]}` |
+| `--concurrency` | `{"bounds": [1, 16], "name": "concurrency", "requires": ["manifest"]}` |
 | `--knob` | `{"name": "knobs", "repeatable": true}` |
 | `--host` | `{"name": "host"}` |
 | `--branch` | `{"name": "branch"}` |
