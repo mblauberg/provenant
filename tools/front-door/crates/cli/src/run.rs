@@ -6710,7 +6710,7 @@ mod tests {
         let prices = provenant_telemetry::validate_prices(&ConfiguredPrices {
             schema_version: 1,
             id: "empty".into(),
-            reviewed_at: "2026-10-29".into(),
+            reviewed_at: "2026-10-29".into(), // timebomb: allow fixed price-table review date, never compared with the clock
             units: "usd_microdollars_per_million_tokens".into(),
             models: Vec::new(),
         })
