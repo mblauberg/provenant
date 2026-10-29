@@ -272,9 +272,8 @@ pub fn prepare_writer(
     let state_dir = Directory::open_anchor(state)?;
     let projects = crate::artifacts::subdir(&state_dir, OsStr::new("worktrees"), true)
         .map_err(|error| anchor_filesystem(error, state))?;
-    let project_state =
-        crate::artifacts::subdir(&projects, OsStr::new(&project.to_string()), true)
-            .map_err(|error| anchor_filesystem(error, state))?;
+    let project_state = crate::artifacts::subdir(&projects, OsStr::new(&project.to_string()), true)
+        .map_err(|error| anchor_filesystem(error, state))?;
     let (directory, binding) =
         worktrees::writer_custody(&project_state, &worktree, &branch, base, || {
             let outcome = provenant_confinement::run_utility(

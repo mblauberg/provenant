@@ -1928,22 +1928,27 @@ fn claude_dispatch(host_native: bool) -> Result {
             lane["applied_route"]["source"],
             "domains.fabric.host_native.ci-fixer"
         );
+        let resume_prompt = rig.root.join("resume-prompt.md");
+        fs::write(&resume_prompt, "continue")?;
         let resumed = rig.command(&[
             "resume",
             lane["attempt_id"].as_str().ok_or("attempt")?,
-            "--prompt",
-            "continue",
+            "--prompt-file",
+            resume_prompt.to_str().ok_or("resume prompt")?,
             "--no-fallback",
             "--json",
         ])?;
         assert_eq!(
             code(&resumed),
-            2,
+            1,
             "{}",
             String::from_utf8_lossy(&resumed.stdout.bytes)
         );
         let refusal: Value = serde_json::from_slice(&resumed.stdout.bytes)?;
-        assert_eq!(refusal["error"]["code"], "CONTINUATION_UNSUPPORTED");
+        assert_eq!(
+            refusal["error"]["code"], "CONTINUATION_UNSUPPORTED",
+            "{refusal}"
+        );
     }
     assert!(account.join("refreshed").exists());
     let attempt = rig
