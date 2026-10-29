@@ -5150,7 +5150,7 @@ fn account_plan_prices_parse_validate_and_reject_unknown_fields() {
 fn free_plan_notional_value_and_extra_directories_parse_and_validate() {
     use provenant_config::DomainConfig;
     let ok = accounts_with_plans(
-        "directories = [\"/home/u/.claude\"]\n[[entries.claude-work.plans]]\nname = \"student\"\nprice_usd = 0\nnotional_usd = 20\neffective_from = \"2026-01-01\"\n",
+        "directories = [\"/home/u/.claude\"]\n[[entries.claude-work.plans]]\nname = \"student\"\nprice = 0\nnotional_usd = 20\neffective_from = \"2026-01-01\"\n",
     )
     .unwrap();
     let entry = &ok.entries["claude-work"];

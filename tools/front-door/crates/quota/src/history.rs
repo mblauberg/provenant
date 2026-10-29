@@ -93,9 +93,7 @@ impl HistoryRecord {
         let Some(previous) = previous else {
             return Some(next);
         };
-        if next.same_reading(previous)
-            || next.observed_unix_seconds < previous.observed_unix_seconds
-        {
+        if next.same_reading(previous) {
             return None;
         }
         for window in &next.windows {
@@ -160,8 +158,7 @@ pub fn encode_line(record: &HistoryRecord) -> Result<Vec<u8>, serde_json::Error>
 #[serde(deny_unknown_fields)]
 pub struct PlanPrice {
     pub name: String,
-    /// Price per month in `currency`; 0 for a free plan. `price_usd` is accepted as a name.
-    #[serde(alias = "price_usd")]
+    /// Price per month in `currency`; 0 for a free plan.
     pub price: f64,
     /// ISO 4217 code; USD when omitted.
     #[serde(default = "usd")]
@@ -277,6 +274,17 @@ mod tests {
         let moved = snapshot(160, None, vec![window("5h", 150, Some(900))]);
         let next = HistoryRecord::observe(Some(&first), &moved).unwrap();
         assert!(next.markers.is_empty());
+    }
+
+    #[test]
+    fn a_backward_clock_step_does_not_stall_history() {
+        let first =
+            HistoryRecord::observe(None, &snapshot(500, None, vec![window("5h", 100, None)]))
+                .unwrap();
+        let earlier = snapshot(400, None, vec![window("5h", 200, None)]);
+        assert!(HistoryRecord::observe(Some(&first), &earlier).is_some());
+        let same = snapshot(300, None, vec![window("5h", 100, None)]);
+        assert!(HistoryRecord::observe(Some(&first), &same).is_none());
     }
 
     #[test]
@@ -414,7 +422,7 @@ mod tests {
         free.notional_usd = Some(-1.0);
         assert!(!valid_plans(&[free]));
         let parsed: PlanPrice = serde_json::from_str(
-            r#"{"name":"s","price_usd":0,"notional_usd":20,"effective_from":"2026-01-01"}"#,
+            r#"{"name":"s","price":0,"notional_usd":20,"effective_from":"2026-01-01"}"#,
         )
         .unwrap();
         assert_eq!(parsed.currency, "USD");

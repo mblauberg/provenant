@@ -35,7 +35,7 @@
       "form": "array of tables, any number of entries",
       "fields": {
         "name": "Plan label, for example max_5x. At most 64 characters.",
-        "price": "Price per month in currency; 0 or more, 0 for a free plan. price_usd is accepted as a name.",
+        "price": "Price per month in currency; 0 or more, 0 for a free plan.",
         "currency": "Three capital letters (ISO 4217). USD when omitted. No conversion is applied.",
         "notional_usd": "Optional list-price value in USD of a free or discounted plan, for example 20 for a student plan priced 0.",
         "effective_from": "First day the price applies, YYYY-MM-DD (UTC)."

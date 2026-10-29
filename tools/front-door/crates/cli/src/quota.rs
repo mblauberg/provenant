@@ -1225,17 +1225,24 @@ fn history_report(
     if total > limit {
         records.drain(..total - limit);
     }
-    let readings: Vec<serde_json::Value> = records
+    // One price lookup per record serves both the JSON and the table.
+    let prices: Vec<Option<PlanPrice>> = records
         .iter()
         .map(|record| {
-            let plans = accounts
+            accounts
                 .entries
                 .values()
                 .find(|e| e.adapter == record.provider && e.key == record.account_key)
-                .map_or(&[][..], |e| e.plans.as_slice());
+                .and_then(|e| price_in_force(&e.plans, record.observed_unix_seconds))
+                .cloned()
+        })
+        .collect();
+    let readings: Vec<serde_json::Value> = records
+        .iter()
+        .zip(&prices)
+        .map(|(record, price)| {
             let mut value = serde_json::to_value(record)?;
-            value["plan_price"] =
-                serde_json::to_value(price_in_force(plans, record.observed_unix_seconds))?;
+            value["plan_price"] = serde_json::to_value(price)?;
             Ok(value)
         })
         .collect::<Result<_, serde_json::Error>>()?;
@@ -1250,32 +1257,15 @@ fn history_report(
     if serde_json::to_vec(&data)?.len() as u64 > 16 * MAX_RECORD_BYTES {
         return Err(EdgeError::TooLarge);
     }
-    Ok((data, history_human(&records, accounts_prices(&accounts))))
+    Ok((data, history_human(&records, &prices)))
 }
 
-fn accounts_prices(
-    accounts: &provenant_providers::accounts::Settings,
-) -> impl Fn(&HistoryRecord) -> Option<PlanPrice> + '_ {
-    move |record| {
-        let plans = accounts
-            .entries
-            .values()
-            .find(|e| e.adapter == record.provider && e.key == record.account_key)?
-            .plans
-            .as_slice();
-        price_in_force(plans, record.observed_unix_seconds).cloned()
-    }
-}
-
-fn history_human(
-    records: &[HistoryRecord],
-    price: impl Fn(&HistoryRecord) -> Option<PlanPrice>,
-) -> String {
+fn history_human(records: &[HistoryRecord], prices: &[Option<PlanPrice>]) -> String {
     if records.is_empty() {
         return "Quota history: no readings\n".into();
     }
     let mut human = format!("Quota history: {} readings\n", records.len());
-    for record in records {
+    for (record, price) in records.iter().zip(prices) {
         let when = jiff::Timestamp::from_second(record.observed_unix_seconds).map_or_else(
             |_| "?".into(),
             |t| t.strftime("%Y-%m-%d %H:%M:%SZ").to_string(),
@@ -1297,7 +1287,7 @@ fn history_human(
         if let Some(balance) = &record.credit_balance {
             human.push_str(&format!("  credit {}", balance.escape_debug()));
         }
-        if let Some(plan) = price(record) {
+        if let Some(plan) = price {
             human.push_str(&format!(
                 "  {} {} {}/mo",
                 plan.name.escape_debug(),

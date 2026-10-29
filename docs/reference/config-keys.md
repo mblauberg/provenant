@@ -36,7 +36,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
     "effective_from": "First day the price applies, YYYY-MM-DD (UTC).",
     "name": "Plan label, for example max_5x. At most 64 characters.",
     "notional_usd": "Optional list-price value in USD of a free or discounted plan, for example 20 for a student plan priced 0.",
-    "price": "Price per month in currency; 0 or more, 0 for a free plan. price_usd is accepted as a name."
+    "price": "Price per month in currency; 0 or more, 0 for a free plan."
   },
   "form": "array of tables, any number of entries",
   "path": "domains.accounts.entries.<id>.plans"

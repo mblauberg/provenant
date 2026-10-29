@@ -121,8 +121,7 @@ currency = "USD"
 effective_from = "2026-01-01"
 ```
 
-Prices are USD unless `currency` says otherwise (`price_usd` is accepted as
-the name of `price`), and nothing converts currencies. A free plan has
+Prices are USD unless `currency` says otherwise, and nothing converts currencies. A free plan has
 `price = 0` and may carry `notional_usd`, the list price it replaces; history
 shows both. An account may also list extra `directories` signed into it; they
 are schema only until native ingest lands. The keys are listed in

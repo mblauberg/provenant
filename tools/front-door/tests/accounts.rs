@@ -215,3 +215,66 @@ fn set_writes_clears_and_resolves_by_id_and_label() -> Result {
     }
     Ok(())
 }
+
+#[test]
+fn reregistering_keeps_plan_prices_and_extra_directories() -> Result {
+    let mut rig = TestRig::new()?;
+    let bin = rig.root.join("bin");
+    fs::create_dir(&bin)?;
+    let claude = bin.join("claude");
+    fs::write(
+        &claude,
+        "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"email\":\"fixture@example.test\"}'\n",
+    )?;
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let directory = rig.home.join(".claude-work");
+    fs::create_dir(&directory)?;
+    let register = |rig: &TestRig| {
+        rig.command(&[
+            "accounts",
+            "register",
+            "work",
+            "--adapter",
+            "claude",
+            "--directory",
+            directory.to_str().unwrap_or(""),
+            "--json",
+        ])
+    };
+    assert_eq!(code(&register(&rig)?), 0);
+    let config_path = rig.state.join("config.toml");
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config_path)?.parse()?;
+    let entry = doc["domains"]["accounts"]["entries"]["claude-work"]
+        .as_table_mut()
+        .ok_or("registration")?;
+    let mut dirs = toml_edit::Array::new();
+    dirs.push("/home/u/.other");
+    entry["directories"] = toml_edit::value(dirs);
+    let mut plans = toml_edit::ArrayOfTables::new();
+    let mut plan = toml_edit::Table::new();
+    plan["name"] = toml_edit::value("student");
+    plan["price"] = toml_edit::value(0.0);
+    plan["currency"] = toml_edit::value("USD");
+    plan["notional_usd"] = toml_edit::value(20.0);
+    plan["effective_from"] = toml_edit::value("2026-01-01");
+    plans.push(plan);
+    entry["plans"] = toml_edit::Item::ArrayOfTables(plans);
+    fs::write(&config_path, doc.to_string())?;
+    // Re-registering rewrites the section and must carry both across.
+    assert_eq!(code(&register(&rig)?), 0);
+    let after: toml_edit::DocumentMut = fs::read_to_string(&config_path)?.parse()?;
+    let entry = &after["domains"]["accounts"]["entries"]["claude-work"];
+    assert_eq!(entry["directories"][0].as_str(), Some("/home/u/.other"));
+    let plan = &entry["plans"][0];
+    assert_eq!(plan["name"].as_str(), Some("student"));
+    assert_eq!(plan["notional_usd"].as_float(), Some(20.0));
+    assert_eq!(plan["effective_from"].as_str(), Some("2026-01-01"));
+    let listed = rig.command(&["accounts", "list", "--json"])?;
+    assert_eq!(code(&listed), 0);
+    Ok(())
+}

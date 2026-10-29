@@ -60,12 +60,8 @@ pub(crate) fn record(
     let current = file_name(snapshot, CURRENT);
     let rotated = file_name(snapshot, ROTATED);
     let half = max_bytes / 2;
-    let mut last = decode_lines(&read_file(
-        &directory,
-        &current,
-        half.saturating_add(READ_LIMIT),
-    )?)
-    .pop();
+    let current_bytes = read_file(&directory, &current, READ_LIMIT)?;
+    let mut last = decode_lines(&current_bytes).pop();
     if last.is_none() {
         last = decode_lines(&read_file(&directory, &rotated, READ_LIMIT)?).pop();
     }
@@ -79,11 +75,21 @@ pub(crate) fn record(
         .and_then(|file| file.metadata().ok())
         .map_or(0, |meta| meta.size);
     // Rotate before the append, so the newest record always lands in `current`.
-    if size > 0 && size.saturating_add(line.len() as u64) > half {
+    let rotated_now = size > 0 && size.saturating_add(line.len() as u64) > half;
+    if rotated_now {
         directory.replace(&current, &directory, &rotated)?;
         directory.sync()?;
     }
+    // Rotation left an empty file. Otherwise a crashed writer may have left an
+    // unterminated fragment, which the new line would glue onto and spoil.
+    let torn = !rotated_now && current_bytes.last().is_some_and(|b| *b != b'\n');
     let mut file = directory.open_append(&current)?;
+    if torn {
+        file.write_all(b"\n").map_err(|source| EdgeError::Read {
+            path: current.clone().into(),
+            source,
+        })?;
+    }
     file.write_all(&line).map_err(|source| EdgeError::Read {
         path: current.clone().into(),
         source,
@@ -339,6 +345,31 @@ mod tests {
             assert!(!text.contains(secret), "{secret}");
         }
         assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o077, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_torn_tail_or_corrupt_line_does_not_spoil_the_next_record() -> TestResult {
+        let (temp, quota) = state()?;
+        let cap = provenant_quota::DEFAULT_HISTORY_MAX_BYTES;
+        record(&quota, &snapshot(100, None, 500, 900), cap)?;
+        let path = temp.path().join("quota/history/k1.claude.jsonl");
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
+        file.write_all(b"{\"schema_version\":1,\"obser")?;
+        drop(file);
+        assert!(record(&quota, &snapshot(200, None, 600, 900), cap)?);
+        assert_eq!(read(temp.path(), &Query::default())?.len(), 2);
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
+        file.write_all(b"not json\n")?;
+        drop(file);
+        assert!(record(&quota, &snapshot(300, None, 700, 900), cap)?);
+        let all = read(temp.path(), &Query::default())?;
+        assert_eq!(
+            all.iter()
+                .map(|r| r.observed_unix_seconds)
+                .collect::<Vec<_>>(),
+            [100, 200, 300]
+        );
         Ok(())
     }
 
