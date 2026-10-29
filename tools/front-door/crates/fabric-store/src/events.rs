@@ -114,34 +114,23 @@ impl Store {
         request.check()?;
         let limit = page(after, limit)?;
         let mut statement = self.db.prepare(
-            "SELECT seq,substr(record,1,?4) FROM events WHERE project=?1 AND seq>?2 ORDER BY seq LIMIT ?3",
+            "SELECT substr(record,1,?4),seq FROM events WHERE project=?1 AND seq>?2 ORDER BY seq LIMIT ?3",
         )?;
-        let mut rows = statement.query(params![
-            project.to_string(),
-            after,
-            limit,
-            MAX_RECORD_READ_BYTES
-        ])?;
-        let mut output = Vec::new();
-        let mut total = 0;
-        let mut truncated = false;
-        while let Some(row) = rows.next()? {
-            let bytes: Vec<u8> = row.get(1)?;
-            total += bytes.len();
-            if total > MAX_PAGE_BYTES {
-                truncated = true;
-                break;
-            }
-            output.push(Event {
+        let rows = statement.query_map(
+            params![project.to_string(), after, limit, MAX_RECORD_READ_BYTES],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let rows = bounded_rows(rows, |bytes, seq| {
+            Ok(Event {
                 extra: Default::default(),
-                seq: row.get(0)?,
+                seq,
                 record: decode(&bytes)?,
-            });
-        }
+            })
+        })?;
         Ok(Page {
             extra: Default::default(),
-            items: output,
-            truncated,
+            items: rows.items,
+            truncated: rows.truncated,
         })
     }
     pub fn event_cursor(

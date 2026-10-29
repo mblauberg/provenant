@@ -178,6 +178,30 @@ fn page(after: i64, limit: u64) -> Result<i64> {
     i64::try_from(limit).map_err(|_| Error::Invalid("page limit"))
 }
 
+struct BoundedRows<T> {
+    items: Vec<T>,
+    truncated: bool,
+}
+
+fn bounded_rows<T, U>(
+    rows: impl Iterator<Item = rusqlite::Result<(Vec<u8>, T)>>,
+    mut map: impl FnMut(Vec<u8>, T) -> Result<U>,
+) -> Result<BoundedRows<U>> {
+    let mut items = Vec::new();
+    let mut total = 0;
+    let mut truncated = false;
+    for row in rows {
+        let (bytes, value) = row?;
+        total += bytes.len();
+        if total > MAX_PAGE_BYTES {
+            truncated = true;
+            break;
+        }
+        items.push(map(bytes, value)?);
+    }
+    Ok(BoundedRows { items, truncated })
+}
+
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
