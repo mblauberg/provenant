@@ -342,7 +342,8 @@ fn uninstall_after_home_rename_never_acts_on_old_paths() {
             .iter()
             .filter(|finding| finding.rule == "relocated_stale_entry")
             .count(),
-        6
+        // Five managed target entries plus the shared instructions link.
+        7
     );
     struct StopReporter(usize);
     impl InstallReporter for StopReporter {
@@ -2119,6 +2120,256 @@ fn manual_include_advice_is_omitted_when_shared_agents_is_installed_and_referenc
         result.manual_includes
     );
     assert_eq!(fs::read(&instruction).unwrap(), text);
+}
+
+/// A release with shared global instructions under `base`, so fixtures can
+/// upgrade between instruction digests without touching `Fixture::source`.
+fn shared_release(base: &Path, name: &str, instructions: &[u8]) -> Release {
+    let source = base.join(format!("staged-{name}"));
+    fs::create_dir_all(source.join("bin")).unwrap();
+    fs::write(
+        source.join("bin/provenant"),
+        format!("fixture executable {name}"),
+    )
+    .unwrap();
+    fs::set_permissions(
+        source.join("bin/provenant"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::create_dir_all(source.join("instructions")).unwrap();
+    fs::write(source.join("instructions/AGENTS.md"), instructions).unwrap();
+    fs::write(source.join("instructions/HARNESS.md"), b"harness guide").unwrap();
+    let digest = source_digest(&[SourceInput {
+        name: "src/lib.rs",
+        bytes: name.as_bytes(),
+    }])
+    .unwrap();
+    package_fixture_release(&source, digest)
+}
+
+#[test]
+fn install_links_the_shared_instructions_and_upgrades_refresh_them() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    let shared = f.home.join(".agents/AGENTS.md");
+    let state = f.targets.roots.state.as_path().to_path_buf();
+    let old = shared_release(&f.base, "shared-old", b"old instructions");
+    install(
+        &f.plan_for(old.clone()),
+        &ctx,
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let old_target =
+        release_root(&state, old.manifest.source_digest).join("instructions/AGENTS.md");
+    assert_eq!(fs::read_link(&shared).unwrap(), old_target);
+    assert_eq!(
+        fs::read_link(shared.with_file_name("HARNESS.md")).unwrap(),
+        release_root(&state, old.manifest.source_digest).join("instructions/HARNESS.md")
+    );
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "shared-instruction"
+                && entry.path.to_path_buf().unwrap() == shared)
+    );
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
+    assert!(
+        inspection.error.is_none() && inspection.findings.is_empty(),
+        "{:?}",
+        inspection
+    );
+
+    let new = shared_release(&f.base, "shared-new", b"new instructions");
+    install(
+        &f.plan_for(new.clone()),
+        &ctx,
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let new_target =
+        release_root(&state, new.manifest.source_digest).join("instructions/AGENTS.md");
+    assert_eq!(fs::read_link(&shared).unwrap(), new_target);
+    assert_eq!(
+        fs::read_link(shared.with_file_name("HARNESS.md")).unwrap(),
+        release_root(&state, new.manifest.source_digest).join("instructions/HARNESS.md")
+    );
+    assert!(f.plan_for(new.clone()).actions().is_empty());
+
+    uninstall(&f.targets, &ctx, &mut Reporter::default()).unwrap();
+    assert!(!shared.exists());
+    let receipt = read_receipt(&f.targets).unwrap().unwrap();
+    assert!(
+        !receipt
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "shared-instruction")
+    );
+}
+
+#[test]
+fn shared_instructions_conflict_for_user_content_and_adopt_with_the_flag() {
+    let f = Fixture::new();
+    let shared = f.home.join(".agents/AGENTS.md");
+    fs::create_dir_all(shared.parent().unwrap()).unwrap();
+    fs::write(&shared, b"my own notes").unwrap();
+    let release = shared_release(&f.base, "shared-user", b"release instructions");
+    let snapshots = Snapshots::capture(&release, &f.targets).unwrap();
+    let error = plan_install(release, f.targets.clone(), snapshots).unwrap_err();
+    assert!(matches!(error, InstallError::Conflict(path) if path == shared));
+    assert_eq!(fs::read(&shared).unwrap(), b"my own notes");
+
+    let mut targets = f.targets.clone();
+    targets.adopt_existing = true;
+    let release = shared_release(&f.base, "shared-user", b"release instructions");
+    let snapshots = Snapshots::capture(&release, &targets).unwrap();
+    let plan = plan_install(release, targets.clone(), snapshots).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(
+        fs::read_link(&shared)
+            .unwrap()
+            .ends_with("instructions/AGENTS.md")
+    );
+    let receipt = read_receipt(&targets).unwrap().unwrap();
+    assert!(
+        receipt
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "shared-instruction"
+                && entry.path.to_path_buf().unwrap() == shared)
+    );
+}
+
+#[test]
+fn shared_instructions_equal_to_the_release_are_adopted_without_the_flag() {
+    let f = Fixture::new();
+    let shared = f.home.join(".agents/AGENTS.md");
+    fs::create_dir_all(shared.parent().unwrap()).unwrap();
+    fs::write(&shared, b"release instructions").unwrap();
+    let release = shared_release(&f.base, "shared-equal", b"release instructions");
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan_for(release),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(
+        fs::read_link(&shared)
+            .unwrap()
+            .ends_with("instructions/AGENTS.md")
+    );
+    assert!(
+        read_receipt(&f.targets)
+            .unwrap()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.selector == "shared-instruction")
+    );
+}
+
+#[test]
+fn check_install_reports_unmanaged_and_stale_shared_instructions() {
+    let f = Fixture::new();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    let shared = f.home.join(".agents/AGENTS.md");
+    let state = f.targets.roots.state.as_path().to_path_buf();
+    let release = shared_release(&f.base, "shared-old", b"release instructions");
+    install(
+        &f.plan_for(release.clone()),
+        &ctx,
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let ok = |f: &Fixture, cancel: &CancelToken| {
+        let inspection =
+            inspect_install(&f.targets, None, "fixture-target", &Smoke, cancel).unwrap();
+        assert!(inspection.error.is_none(), "{:?}", inspection.error);
+        assert!(inspection.findings.is_empty(), "{:?}", inspection.findings);
+    };
+    ok(&f, &cancel);
+
+    fs::remove_file(&shared).unwrap();
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
+    assert!(
+        inspection
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "missing_shared_instructions")
+    );
+    // A plain copy of older instructions is unmanaged, not missing.
+    fs::write(&shared, b"older user copy").unwrap();
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
+    assert!(
+        inspection
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "unmanaged_shared_instructions"
+                && finding.path.to_path_buf().unwrap() == shared)
+    );
+
+    // A link into another release still works but is stale.
+    let other = shared_release(&f.base, "shared-other", b"other instructions");
+    fs::remove_file(&shared).unwrap();
+    symlink(
+        release_root(&state, other.manifest.source_digest).join("instructions/AGENTS.md"),
+        &shared,
+    )
+    .unwrap();
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
+    assert!(
+        inspection
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "stale_shared_instructions"
+                && finding.path.to_path_buf().unwrap() == shared)
+    );
+
+    // A foreign link is unmanaged like a plain file.
+    fs::remove_file(&shared).unwrap();
+    symlink(f.home.join("personal/instructions.md"), &shared).unwrap();
+    let inspection = inspect_install(&f.targets, None, "fixture-target", &Smoke, &cancel).unwrap();
+    assert!(
+        inspection
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "unmanaged_shared_instructions")
+    );
+
+    // The managed link state again is clean.
+    fs::remove_file(&shared).unwrap();
+    symlink(
+        release_root(&state, release.manifest.source_digest).join("instructions/AGENTS.md"),
+        &shared,
+    )
+    .unwrap();
+    ok(&f, &cancel);
 }
 
 #[test]
@@ -4149,4 +4400,58 @@ fn linux_tick_units_are_receipted_reinstalled_idempotently_and_removed() {
     assert!(reporter.0.iter().any(|s| s == "tick-agent"));
     assert!(reporter.0.iter().any(|s| s == "tick-service"));
     assert!(!timer.exists() && !service.exists());
+}
+
+#[test]
+fn shared_instruction_adopts_foreign_link_and_resolves_parent() {
+    let f = Fixture::new();
+    let external = f.home.join("dotfiles");
+    fs::create_dir_all(&external).unwrap();
+    symlink(&external, f.home.join(".agents")).unwrap();
+    let shared = external.join("AGENTS.md");
+    symlink(f.home.join("personal.md"), &shared).unwrap();
+    let release = shared_release(&f.base, "shared-symlink", b"instructions");
+    let mut targets = f.targets.clone();
+    targets
+        .resolve_destinations(&provenant_os::fs::SystemPathResolver)
+        .unwrap();
+    let snapshots = Snapshots::capture(&release, &targets).unwrap();
+    assert!(matches!(
+        plan_install(release.clone(), targets.clone(), snapshots),
+        Err(InstallError::Conflict(_))
+    ));
+    targets.adopt_existing = true;
+    let snapshots = Snapshots::capture(&release, &targets).unwrap();
+    let plan = plan_install(release, targets.clone(), snapshots).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(
+        fs::read_link(&shared)
+            .unwrap()
+            .ends_with("instructions/AGENTS.md")
+    );
+    assert!(
+        fs::read_link(external.join("HARNESS.md"))
+            .unwrap()
+            .ends_with("instructions/HARNESS.md")
+    );
+    let inspection = inspect_install(&targets, None, "fixture-target", &Smoke, &cancel).unwrap();
+    assert!(
+        inspection.error.is_none() && inspection.findings.is_empty(),
+        "{inspection:?}"
+    );
+    uninstall(
+        &targets,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+    )
+    .unwrap();
 }
