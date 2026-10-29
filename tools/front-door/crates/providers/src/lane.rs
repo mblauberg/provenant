@@ -13,7 +13,6 @@ use std::{
 #[derive(Default)]
 pub(crate) struct GitWrapper {
     pub(crate) scrub: bool,
-    pub(crate) routing: Option<Vec<u8>>,
     include: Option<String>,
     git: Option<PathBuf>,
 }
@@ -24,12 +23,19 @@ impl crate::LaunchSpec {
         bin: &Path,
         git: &Path,
     ) -> Result<(), ProviderError> {
-        let git = self.git_wrapper.git.as_deref().unwrap_or(git);
+        if self
+            .git_wrapper
+            .git
+            .as_deref()
+            .is_some_and(|selected| selected != git)
+        {
+            return Err(ProviderError::InvalidPath);
+        }
+        self.git_wrapper.git = Some(git.to_owned());
         let bytes = git_wrapper(
             git,
             &self.env,
             self.git_wrapper.scrub,
-            self.git_wrapper.routing.as_deref(),
             self.git_wrapper.include.as_deref(),
         )?;
         let wrapper = bin.join("git");
@@ -103,7 +109,6 @@ impl crate::LaunchSpec {
         let include = shell_quote(&format!("include.path={}", text(&config)?));
         self.git_wrapper.scrub = true;
         self.git_wrapper.include = Some(include);
-        self.git_wrapper.git = Some(git.to_owned());
         self.write_git_wrapper(&scratch.join("bin"), git)?;
         self.setup.extend([
             SetupStep::WriteFile {
@@ -150,7 +155,6 @@ fn git_wrapper(
     git: &Path,
     env: &[(OsString, OsString)],
     scrub: bool,
-    routing: Option<&[u8]>,
     include: Option<&str>,
 ) -> Result<Vec<u8>, ProviderError> {
     let git = git.to_str().ok_or(ProviderError::InvalidPath)?;
@@ -162,14 +166,7 @@ fn git_wrapper(
         bytes.extend_from_slice(b"GIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n");
         bytes.extend_from_slice(identity_exports(env)?.as_bytes());
     }
-    if let Some(routing) = routing {
-        bytes.extend_from_slice(routing);
-    }
-    let executable = if routing.is_some_and(|routing| !routing.is_empty()) {
-        "\"$lane_git\"".to_owned()
-    } else {
-        shell_quote(git)
-    };
+    let executable = shell_quote(git);
     let include = include
         .map(|value| format!(" -c {value}"))
         .unwrap_or_default();
@@ -334,7 +331,7 @@ impl LaneRuntime<'_> {
         setup.push(if scrubbed_git_config {
             SetupStep::WriteExecutable {
                 path: bin.join("git"),
-                bytes: self.git_wrapper(env, &[])?,
+                bytes: git_wrapper(self.git, env, true, None)?,
             }
         } else {
             SetupStep::Symlink {
@@ -357,14 +354,6 @@ impl LaneRuntime<'_> {
             (RUN_STATE_DIRECTORY_ENV.into(), self.child_state.into()),
         ]);
         Ok(())
-    }
-
-    pub(crate) fn git_wrapper(
-        &self,
-        env: &[(OsString, OsString)],
-        before_exec: &[u8],
-    ) -> Result<Vec<u8>, ProviderError> {
-        git_wrapper(self.git, env, true, Some(before_exec), None)
     }
 
     /// Rust Fabric uses stdio and SQLite, so it needs no daemon socket grant.
@@ -442,6 +431,10 @@ fn identity_exports(env: &[(OsString, OsString)]) -> Result<String, ProviderErro
     let mut identity = String::new();
     for (key, value) in env {
         if [
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_WORK_TREE",
+            "GIT_OBJECT_DIRECTORY",
             "GIT_AUTHOR_NAME",
             "GIT_AUTHOR_EMAIL",
             "GIT_COMMITTER_NAME",
@@ -543,7 +536,7 @@ mod tests {
                 .push(("GIT_AUTHOR_NAME".into(), "Fixture Author".into()));
             let result = spec.configure_publishing(
                 &plan.permissions().scratch.path,
-                Path::new("/fixture/git"),
+                Path::new("/fixture/git/bin/git"),
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
                 &provenant_config::GithubPolicy::default(),
@@ -562,53 +555,19 @@ mod tests {
             let identity = wrapper_text
                 .find("export GIT_AUTHOR_NAME='Fixture Author'")
                 .ok_or(ProviderError::Malformed)?;
-            let routing = wrapper_text
-                .find("lane_writer=1")
-                .ok_or(ProviderError::Malformed)?;
-            let exec = wrapper_text
-                .find("exec \"$lane_git\" -c 'include.path=")
-                .ok_or(ProviderError::Malformed)?;
-            assert!(identity < routing && routing < exec, "{id}: {wrapper_text}");
-
-            // Simulate publishing before routing, which preparation normally
-            // installs first, and check that the later routing retains it.
-            spec.git_wrapper.routing = None;
-            spec.configure_publishing(
-                &plan.permissions().scratch.path,
-                Path::new("/fixture/git"),
-                Path::new("/fixture/gh"),
-                Path::new("/fixture/home"),
-                &provenant_config::GithubPolicy::default(),
-            )?;
-            crate::launch::private_git_objects(
-                &crate::tests::fixture_input(
-                    &route,
-                    &plan,
-                    &prompt,
-                    Path::new("/fixture/repo"),
-                    (id == "claude").then_some(&token),
-                ),
-                &mut spec,
-            )?;
-            let bytes = spec
-                .setup
-                .iter()
-                .find_map(|step| match step {
-                    SetupStep::WriteExecutable { path, bytes } if path == &wrapper => Some(bytes),
-                    _ => None,
-                })
-                .ok_or(ProviderError::Malformed)?;
-            let wrapper_text = String::from_utf8_lossy(bytes);
-            let identity = wrapper_text
-                .find("export GIT_AUTHOR_NAME='Fixture Author'")
-                .ok_or(ProviderError::Malformed)?;
-            let routing = wrapper_text
-                .find("lane_writer=1")
-                .ok_or(ProviderError::Malformed)?;
-            let exec = wrapper_text
-                .find("exec \"$lane_git\" -c 'include.path=")
-                .ok_or(ProviderError::Malformed)?;
-            assert!(identity < routing && routing < exec, "{id}: {wrapper_text}");
+            assert!(identity < wrapper_text.find("exec ").ok_or(ProviderError::Malformed)?);
+            assert!(spec.env.iter().any(|(key, value)| {
+                key == "GIT_DIR"
+                    && value
+                        == &plan
+                            .permissions()
+                            .scratch
+                            .path
+                            .join("git-common")
+                            .into_os_string()
+            }));
+            assert!(wrapper_text.contains("export GIT_DIR="));
+            assert!(wrapper_text.contains("include.path="));
         }
         Ok(())
     }
@@ -818,12 +777,14 @@ mod tests {
         let wrapper = dir.path().join("wrapper");
         std::fs::write(
             &wrapper,
-            lane.git_wrapper(
+            git_wrapper(
+                lane.git,
                 &[
                     ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
                     ("GIT_COMMITTER_EMAIL".into(), "lane@example.org".into()),
                 ],
-                &[],
+                true,
+                None,
             )
             .unwrap(),
         )

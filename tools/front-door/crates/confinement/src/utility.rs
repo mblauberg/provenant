@@ -317,6 +317,11 @@ impl UtilityRuntime {
         })
     }
 
+    /// The pinned Git locator, for callers that run Git themselves.
+    pub fn git_program_path(&self) -> &Path {
+        &self.git.locator
+    }
+
     /// Add locations that lanes can write, beyond the worktrees and scratch
     /// that follow from the repository itself.
     #[must_use]

@@ -5,6 +5,65 @@ use provenant_core::{CancelToken, OperationId, TaskId};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn peer_wait_views_remain_settling_until_terminal_custody_is_released() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let input = super::tests::input();
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let custody = attempt.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    store.withdraw(
+        id,
+        AttemptState::Queued,
+        Outcome::Cancelled,
+        "fixture terminal publication",
+        input.created_at,
+        &call,
+    )?;
+    let service = Service::new(&store);
+    let query = LaneQuery {
+        targets: vec![],
+        all: true,
+        limit: 10,
+        after: 0,
+        newest_first: false,
+        owner: None,
+        unseen_after: None,
+    };
+    assert!(matches!(
+        service.status(id, &call)?.state,
+        AttemptState::Terminal { .. }
+    ));
+    assert_eq!(
+        service.status_for_wait(id, &call)?.state,
+        AttemptState::Settling {
+            publication_pending: false
+        }
+    );
+    assert_eq!(
+        service.lanes_for_wait(&query, &call)?.lanes[0].state,
+        AttemptState::Settling {
+            publication_pending: false
+        }
+    );
+    drop(custody);
+    let observed = service.status_for_wait(id, &call)?;
+    assert!(matches!(observed.state, AttemptState::Terminal { .. }));
+    assert!(store.custody_released(&observed, &call)?);
+    assert!(matches!(
+        service.lanes_for_wait(&query, &call)?.lanes[0].state,
+        AttemptState::Terminal { .. }
+    ));
+    Ok(())
+}
+
+#[test]
 #[allow(clippy::disallowed_methods)]
 fn dispatch_validates_review_commits() -> TestResult {
     use std::process::Command;

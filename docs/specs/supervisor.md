@@ -5,8 +5,9 @@ evidence, worktrees), `crates/os` (bounded I/O and execution)
 Anchor: `crates/supervisor/tests/custody.rs`, `crates/supervisor/src/custody_tests.rs`,
 `crates/confinement/src/permissions.rs`, `src/worktree_tests.rs`
 
-Supervisor holds processes, output and kernel locks from launch through
-durable exit publication. Confinement turns an authorised plan into
+Supervisor holds processes, output and live custody through provider exit and
+durable exit publication. Run then drives resumable settlement without holding
+writer locks through external commands. Confinement turns an authorised plan into
 filesystem, Git, network and provider permissions, checks evidence and
 quarantines instruction changes. Together they prevent a failed write, a lost client or a mistaken process identity from killing a healthy lane, freeing a busy worktree or publishing an incomplete result. Run owns admission and result
 semantics ([run](run.md)). Wiring and platform limits are in the [crate
@@ -127,7 +128,20 @@ supervisor releases a 64 KiB reserve for one retry, with no provider signal.
 
 The writer reservation is published under the writer lock before spawn and
 cleared only after quiescence, quarantine and run's terminal commit, or an
-authorised reconcile decision; a missing or malformed reservation refuses
+authorised reconcile decision. Provider exit releases its host build slot;
+once quiescence is proven, the live custody and writer locks are released
+before object import. The reservation remains as a settling fence, so another
+writer cannot edit the checkout during settlement. Run journals import,
+publication, terminal recording and release with one native process owner and
+a counter capped at three attempts that reach import. Import claims use
+persisted backoff; an unknown process observation expires after ten minutes.
+Short locks protect only journal updates; Git runs
+without them. A dead owner resumes at the last durable phase, including after
+branch publication. Public cancel records its request without waiting for a
+writer lock; reconcile queues a detached driver rather than doing import in
+the caller. Lane waits continue reporting settlement until custody is released.
+See [publication order](run.md#publication-order). A missing or
+malformed reservation refuses
 acquisition. `SettlementCommit`, needed for scratch deletion and fence
 clearing, is issued only after the attempt inode, custody lock and both
 digests in `release.json` are verified. After a verified boot change, a
@@ -225,17 +239,28 @@ Literal discovery grants accept absent entries or real directories through
 
 ### Git write set
 
-Writers may change only their linked tree, its private index, HEAD and merge
-state, objects, their branch ref with its lock and reflog in the lane's private
-Git directory, and private `FETCH_HEAD`. The shared repository's branch refs and
-reflogs are host-owned and read-only to lanes. Remote-tracking refs and reflogs, other refs, packed refs,
-common and worktree config, gitfiles, provider configuration and protected
-instructions stay immutable. Read-only lanes never write the common Git directory.
-- Why: a writer that could move another ref or config could rewrite history
-  or plant hooks.
+A writer owns a complete Git directory and object store under attempt scratch,
+including its index, HEAD, refs, config, temporary files, stash, rebase and merge
+state. Plain Git environment selects these paths; its object alternate supplies
+read access to the shared store. The original worktree gitfile remains fixed
+for host identity checks. A single small wrapper restores scrubbed environment
+and publishing configuration where needed.
+
+The linked admin directory and shared Git directory are read-only throughout
+their subtrees. This includes the original index, all refs and reflogs, config,
+hooks and info. No per-file write exception reopens either subtree. Provider
+configuration and protected instructions retain their separate protections.
+After provider exit, the host imports the pinned head through Git's receive
+quarantine and moves the real branch with compare-and-swap. Lane configuration
+is never executed as host configuration. Read-only lanes likewise cannot write
+the common Git directory.
+- Why: private Git supports ordinary commands while the shared metadata and
+  object store retain one host-controlled write boundary.
 - Test: `crates/confinement/src/permissions.rs::linked_worktree_grants_derive_from_verified_git_paths_and_ref`;
+  `crates/confinement/tests/lane_git_conformance.rs`;
   `src/worktree_tests.rs::writer_production_plan_denies_outside_writes`
-- Owner: `crates/confinement/src/permissions.rs`
+- Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/launch.rs`,
+  `crates/run/src/objects.rs`
 
 ### Network and sockets
 

@@ -133,6 +133,63 @@ pub struct WriterLaunch {
     pub(crate) base: GitOid,
     pub(crate) custody: Option<(Directory, WriterBinding)>,
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitPins {
+    schema_version: u64,
+    scope: provenant_supervisor::custody::Scope,
+    base: GitOid,
+}
+
+/// Remove only this attempt's host-owned retention refs. This runs before the
+/// terminal record becomes visible, including cancellation and import refusal.
+pub(crate) fn cleanup_git_pins(
+    state: &Path,
+    writer: &WriterRequest,
+    attempt: &Directory,
+    scope: provenant_supervisor::custody::Scope,
+    head: Option<GitOid>,
+) -> Result<()> {
+    let pins = crate::artifacts::read_sealed(attempt, "writer-git-pins.json", crate::RECORD_LIMIT)?;
+    if let Some(raw) = &pins {
+        let pins: GitPins = crate::db::decode(raw)?;
+        if pins.schema_version != 1 || pins.scope != scope {
+            return Err(RunError::Validation("writer Git pins scope mismatch"));
+        }
+    } else if head.is_none() {
+        // A queued withdrawal has never opened the proposed writer repository.
+        return Ok(());
+    }
+    let utility = runtime(state)?;
+    let executor =
+        SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
+    let repo = utility
+        .open_repo(&executor, &writer.project, budget()?, &CancelToken::new())
+        .map_err(error(
+            "open writer repository for Git ref cleanup",
+            Some(&writer.project),
+        ))?;
+    let mut refs = vec![format!("refs/provenant/lane-base/{}", scope.attempt)];
+    if let Some(head) = head {
+        refs.push(format!("refs/provenant/import/{head}"));
+    }
+    for reference in refs {
+        crate::objects::command(
+            utility.git_program_path(),
+            repo.common_git_dir(),
+            repo.root_path(),
+            &[
+                "update-ref".into(),
+                "--no-deref".into(),
+                "-d".into(),
+                reference.into(),
+            ],
+            None,
+        )?;
+    }
+    Ok(())
+}
 /// Reopen the persisted scope and match its active Provenant registration.
 /// The subsequent supervisor reservation is the authoritative exclusion check.
 pub fn prepare_writer(
@@ -1164,7 +1221,41 @@ impl WriterLaunch {
         }
         snapshot
             .persist(&archive)
-            .map_err(error("persist writer instruction snapshot", None))
+            .map_err(error("persist writer instruction snapshot", None))?;
+        crate::artifacts::seal(
+            attempt,
+            "writer-git-pins.json",
+            &crate::db::bytes(&GitPins {
+                schema_version: 1,
+                scope,
+                base: self.base,
+            })?,
+            crate::RECORD_LIMIT,
+        )?;
+        let reference = format!("refs/provenant/lane-base/{}", scope.attempt);
+        match crate::objects::resolve_ref(
+            utility.git_program_path(),
+            self.worktree.repo(),
+            &reference,
+        ) {
+            Ok(current) if current == self.base => return Ok(()),
+            Ok(_) => return Err(RunError::Validation("writer Git base pin changed")),
+            Err(_) => {}
+        }
+        crate::objects::command(
+            utility.git_program_path(),
+            self.worktree.repo().common_git_dir(),
+            self.worktree.repo().root_path(),
+            &[
+                "update-ref".into(),
+                "--no-deref".into(),
+                reference.into(),
+                self.base.to_string().into(),
+                "0".repeat(self.base.to_string().len()).into(),
+            ],
+            None,
+        )?;
+        Ok(())
     }
     pub(crate) fn terminal(
         &self,
@@ -1173,6 +1264,7 @@ impl WriterLaunch {
         custody: &provenant_supervisor::custody::Recovery,
         remote: &str,
         base_ref: Option<&str>,
+        settlement: &mut crate::settlement::Driver,
     ) -> Result<bool> {
         if custody.observe() != provenant_supervisor::custody::RecoveryState::Absent {
             return Err(RunError::Validation(
@@ -1190,6 +1282,10 @@ impl WriterLaunch {
                 "read writer custody base",
                 Some(self.worktree.path()),
             ))?;
+        settlement.set_base(base)?;
+        let base = settlement
+            .base()
+            .ok_or(RunError::Validation("settlement base missing"))?;
         // The raw branch OID is only a name until the complete graph has been
         // hash-checked. Do this before instruction recovery, diffs or ancestry.
         let source = crate::objects::bound_source(attempt)?;
@@ -1200,10 +1296,14 @@ impl WriterLaunch {
             self.worktree.repo(),
             self.branch.as_str(),
         )?;
-        let verified_tip = match &source {
-            Some(source) => crate::objects::private_tip(source, self.branch.as_str())?,
-            None => shared_tip,
+        let verified_tip = match settlement.head() {
+            Some(head) => head,
+            None => match &source {
+                Some(source) => crate::objects::private_tip(source, self.branch.as_str())?,
+                None => shared_tip,
+            },
         };
+        settlement.set_head(verified_tip)?;
         let head = self
             .worktree
             .repo()
@@ -1214,13 +1314,23 @@ impl WriterLaunch {
         {
             return Err(RunError::Validation("writer HEAD is not the lane branch"));
         }
-        crate::objects::settle(
-            &git_executable,
-            self.worktree.repo(),
-            source.as_ref().map(|source| &source.objects),
-            verified_tip,
-        )?;
-        if source.is_some() {
+        let import_cancel = settlement.cancellation();
+        if settlement.phase() == crate::settlement::Phase::Import {
+            settlement.begin_import()?;
+            crate::objects::settle_cancel(
+                &git_executable,
+                self.worktree.repo(),
+                source.as_ref().map(|source| &source.objects),
+                verified_tip,
+                Some(&import_cancel),
+                Some(custody),
+            )?;
+            settlement.advance(crate::settlement::Phase::Publish)?;
+        }
+        if crate::artifacts::read_sealed(attempt, "cancel.json", crate::RECORD_LIMIT)?.is_some() {
+            return Err(RunError::Validation("lane import cancelled"));
+        }
+        if settlement.phase() == crate::settlement::Phase::Publish {
             crate::objects::publish_branch(
                 &git_executable,
                 self.worktree.repo(),
@@ -1228,11 +1338,17 @@ impl WriterLaunch {
                 base,
                 verified_tip,
             )?;
+            // The private index may contain staged edits which the host's
+            // quarantine must observe. Restore it only after receive succeeds.
+            if let Some(source) = &source {
+                crate::objects::restore_index(source, self.worktree.repo())?;
+            }
+            settlement.advance(crate::settlement::Phase::Record)?;
         }
         let utility = runtime(state)?;
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let cancel = CancelToken::new();
+        let cancel = import_cancel;
         let git = provenant_confinement::Git::new(
             &executor,
             self.worktree.repo(),
@@ -1375,23 +1491,6 @@ impl WriterLaunch {
         {
             return Err(RunError::Validation("writer HEAD is not the lane branch"));
         }
-        let ancestry = provenant_confinement::run_utility(
-            &executor,
-            provenant_confinement::GitRead::MergeBaseIsAncestor {
-                ancestor: base,
-                tip,
-            },
-            self.worktree.repo(),
-            &utility,
-            budget()?,
-            &cancel,
-        )
-        .map_err(error("verify writer ancestry", Some(self.worktree.path())))?;
-        if ancestry.termination != provenant_os::exec::Termination::Exit(0) {
-            return Err(RunError::Validation(
-                "writer branch no longer descends from its recorded base",
-            ));
-        }
         worktrees::check_writer_terminal(self.worktree.repo())?;
         crate::artifacts::seal(
             attempt,
@@ -1415,6 +1514,7 @@ impl WriterLaunch {
         &self,
         state: &Path,
         custody: &provenant_supervisor::custody::Recovery,
+        cancel: &CancelToken,
     ) -> Result<Option<String>> {
         let base = custody
             .writer_base(
@@ -1429,13 +1529,12 @@ impl WriterLaunch {
         let utility = runtime(state)?;
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let cancel = CancelToken::new();
         let git = provenant_confinement::Git::new(
             &executor,
             self.worktree.repo(),
             &utility,
             budget()?,
-            &cancel,
+            cancel,
         );
         let paths = git.uncommitted_since(base).map_err(error(
             "read writer uncommitted changes",

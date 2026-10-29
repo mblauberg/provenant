@@ -759,7 +759,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     assert_eq!(evidence["review_required"], true);
     wait_for_writer_release(&store)?;
 
-    // The same terminal boundary must refuse a rewind of the recorded base.
+    // A private rewind may publish through CAS, retaining instruction review.
     fs::remove_file(
         writer
             .worktree
@@ -769,6 +769,21 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     )?;
     let path_text = path.to_str().ok_or("fixture worktree encoding")?;
     git(&rig, &["-C", path_text, "reset", "--hard", "HEAD"])?;
+    // The rewind target is the trusted origin default, as required by the
+    // publication ancestry guard, rather than an arbitrary older lane tip.
+    let origin_default = git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?;
+    git(
+        &rig,
+        &["update-ref", "refs/remotes/origin/main", &origin_default],
+    )?;
+    git(
+        &rig,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    )?;
     fs::write(path.join("source-base"), b"new base")?;
     git(&rig, &["-C", path_text, "add", "source-base"])?;
     git(&rig, &["-C", path_text, "commit", "-qm", "Writer base"])?;
@@ -814,9 +829,13 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     fs::write(private_ref, format!("{previous}\n"))?;
     fs::write(release, b"release")?;
     let terminal = await_terminal(&store, attempt, &call)?;
-    assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
+    assert_terminal_outcome(&terminal, provenant_run::Outcome::ReviewRequired)?;
     assert!(
-        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("no longer descends from its recorded base"))
+        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == "protected changes require review")
+    );
+    assert_eq!(
+        git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?,
+        previous
     );
     wait_for_writer_release(&store)?;
     cleanup.disarm();
@@ -986,7 +1005,7 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
     let snapshot_path = attempt_path.join("quarantine/snapshot.json");
     let baseline = fs::read(&snapshot_path)?;
     fs::write(&snapshot_path, b"{}")?;
-    let uncertain = store.reconcile(record.run_id, &provider, &call)?;
+    let uncertain = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
     assert!(
         matches!(uncertain.as_slice(), [(id, provenant_run::Reconciled::Uncertain { .. })] if *id == attempt)
     );
@@ -1005,7 +1024,13 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
             .join("CHERRY_PICK_HEAD"),
         b"unfinished cherry-pick",
     )?;
-    let found = store.reconcile(record.run_id, &provider, &call)?;
+    // The backoff itself has unit coverage. Emulate its expiry so this fixture
+    // can exercise recovery of the repaired archive without a real-time wait.
+    let progress = attempt_path.join("settlement-progress.json");
+    let mut journal: Value = serde_json::from_slice(&fs::read(&progress)?)?;
+    journal["retry_after_ms"] = 0.into();
+    fs::write(progress, serde_json::to_vec(&journal)?)?;
+    let found = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
     assert_eq!(found, vec![(attempt, provenant_run::Reconciled::Finished)]);
     let terminal = store.record(attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
@@ -1315,8 +1340,15 @@ fn await_terminal(
     call: &provenant_run::Request<'_>,
 ) -> Result<provenant_run::AttemptRecord> {
     let mut result = None;
-    if !eventually(Duration::from_secs(12), || {
-        match store.record(attempt, call) {
+    // A third import is eligible after the five- and thirty-second backoffs.
+    if !eventually(Duration::from_secs(60), || {
+        let poll = provenant_run::Request {
+            clock: call.clock,
+            cancel: call.cancel,
+            budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 30)
+                .expect("valid terminal poll budget"),
+        };
+        match store.record(attempt, &poll) {
             Ok(record) if matches!(record.state, provenant_run::AttemptState::Terminal { .. }) => {
                 result = Some(Ok(record));
                 true
@@ -1328,7 +1360,20 @@ fn await_terminal(
             }
         }
     }) {
-        return Err("writer attempt did not reach terminal state".into());
+        let poll = provenant_run::Request {
+            clock: call.clock,
+            cancel: call.cancel,
+            budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 30)?,
+        };
+        let temporary = store.temporary_path(attempt, &poll)?;
+        let directory = temporary.parent().ok_or("attempt directory")?;
+        let progress = fs::read_to_string(directory.join("settlement-progress.json"))
+            .unwrap_or_else(|error| error.to_string());
+        return Err(format!(
+            "writer attempt did not reach terminal state: {:?}; settlement: {progress}",
+            store.record(attempt, &poll)?.state
+        )
+        .into());
     }
     Ok(result.expect("eventually returned on terminal state or error")?)
 }
@@ -2900,20 +2945,22 @@ fn lane_prepare_isolates_nested_state() -> Result {
             fs::canonicalize(provenant_os::git::git_executable().ok_or("host Git")?)?;
         let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
         let git_entry = fs::symlink_metadata(&scratch_git)?.file_type();
-        assert!(
+        let wrapped = writer || adapter == "claude" || publishing;
+        assert_eq!(
             git_entry.is_file(),
-            "Git wrapper for {adapter} writer={writer} publishing={publishing}"
+            wrapped,
+            "Git setup for {adapter} writer={writer} publishing={publishing}"
         );
-        if adapter == "claude" || publishing {
+        if !wrapped {
+            assert_eq!(fs::canonicalize(&scratch_git)?, selected_git);
+        }
+        if wrapped {
             // Claude's env scrub and publishing both need a Git wrapper.
             let wrapper = fs::read_to_string(&scratch_git)?;
             assert!(wrapper.contains("GIT_CONFIG_GLOBAL=/dev/null"));
-            // Routed wrappers exec the bound Git through `$lane_git`.
             let git = format!("'{}'", selected_git.display());
             assert!(
-                wrapper.contains(&format!("exec {git}"))
-                    || (wrapper.contains(&format!("lane_git={git}\n"))
-                        && wrapper.contains("exec \"$lane_git\"")),
+                wrapper.contains(&format!("exec {git}")),
                 "Git exec for {adapter} writer={writer} publishing={publishing}"
             );
             assert_eq!(wrapper.contains(" -c 'include.path="), publishing);

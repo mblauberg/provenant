@@ -357,8 +357,14 @@ ENOENT from a spawn, re-validate the target when it changed, so
 `brew upgrade git` does not break a long-lived process while a replaced or
 loosened target is refused. Writer-only grants come
 from confinement's writer profile, and each attempt records its write
-allowances and Git grants digest. Remote-tracking refs, their reflogs and shared
-config stay read-only.
+allowances and Git grants digest. Writers use a complete private Git directory
+and index under attempt scratch with the shared object store as a read-only
+alternate. Plain Git environment selects these paths; the one wrapper source
+only restores scrubbed environment and publishing credentials. Shared refs,
+config, hooks, info and linked admin metadata stay read-only throughout their
+subtrees. The host imports the pinned result through Git receive quarantine
+and publishes the real branch itself; lane configuration never becomes host
+configuration.
 - Why: a lane-chosen Git or helper would run with host authority.
 - Test: `crates/os/src/git.rs::override_wins_and_invalid_override_does_not_fall_back`;
   `crates/confinement/src/utility.rs::executable_pin_keeps_the_locator_and_follows_a_swapped_target`;
