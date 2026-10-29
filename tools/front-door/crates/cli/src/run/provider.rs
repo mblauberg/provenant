@@ -950,11 +950,6 @@ fn prepare_command(
     })?;
     let scratch = paths.temporary.join("command");
     apply_setup_directory(&[&paths.temporary], &scratch)?;
-    apply_setup(
-        &[SetupStep::CreateDir(paths.provider_state.clone())],
-        &[&paths.provider_state],
-        None,
-    )?;
     let mut access = task.access.clone();
     // With no API endpoints, provider-only reach is network off.
     access.network.get_or_insert(
