@@ -787,7 +787,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         "repo view --json nameWithOwner" => {
             io::stdout().write_all(br#"{"nameWithOwner":"owner/repo"}"#)?;
         }
-        "pr view 1668 --json headRefOid" => {
+        "pr view 1668 --json headRefOid" | "pr view 1668 --json headRefOid,mergeable" => {
             io::stdout().write_all(&fs::read(dir.join("head.json"))?)?
         }
         "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository" => {
@@ -809,7 +809,11 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
                 &serde_json::json!({"state":state,"mergedAt":null,"closedAt":null}),
             )?)?;
         }
-        value if value.starts_with("pr view ") && value.ends_with(" --json headRefOid") => {
+        value
+            if value.starts_with("pr view ")
+                && (value.ends_with(" --json headRefOid")
+                    || value.ends_with(" --json headRefOid,mergeable")) =>
+        {
             io::stdout().write_all(&fs::read(dir.join("head.json"))?)?;
         }
         value

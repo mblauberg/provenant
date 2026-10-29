@@ -107,6 +107,18 @@ fn ci_outcomes_are_recorded_and_fail_closed() {
         (CiState::Passed, NodeState::Succeeded, None),
         (CiState::Failed, NodeState::Failed, Some("failed")),
         (CiState::Unavailable, NodeState::Failed, Some("unavailable")),
+        (
+            CiState::Conflict,
+            NodeState::Failed,
+            Some("conflict; next: rebase the branch onto its base and push"),
+        ),
+        (
+            CiState::NotScheduled,
+            NodeState::Failed,
+            Some(
+                "not_scheduled; next: check the workflow triggers or push an empty commit to start CI",
+            ),
+        ),
     ] {
         let mut owner = Owner {
             observations: VecDeque::from([observation(state, "checks: fixture")]),

@@ -431,6 +431,34 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
 
 fn land_wait_is_bounded_and_requires_the_exact_head() -> Result {
     for (bucket, expected, exit) in [("pending", "CI_TIMEOUT", 124), ("fail", "CI_FAILED", 1)] {
+        // A conflicting PR never starts CI: name it, with a next step, instead of timing out.
+        for (checks, expected) in [
+            (r#"[]"#, "CI_CONFLICT"),
+            (r#"[{"name":"build","bucket":"pending"}]"#, "CI_CONFLICT"),
+        ] {
+            let rig = self::rig()?;
+            fs::write(rig.project.join("checks.json"), checks)?;
+            fs::write(
+                rig.project.join("head.json"),
+                format!(r#"{{"headRefOid":"{HEAD}","mergeable":"CONFLICTING"}}"#),
+            )?;
+            let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=1s", "--json"])?;
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+            assert_eq!(report["error"]["code"], expected, "{report}");
+            assert!(
+                report["error"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("next:"))
+            );
+            no_merge(&rig)?;
+        }
+        // No check ever registered: unscheduled, not a generic timeout.
+        let rig = self::rig()?;
+        fs::write(rig.project.join("checks.json"), "[]")?;
+        let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=1s", "--json"])?;
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(report["error"]["code"], "CI_NOT_SCHEDULED", "{report}");
+        no_merge(&rig)?;
         let rig = self::rig()?;
         fs::write(
             rig.project.join("checks.json"),
@@ -569,7 +597,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
         "{call}"
     )?;
     match call.as_str() {
-        "pr view 1668 --json headRefOid" => {
+        "pr view 1668 --json headRefOid" | "pr view 1668 --json headRefOid,mergeable" => {
             if Path::new("head-seq").exists() {
                 // One head per read, the last one repeating: scripted head movement.
                 let seq = fs::read_to_string("head-seq")?;

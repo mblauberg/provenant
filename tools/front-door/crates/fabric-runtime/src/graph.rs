@@ -333,6 +333,10 @@ pub enum CiState {
     Failed,
     Pending,
     Unavailable,
+    /// The pull request conflicts with its base, so CI never starts.
+    Conflict,
+    /// No check has registered for the head, so CI was never scheduled.
+    NotScheduled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1982,6 +1986,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             CiState::Passed => None,
                             CiState::Failed => Some("failed".into()),
                             CiState::Unavailable => Some("unavailable".into()),
+                            CiState::Conflict => Some(
+                                "conflict; next: rebase the branch onto its base and push".into(),
+                            ),
+                            CiState::NotScheduled => Some(
+                                "not_scheduled; next: check the workflow triggers or push an empty commit to start CI"
+                                    .into(),
+                            ),
                         }
                     }
                 } else {

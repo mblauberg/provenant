@@ -821,7 +821,12 @@ pub(crate) fn run(
         Outcome::Timeout
     } else if matches!(
         failure_code,
-        "CI_PENDING" | "CI_FAILED" | "HEAD_MOVED" | "PR_CLOSED"
+        "CI_PENDING"
+            | "CI_FAILED"
+            | "CI_CONFLICT"
+            | "CI_NOT_SCHEDULED"
+            | "HEAD_MOVED"
+            | "PR_CLOSED"
     ) {
         Outcome::Refused
     } else {
@@ -859,7 +864,10 @@ pub(crate) fn run(
                 "MERGE_FAILED" | "MERGE_STATE_UNKNOWN" => {
                     format!("provenant land {number} --head {expected}")
                 }
-                "CI_FAILED" => format!("gh pr checks {number}"),
+                "CI_FAILED" | "CI_NOT_SCHEDULED" => format!("gh pr checks {number}"),
+                "CI_CONFLICT" => format!(
+                    "git rebase origin/<base> && git push --force-with-lease (PR #{number})"
+                ),
                 "HEAD_MOVED" => format!("provenant pr status {number} --full"),
                 _ => "provenant help land".into(),
             }),

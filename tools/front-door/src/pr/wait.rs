@@ -21,6 +21,16 @@ fn failure(code: &'static str, message: impl Into<String>) -> Box<dyn std::error
         message: message.into(),
     })
 }
+fn expired_failure(unscheduled: bool) -> Box<dyn std::error::Error> {
+    if unscheduled {
+        failure(
+            "CI_NOT_SCHEDULED",
+            "no check registered for this head; next: check the workflow triggers or push an empty commit to start CI",
+        )
+    } else {
+        failure("CI_TIMEOUT", "CI wait expired; no merge was attempted")
+    }
+}
 /// The quiet period an unconstrained repository must show after its newest
 /// check registered before landing trusts that no further check is coming.
 pub(super) const SETTLE: Duration = Duration::from_secs(60);
@@ -44,6 +54,29 @@ enum State {
     Settling,
     Failed,
     Unavailable,
+    /// The pull request conflicts with its base, so CI will not start.
+    Conflict,
+    /// The wait expired with no check registered for the head.
+    NotScheduled,
+}
+/// Fold mergeability and an expired wait into a CI state. A conflicting pull
+/// request never starts CI; an empty head after the wait was never scheduled.
+fn observe(
+    checks: &[Check],
+    required: &[Required],
+    now: jiff::Timestamp,
+    mergeable: Option<&str>,
+    expired: bool,
+) -> State {
+    match state(checks, required, now) {
+        State::Pending | State::Settling | State::Unavailable
+            if mergeable == Some("CONFLICTING") =>
+        {
+            State::Conflict
+        }
+        State::Pending | State::Settling if expired && checks.is_empty() => State::NotScheduled,
+        other => other,
+    }
 }
 fn state(checks: &[Check], required: &[Required], now: jiff::Timestamp) -> State {
     let selected: Vec<_> = checks
@@ -314,11 +347,13 @@ pub(super) fn checks(
                 )
             }
         })?;
-    let check_head = || -> Result<()> {
+    let check_head = || -> Result<Option<String>> {
         #[derive(Deserialize)]
         struct Head {
             #[serde(rename = "headRefOid")]
             head: GitOid,
+            #[serde(default)]
+            mergeable: Option<String>,
         }
         let bytes = successful(read(&[
             "gh",
@@ -326,24 +361,44 @@ pub(super) fn checks(
             "view",
             &target,
             "--json",
-            "headRefOid",
+            "headRefOid,mergeable",
         ])?)?;
-        if serde_json::from_slice::<Head>(&bytes)?.head != expected {
+        let head: Head = serde_json::from_slice(&bytes)?;
+        if head.head != expected {
             return Err(failure(
                 "HEAD_MOVED",
                 format!("pull request head moved from {expected}"),
             ));
         }
-        Ok(())
+        Ok(head.mergeable)
     };
     let mut progress = 0;
     loop {
-        check_head()?;
+        let _ = check_head()?;
         // Read the pinned commit, not whichever head the PR has while gh runs.
         // Before/after head reads alone cannot protect against an A-B-A update.
         let checks = commit_checks(&policy.repository, expected, &read)?;
-        check_head()?;
-        match state(&checks, &policy.checks, jiff::Timestamp::now()) {
+        let mergeable = check_head()?;
+        let expired = Instant::now() >= deadline;
+        match observe(
+            &checks,
+            &policy.checks,
+            jiff::Timestamp::now(),
+            mergeable.as_deref(),
+            expired,
+        ) {
+            State::Conflict => {
+                return Err(failure(
+                    "CI_CONFLICT",
+                    "pull request conflicts with its base, so CI will not start; next: rebase onto the base branch and push",
+                ));
+            }
+            State::NotScheduled => {
+                return Err(failure(
+                    "CI_NOT_SCHEDULED",
+                    "no check registered for this head; next: check the workflow triggers or push an empty commit to start CI",
+                ));
+            }
             State::Passed => return Ok(()),
             State::Failed => return Err(failure("CI_FAILED", "required CI checks failed")),
             State::Unavailable => {
@@ -362,10 +417,7 @@ pub(super) fn checks(
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err(failure(
-                "CI_TIMEOUT",
-                "CI wait expired; no merge was attempted",
-            ));
+            return Err(expired_failure(checks.is_empty()));
         }
         // Eight lines for the whole wait, regardless of duration or churn.
         if !json && progress < 8 {
@@ -378,10 +430,7 @@ pub(super) fn checks(
         }
         std::thread::sleep(left.min(Duration::from_secs(2)));
         if Instant::now() >= deadline {
-            return Err(failure(
-                "CI_TIMEOUT",
-                "CI wait expired; no merge was attempted",
-            ));
+            return Err(expired_failure(checks.is_empty()));
         }
     }
 }
@@ -413,6 +462,52 @@ mod tests {
         }
     }
     const NOW: &str = "2026-01-01T00:00:00Z";
+
+    #[test]
+    fn conflict_and_unscheduled_heads_are_named() {
+        let now = at(NOW);
+        let required = [need("build")];
+        // A conflicting PR never starts CI, whatever else has registered.
+        assert_eq!(
+            observe(&[], &required, now, Some("CONFLICTING"), false),
+            State::Conflict
+        );
+        assert_eq!(
+            observe(
+                &[check("lint", "pending")],
+                &required,
+                now,
+                Some("CONFLICTING"),
+                false
+            ),
+            State::Conflict
+        );
+        // A failed required check stays failed.
+        assert_eq!(
+            observe(
+                &[check("build", "fail")],
+                &required,
+                now,
+                Some("CONFLICTING"),
+                true
+            ),
+            State::Failed
+        );
+        // Nothing registered: pending while the wait runs, unscheduled once it expires.
+        assert_eq!(
+            observe(&[], &required, now, Some("MERGEABLE"), false),
+            State::Pending
+        );
+        assert_eq!(
+            observe(&[], &required, now, None, true),
+            State::NotScheduled
+        );
+        // Something registered is still pending after expiry; the timeout reports it.
+        assert_eq!(
+            observe(&[check("lint", "pass")], &required, now, None, true),
+            State::Pending
+        );
+    }
 
     #[test]
     fn commit_ci_rejects_wrong_heads_and_keeps_latest_legacy_status() {
