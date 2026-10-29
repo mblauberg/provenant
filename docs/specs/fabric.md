@@ -1059,12 +1059,17 @@ have a run-file path. The runtime retains only the excerpt and a 16 KiB tail
 of the redacted text for parsing.
 
 The optional typed verdict must be the final non-empty standalone line of the
-complete redacted stream. Its syntax is `VERDICT: TOKEN`, with an uppercase
+complete redacted stream, ignoring a closed `handoff` fence (and blank lines)
+that follows it. Its syntax is `VERDICT: TOKEN`, with an uppercase
 ASCII token containing only letters, digits, underscores or hyphens. The line
-must fit within 1024 bytes, including surrounding whitespace. Repeated verdict
-markers anywhere in the stream, even in quotations or outside the retained
-windows, invalidate the evidence. Case differences, trailing text or an overlong
-line also invalidate it. Invalid evidence is recorded
+must fit within 1024 bytes, including surrounding whitespace. A declaration is a
+line that starts with `verdict:` (any case) after optional whitespace, markdown
+emphasis, list markers (`-`, `*`, `+`, `1.`, `1)`) or heading marks, judged from
+the start of the line even when it is overlong. Mentions in prose, and
+blockquoted lines, are not declarations. More than one declaration anywhere in
+the stream, even outside the retained windows, invalidates the evidence. Case
+differences, trailing text, an overlong line or an unterminated trailing
+`handoff` fence also invalidate it. Invalid evidence is recorded
 in `verdict_error` and must fail any consuming verdict gate. A missing verdict
 is a non-match; a matched `required_verdict` contract must not override invalid
 typed evidence.

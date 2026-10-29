@@ -27,7 +27,9 @@ pub struct CapturedResult {
     /// Final declaration parsed with fence context from the complete stream.
     pub handoff: Result<Option<crate::handoff::Handoff>, &'static str>,
     /// Exactly one well-formed verdict, on the final non-empty line of the
-    /// complete stream. Independent of the legacy required-line contract.
+    /// complete stream, ignoring a closed trailing `handoff` fence. Only lines
+    /// that start with `VERDICT:` (after emphasis or list markers; not
+    /// blockquotes) count as declarations. Independent of the legacy required-line contract.
     pub verdict: Option<Box<str>>,
     pub verdict_invalid: bool,
     pub digest: String,
@@ -175,70 +177,108 @@ impl ResultCapture {
     }
 }
 
-/// Retain one bounded line and count verdict markers across every byte, even
-/// outside the excerpt windows. Quoted, repeated or malformed markers cannot
-/// be hidden by a later valid verdict.
+/// Retain one bounded line and count standalone verdict declarations across
+/// every byte, even outside the excerpt windows. Repeated or malformed
+/// declarations cannot be hidden by a later valid verdict. A closed trailing
+/// `handoff` fence after the verdict is ignored, since every lane must end
+/// with one; any other later text clears the verdict.
 #[derive(Default)]
 struct VerdictCapture {
     line: Vec<u8>,
     overflow: bool,
-    marker_prefix: usize,
+    in_handoff: bool,
+    /// Declaration scan of the current line, over every byte so clipping
+    /// cannot hide it: past the marker prefix, after digits of a possible
+    /// ordered-list marker, not a declaration (blockquote or other text), and
+    /// the first bytes after the prefix.
+    past_prefix: bool,
+    digits: bool,
+    no_decl: bool,
+    head: Vec<u8>,
     markers: u8,
     final_verdict: Option<Box<str>>,
 }
 
 impl VerdictCapture {
     fn push(&mut self, chunk: &[u8]) {
-        const MARKER: &[u8] = b"verdict:";
         for &byte in chunk {
             if byte == b'\n' {
                 self.end_line();
-                continue;
-            }
-            let lower = byte.to_ascii_lowercase();
-            self.marker_prefix = if lower == MARKER[self.marker_prefix] {
-                self.marker_prefix + 1
             } else {
-                usize::from(lower == MARKER[0])
-            };
-            if self.marker_prefix == MARKER.len() {
-                self.markers = self.markers.saturating_add(1);
-                self.marker_prefix = 0;
+                self.scan(byte);
+                if self.line.len() < VERDICT_BYTES {
+                    self.line.push(byte);
+                } else {
+                    self.overflow = true;
+                }
             }
-            if self.line.len() < VERDICT_BYTES {
-                self.line.push(byte);
-            } else {
-                self.overflow = true;
+        }
+    }
+
+    fn scan(&mut self, byte: u8) {
+        if self.no_decl {
+            return;
+        }
+        if self.past_prefix {
+            if self.head.len() < 8 {
+                self.head.push(byte);
+            }
+            return;
+        }
+        match byte {
+            b' ' | b'\t' | b'*' | b'_' | b'-' | b'+' | b'#' if !self.digits => {}
+            b'0'..=b'9' => self.digits = true,
+            b'.' | b')' if self.digits => self.digits = false,
+            b'>' => self.no_decl = true,
+            _ if self.digits => self.no_decl = true,
+            _ => {
+                self.past_prefix = true;
+                self.head.push(byte);
             }
         }
     }
 
     fn end_line(&mut self) {
         let text = std::str::from_utf8(&self.line).ok().map(str::trim);
-        if self.overflow || text != Some("") {
-            self.final_verdict = text
-                .filter(|line| {
-                    !self.overflow
-                        && self.markers == 1
-                        && line.strip_prefix("VERDICT: ").is_some_and(|token| {
-                            !token.is_empty()
-                                && token.bytes().all(|byte| {
-                                    byte.is_ascii_uppercase()
-                                        || byte.is_ascii_digit()
-                                        || matches!(byte, b'_' | b'-')
-                                })
-                        })
-                })
-                .map(Box::<str>::from);
+        if self.in_handoff {
+            self.in_handoff = self.overflow || text != Some("```");
+        } else {
+            if !self.no_decl && self.head.eq_ignore_ascii_case(b"verdict:") {
+                self.markers = self.markers.saturating_add(1);
+            }
+            if self.final_verdict.is_some() && !self.overflow && text == Some("```handoff") {
+                self.in_handoff = true;
+            } else if self.overflow || text != Some("") {
+                self.final_verdict = text
+                    .filter(|line| {
+                        !self.overflow
+                            && self.markers == 1
+                            && line.strip_prefix("VERDICT: ").is_some_and(|token| {
+                                !token.is_empty()
+                                    && token.bytes().all(|byte| {
+                                        byte.is_ascii_uppercase()
+                                            || byte.is_ascii_digit()
+                                            || matches!(byte, b'_' | b'-')
+                                    })
+                            })
+                    })
+                    .map(Box::<str>::from);
+            }
         }
         self.line.clear();
         self.overflow = false;
-        self.marker_prefix = 0;
+        self.past_prefix = false;
+        self.digits = false;
+        self.no_decl = false;
+        self.head.clear();
     }
 
     fn finish(mut self) -> (Option<Box<str>>, bool) {
         self.end_line();
-        let verdict = self.final_verdict.filter(|_| self.markers == 1);
+        // An unterminated handoff fence is not a trailing handoff block.
+        let verdict = self
+            .final_verdict
+            .filter(|_| self.markers == 1 && !self.in_handoff);
         let invalid = self.markers > 0 && verdict.is_none();
         (verdict, invalid)
     }
@@ -270,6 +310,42 @@ fn window(bytes: &[u8], cap: usize, tail: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verdict_survives_trailing_handoff_but_not_prose() {
+        let block = "```handoff\n{\"note\":\"verdict: x\"}\n```\n";
+        let run = |text: &str| {
+            let mut capture = ResultCapture::new(None);
+            for chunk in text.as_bytes().chunks(5) {
+                capture.push(chunk);
+            }
+            capture.finish()
+        };
+        let ok = run(&format!("review\nVERDICT: PASS\n\n{block}"));
+        assert_eq!(ok.verdict.as_deref(), Some("VERDICT: PASS"));
+        assert!(!ok.verdict_invalid);
+        let prose = run(&format!("VERDICT: PASS\nthanks\n{block}"));
+        assert!(prose.verdict.is_none());
+        let prose_after = run(&format!("VERDICT: PASS\n{block}done\n"));
+        assert!(prose_after.verdict.is_none());
+        let twice = run(&format!("VERDICT: PASS\nVERDICT: FAIL\n{block}"));
+        assert!(twice.verdict.is_none() && twice.verdict_invalid);
+        let long = " ".repeat(1100);
+        for (text, valid) in [
+            (format!("{long}VERDICT: FAIL\nVERDICT: PASS\n"), false),
+            ("> VERDICT: FAIL\nVERDICT: PASS\n".to_owned(), true),
+            ("1. VERDICT: FAIL\nVERDICT: PASS\n".to_owned(), false),
+            ("2) VERDICT: FAIL\nVERDICT: PASS\n".to_owned(), false),
+            (
+                format!("VERDICT: PASS\n```handoff\n{{}}\n```{long}junk\n"),
+                false,
+            ),
+        ] {
+            assert_eq!(run(&text).verdict.is_some(), valid, "{text:?}");
+        }
+        let mid = run("I will say the verdict: soon.\nVERDICT: PASS\n");
+        assert_eq!(mid.verdict.as_deref(), Some("VERDICT: PASS"));
+    }
 
     #[test]
     fn handoff_fence_context_survives_chunks_and_clipped_windows() {
@@ -316,8 +392,8 @@ mod tests {
             ("verdict: PASS\nVERDICT: PASS".to_owned(), None, true),
             (
                 "Quoted: VERDICT: PASS\nVERDICT: PASS".to_owned(),
-                None,
-                true,
+                Some("VERDICT: PASS"),
+                false,
             ),
             (
                 format!(
