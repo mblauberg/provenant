@@ -60,9 +60,7 @@ pub fn repository_marker(top: &Path) -> Option<RepositoryMarker> {
 fn read_marker_line(path: &Path) -> io::Result<String> {
     let mut bytes = Vec::new();
     fs::File::open(path)?.take(4097).read_to_end(&mut bytes)?;
-    let line = bytes
-        .strip_suffix(b"\n")
-        .ok_or_else(|| io::Error::other("incomplete Git marker"))?;
+    let line = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
     if bytes.len() > 4096 || line.is_empty() || line.contains(&0) || line.contains(&b'\n') {
         return Err(io::Error::other("invalid Git marker"));
     }
@@ -339,6 +337,11 @@ mod tests {
         let marker = repository_marker(&top).unwrap();
         assert_eq!(marker.git_dir, Some(private.clone()));
         assert_eq!(marker.common_dir, Some(private.join("../common")));
+        fs::write(private.join("commondir"), "../common").unwrap();
+        assert_eq!(
+            repository_marker(&top).unwrap().common_dir,
+            Some(private.join("../common"))
+        );
         fs::write(top.join(".git"), b"gitdir: bad\nextra\n").unwrap();
         let marker = repository_marker(&top).unwrap();
         assert!(marker.git_dir.is_none());
