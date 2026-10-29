@@ -1103,44 +1103,51 @@ fn oversized_received_pack_is_refused_with_a_clear_reason() -> TestResult {
 
 #[test]
 fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestResult {
-    let mut fixture = Fixture::new("sha1")?;
-    let (attempt, scratch) = fixture.overlay()?;
-    fixture.git_overlay(
-        &scratch,
-        &[
-            "update-index",
-            "--skip-worktree",
-            "--assume-unchanged",
-            "file",
-        ],
-    )?;
-    let source = super::bound_source(&attempt)?.ok_or("private source")?;
-    fixture.import()?;
-    super::publish_branch(
-        &fixture.git,
-        fixture.worktree.repo(),
-        "refs/heads/lane",
-        fixture.base,
-        fixture.head,
-    )?;
-    super::restore_index(&source, fixture.worktree.repo())?;
-    fs::write(fixture.lane.join("file"), "hidden uncommitted edit\n")?;
-    let flags = git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.lane,
-        None,
-        &["ls-files", "-v"],
-    )?;
-    assert_eq!(flags.stdout, b"H file\n");
-    let status = git(
-        &fixture.git,
-        &fixture.home,
-        &fixture.lane,
-        None,
-        &["status", "--porcelain"],
-    )?;
-    assert_eq!(status.stdout, b" M file\n");
+    for options in [
+        vec!["--skip-worktree"],
+        vec!["--assume-unchanged"],
+        vec!["--skip-worktree", "--assume-unchanged"],
+    ] {
+        let mut fixture = Fixture::new("sha1")?;
+        let (attempt, scratch) = fixture.overlay()?;
+        for flag in &options {
+            fixture.git_overlay(&scratch, &["update-index", flag, "file"])?;
+        }
+        let hidden = fixture.git_overlay(&scratch, &["ls-files", "-v"])?;
+        let expected = match options.as_slice() {
+            ["--skip-worktree"] => b"S file\n".as_slice(),
+            ["--assume-unchanged"] => b"h file\n".as_slice(),
+            _ => b"s file\n".as_slice(),
+        };
+        assert_eq!(hidden.stdout, expected);
+        let source = super::bound_source(&attempt)?.ok_or("private source")?;
+        fixture.import()?;
+        super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            "refs/heads/lane",
+            fixture.base,
+            fixture.head,
+        )?;
+        super::restore_index(&source, fixture.worktree.repo())?;
+        fs::write(fixture.lane.join("file"), "hidden uncommitted edit\n")?;
+        let flags = git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.lane,
+            None,
+            &["ls-files", "-v"],
+        )?;
+        assert_eq!(flags.stdout, b"H file\n");
+        let status = git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.lane,
+            None,
+            &["status", "--porcelain"],
+        )?;
+        assert_eq!(status.stdout, b" M file\n");
+    }
     Ok(())
 }
 

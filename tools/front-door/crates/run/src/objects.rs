@@ -809,22 +809,20 @@ pub(crate) fn restore_index(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
         &args(&["ls-files", "-z"]),
         None,
     )?;
-    execute_bounded(
-        &git,
-        repo.private_git_dir(),
-        repo.root_path(),
-        &args(&[
-            "update-index",
-            "--no-skip-worktree",
-            "--no-assume-unchanged",
-            "-z",
-            "--stdin",
-        ]),
-        None,
-        Execution {
-            input: Some(&paths),
-            ..Execution::default()
-        },
-    )?;
+    // Git applies these modes separately. Combining them leaves skip-worktree
+    // set on entries which also carry assume-unchanged.
+    for flag in ["--no-skip-worktree", "--no-assume-unchanged"] {
+        execute_bounded(
+            &git,
+            repo.private_git_dir(),
+            repo.root_path(),
+            &args(&["update-index", flag, "-z", "--stdin"]),
+            None,
+            Execution {
+                input: Some(&paths),
+                ..Execution::default()
+            },
+        )?;
+    }
     Ok(())
 }
