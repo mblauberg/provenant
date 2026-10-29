@@ -445,6 +445,25 @@ quota source was found. The [Go docs](https://opencode.ai/docs/go/)
 describe the allowance windows and per-response consumption; those do not
 establish total usage across devices.
 
+## Quota polling intervals
+
+Timer and panel polling intervals are set per adapter, in seconds, under the
+quota domain:
+
+```toml
+[domains.quota.polling_intervals.codex]
+timer_seconds = 600
+panel_seconds = 120
+```
+
+The adapter must be a registered ID. Each value must be a whole number of
+seconds from 1 to `i64::MAX / 4`. Omitted values keep the provider default.
+Unlike the probe and history ceilings above, these may be raised or lowered.
+Battery doubles each interval. Low power quadruples it, and adapters that do not
+poll in low power stay idle. Manual ticks keep their 30-second interval. Quota
+ticks, `quota show` staleness and routing admission all use the configured
+values. `probe_seconds`, `low_power` and `solo` keep the provider's settings.
+
 ## Lane cache collection
 
 GC also applies [terminal provider-state retention](gc.md). The separate

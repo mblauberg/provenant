@@ -656,9 +656,9 @@ fn quota_observations(
     catalogue: &Catalogue,
     availability: &[AvailabilityRecord],
     records: &[provenant_quota::AccountRecord],
+    policies: &[provenant_quota::QuotaPolicy],
     requested_models: &[ModelId],
 ) -> Result<Vec<QuotaObservation>, EdgeError> {
-    let policies = provenant_providers::quota_policies(REGISTRY);
     let mut observations = Vec::new();
     for record in records {
         let adapter = record.account.adapter.as_str();
@@ -666,7 +666,7 @@ fn quota_observations(
             continue;
         };
         let Some(ttl) = provenant_quota::schedule::interval(
-            &policies,
+            policies,
             adapter,
             provenant_quota::schedule::Trigger::Timer,
             provenant_quota::schedule::Power::Ac,
@@ -814,9 +814,14 @@ fn with_context<T>(
     access: &[AccessContext<'_>],
     host: &str,
     requested_models: &[ModelId],
-    action: impl FnOnce(&RoutingContext<'_>, &[provenant_quota::AccountRecord]) -> Result<T, EdgeError>,
+    action: impl FnOnce(
+        &RoutingContext<'_>,
+        &[provenant_quota::AccountRecord],
+        &[provenant_quota::QuotaPolicy],
+    ) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
     let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
+    let policies = provenant_providers::scheduling_policies(&domains.quota, REGISTRY);
     let mut config = domains.routing;
     resolve_pacing_accounts(&mut config, &domains.accounts)?;
     let catalogue = Catalogue::bundled()?;
@@ -839,7 +844,13 @@ fn with_context<T>(
     domains
         .quota
         .apply_calibration(&mut quota_records, timestamp.as_second());
-    let quota = quota_observations(&catalogue, availability, &quota_records, requested_models)?;
+    let quota = quota_observations(
+        &catalogue,
+        availability,
+        &quota_records,
+        &policies,
+        requested_models,
+    )?;
     let capacity_cooldowns: Vec<_> = quota_records
         .iter()
         .flat_map(|record| record.capacity_cooldowns.iter().cloned())
@@ -859,6 +870,7 @@ fn with_context<T>(
             host,
         },
         &quota_records,
+        &policies,
     )
 }
 /// Resolve one production dispatch against fresh provider facts and validated
@@ -949,7 +961,7 @@ fn resolve_dispatch_excluding(
         access,
         host,
         &requested_models,
-        |context, records| {
+        |context, records, policies| {
             let mut excluded_members = initial_exclusions.to_vec();
             let mut refusals = Vec::new();
             let mut refused_accounts: Vec<(String, String)> = Vec::new();
@@ -965,9 +977,8 @@ fn resolve_dispatch_excluding(
                 let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
                 let pools = admission_pools(&resolved.adapter, context.catalogue, &model);
                 let now_unix_seconds = context.now.as_timestamp().as_second();
-                let policies = provenant_providers::quota_policies(context.registry);
                 let admission = provenant_quota::Admission {
-                    policies: &policies,
+                    policies,
                     now_unix_seconds,
                     records,
                     pools: &pools,
@@ -1175,7 +1186,7 @@ pub(crate) fn check_dispatch_candidate(
     let mut records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
     domains.quota.apply_calibration(&mut records, now);
     provenant_quota::Admission {
-        policies: &provenant_providers::quota_policies(REGISTRY),
+        policies: &provenant_providers::scheduling_policies(&domains.quota, REGISTRY),
         now_unix_seconds: now,
         records: &records,
         pools: &pools,
@@ -1188,7 +1199,7 @@ fn list_data(
     roots: &Roots,
     query: &RouteListRequest,
 ) -> Result<Box<provenant_routing::RouteList>, EdgeError> {
-    with_context(roots, &[], &[], "local-preview", &[], |context, _| {
+    with_context(roots, &[], &[], "local-preview", &[], |context, _, _| {
         Ok(Box::new(provenant_routing::list(
             &provenant_routing::RouteListQuery {
                 adapter: query.adapter.clone(),
@@ -1638,8 +1649,13 @@ fn list_overrides(roots: &Roots, now: i64) -> Result<Vec<OverrideRow>, EdgeError
 fn execute(command: &Route, roots: &Roots, now: i64) -> Result<Data, EdgeError> {
     match command {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
-        Route::Resolve(query) => {
-            with_context(roots, &[], &[], "local-preview", &[], |context, records| {
+        Route::Resolve(query) => with_context(
+            roots,
+            &[],
+            &[],
+            "local-preview",
+            &[],
+            |context, records, _| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),
                     ..*context
@@ -1690,8 +1706,8 @@ fn execute(command: &Route, roots: &Roots, now: i64) -> Result<Data, EdgeError> 
                     pacing,
                     quota,
                 })))
-            })
-        }
+            },
+        ),
         Route::Set(request) => {
             set_pool(roots, request)?;
             Ok(Data::List(list_data(
@@ -2697,7 +2713,9 @@ mod route_tests {
             super::ModelId::parse("opencode/opencode/unlisted")?,
             super::ModelId::parse("opencode/openrouter/unlisted")?,
         ];
-        let observed = super::quota_observations(&catalogue, &availability, &[record], &requested)?;
+        let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
+        let observed =
+            super::quota_observations(&catalogue, &availability, &[record], &policies, &requested)?;
         let bound: Vec<_> = observed.iter().map(|o| o.model.as_str()).collect();
         assert!(bound.contains(&"opencode/opencode-go/glm-5.1"));
         assert!(bound.contains(&"opencode/opencode-go/unlisted"));

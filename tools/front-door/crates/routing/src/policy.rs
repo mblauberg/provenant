@@ -405,6 +405,8 @@ pub(crate) fn restricting_rule(row: &toml_edit::Table) -> bool {
 pub struct ModelPolicyRule {
     pub adapter: Option<String>,
     pub model: Option<ModelId>,
+    /// Match the provider model's suffix, for open-ended catalogue classes.
+    pub model_suffix: Option<String>,
     /// Canonical adapter/key or a registry-free account key.
     pub account: Option<String>,
     pub schedule: Schedule,
@@ -419,6 +421,7 @@ impl<'de> Deserialize<'de> for ModelPolicyRule {
         struct Input {
             adapter: Option<Scoped<String>>,
             model: Option<Scoped<ModelId>>,
+            model_suffix: Option<Scoped<String>>,
             account: Option<Scoped<String>>,
             schedule: Option<Scoped<Schedule>>,
             policy: ModelPolicy,
@@ -433,11 +436,13 @@ impl<'de> Deserialize<'de> for ModelPolicyRule {
         let mut malformed = false;
         let adapter = Scoped::take(input.adapter, &mut malformed);
         let model = Scoped::take(input.model, &mut malformed);
+        let model_suffix = Scoped::take(input.model_suffix, &mut malformed);
         let account = Scoped::take(input.account, &mut malformed);
         let schedule = Scoped::take(input.schedule, &mut malformed).unwrap_or_default();
         Ok(Self {
             adapter,
             model,
+            model_suffix,
             account,
             schedule: if malformed {
                 Schedule::malformed()
@@ -555,34 +560,7 @@ impl ModelPolicies {
             }
             .into(),
         ];
-        // Scope outranks array position. Later rules win within one scope.
-        let mut matching: Vec<_> = self
-            .rules
-            .iter()
-            .enumerate()
-            .filter(|(_, rule)| {
-                rule.adapter.as_deref().is_none_or(|a| a == model.adapter())
-                    && rule.model.as_ref().is_none_or(|m| m == model)
-                    && rule.account.as_deref().is_none_or(|a| {
-                        account.is_some_and(|key| {
-                            a == key || a == format!("{}/{key}", model.adapter())
-                        })
-                    })
-                    && rule.schedule.active(now)
-            })
-            .collect();
-        matching.sort_by_key(|(index, r)| {
-            (
-                u8::from(r.adapter.is_some())
-                    + 2 * u8::from(r.model.is_some())
-                    + 4 * u8::from(r.account.is_some()),
-                *index,
-            )
-        });
-        for (index, rule) in matching {
-            policy.overlay(&rule.policy);
-            sources.push(format!("rules[{index}]"));
-        }
+        self.apply_rules(&mut policy, &mut sources, model, account, now);
         if let Some(fallback) = policy.result.fallback.as_ref() {
             let valid = crate::Catalogue::bundled()
                 .ok()
@@ -602,6 +580,49 @@ impl ModelPolicies {
             }
         }
         EffectiveModelPolicy { policy, sources }
+    }
+
+    fn apply_rules(
+        &self,
+        policy: &mut ModelPolicy,
+        sources: &mut Vec<String>,
+        model: &ModelId,
+        account: Option<&str>,
+        now: i64,
+    ) {
+        // Scope outranks array position. Later rules win within one scope.
+        let mut matching: Vec<_> = self
+            .rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| {
+                rule.scope_valid()
+                    && rule.adapter.as_deref().is_none_or(|a| a == model.adapter())
+                    && rule.model.as_ref().is_none_or(|m| m == model)
+                    && rule
+                        .model_suffix
+                        .as_deref()
+                        .is_none_or(|suffix| model.model().ends_with(suffix))
+                    && rule.account.as_deref().is_none_or(|a| {
+                        account.is_some_and(|key| {
+                            a == key || a == format!("{}/{key}", model.adapter())
+                        })
+                    })
+                    && rule.schedule.active(now)
+            })
+            .collect();
+        matching.sort_by_key(|(index, r)| {
+            (
+                u8::from(r.adapter.is_some())
+                    + 2 * u8::from(r.model.is_some() || r.model_suffix.is_some())
+                    + 4 * u8::from(r.account.is_some()),
+                *index,
+            )
+        });
+        for (index, rule) in matching {
+            policy.overlay(&rule.policy);
+            sources.push(format!("rules[{index}]"));
+        }
     }
 
     /// Each invalid value is reported at its own field so recovery drops only
@@ -689,6 +710,8 @@ impl ModelPolicyRule {
     fn scope_valid(&self) -> bool {
         !(self.adapter.as_deref().is_some_and(|a| {
             !crate::request::identifier(a) || self.model.as_ref().is_some_and(|m| m.adapter() != a)
+        }) || self.model_suffix.as_deref().is_some_and(|suffix| {
+            suffix.is_empty() || suffix.len() > 128 || suffix.chars().any(char::is_control)
         }) || self.account.as_deref().is_some_and(|a| {
             a.split('/').count() > 2 || a.split('/').any(|part| !crate::request::identifier(part))
         }) || !self.schedule.valid())
@@ -794,68 +817,33 @@ impl ModelPolicy {
     }
 }
 
+// Invalid embedded data is a build defect, never a recoverable user configuration.
+#[allow(clippy::expect_used)]
 fn bundled_policy(model: &ModelId, now: i64) -> ModelPolicy {
-    let mut policy = ModelPolicy::default();
-    policy.cache.read_share_target = Some(0.90);
-    if model.adapter() == "claude" {
-        policy.compaction = CompactionPolicy {
-            window: Some(275_000),
-            mode: Some(CompactionMode::TaskBoundary),
-            min_turns: Some(14),
-        };
-        policy.cache.read_ratio = match model.model() {
-            "claude-opus-5-5" | "claude-sonnet-5-5" => Some(0.05),
-            "claude-haiku-5-5" | "claude-sonnet-5" => Some(0.10),
-            _ => None,
-        };
-        policy.cache.write_ratio = Some(1.25);
-        policy.cache.output_ratio = Some(5.0);
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Bundled {
+        defaults: ModelPolicy,
+        rules: Vec<ModelPolicyRule>,
     }
-    if model.adapter() == "codex" {
-        policy.cache.read_ratio = match model.model() {
-            "gpt-6.1-sol" | "gpt-6.1-terra" => Some(0.05),
-            "gpt-6-luna" => Some(0.10),
-            _ => None,
+    static BUNDLED: std::sync::LazyLock<ModelPolicies> = std::sync::LazyLock::new(|| {
+        let asset: Bundled = toml_edit::de::from_str(include_str!("../assets/model-policy.toml"))
+            .expect("valid bundled model policy");
+        let policies = ModelPolicies {
+            bundled: false,
+            defaults: asset.defaults,
+            rules: asset.rules,
         };
-        policy.cache.write_ratio = Some(1.25);
-        policy.cache.output_ratio = Some(5.0);
-    }
-    if model.as_str() == "opencode/opencode-go/deepseek-v4.1-flash" {
-        policy.cache.read_ratio = Some(0.02);
-        policy.cache.write_ratio = Some(0.0);
-        policy.cache.output_ratio = Some(4.0);
-        policy.cache.context_window = Some(1_000_000);
-        policy.cache.read_heavy_weight = Some(3);
-        // Published weekday peak windows in config/telemetry-prices.toml.
-        let weekday = (now.div_euclid(86_400) + 3).rem_euclid(7);
-        let hour = now.rem_euclid(86_400) / 3600;
-        policy.cache.price_multiplier = Some(
-            if weekday < 5 && ((1..4).contains(&hour) || (6..10).contains(&hour)) {
-                2.0
-            } else {
-                1.0
-            },
+        let mut errors = Vec::new();
+        policies.validate(&mut errors);
+        assert!(
+            errors.is_empty(),
+            "invalid bundled model policy: {errors:?}"
         );
-        policy.compaction = CompactionPolicy {
-            mode: Some(CompactionMode::TaskBoundary),
-            window: Some(800_000),
-            min_turns: Some(20),
-        };
-    }
-    if model.as_str() == "codex/gpt-6.1-terra" {
-        policy.lane.stop_early_ok = Some(false);
-        policy.lane.max_continuations = Some(2);
-    }
-    if model.as_str() == "agy/gemini-3.8-flash"
-        || (model.adapter() == "opencode" && model.model().ends_with("-free"))
-    {
-        policy.lane.read_only = Some(true);
-        policy.result.check = Some(true);
-        policy.result.sections = Some(vec!["## Findings".into(), "## Evidence".into()]);
-        // An exact, catalogued paid route with its recorded effort control.
-        policy.result.fallback = ModelId::parse("codex/gpt-6-luna").ok();
-        policy.result.fallback_effort = Some("high".into());
-    }
+        policies
+    });
+    let mut policy = BUNDLED.defaults.clone();
+    BUNDLED.apply_rules(&mut policy, &mut Vec::new(), model, None, now);
     policy
 }
 
@@ -879,36 +867,140 @@ pub fn validate_intent(policy: &ModelPolicy, intent: RouteIntent) -> Result<(), 
 mod tests {
     use super::*;
 
-    /// The peak window and multiplier in `bundled_policy` are hard-coded; the
-    /// price file states them in a comment. Keep the two in step.
     #[test]
-    fn deepseek_peak_window_matches_the_price_file() -> Result<(), Box<dyn std::error::Error>> {
-        let prices = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../../config/telemetry-prices.toml"),
+    fn malformed_suffix_selectors_do_not_broaden_rules() -> Result<(), Box<dyn std::error::Error>> {
+        for suffix in [
+            serde_json::json!(""),
+            serde_json::json!("\n"),
+            serde_json::json!("x".repeat(129)),
+            serde_json::json!(7),
+        ] {
+            let policies: ModelPolicies = serde_json::from_value(serde_json::json!({"rules": [{
+                "adapter": "opencode", "model_suffix": suffix,
+                "policy": {"cache": {"read_ratio": 0.5}}
+            }]}))?;
+            let mut errors = Vec::new();
+            policies.validate(&mut errors);
+            assert!(errors.iter().any(|e| e.field == "model_policy.rules.0"));
+            assert_eq!(
+                policies
+                    .effective(&ModelId::parse("opencode/unknown-free")?, None, 0)
+                    .policy
+                    .cache
+                    .read_ratio,
+                None
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_policy_matches_pre_data_golden() -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Deserialize)]
+        struct Case {
+            model: ModelId,
+            at: i64,
+            policy: ModelPolicy,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("../assets/model-policy-golden.json"))?;
+        for case in cases {
+            assert_eq!(
+                serde_json::to_value(
+                    ModelPolicies::default()
+                        .effective(&case.model, None, case.at)
+                        .policy
+                )?,
+                serde_json::to_value(case.policy)?,
+                "{} at {}",
+                case.model.as_str(),
+                case.at
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_fields_and_peak_schedule_can_be_overridden_per_account()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            r#"
+            [defaults.cache]
+            read_share_target = 0.8
+            [[rules]]
+            adapter = "claude"
+            account = "work"
+            [rules.policy.compaction]
+            window = 400000
+            [[rules]]
+            model = "opencode/opencode-go/deepseek-v4.1-flash"
+            account = "work"
+            [rules.schedule]
+            windows = [{ start_hour = 2, end_hour = 3 }]
+            [rules.policy.cache]
+            read_ratio = 0.04
+            price_multiplier = 3.0
+            [[rules]]
+            model = "codex/gpt-6.1-terra"
+            account = "work"
+            [rules.policy.lane]
+            stop_early_ok = true
+            max_continuations = 0
+            [[rules]]
+            adapter = "opencode"
+            model_suffix = "-free"
+            account = "work"
+            [rules.policy.lane]
+            read_only = false
+        "#,
         )?;
+        let claude = policies
+            .effective(&ModelId::parse("claude/claude-opus-5-5")?, Some("work"), 0)
+            .policy;
+        assert_eq!(claude.compaction.window, Some(400000));
+        assert_eq!(claude.cache.read_share_target, Some(0.8));
+        let deepseek = ModelId::parse("opencode/opencode-go/deepseek-v4.1-flash")?;
+        for (account, hour, expected) in [
+            ("work", 1, 2.0),
+            ("work", 2, 3.0),
+            ("work", 3, 2.0),
+            ("other", 2, 2.0),
+        ] {
+            let policy = policies
+                .effective(&deepseek, Some(account), 4 * 86400 + hour * 3600)
+                .policy;
+            assert_eq!(policy.cache.price_multiplier, Some(expected));
+            assert_eq!(
+                policy.cache.read_ratio,
+                Some(if account == "work" && hour == 2 {
+                    0.04
+                } else {
+                    0.02
+                })
+            );
+        }
+        let terra = policies
+            .effective(
+                &ModelId::parse("codex/gpt-6.1-terra")?,
+                Some("codex/work"),
+                0,
+            )
+            .policy;
+        assert_eq!(terra.lane.stop_early_ok, Some(true));
+        assert_eq!(terra.lane.max_continuations, Some(0));
+        let free = policies
+            .effective(&ModelId::parse("opencode/unknown-free")?, Some("work"), 0)
+            .policy;
+        assert_eq!(free.lane.read_only, Some(false));
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_deepseek_schedule_preserves_every_hour_of_the_week()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let hours = [1, 4, 6, 10];
+        let multiplier = 2.0;
         let model = "opencode/opencode-go/deepseek-v4.1-flash";
-        let block = prices
-            .split("[[models]]")
-            .find(|block| block.contains(&format!("model = \"{model}\"")))
-            .ok_or("price entry missing")?;
-        let comment = block
-            .lines()
-            .find(|line| line.contains("peak hours"))
-            .ok_or("peak comment missing")?;
-        let numbers = |text: &str| -> Vec<i64> {
-            text.split(|c: char| !c.is_ascii_digit())
-                .filter_map(|part| part.parse().ok())
-                .collect()
-        };
-        let (window, rest) = comment
-            .split_once('(')
-            .and_then(|(_, rest)| rest.split_once(')'))
-            .ok_or("peak window missing")?;
-        let hours = numbers(window.split("UTC").next().unwrap_or_default());
-        assert_eq!(hours.len(), 4, "{comment}");
-        assert!(window.contains("Monday to Friday"), "{comment}");
-        let multiplier = numbers(rest).first().copied().ok_or("multiplier missing")? as f64;
         let model = ModelId::parse(model)?;
         // 1970-01-05 is a Monday; sample every hour of a full week. // timebomb: allow evaluated at an injected instant
         let monday = 4 * 86_400;
