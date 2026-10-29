@@ -5364,7 +5364,7 @@ pub(super) fn start_fabric_relay(
     let executor = provenant_os::exec::SystemExecutor::new(provenant_fabric_mcp::lane::WORKERS)
         .map_err(|e| e.to_string())?;
     let cancel = CancelToken::new();
-    // Initialise and retain the WAL before a lane opens its read-only connection.
+    // Initialise the store before a lane opens it; store writers persist WAL companions.
     drop(
         CoordinationService::for_identity(
             &ctx.roots.state,
