@@ -65,6 +65,25 @@ pub enum Quota {
         #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=365))]
         days: u32,
     },
+    /// List recorded quota readings with resets, plan changes and the plan price in force
+    ///
+    /// Readings are kept by `quota tick` and refreshes, one per distinct
+    /// reading, oldest first. `--since` and `--until` take seconds ago, a date
+    /// or an RFC3339 timestamp. With `--limit` the newest readings are kept.
+    History {
+        /// Account label or key
+        #[arg(long)]
+        account: Option<String>,
+        /// Earliest reading
+        #[arg(long, value_parser = crate::grammar::since)]
+        since: Option<jiff::Timestamp>,
+        /// Latest reading
+        #[arg(long, value_parser = crate::grammar::since)]
+        until: Option<jiff::Timestamp>,
+        /// Most readings to return
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+        limit: u32,
+    },
     /// Set menu bar display choices, then show quota
     ///
     /// With no options nothing changes. `--icon` takes `most_constrained` or an
@@ -164,7 +183,7 @@ fn create_path(path: &Path) -> Result<Directory, EdgeError> {
     };
     Ok(dir)
 }
-fn private(path: &Path) -> Result<Directory, EdgeError> {
+pub(crate) fn private(path: &Path) -> Result<Directory, EdgeError> {
     let dir = create_path(path)?;
     let meta = dir.metadata()?;
     if meta.mode & 0o077 != 0 || meta.uid != provenant_os::fs::effective_uid() {
@@ -172,7 +191,7 @@ fn private(path: &Path) -> Result<Directory, EdgeError> {
     }
     Ok(dir)
 }
-fn child(parent: &Directory, name: &OsStr) -> Result<Directory, EdgeError> {
+pub(crate) fn child(parent: &Directory, name: &OsStr) -> Result<Directory, EdgeError> {
     match parent.mkdir(name, 0o700) {
         Ok(()) => parent.sync()?,
         Err(e) if e.is_exists() => {}
@@ -199,6 +218,7 @@ fn read_records(dir: &Directory) -> Result<Vec<AccountRecord>, EdgeError> {
         let entry = entry?;
         if entry == "report.json"
             || entry == "quota.lock"
+            || entry == crate::quota_history::DIRECTORY
             || entry.to_str().is_some_and(|s| s.starts_with('.'))
         {
             continue;
@@ -598,6 +618,7 @@ fn clean_orphan_dirs(dir: &Directory) -> Result<(), EdgeError> {
         let entry = entry?;
         if entry == "report.json"
             || entry == "quota.lock"
+            || entry == crate::quota_history::DIRECTORY
             || entry.to_str().is_some_and(|s| s.starts_with('.'))
         {
             continue;
@@ -827,6 +848,8 @@ fn execute(
         | Quota::Usage {
             adapter: filter, ..
         } => (filter, None),
+        // Dispatched by `run` before execute; reads the cache like `show`.
+        Quota::History { .. } => (&all, None),
         Quota::Display { headline, icon } => {
             crate::accounts::set_quota_display(roots, headline.map(Into::into), icon.as_deref())
                 .map_err(EdgeError::Display)?;
@@ -985,7 +1008,21 @@ fn execute(
             })
         {
             match schedule::complete(reserved, &token, finished, outcome, None) {
-                Ok(complete) => write_intent(&dir, &complete, &mut records)?,
+                Ok(complete) => {
+                    write_intent(&dir, &complete, &mut records)?;
+                    // Best effort: a history fault never fails the refresh.
+                    if let Some(snapshot) = complete
+                        .replacement
+                        .as_ref()
+                        .and_then(|record| record.snapshot.as_ref())
+                    {
+                        let _ = crate::quota_history::record(
+                            &dir,
+                            snapshot,
+                            settings.history_max_bytes,
+                        );
+                    }
+                }
                 Err(QuotaError::Conflict) => {} // A newer claim or observation owns the record.
                 Err(error) => return Err(error.into()),
             }
@@ -1214,6 +1251,117 @@ fn usage_report(
     Ok((data, human))
 }
 
+/// Schema of `quota history --json`.
+const HISTORY_SCHEMA_VERSION: u64 = 1;
+
+fn history_report(
+    roots: &Roots,
+    query: &crate::quota_history::Query,
+    limit: u32,
+) -> Result<(serde_json::Value, String), EdgeError> {
+    let clock = SystemClock::new();
+    let now = clock
+        .wall_now()
+        .map_err(|_| EdgeError::Time)?
+        .as_timestamp()
+        .as_second();
+    let accounts = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+        .domains
+        .accounts;
+    let mut records = crate::quota_history::read(roots.state.as_path(), query)?;
+    let total = records.len();
+    let limit = limit as usize;
+    if total > limit {
+        records.drain(..total - limit);
+    }
+    // One price lookup per record serves both the JSON and the table.
+    let prices: Vec<Option<PlanPrice>> = records
+        .iter()
+        .map(|record| {
+            accounts
+                .entries
+                .values()
+                .find(|e| e.adapter == record.provider && e.key == record.account_key)
+                .and_then(|e| price_in_force(&e.plans, record.observed_unix_seconds))
+                .cloned()
+        })
+        .collect();
+    let readings: Vec<serde_json::Value> = records
+        .iter()
+        .zip(&prices)
+        .map(|(record, price)| {
+            let mut value = serde_json::to_value(record)?;
+            value["plan_price"] = serde_json::to_value(price)?;
+            Ok(value)
+        })
+        .collect::<Result<_, serde_json::Error>>()?;
+    let data = serde_json::json!({
+        "schema_version": HISTORY_SCHEMA_VERSION,
+        "generated_unix_seconds": now,
+        "count": readings.len(),
+        "matched": total,
+        "truncated": total > readings.len(),
+        "readings": readings,
+    });
+    if serde_json::to_vec(&data)?.len() as u64 > 16 * MAX_RECORD_BYTES {
+        return Err(EdgeError::TooLarge);
+    }
+    Ok((data, history_human(&records, &prices)))
+}
+
+fn history_human(records: &[HistoryRecord], prices: &[Option<PlanPrice>]) -> String {
+    if records.is_empty() {
+        return "Quota history: no readings\n".into();
+    }
+    let mut human = format!("Quota history: {} readings\n", records.len());
+    for (record, price) in records.iter().zip(prices) {
+        let when = jiff::Timestamp::from_second(record.observed_unix_seconds).map_or_else(
+            |_| "?".into(),
+            |t| t.strftime("%Y-%m-%d %H:%M:%SZ").to_string(),
+        );
+        human.push_str(&format!(
+            "{when}  {} [{}]  {}",
+            record.label.escape_debug(),
+            record.provider,
+            record.plan.as_deref().unwrap_or("-").escape_debug()
+        ));
+        for window in &record.windows {
+            human.push_str(&format!(
+                "  {} {}.{:02}%",
+                window.pool.escape_debug(),
+                window.used_basis_points / 100,
+                window.used_basis_points % 100
+            ));
+        }
+        if let Some(balance) = &record.credit_balance {
+            human.push_str(&format!("  credit {}", balance.escape_debug()));
+        }
+        if let Some(plan) = price {
+            human.push_str(&format!(
+                "  {} {} {}/mo",
+                plan.name.escape_debug(),
+                plan.price,
+                plan.currency
+            ));
+        }
+        for marker in &record.markers {
+            match marker.kind {
+                MarkerKind::Reset => human.push_str(&format!(
+                    "  RESET {}",
+                    marker.pool.as_deref().unwrap_or("").escape_debug()
+                )),
+                MarkerKind::PlanChange => human.push_str(&format!(
+                    "  PLAN CHANGE {} -> {}",
+                    marker.from.as_deref().unwrap_or("-").escape_debug(),
+                    marker.to.as_deref().unwrap_or("-").escape_debug()
+                )),
+            }
+        }
+        human.push('\n');
+    }
+    human
+}
+
 /// `93.4% of 1200 input tokens`, or why there is no share.
 pub(crate) fn cache_share(cache: &provenant_telemetry::CacheSummary) -> String {
     match cache.read_share_basis_points {
@@ -1370,12 +1518,27 @@ pub fn run(
     let name = match command {
         Quota::Show(_) => "quota show",
         Quota::Usage { .. } => "quota usage",
+        Quota::History { .. } => "quota history",
         Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
     let mut summary = None;
     let result = match &command {
         Quota::Usage { adapter, days } => usage_report(roots, adapter, *days),
+        Quota::History {
+            account,
+            since,
+            until,
+            limit,
+        } => history_report(
+            roots,
+            &crate::quota_history::Query {
+                account: account.clone(),
+                since: since.map(|t| t.as_second()),
+                until: until.map(|t| t.as_second()),
+            },
+            *limit,
+        ),
         _ => execute(&command, roots, registry, effects).and_then(|report| {
             let human = quota_human(&report);
             if matches!(command, Quota::Show(_)) {
@@ -1411,7 +1574,10 @@ pub fn run(
     };
     let mode = globals.render_mode(
         &human,
-        matches!(command, Quota::Show(_) | Quota::Usage { .. }),
+        matches!(
+            command,
+            Quota::Show(_) | Quota::Usage { .. } | Quota::History { .. }
+        ),
         summary.as_ref(),
     );
     let outcome = crate::render_or_publish(

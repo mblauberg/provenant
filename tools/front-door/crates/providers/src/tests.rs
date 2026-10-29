@@ -5077,6 +5077,8 @@ fn registration_org_refuses_a_different_org_and_upgrades_legacy_records() {
         plan: None,
         priority: None,
         billing_anchor: None,
+        plans: Vec::new(),
+        directories: Vec::new(),
         limits: None,
         display_name: None,
         hidden: false,
@@ -5183,6 +5185,8 @@ fn shared_settings_refuse_identity_credential_and_hook_keys() {
         plan: None,
         priority: None,
         billing_anchor: None,
+        plans: Vec::new(),
+        directories: Vec::new(),
         limits: None,
         display_name: None,
         hidden: false,
@@ -5212,4 +5216,60 @@ fn shared_settings_refuse_identity_credential_and_hook_keys() {
             serde_json::json!({"ANTHROPIC_AUTH_TOKEN": "x"}),
         );
     assert!(settings.settings_error().is_some());
+}
+
+fn accounts_with_plans(plans: &str) -> Result<accounts::Settings, toml_edit::de::Error> {
+    toml_edit::de::from_str(&format!(
+        "[entries.claude-work]\nadapter = \"claude\"\nlabel = \"work\"\nkey = \"k1\"\ndirectory = \"/home/u/.claude-work\"\n{plans}"
+    ))
+}
+#[test]
+fn account_plan_prices_parse_validate_and_reject_unknown_fields() {
+    use provenant_config::DomainConfig;
+    let valid = accounts_with_plans(
+        "[[entries.claude-work.plans]]\nname = \"max_5x\"\nprice = 100.0\ncurrency = \"USD\"\neffective_from = \"2026-01-01\"\n[[entries.claude-work.plans]]\nname = \"max_20x\"\nprice = 300\ncurrency = \"AUD\"\neffective_from = \"2026-06-01\"\n",
+    )
+    .unwrap();
+    assert_eq!(valid.entries["claude-work"].plans.len(), 2);
+    assert!(valid.validate().is_empty());
+    // Unknown keys are refused at parse time.
+    assert!(
+        accounts_with_plans(
+            "[[entries.claude-work.plans]]\nname = \"a\"\nprice = 1\ncurrency = \"USD\"\neffective_from = \"2026-01-01\"\nnote = \"x\"\n"
+        )
+        .is_err()
+    );
+    for bad in [
+        "price = -1\ncurrency = \"USD\"\neffective_from = \"2026-01-01\"",
+        "price = 1\ncurrency = \"usd\"\neffective_from = \"2026-01-01\"",
+        "price = 1\ncurrency = \"USD\"\neffective_from = \"2026-02-30\"",
+        "price = 1\ncurrency = \"USD\"\neffective_from = \"soon\"",
+    ] {
+        let parsed = accounts_with_plans(&format!(
+            "[[entries.claude-work.plans]]\nname = \"a\"\n{bad}\n"
+        ))
+        .unwrap();
+        assert_eq!(parsed.validate()[0].code, "plans", "{bad}");
+    }
+    let duplicate = accounts_with_plans(
+        "[[entries.claude-work.plans]]\nname = \"a\"\nprice = 1\ncurrency = \"USD\"\neffective_from = \"2026-01-01\"\n[[entries.claude-work.plans]]\nname = \"b\"\nprice = 2\ncurrency = \"USD\"\neffective_from = \"2026-01-01\"\n",
+    )
+    .unwrap();
+    assert_eq!(duplicate.validate()[0].code, "plans");
+}
+
+#[test]
+fn free_plan_notional_value_and_extra_directories_parse_and_validate() {
+    use provenant_config::DomainConfig;
+    let ok = accounts_with_plans(
+        "directories = [\"/home/u/.claude\"]\n[[entries.claude-work.plans]]\nname = \"student\"\nprice = 0\nnotional_usd = 20\neffective_from = \"2026-01-01\"\n",
+    )
+    .unwrap();
+    let entry = &ok.entries["claude-work"];
+    assert_eq!(entry.plans[0].currency, "USD");
+    assert_eq!(entry.plans[0].notional_usd, Some(20.0));
+    assert_eq!(entry.directories.len(), 1);
+    assert!(ok.validate().is_empty());
+    let relative = accounts_with_plans("directories = [\"rel/dir\"]\n").unwrap();
+    assert!(!relative.validate().is_empty());
 }

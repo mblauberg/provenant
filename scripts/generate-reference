@@ -143,6 +143,13 @@ def config_reference(data):
                 f"{setting['min']} to {setting['max']}" + (f" or {auto} for auto" if auto is not None else ""))
             text += f"| `{name}` | {setting['default']} | {setting['effect']} ({allowed}). |\n"
         text += "\n"
+    history = data.get("quota_history")
+    if history:
+        text += (f"## Quota history and plan prices\n\nSet the cap in `[{history['path']}]`; "
+                 "set prices per account as shown.\n\n| Key | Default | Effect |\n|---|---|---|\n")
+        for name, setting in history["settings"].items():
+            text += f"| `{name}` | {setting['default']} | {setting['effect']} ({setting['allowed']}). |\n"
+        text += "\n### Account plan prices\n\n" + fenced(history["plans"]) + "\n"
     provider_updates = data.get("provider_updates")
     if provider_updates:
         text += "## Provider updates\n\n" + fenced(provider_updates) + "\n"
@@ -152,7 +159,7 @@ def config_reference(data):
             text += f"| `{key}` | {cell(value)} |\n"
         text += "\n"
     remainder = {key: value for key, value in data.items()
-                 if key not in {"knobs", "provider_updates", *(section[0] for section in HOST_SECTIONS)}}
+                 if key not in {"knobs", "provider_updates", "quota_history", *(section[0] for section in HOST_SECTIONS)}}
     if remainder:
         text += "## Registry and profiles\n\n" + fenced(remainder)
     return text.rstrip() + "\n"

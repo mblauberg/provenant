@@ -592,7 +592,8 @@ mod tests {
             target.path(),
             Wait {
                 timeout: Duration::from_millis(600),
-                progress_every: Duration::from_millis(200),
+                // Six intervals per timeout leave room for a slow scheduler tick.
+                progress_every: Duration::from_millis(100),
             },
             &mut |waited| reports.push(waited),
         )

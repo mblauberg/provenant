@@ -60,6 +60,31 @@ Set these in `[domains.routing.model_policy]` in the host configuration. Omit a 
 | `defaults.result.fallback_effort` | per model | Effort for the fallback attempt. (effort name). |
 | `rules` | empty | Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Inclusive start, exclusive expiry; an overnight window wraps midnight; inactive rules have no effect. (tables with adapter, model, account, starts_unix_seconds, expires_unix_seconds, windows (list of {start_hour, end_hour}, UTC) and policy (the same fields as defaults, under rules.policy)). |
 
+## Quota history and plan prices
+
+Set the cap in `[domains.quota]`; set prices per account as shown.
+
+| Key | Default | Effect |
+|---|---|---|
+| `history_max_bytes` | 4194304 (4 MiB) | Disk cap for each account's quota history under quota/history/. Readings go to a current file that rotates to one predecessor at half the cap, so the pair never exceeds it and the newest reading is always kept. (65536 to 134217728 bytes). |
+
+### Account plan prices
+
+```json
+{
+  "effect": "Prices over time for the account. The entry with the latest effective_from on or before a reading applies to it, and quota history --json shows it as plan_price, with price and notional_usd. Dates must differ within an account; unknown keys, negative or non-finite prices and bad dates refuse the config. This is not the detected plan label, which comes from the provider or the account's plan option.",
+  "fields": {
+    "currency": "Three capital letters (ISO 4217). USD when omitted. No conversion is applied.",
+    "effective_from": "First day the price applies, YYYY-MM-DD (UTC).",
+    "name": "Plan label, for example max_5x. At most 64 characters.",
+    "notional_usd": "Optional list-price value in USD of a free or discounted plan, for example 20 for a student plan priced 0.",
+    "price": "Price per month in currency; 0 or more, 0 for a free plan."
+  },
+  "form": "array of tables, any number of entries",
+  "path": "domains.accounts.entries.<id>.plans"
+}
+```
+
 ## Provider updates
 
 ```json

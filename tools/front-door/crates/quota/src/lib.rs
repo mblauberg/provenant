@@ -4,6 +4,8 @@ pub mod chair;
 mod source;
 pub use source::*;
 mod calibration;
+mod history;
+pub use history::*;
 mod settings;
 pub use calibration::*;
 mod state;

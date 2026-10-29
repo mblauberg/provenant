@@ -54,7 +54,7 @@ fn usage_reads_terminal_lanes_across_projects_and_keeps_unknown_accounts() -> Re
         assert_eq!(row["lane_usage"]["uncached_input"]["missing"], 1);
     }
     assert!(!String::from_utf8_lossy(&output.stdout.bytes).contains("private fixture prompt"));
-    let human = rig.command(&["quota", "usage"])?;
+    let human = rig.command(&["quota", "usage", "--full"])?;
     let human = String::from_utf8(human.stdout.bytes)?;
     assert!(human.contains("Chair tokens are read from each recorded chair session"));
     assert!(human.contains("unknown account"));
@@ -862,4 +862,97 @@ fn show_warns_when_display_icon_account_is_not_registered() -> Result {
     );
     assert_eq!(std::fs::read_to_string(path)?, before);
     rig.assert_legacy_unchanged()
+}
+
+fn history_line(at: i64, plan: &str, used: u64, reset: i64, marker: &str) -> String {
+    format!(
+        "{{\"schema_version\":1,\"observed_unix_seconds\":{at},\"account_key\":\"k1\",\"label\":\"work\",\"provider\":\"claude\",\"status\":\"available\",\"plan\":\"{plan}\",\"tier\":null,\"windows\":[{{\"pool\":\"five_hour\",\"window_seconds\":18000,\"used_basis_points\":{used},\"resets_unix_seconds\":{reset}}}],\"credit_balance\":null,\"reset_credits\":null{marker}}}\n"
+    )
+}
+
+#[test]
+fn history_lists_readings_with_price_in_force_and_filters() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = TestRig::new()?;
+    let history = rig.state.join("quota/history");
+    std::fs::create_dir_all(&history)?;
+    for path in [&rig.state, &rig.state.join("quota"), &history] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    // 2026-01-15, 2026-06-15 and 2026-06-15 (second, after a plan change and reset).
+    let (a, b, c) = (1_768_478_400, 1_781_524_800, 1_781_528_400);
+    let mut text = history_line(a, "max_5x", 500, a + 100, "");
+    // Torn line from a crashed writer must not break the listing.
+    text.push_str("{\"schema_version\":1,\"obs\n");
+    text.push_str(&history_line(b, "max_5x", 900, b + 100, ""));
+    text.push_str(&history_line(
+        c,
+        "max_20x",
+        10,
+        c + 100,
+        ",\"markers\":[{\"kind\":\"reset\",\"pool\":\"five_hour\"},{\"kind\":\"plan.change\",\"from\":\"max_5x\",\"to\":\"max_20x\"}]",
+    ));
+    std::fs::write(history.join("k1.claude.jsonl"), text)?;
+    std::fs::set_permissions(
+        history.join("k1.claude.jsonl"),
+        std::fs::Permissions::from_mode(0o600),
+    )?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version = 1\n[domains.accounts.entries.claude-work]\nadapter = \"claude\"\nlabel = \"work\"\nkey = \"k1\"\ndirectory = \"{}\"\n\n[[domains.accounts.entries.claude-work.plans]]\nname = \"max_5x\"\nprice = 100.0\ncurrency = \"USD\"\neffective_from = \"2026-01-01\"\n\n[[domains.accounts.entries.claude-work.plans]]\nname = \"max_20x\"\nprice = 200.0\ncurrency = \"USD\"\neffective_from = \"2026-06-01\"\n",
+            rig.root.join("claude").display()
+        ),
+    )?;
+    let output = rig.command(&["quota", "history", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let data = &report["data"];
+    assert_eq!(data["schema_version"], 1);
+    assert_eq!(data["count"], 3);
+    assert_eq!(data["truncated"], false);
+    let readings = data["readings"].as_array().ok_or("readings")?;
+    let times: Vec<i64> = readings
+        .iter()
+        .map(|r| r["observed_unix_seconds"].as_i64().unwrap_or(0))
+        .collect();
+    assert_eq!(times, [a, b, c]);
+    assert_eq!(readings[0]["plan_price"]["name"], "max_5x");
+    assert_eq!(readings[0]["plan_price"]["price"], 100.0);
+    assert_eq!(readings[1]["plan_price"]["name"], "max_20x");
+    assert_eq!(readings[2]["markers"][1]["kind"], "plan.change");
+    assert_eq!(readings[2]["windows"][0]["used_basis_points"], 10);
+    for key in ["tier", "credit_balance", "account_key", "label", "provider"] {
+        assert!(readings[0].get(key).is_some(), "{key}");
+    }
+    let since = rig.command(&["quota", "history", "--json", "--since", "2026-06-01"])?;
+    let since: serde_json::Value = serde_json::from_slice(&since.stdout.bytes)?;
+    assert_eq!(since["data"]["count"], 2);
+    let other = rig.command(&["quota", "history", "--json", "--account", "other"])?;
+    let other: serde_json::Value = serde_json::from_slice(&other.stdout.bytes)?;
+    assert_eq!(other["data"]["count"], 0);
+    let limited = rig.command(&["quota", "history", "--json", "--limit", "1"])?;
+    let limited: serde_json::Value = serde_json::from_slice(&limited.stdout.bytes)?;
+    assert_eq!(limited["data"]["truncated"], true);
+    assert_eq!(limited["data"]["readings"][0]["observed_unix_seconds"], c);
+    let human = String::from_utf8(rig.command(&["quota", "history"])?.stdout.bytes)?;
+    assert!(human.contains("RESET five_hour"), "{human}");
+    assert!(human.contains("PLAN CHANGE max_5x -> max_20x"), "{human}");
+    Ok(())
+}
+
+#[test]
+fn history_without_state_is_empty_and_creates_nothing() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    let output = rig.command(&["quota", "history", "--json"])?;
+    assert_eq!(code(&output), 0);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["data"]["count"], 0);
+    assert!(!rig.state.exists());
+    Ok(())
 }

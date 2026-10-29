@@ -78,6 +78,10 @@ impl QuotaSnapshot {
                         .as_ref()
                         .is_some_and(|value| !detail_text(value, 128))
                     || details
+                        .tier
+                        .as_ref()
+                        .is_some_and(|value| !detail_text(value, 128))
+                    || details
                         .fingerprint
                         .as_ref()
                         .is_some_and(|value| !fingerprint(value))

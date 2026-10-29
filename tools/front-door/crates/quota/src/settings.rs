@@ -12,6 +12,12 @@ pub struct Settings {
     pub display: Display,
     #[serde(default)]
     pub calibration: BTreeMap<String, Calibration>,
+    /// Disk cap in bytes for each account's quota history (current file plus one rotated).
+    #[serde(default = "default_history_max_bytes")]
+    pub history_max_bytes: u64,
+}
+fn default_history_max_bytes() -> u64 {
+    crate::DEFAULT_HISTORY_MAX_BYTES
 }
 /// Which window the menu bar leads with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +63,7 @@ impl Default for Settings {
             wall_budget_seconds: 55,
             display: Display::default(),
             calibration: BTreeMap::new(),
+            history_max_bytes: default_history_max_bytes(),
         }
     }
 }
@@ -76,6 +83,14 @@ impl DomainConfig for Settings {
             code: "ceiling",
         })
         .collect();
+        if !(crate::MIN_HISTORY_MAX_BYTES..=crate::MAX_HISTORY_MAX_BYTES)
+            .contains(&self.history_max_bytes)
+        {
+            errors.push(SectionError {
+                field: "history_max_bytes".into(),
+                code: "ceiling",
+            });
+        }
         if !valid_icon(&self.display.icon) {
             errors.push(SectionError {
                 field: "display.icon".into(),
@@ -134,5 +149,21 @@ mod tests {
         let long = "a".repeat(129);
         let s = parse(&format!("{BASE}[display]\nicon = \"{long}\"\n")).unwrap();
         assert!(!s.validate().is_empty());
+    }
+    #[test]
+    fn history_cap_defaults_and_is_bounded() {
+        let s = parse(BASE).unwrap();
+        assert_eq!(s.history_max_bytes, crate::DEFAULT_HISTORY_MAX_BYTES);
+        assert!(s.validate().is_empty());
+        for bad in [
+            0,
+            crate::MIN_HISTORY_MAX_BYTES - 1,
+            crate::MAX_HISTORY_MAX_BYTES + 1,
+        ] {
+            let s = parse(&format!("{BASE}history_max_bytes = {bad}\n")).unwrap();
+            assert_eq!(s.validate()[0].field, "history_max_bytes", "{bad}");
+        }
+        let s = parse(&format!("{BASE}history_max_bytes = 131072\n")).unwrap();
+        assert!(s.validate().is_empty());
     }
 }

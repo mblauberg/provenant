@@ -40,8 +40,15 @@ pub struct Registration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_fingerprint: Option<String>,
     pub directory: PathBuf,
+    /// Further config directories signed into the same account. Schema only;
+    /// native session ingest will attribute these to this label.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directories: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// Subscription prices over time, for value reporting. Not the detected `plan`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plans: Vec<provenant_quota::PlanPrice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +108,8 @@ impl Settings {
             entry.key = key.into();
             entry.label = key.into();
             entry.plan = None;
+            entry.plans.clear();
+            entry.directories.clear();
             entry.limits = None;
             entry.billing_anchor = None;
             entry.display_name = None;
@@ -191,6 +200,16 @@ impl DomainConfig for Settings {
                 code: "registration",
             });
         }
+        if self
+            .entries
+            .values()
+            .any(|e| !provenant_quota::valid_plans(&e.plans))
+        {
+            errors.push(SectionError {
+                field: "entries".into(),
+                code: "plans",
+            });
+        }
         if self.entries.iter().any(|(id, e)| !valid_display(id, e)) {
             errors.push(SectionError {
                 field: "entries".into(),
@@ -216,6 +235,16 @@ fn valid_entry(entry: &Registration) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
         && entry.directory.is_absolute()
+        && entry.directories.len() <= 8
+        && entry.directories.iter().all(|d| {
+            d.is_absolute()
+                && !d.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )
+                })
+        })
         && !entry.directory.components().any(|c| {
             matches!(
                 c,
