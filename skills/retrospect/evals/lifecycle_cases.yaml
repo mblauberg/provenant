@@ -1,7 +1,0 @@
-schema_version: 1
-target_skill: retrospect
-cases:
-  - {id: lifecycle-retrospect-positive, relation: positive, prompt: "Retrospect on human attention, gate latency and unnecessary interruptions, then feed evidence into the next scope cycle.", tags: [lifecycle-alignment, direct], expected: {primary_skill: retrospect, companion_skills: []}}
-  - {id: lifecycle-retrospect-negative, relation: negative, prompt: "The active service defect is still causing impact; diagnose it before any retrospective.", tags: [lifecycle-alignment, boundary], expected: {primary_skill: diagnose, companion_skills: []}}
-  - {id: lifecycle-retrospect-adjacent, relation: adjacent, prompt: "Retrospect on the completed run, then scope the supported lifecycle improvement for the next cycle.", tags: [lifecycle-alignment, composition], expected: {primary_skill: retrospect, companion_skills: [scope]}}
-  - {id: lifecycle-retrospect-portability, relation: portability, prompt: "With Console, Herdr and GitHub unavailable, derive the retrospective from canonical project artifacts and retained receipts.", tags: [lifecycle-alignment, portable], adapters: {console: absent, herdr: absent, github: absent}, expected: {primary_skill: retrospect, companion_skills: []}}

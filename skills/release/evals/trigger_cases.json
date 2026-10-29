@@ -3,9 +3,9 @@
   "target_skill": "release",
   "cases": [
     {
-      "id": "q199",
+      "id": "q1",
       "relation": "positive",
-      "prompt": "Deploy the accepted build to production under the approved rollout, rollback, and observation plan.",
+      "prompt": "Promote the accepted build to production under the approved rollout plan and observe it.",
       "tags": [
         "direct"
       ],
@@ -15,9 +15,9 @@
       }
     },
     {
-      "id": "q200",
+      "id": "q2",
       "relation": "positive",
-      "prompt": "Publish this accepted report to the named public audience with explicit authority and proof.",
+      "prompt": "Publish the accepted package to the registry once the owner has authorised it.",
       "tags": [
         "direct"
       ],
@@ -27,9 +27,9 @@
       }
     },
     {
-      "id": "q201",
+      "id": "q3",
       "relation": "positive",
-      "prompt": "Send the accepted artifact to the approved recipient and record delivery evidence; do not redraft it.",
+      "prompt": "Send the approved announcement to the customer list and record the evidence.",
       "tags": [
         "direct"
       ],
@@ -39,10 +39,11 @@
       }
     },
     {
-      "id": "q202",
+      "id": "q4",
       "relation": "negative",
-      "prompt": "Implement the feature and report acceptance after objective checks and required review without deploying it.",
+      "prompt": "Implement the approved change and get it through CI.",
       "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -51,22 +52,11 @@
       }
     },
     {
-      "id": "q203",
+      "id": "q5",
       "relation": "negative",
-      "prompt": "Draft an Australian settlement letter but do not send it.",
+      "prompt": "Draft the announcement email for the owner to review.",
       "tags": [
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "legal-writing",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q204",
-      "relation": "negative",
-      "prompt": "Write concise release notes for the next software version.",
-      "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -75,71 +65,43 @@
       }
     },
     {
-      "id": "q205",
-      "relation": "boundary",
-      "prompt": "Implement the approved feature, meet acceptance through checks and required review, then deploy only after the separate promotion gate.",
+      "id": "q6",
+      "relation": "negative",
+      "prompt": "Verify this research report against its acceptance criteria.",
       "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": [
-          "release"
-        ]
-      }
-    },
-    {
-      "id": "q206",
-      "relation": "boundary",
-      "prompt": "Deliver the approved report through acceptance, then publish that pinned artifact to its audience.",
-      "tags": [
-        "composition"
+        "near-miss",
+        "adjacent"
       ],
       "expected": {
         "primary_skill": "deliver",
-        "companion_skills": [
-          "release"
-        ]
+        "companion_skills": []
       }
     },
     {
-      "id": "q207",
+      "id": "q7",
+      "relation": "negative",
+      "prompt": "Work out why last night's deploy failed.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q8",
       "relation": "boundary",
-      "prompt": "Draft and source-check the court correspondence, then send the accepted version after explicit approval.",
+      "prompt": "Release this accepted change; the rollout needs a staged canary run in parallel lanes.",
       "tags": [
         "composition"
       ],
       "expected": {
-        "primary_skill": "legal-writing",
+        "primary_skill": "release",
         "companion_skills": [
-          "release"
+          "orchestrate"
         ]
-      }
-    },
-    {
-      "id": "q176128",
-      "relation": "negative",
-      "prompt": "The release candidate is accepted; rewrite its release-note prose.",
-      "tags": [
-        "near-miss",
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "engineering-writing",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q176129",
-      "relation": "negative",
-      "prompt": "Implement the approved release status endpoint; deployment remains a later task.",
-      "tags": [
-        "near-miss",
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": []
       }
     }
   ]

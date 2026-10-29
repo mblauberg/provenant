@@ -53,53 +53,10 @@ For absence or impossibility claims in a review, see `diagnose`'s evidence rules
 - Is the proposed simplification local enough to validate, or speculative
   redesign outside the dependency cone?
 
-### The 1,000-line cap
-
-A source file over 1,000 lines is a mandatory inspection signal, not a finding
-by itself. Report a finding only when the size exposes a concrete cohesion,
-ownership, reviewability or change-risk defect. A test file over 1,000 lines is
-also an inspection signal.
-
-The reason is mechanical, not aesthetic: a file no model can hold in context is a
-file no model can review. Past the cap, review silently degrades from "read this
-file" to "grep this file", and the defects that survive are exactly the ones that
-span the parts nobody read together. God files are not born big; they are grown
-one accepted diff at a time, which is why the cap binds at review.
-
-When a file is over cap:
-
-- report it, and name the seams it should split on: an owner per module, not an
-  arbitrary line-chop (`…-continued-2` is not a split);
-- reject a change that pushes a file past the cap, or that grows one already over
-  it. "It was already 4,000 lines" is the mechanism, not an excuse;
-- do not demand an unrelated refactor as the price of an unrelated fix. Record the
-  finding, and let the owner sequence the split.
-
-Generated files, vendored code and lockfiles are exempt; nobody reads them.
-
-### Design-principle probes, not verdicts
-
-Use SOLID and related principles to generate hypotheses, never as standalone
-findings:
-
-- **Single responsibility/cohesion:** do state and behaviour that change for the
-  same reason have one clear owner, or are policy and effects scattered?
-- **Open/closed:** does a recurring extension require distributed conditionals,
-  or would one proven seam remove them? Do not add an abstraction for a
-  hypothetical extension.
-- **Liskov substitution:** can each implementation preserve the caller-visible
-  preconditions, postconditions, errors and invariants of its contract?
-- **Interface segregation:** are clients forced to depend on methods, data or
-  permissions they do not use, or is the interface small and deep?
-- **Dependency inversion/information hiding:** does stable policy depend directly
-  on volatile infrastructure detail, and does the proposed boundary actually
-  hide complexity rather than relocate it?
-
-Also test simplicity/YAGNI, duplication of knowledge rather than mere text,
-coupling, idempotency, explicit state/invariants, failure atomicity,
-concurrency/cancellation, observability and operational ownership. Report only
-when evidence ties the principle to a present defect, regression or material
-risk with a validation route.
+A source file over 1,000 lines is an inspection signal: report it only when
+the size exposes a concrete cohesion, ownership or change-risk defect, and name
+the seams to split on. Reject a change that grows a file already over the cap.
+Generated files, vendored code and lockfiles are exempt.
 
 ## Verification
 
@@ -155,9 +112,3 @@ on; a secure-looking diff can still bypass a weak baseline.
   enforcement and human-trust overclaims.
 - Require safe partial failure, idempotent retry where applicable, containment
   and audit evidence. Never label an untested threat surface secure.
-
-## Optional overlays
-
-Activate project and domain skills when relevant: language/type discipline,
-frontend accessibility and performance, database/policy controls, security,
-legal or financial authority boundaries, and release/rollback requirements.

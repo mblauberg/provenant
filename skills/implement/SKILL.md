@@ -1,72 +1,62 @@
 ---
 name: implement
-description: "Use for approved software changes through verification, review, repair and acceptance. Use scope for unsettled scope, diagnose for investigation, code-review for read-only review and release for promotion."
+description: "Use to build an approved software change through the deliver loop: write, CI, repair, independent review, land. Not for unsettled scope (scope), root cause (diagnose), read-only review (code-review) or promotion (release)."
 ---
 
 # Implement
 
-## Entry gate
+The `deliver` preset is the default loop. This skill covers what the preset
+does not: what to hand it, how to map work onto its nodes, and when to stop.
 
-Require approved scope, non-goals, acceptance criteria, approved or parked
-costly-to-reverse decisions, build ceiling and write/external authority.
-Require the HARNESS minimum tier and task-scoped paths, disclosure, secrets
-and external-action constraints; assess evaluate for stochastic or judgement-bearing
-behaviour. Missing inputs go to scope; infer no owner decisions beyond its
-recorded, owner-authorised assumptions.
+## Entry
 
-For active service or safety impact, user-approved containment may parallelise
-verification and review. Keep every gate and name a reconciliation run.
+Start from an approved spec: outcome, acceptance criteria with how each is
+verified, non-goals, risk tier and write authority (the tracker issue or the
+scope digest). Missing inputs go back to `scope`. Do not invent owner decisions;
+record an engineering call as `Decided (<source>): <reason>` and proceed.
 
-## Loop
+## How it runs
 
-Read [delivery contract and execution detail](references/run-contract.md).
+```sh
+provenant run --preset deliver --prompt-file ISSUE.md \
+  --set 'parameters.worktree="WT"' --set 'parameters.risk_tier="substantial"' \
+  --set 'parameters.spec="#N"' --explain
+```
 
-1. Substantial+ starts a fresh implementation session bound to approved digests.
-   Save a delivery receipt with `provenant workflow receipt save`; carry its
-   typed DeliveryId through every dispatch, review, retry, resume and handoff.
-2. Keep an adaptive plan and name the governing skill in worker contracts.
-   Writer tier follows task size. Use tdd for every new or changed observable
-   behaviour, refactor for preserving structure,
-   diagnose for unknown causes and orchestrate for decomposition.
-   For version-sensitive interfaces and migrations, read
-   [source grounding](references/source-grounding.md) and
-   [migration compatibility](references/migration-compatibility.md).
-3. Run fast checks before review; slow checks run in parallel with review.
-   Map criteria to evidence and attach a passing evaluate receipt when
-   required. Report project-deferred tests as unverified; their gate runs
-   before merge.
-4. Apply the contract's polish step for diffs over about 300 changed lines or
-   multiple crates/packages, subject to `review.polish`. Keep changes within
-   approved structure and every fast check green.
-5. Invoke read-only code-review under the HARNESS ladder. Bind attempts with
-   `provenant workflow review`. UI changes produce viewport screenshots;
-   attach them to briefs for reviewers with vision. Record omissions and
-   substitutions; native reviewers bind the tool's model parameter and
-   record resolved routes from tool evidence.
-6. Batch review and slow-check findings into bounded repair. A failed gate
-   gets one repair at the same tier, then escalates one tier. Downward
-   handoffs carry failing tests, types or checks. Re-review only repaired
-   deltas. Contest findings under code-review's contract; one re-audit adds
-   no gate. Stop and escalate after two consecutive repair cycles leave
-   failures unchanged or larger. Every gate passes before merge.
-7. Update owned docs for behavioural, architectural, operational or decision
-   changes. Substantial+ uses session to refresh recovery checkpoints, audit
-   context and graduate durable findings.
-8. The PR is the evidence: exact-head CI, required review and repository merge.
-   Hand off after the receipt accepts.
+Check the explanation, then submit the same command without `--explain` (add
+`--wait 2h` when no one is watching). Nodes run in order: `write`, `ci` (a
+repair loop bounded by `max_iterations`), `review` (`review-council`), `accept`
+and `land`. `land_tier` lands routine and substantial work automatically;
+crucial and terminal work asks the `decision_session`. Follow a run with
+`provenant status` and `provenant fabric graph status ID`; take over a stalled
+landing with `provenant land N --head SHA --wait`.
 
-## Authority and completion
+Other shapes: `generator-evaluator` for a slice that stays in your worktree,
+`big-batch` for several lanes, `single` when the change is routine. Read
+`docs/runbooks/presets.md` for parameters.
 
-Reviewed source stays immutable. Separately authorised artefacts and Fabric
-communication stay bounded. Missing review legs remain failed/unavailable;
-unsatisfied HARNESS coverage blocks. Evidence outranks confidence; adjudicate,
-never vote. Recheck absence findings against their cited evidence.
+## Writing the brief
 
-Objective checks and tier-required review meet acceptance; the chair reports
-the outcome and the user may reject it. Explicit user acceptance is required
-only for terminal work or when scoped; a project may name its landing gate.
-Never fabricate approval from passing checks. Promotion needs separate release
-authority. Return evidence to scope on drift. Keep criteria, evidence and
-outcome in the existing project document or PR.
+The writer sees only the brief. Put in it the issue path, the acceptance
+criteria, the files and owners already found, the checks to run, and the
+instruction to stop and report instead of widening scope. One writer per
+worktree. Name the method skill: `test-design` for observable behaviour,
+`refactor` for restructuring, `diagnose` for an unknown cause.
 
-Reference eval cases (not run by CI): [lifecycle](evals/lifecycle_cases.yaml).
+## Rules the preset cannot enforce
+
+- The implementer may not edit a failing acceptance test or weaken an
+  assertion to pass. A changed test is reported with the reason.
+- Update the owned docs in the same PR: behaviour, architecture, operations. A
+  settled decision moves to its durable home (see `engineering-docs`).
+- Keep compatibility only for published or persisted contracts. Otherwise
+  change the callers and delete the old path.
+- Report checks that did not run as unverified, never as passing.
+- A repair that leaves failures unchanged or larger twice in a row stops the
+  run. Return the evidence to `scope` when the spec turns out wrong.
+
+## Done
+
+Exact-head CI and the review the tier requires meet acceptance. Finish with
+the outcome report owned by `deliver`. Promotion needs separate authority
+(`release`).
