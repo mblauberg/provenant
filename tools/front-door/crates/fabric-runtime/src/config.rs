@@ -434,7 +434,36 @@ pub(crate) fn valid_executable_override(path: &std::path::Path) -> bool {
 fn defaults(_profile: Profile) -> &'static str {
     include_str!("../assets/fabric.toml")
 }
-pub const SECTION: DomainSection = DomainSection::new::<FabricConfig>("fabric", defaults);
+/// Protocol caps, graph limits and budgets, read roots and executables are a
+/// boundary: recovery could raise a cap, lift a budget or swap a binary. Labels,
+/// peers' addresses and lane tuning recover to defaults.
+pub const SECTION: DomainSection =
+    DomainSection::new::<FabricConfig>("fabric", defaults).with_boundary_check(boundary);
+
+fn boundary(error: &SectionError) -> bool {
+    let field = error.field.as_str();
+    let under = |path: &str| {
+        field == path
+            || field.starts_with(&format!("{path}."))
+            // A malformed ancestor would drop the boundary value with it.
+            || path.starts_with(&format!("{field}."))
+            || field.is_empty()
+    };
+    [
+        "limits",
+        "graph.limits",
+        "graph.budget",
+        "graph.allowed_read_roots",
+        "ssh_executable",
+        "home_hosts",
+    ]
+    .into_iter()
+    .any(under)
+        || field
+            .strip_prefix("peers.")
+            .and_then(|rest| rest.split_once('.'))
+            .is_some_and(|(_, leaf)| leaf == "remote_executable")
+}
 
 #[cfg(test)]
 mod tests {
@@ -723,6 +752,29 @@ mod tests {
                 false,
                 "range",
             ),
+            // A zero budget must not recover to unlimited.
+            (
+                "schema_version = 1\n[domains.fabric.graph.budget.per_graph]\ntokens = 0\n",
+                "graph.budget.per_graph.tokens",
+                "rejected value: 0",
+                true,
+                "range",
+            ),
+            (
+                "schema_version = 1\n[domains.fabric.graph.budget.per_node]\nwall_time_seconds = 0\n",
+                "graph.budget.per_node.wall_time_seconds",
+                "rejected value: 0",
+                true,
+                "range",
+            ),
+            // Configuration may only lower a protocol cap.
+            (
+                "schema_version = 1\n[domains.fabric.limits]\nlease_seconds = 3601\n",
+                "limits.lease_seconds",
+                "3601",
+                false,
+                "range",
+            ),
         ] {
             let error =
                 provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
@@ -733,5 +785,24 @@ mod tests {
             assert_eq!(error.contains(rejected), should_echo, "{error}");
             assert!(error.contains(rule), "{error}");
         }
+
+        // Lane tuning is not a boundary: it recovers with a warning that names
+        // the field, keeping a valid budget beside it.
+        let config = provenant_config::load_with_domains(
+            &roots,
+            Some(&b"schema_version = 1\n[domains.fabric.lanes.priority]\nwriter = 40\n[domains.fabric.graph.budget.per_graph]\ntokens = 1000\n"[..]),
+            &sections,
+        )
+        .unwrap();
+        assert_eq!(config.domains.fabric.lanes.priority.writer, 10);
+        assert_eq!(
+            config.domains.fabric.graph.budget.per_graph.tokens,
+            Some(1000)
+        );
+        assert!(
+            config.warnings[0]
+                .message
+                .starts_with("domains.fabric.lanes.priority.writer:")
+        );
     }
 }

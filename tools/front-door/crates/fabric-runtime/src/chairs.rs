@@ -1,10 +1,22 @@
 //! Host-only dispatch associations. Never open this index in a lane's child root.
-use provenant_core::{Digest, ProjectId, RunId, StateRoot};
+use provenant_core::{Digest, OperationId, ProjectId, RunId, StateRoot};
 use provenant_fabric_store::HostStore;
 pub use provenant_fabric_store::{Error, Request, RunChair, ThreadWait};
 use provenant_records::run::CanonicalRequest;
 
 pub struct ChairIndex(HostStore);
+
+/// Who proposes a new association, and the run's own operation, from which the
+/// host re-derives a versioned run ID before trusting it.
+#[derive(Clone, Copy)]
+pub enum Admission<'a> {
+    /// A lane-proposed child or a lane-local continuation.
+    Lane(&'a OperationId),
+    /// A continuation the host root prepared from its own sealed request. An
+    /// unversioned one carries a run ID the host generated; a versioned one is
+    /// still checked against derivation.
+    HostRoot(&'a OperationId),
+}
 impl ChairIndex {
     /// Read existing host associations without creating or migrating state.
     pub fn open_read_only(
@@ -46,15 +58,17 @@ impl ChairIndex {
 
     /// Parent digest comes from the host-sealed holder or original host request.
     /// Absent proposals inherit; an explicit disagreement refuses the launch.
+    /// The run ID must be the host derivation for `admission`'s operation.
     pub fn inherit(
         &self,
         project: ProjectId,
         parent: (RunId, Digest),
         run: RunId,
+        admission: Admission<'_>,
         proposal: &CanonicalRequest,
         call: &Request<'_>,
     ) -> Result<(), Error> {
-        self.admit(project, run, proposal, call)?;
+        self.admit(project, run, admission, proposal, call)?;
         self.bind(project, parent, run, proposal, call)
     }
 
@@ -75,24 +89,40 @@ impl ChairIndex {
         &self,
         project: ProjectId,
         run: RunId,
+        admission: Admission<'_>,
         proposal: &CanonicalRequest,
         call: &Request<'_>,
     ) -> Result<(), Error> {
-        // A new association needs a host-derived run ID; an unversioned request
-        // may only replay a retained host seal for the same digest.
-        if proposal.child_attempt_id_version.is_none() {
-            let digest = proposal.digest()?;
-            match self.read(project, run, call)? {
-                Some(value) if value.request_digest == digest => {}
-                Some(_) => return Err(Error::Conflict),
-                None => {
-                    return Err(Error::Invalid(
-                        "new chair associations require host-derived child run IDs",
-                    ));
-                }
+        use provenant_records::run::ChildIdError;
+        let (operation, host_root) = match admission {
+            Admission::Lane(operation) => (operation, false),
+            Admission::HostRoot(operation) => (operation, true),
+        };
+        // A versioned request must carry exactly the host-derived run ID; an
+        // unsupported version is never trusted.
+        match proposal.child_run_id(project, operation) {
+            Ok(Some(expected)) if expected == run => Ok(()),
+            Ok(Some(_)) => Err(Error::Invalid(
+                "child run ID does not match host derivation",
+            )),
+            Err(ChildIdError::UnsupportedVersion) => {
+                Err(Error::Invalid("unsupported child attempt ID version"))
             }
+            Err(ChildIdError::MissingParent) => {
+                Err(Error::Invalid("derived child IDs require a parent attempt"))
+            }
+            Err(ChildIdError::Canonical(error)) => Err(error.into()),
+            // The host root generated this unversioned continuation's ID itself.
+            Ok(None) if host_root => Ok(()),
+            // A lane's unversioned request may only replay a retained host seal.
+            Ok(None) => match self.read(project, run, call)? {
+                Some(value) if value.request_digest == proposal.digest()? => Ok(()),
+                Some(_) => Err(Error::Conflict),
+                None => Err(Error::Invalid(
+                    "new chair associations require host-derived child run IDs",
+                )),
+            },
         }
-        Ok(())
     }
 
     fn bind(
@@ -174,6 +204,22 @@ mod tests {
             host: HostId::from_bytes([2; 16]),
             actor: ActorId::from_bytes([3; 16]),
         });
+        let op = |name: &str| OperationId::parse(name);
+        let derived = |request: &CanonicalRequest,
+                       operation: &OperationId|
+         -> Result<RunId, Box<dyn std::error::Error>> {
+            Ok(request
+                .child_run_id(project, operation)?
+                .ok_or("versioned request")?)
+        };
+        let (a, b, c, d, e, f) = (
+            op("op-a")?,
+            op("op-b")?,
+            op("op-c")?,
+            op("op-d")?,
+            op("op-e")?,
+            op("op-f")?,
+        );
         let mut parent = proposal();
         parent.chair = chair.clone();
         let index = ChairIndex::open(&root, &call)?;
@@ -182,22 +228,78 @@ mod tests {
         let mut child = proposal();
         child.parent_attempt = Some(AttemptId::from_bytes([4; 16]));
         child.lane_depth = Some(2);
-        index.inherit(project, (run(1), parent.digest()?), run(2), &child, &call)?;
+        let child_run = derived(&child, &a)?;
+        index.inherit(
+            project,
+            (run(1), parent.digest()?),
+            child_run,
+            Admission::Lane(&a),
+            &child,
+            &call,
+        )?;
         let mut grandchild = child.clone();
         grandchild.parent_attempt = Some(AttemptId::from_bytes([5; 16]));
         grandchild.lane_depth = Some(3);
+        let grandchild_run = derived(&grandchild, &a)?;
         index.inherit(
             project,
-            (run(2), child.digest()?),
-            run(3),
+            (child_run, child.digest()?),
+            grandchild_run,
+            Admission::Lane(&a),
             &grandchild,
             &call,
         )?;
         drop(index);
         let index = ChairIndex::open(&root, &call)?;
-        for id in [1, 2, 3] {
-            assert_eq!(index.read(project, run(id), &call)?.unwrap().chair, chair);
+        for id in [run(1), child_run, grandchild_run] {
+            assert_eq!(index.read(project, id, &call)?.unwrap().chair, chair);
         }
+
+        // A versioned proposal binds only its host derivation: neither a
+        // lane-chosen ID, another operation's ID nor an unsupported version.
+        for (id, operation) in [(run(20), &a), (child_run, &b)] {
+            assert!(matches!(
+                index.inherit(
+                    project,
+                    (run(1), parent.digest()?),
+                    id,
+                    Admission::Lane(operation),
+                    &child,
+                    &call,
+                ),
+                Err(Error::Invalid(
+                    "child run ID does not match host derivation"
+                ))
+            ));
+            assert!(matches!(
+                index.inherit(
+                    project,
+                    (run(1), parent.digest()?),
+                    id,
+                    Admission::HostRoot(operation),
+                    &child,
+                    &call,
+                ),
+                Err(Error::Invalid(_))
+            ));
+        }
+        assert!(index.read(project, run(20), &call)?.is_none());
+        let mut unsupported = child.clone();
+        unsupported.child_attempt_id_version = Some(2);
+        for admission in [Admission::Lane(&a), Admission::HostRoot(&a)] {
+            assert!(matches!(
+                index.inherit(
+                    project,
+                    (run(1), parent.digest()?),
+                    run(21),
+                    admission,
+                    &unsupported,
+                    &call,
+                ),
+                Err(Error::Invalid("unsupported child attempt ID version"))
+            ));
+        }
+        assert!(index.read(project, run(21), &call)?.is_none());
 
         // Lane-writable proposals and even a fabricated child-root index cannot
         // transfer ownership or replace the host's sealed association.
@@ -208,21 +310,37 @@ mod tests {
             host: HostId::from_bytes([8; 16]),
             actor: ActorId::from_bytes([9; 16]),
         });
+        let forged_run = derived(&forged, &a)?;
         assert!(matches!(
-            index.inherit(project, (run(1), parent.digest()?), run(4), &forged, &call),
+            index.inherit(
+                project,
+                (run(1), parent.digest()?),
+                forged_run,
+                Admission::Lane(&a),
+                &forged,
+                &call,
+            ),
             Err(Error::Conflict)
         ));
-        assert!(index.read(project, run(4), &call)?.is_none());
+        assert!(index.read(project, forged_run, &call)?.is_none());
         inputs.state_dir = Some(root.as_path().join("children/fabricated"));
         let lane_root = inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state;
-        ChairIndex::open(&lane_root, &call)?.submit(project, run(2), &forged, &call)?;
-        assert_eq!(index.read(project, run(2), &call)?.unwrap().chair, chair);
+        ChairIndex::open(&lane_root, &call)?.submit(project, child_run, &forged, &call)?;
+        assert_eq!(index.read(project, child_run, &call)?.unwrap().chair, chair);
         assert!(matches!(
             index.submit(project, run(1), &forged, &call),
             Err(Error::Conflict)
         ));
+        let other_run = derived(&child, &b)?;
         assert!(matches!(
-            index.inherit(project, (run(1), forged.digest()?), run(4), &child, &call),
+            index.inherit(
+                project,
+                (run(1), forged.digest()?),
+                other_run,
+                Admission::Lane(&b),
+                &child,
+                &call,
+            ),
             Err(Error::Conflict)
         ));
 
@@ -230,59 +348,119 @@ mod tests {
         // a child whose lane-local request never contained that binding.
         let mut continuation = child.clone();
         continuation.parent = Some(AttemptId::from_bytes([6; 16]));
-        index.inherit(
-            project,
-            (run(2), child.digest()?),
-            run(5),
-            &continuation,
-            &call,
-        )?;
-        index.inherit(
-            project,
-            (run(2), child.digest()?),
-            run(5),
-            &continuation,
-            &call,
-        )?;
-        assert_eq!(index.read(project, run(5), &call)?.unwrap().chair, chair);
+        let continuation_run = derived(&continuation, &c)?;
+        for _ in 0..2 {
+            index.inherit(
+                project,
+                (child_run, child.digest()?),
+                continuation_run,
+                Admission::Lane(&c),
+                &continuation,
+                &call,
+            )?;
+        }
+        assert_eq!(
+            index.read(project, continuation_run, &call)?.unwrap().chair,
+            chair
+        );
 
         // A legacy/unindexed worker remains unbound, regardless of provider
         // session handles kept elsewhere in its run store.
         assert!(index.read(project, run(9), &call)?.is_none());
-        index.inherit(project, (run(9), parent.digest()?), run(6), &child, &call)?;
-        assert!(index.read(project, run(6), &call)?.unwrap().chair.is_none());
-
-        // An unversioned proposal cannot bind a lane-chosen run ID, but may
-        // replay a retained host seal.
-        let mut legacy = child.clone();
-        legacy.child_attempt_id_version = None;
-        assert!(matches!(
-            index.inherit(project, (run(1), parent.digest()?), run(11), &legacy, &call),
-            Err(Error::Invalid(_))
-        ));
-        assert!(index.read(project, run(11), &call)?.is_none());
-        index.submit(project, run(12), &legacy, &call)?;
-        index.inherit(project, (run(9), parent.digest()?), run(12), &legacy, &call)?;
-
-        // Chair dimension: inherit while the parent has no row, then the parent
-        // gains chair A. The identical re-inherit conflicts and X stays unbound.
-        index.inherit(project, (run(13), child.digest()?), run(14), &child, &call)?;
-        let mut owned = child.clone();
-        owned.chair = chair.clone();
-        index.submit(project, run(13), &owned, &call)?;
-        assert!(matches!(
-            index.inherit(project, (run(13), owned.digest()?), run(14), &child, &call),
-            Err(Error::Conflict)
-        ));
+        let unbound_run = derived(&child, &d)?;
+        index.inherit(
+            project,
+            (run(9), parent.digest()?),
+            unbound_run,
+            Admission::Lane(&d),
+            &child,
+            &call,
+        )?;
         assert!(
             index
-                .read(project, run(14), &call)?
+                .read(project, unbound_run, &call)?
                 .unwrap()
                 .chair
                 .is_none()
         );
+
+        // An unversioned lane proposal cannot bind a lane-chosen run ID, but may
+        // replay a retained host seal. The host root's own continuation may.
+        let mut legacy = child.clone();
+        legacy.child_attempt_id_version = None;
         assert!(matches!(
-            index.inherit(project, (run(9), parent.digest()?), run(7), &forged, &call),
+            index.inherit(
+                project,
+                (run(1), parent.digest()?),
+                run(11),
+                Admission::Lane(&a),
+                &legacy,
+                &call,
+            ),
+            Err(Error::Invalid(_))
+        ));
+        assert!(index.read(project, run(11), &call)?.is_none());
+        index.submit(project, run(12), &legacy, &call)?;
+        index.inherit(
+            project,
+            (run(9), parent.digest()?),
+            run(12),
+            Admission::Lane(&a),
+            &legacy,
+            &call,
+        )?;
+        index.inherit(
+            project,
+            (run(1), parent.digest()?),
+            run(15),
+            Admission::HostRoot(&a),
+            &legacy,
+            &call,
+        )?;
+        assert_eq!(index.read(project, run(15), &call)?.unwrap().chair, chair);
+
+        // Chair dimension: inherit while the parent has no row, then the parent
+        // gains chair A. The identical re-inherit conflicts and X stays unbound.
+        let late_run = derived(&child, &e)?;
+        index.inherit(
+            project,
+            (run(13), child.digest()?),
+            late_run,
+            Admission::Lane(&e),
+            &child,
+            &call,
+        )?;
+        let mut owned = child.clone();
+        owned.chair = chair.clone();
+        index.submit(project, run(13), &owned, &call)?;
+        assert!(matches!(
+            index.inherit(
+                project,
+                (run(13), owned.digest()?),
+                late_run,
+                Admission::Lane(&e),
+                &child,
+                &call,
+            ),
+            Err(Error::Conflict)
+        ));
+        assert!(
+            index
+                .read(project, late_run, &call)?
+                .unwrap()
+                .chair
+                .is_none()
+        );
+        let forged_unbound = derived(&forged, &f)?;
+        assert!(matches!(
+            index.inherit(
+                project,
+                (run(9), parent.digest()?),
+                forged_unbound,
+                Admission::Lane(&f),
+                &forged,
+                &call,
+            ),
             Err(Error::Conflict)
         ));
         assert!(

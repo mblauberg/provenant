@@ -3446,6 +3446,10 @@ fn launch_on_host(
         if request.parent.is_some() && session.context.state_root != edge.roots.state {
             check_chair_run_id(session, edge.roots, run, request, call)?;
         }
+        let operation = match request.parent {
+            Some(_) => Some(session.store.run(run, call)?.operation_id),
+            None => None,
+        };
         with_chair_index(edge.roots, call, |index, index_call| {
             if let Some(prior) = request.parent {
                 let lane_local = session.context.state_root != edge.roots.state;
@@ -3480,10 +3484,21 @@ fn launch_on_host(
                         return Err(provenant_fabric_runtime::chairs::Error::NotFound);
                     }
                 }
+                let operation =
+                    operation
+                        .as_ref()
+                        .ok_or(provenant_fabric_runtime::chairs::Error::Invalid(
+                            "continuation operation",
+                        ))?;
                 index.inherit(
                     session.context.project_id,
                     (parent.run_id, original.digest()?),
                     run,
+                    if lane_local {
+                        provenant_fabric_runtime::chairs::Admission::Lane(operation)
+                    } else {
+                        provenant_fabric_runtime::chairs::Admission::HostRoot(operation)
+                    },
                     request,
                     index_call,
                 )

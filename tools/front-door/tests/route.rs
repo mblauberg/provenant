@@ -532,18 +532,27 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
 }
 
 #[test]
-fn pacing_profiles_reject_unknown_keys_and_list_options() -> Result {
+fn pacing_profiles_warn_on_unknown_keys_and_list_accounts() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
     fs::write(
         rig.state.join("config.toml"),
         "schema_version=1\n[domains.routing.pacing.accounts.pro]\nwindow=['five_hour']\n",
     )?;
-    let output = call(&rig, &["route", "list"], 2)?;
-    let message = output["error"]["message"].as_str().ok_or("config error")?;
-    assert!(message.contains("unknown_key"), "{message}");
+    // The misspelt key is tuning, so it warns and is ignored; the profile
+    // still names an unregistered account, which refuses and lists choices.
+    let out = rig.command(&["route", "list", "--json"])?;
+    assert_eq!(code(&out), 2);
+    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
     assert!(
-        message.contains("windows, reserve, deadline, after_deadline"),
+        stderr.contains("domains.routing.pacing.accounts.pro.window")
+            && stderr.contains("unknown_key"),
+        "{stderr}"
+    );
+    let output: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let message = output["error"]["message"].as_str().ok_or("config error")?;
+    assert!(
+        message.contains("unknown account `pro`") && message.contains("valid accounts"),
         "{message}"
     );
     Ok(())
@@ -657,7 +666,7 @@ fn route_list_human_output_omits_dispatch_only_fields() -> Result {
 }
 
 #[test]
-fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> Result {
+fn route_config_verbs_round_trip_atomic_config_and_recover_invalid_weights() -> Result {
     let rig = rig()?;
     let set = call(
         &rig,
@@ -719,6 +728,8 @@ fn route_config_verbs_round_trip_atomic_config_and_refuse_invalid_weights() -> R
             .any(|m| m["model"] == "codex/gpt-6-luna")
     );
 
+    // Pool weights are tuning: an invalid member recovers with a warning
+    // naming the weight, and the bundled pool applies.
     fs::write(
         rig.state.join("config.toml"),
         r#"schema_version = 1
@@ -727,25 +738,33 @@ pools = { junior = [{ model = "codex/gpt-6-luna", weight = 101, effort = "high",
 "#,
     )?;
     let out = rig.command(&["route", "list", "--pool", "junior", "--json"])?;
-    assert_eq!(code(&out), 2);
-    let rejected: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    let message = rejected["error"]["message"]
-        .as_str()
-        .ok_or("config error")?;
-    assert!(message.contains("routing") && message.contains("weight"));
+    assert_eq!(code(&out), 0);
+    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    assert!(
+        stderr.contains("domains.routing.pools.junior") && stderr.contains("weight"),
+        "{stderr}"
+    );
+    let recovered: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert!(
+        !recovered["data"]["pools"]["junior"]
+            .as_array()
+            .ok_or("junior members")?
+            .iter()
+            .any(|m| m["weight"] == 101)
+    );
 
-    // Routing lives only under its domain; the root alias is gone.
+    // Routing lives only under its domain; the root alias is an unknown key.
     fs::write(
         rig.state.join("config.toml"),
         "schema_version = 1\n[routing.pacing]\ncodex = \"spend\"\n",
     )?;
     let out = rig.command(&["route", "list", "--pool", "junior", "--json"])?;
-    assert_eq!(code(&out), 2);
-    let rejected: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    let message = rejected["error"]["message"]
-        .as_str()
-        .ok_or("config error")?;
-    assert!(message.contains("unknown_key"), "{message}");
+    assert_eq!(code(&out), 0);
+    let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+    assert!(
+        stderr.contains("routing: ignored invalid configuration (unknown_key)"),
+        "{stderr}"
+    );
     Ok(())
 }
 

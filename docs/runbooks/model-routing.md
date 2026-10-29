@@ -206,7 +206,10 @@ another candidate in the pool can serve; `continue` instead paces to the reset.
 Removing `deadline` switches an account back to its own resets. Policies,
 window selectors and deadline forms are validated together. Unknown configuration
 keys warn and are ignored; invalid optional policy rows use defaults or are
-omitted while valid rows remain active.
+omitted while valid rows remain active. Model policy recovers per field, so an
+invalid `max_continuations` leaves a sibling `read_only` in force. Invalid
+enforced fields (`read_only`, `max_context`, `max_turns`), or a malformed rule
+that sets one, refuse the configuration instead.
 
 These profiles illustrate how different accounts can share a provider:
 

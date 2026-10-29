@@ -197,3 +197,49 @@ fn inspection_keeps_warnings_alongside_a_boundary_error() {
             .any(|finding| finding.message.starts_with("extra:"))
     );
 }
+
+#[test]
+fn malformed_authority_knobs_refuse_instead_of_granting_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = roots(dir.path());
+    // `lanes.publish` defaults to true: recovering a malformed `false` would
+    // hand an open-network writer the gh login the user withheld.
+    for value in [
+        "'lanes.publish'='false'",
+        "'lanes.publish'=0",
+        "'fabric.accept_handoff'='true'",
+        "'chair.auto_switch'=1",
+        "'chair.switch_accounts'='pro'",
+        "'lanes.max_depth'=0",
+    ] {
+        let text = format!("schema_version=1\n[knobs]\n{value}\n");
+        let error = load(&roots, Some(text.as_bytes())).unwrap_err();
+        let name = value.split('\'').nth(1).unwrap();
+        assert!(error.to_string().contains(name), "{value}: {error}");
+        std::fs::write(dir.path().join("config.toml"), &text).unwrap();
+        assert!(
+            inspect_config(&roots, &crate::domains::NO_DOMAINS)
+                .unwrap()
+                .error
+                .is_some()
+        );
+    }
+    let config = load(
+        &roots,
+        Some(&b"schema_version=1\n[knobs]\n'lanes.publish'=false\n"[..]),
+    )
+    .unwrap();
+    assert_eq!(config.knobs["lanes.publish"].value, false);
+    // A non-authority knob still recovers with a warning naming it.
+    let config = load(
+        &roots,
+        Some(&b"schema_version=1\n[knobs]\n'lanes.silence_seconds'='soon'\n"[..]),
+    )
+    .unwrap();
+    assert_eq!(config.knobs["lanes.silence_seconds"].value, 300);
+    assert!(
+        config.warnings[0]
+            .message
+            .starts_with("knobs.lanes.silence_seconds:")
+    );
+}

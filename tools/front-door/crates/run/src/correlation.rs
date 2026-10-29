@@ -18,28 +18,18 @@ pub(crate) fn child_run_id(
     request: &CanonicalRequest,
     operation: &provenant_core::OperationId,
 ) -> Result<Option<RunId>> {
-    match request.child_attempt_id_version {
-        None => Ok(None),
-        Some(1) => {
-            let parent = request.parent_attempt.ok_or(RunError::Validation(
-                "derived child IDs require a parent attempt",
-            ))?;
-            use sha2::{Digest as _, Sha256};
-            let mut hash = Sha256::new();
-            hash.update(b"provenant-child-run-v1\0");
-            hash.update(project.as_bytes());
-            hash.update(parent.as_bytes());
-            hash.update(
-                provenant_records::CanonicalV1::file_digest(operation.as_str().as_bytes()).bytes(),
-            );
-            hash.update(request.digest()?.as_bytes());
-            let digest = hash.finalize();
-            let mut id = [0; 16];
-            id.copy_from_slice(&digest[..16]);
-            Ok(Some(RunId::from_bytes(id)))
-        }
-        Some(_) => Err(RunError::Validation("unsupported child attempt ID version")),
-    }
+    use provenant_records::run::ChildIdError;
+    request
+        .child_run_id(project, operation)
+        .map_err(|error| match error {
+            ChildIdError::UnsupportedVersion => {
+                RunError::Validation("unsupported child attempt ID version")
+            }
+            ChildIdError::MissingParent => {
+                RunError::Validation("derived child IDs require a parent attempt")
+            }
+            ChildIdError::Canonical(error) => error.into(),
+        })
 }
 /// Version 1 binds the ID to the entire proposal and the host's namespace.
 /// No lane-proposed ID is adopted as authority, even at first validation.

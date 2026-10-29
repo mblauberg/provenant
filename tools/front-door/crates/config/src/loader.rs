@@ -287,6 +287,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             rejected: String::new(),
         });
     }
+    let mut knob_boundary = None;
     let knobs = loop {
         match crate::knobs::resolve(
             profile,
@@ -296,12 +297,19 @@ fn inspect<T: DeserializeOwned + Serialize>(
         ) {
             Ok(knobs) => break knobs,
             Err((key, rule)) if key.starts_with("knobs.") => {
-                issues.push(Issue {
-                    location: site(&user_sites, &key, &user_origin, rule == "unknown_key"),
-                    rule,
-                    source: None,
-                    rejected: String::new(),
-                });
+                let location = site(&user_sites, &key, &user_origin, rule == "unknown_key");
+                // An invalid capability or authority knob never recovers to
+                // its default, which could grant what the user withheld.
+                if crate::knobs::strict(key.trim_start_matches("knobs.")) {
+                    knob_boundary.get_or_insert(ConfigError::Schema { location, rule });
+                } else {
+                    issues.push(Issue {
+                        location,
+                        rule,
+                        source: None,
+                        rejected: String::new(),
+                    });
+                }
                 if let Some(table) = &mut valid_knobs {
                     table.remove(key.trim_start_matches("knobs."));
                 }
@@ -436,9 +444,9 @@ fn inspect<T: DeserializeOwned + Serialize>(
         semantic_sites: &mut semantic_sites,
     }
     .apply::<T>(&mut effective, &user, &mut Vec::new());
-    let mut boundary_error = None;
+    let mut boundary_error = knob_boundary;
     for issue in &issues {
-        if boundary_issue(issue, sections) {
+        if boundary_error.is_none() && boundary_issue(issue, sections) {
             boundary_error = Some(issue.clone().error());
             break;
         }
@@ -931,6 +939,15 @@ fn repair_semantic(
     };
     let dotted = join(prefix, first);
     if let Some(item) = table.get_mut(first) {
+        // A field inside a row: drop only that field, keeping its siblings.
+        if tail.len() > 1
+            && tail[0].parse::<usize>().is_ok()
+            && array(item).is_some()
+            && remove_item_path(item, tail)
+        {
+            replace_origins(&join(&dotted, &tail.join(".")), None, origins, compiled);
+            return;
+        }
         if let Some(index) = tail.first().and_then(|key| key.parse::<usize>().ok()) {
             let removed = if let Some(array) = item.as_array_mut() {
                 if index < array.len() {
@@ -1167,6 +1184,32 @@ fn remove_array_member_at(item: &mut Item, offset: usize) -> Option<Vec<String>>
     None
 }
 fn remove_item_path(item: &mut Item, path: &[String]) -> bool {
+    // An array of tables keeps its form, so a nested field can be removed
+    // without discarding the whole row.
+    if let Item::ArrayOfTables(tables) = item {
+        let Some(index) = path.first().and_then(|part| part.parse::<usize>().ok()) else {
+            return false;
+        };
+        if index >= tables.len() {
+            return false;
+        }
+        if path.len() == 1 {
+            tables.remove(index);
+            return true;
+        }
+        let Some(row) = tables.get_mut(index) else {
+            return false;
+        };
+        let mut child = Item::Table(row.clone());
+        if !remove_item_path(&mut child, &path[1..]) {
+            return false;
+        }
+        let Ok(table) = child.into_table() else {
+            return false;
+        };
+        *row = table;
+        return true;
+    }
     if let Some(items) = array(item) {
         let Some(index) = path.first().and_then(|part| part.parse::<usize>().ok()) else {
             return false;

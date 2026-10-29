@@ -338,11 +338,13 @@ fn inherit_child_chair(
     call: &run::Request<'_>,
 ) -> Result<(), Fail> {
     check_chair_run_id(session, roots, run, validated, call)?;
+    let operation = session.store.run(run, call)?.operation_id;
     with_chair_index(roots, call, |index, index_call| {
         index.inherit(
             session.context.project_id,
             parent,
             run,
+            provenant_fabric_runtime::chairs::Admission::Lane(&operation),
             validated,
             index_call,
         )

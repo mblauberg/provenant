@@ -1181,7 +1181,8 @@ fn ordinary_leaves_validate_roots_and_unbuilt_owners_refuse() -> Result {
 }
 
 #[test]
-fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -> Result {
+fn config_show_reads_typed_defaults_warns_on_unknown_keys_and_refuses_authority_input_without_writes()
+-> Result {
     let rig = TestRig::new()?.without_state()?;
     let defaults = rig.command(&["config", "show", "--json"])?;
     assert_eq!(code(&defaults), 0);
@@ -1210,9 +1211,30 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
         rig.state.join("config.toml"),
         "schema_version=1\nunknown='private-marker'\n",
     )?;
+    // An unknown key warns by name without echoing its value.
+    let unknown = rig.command(&["config", "show", "--json"])?;
+    assert_eq!(code(&unknown), 0);
+    let stderr = String::from_utf8_lossy(&unknown.stderr.bytes);
+    assert!(
+        stderr.contains("unknown: ignored invalid configuration (unknown_key)"),
+        "{stderr}"
+    );
+    for stream in [&unknown.stdout.bytes, &unknown.stderr.bytes] {
+        assert!(!String::from_utf8_lossy(stream).contains("private-marker"));
+    }
+    // A malformed authority knob refuses rather than recovering to its default.
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[knobs]\n'lanes.publish'='private-marker'\n",
+    )?;
     let invalid = rig.command(&["config", "show", "--json"])?;
     assert_eq!(code(&invalid), 2);
+    assert!(String::from_utf8_lossy(&invalid.stdout.bytes).contains("lanes.publish"));
     assert!(!String::from_utf8_lossy(&invalid.stdout.bytes).contains("private-marker"));
+    assert_eq!(
+        std::fs::read_to_string(rig.state.join("config.toml"))?,
+        "schema_version=1\n[knobs]\n'lanes.publish'='private-marker'\n"
+    );
     rig.assert_legacy_unchanged()
 }
 

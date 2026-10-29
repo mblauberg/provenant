@@ -986,7 +986,9 @@ mod tests {
             observe(&[("build", "pending")], Some(&required)).state,
             CiState::Pending
         );
-        assert_eq!(observe(&[], None).state, CiState::Unavailable);
+        // No reported checks means CI never started: still not passed.
+        assert_eq!(observe(&[], None).state, CiState::NotScheduled);
+        assert_eq!(observe(&[], Some(&required)).state, CiState::NotScheduled);
         assert_eq!(summarise_ci(None, None).state, CiState::Unavailable);
         assert!(
             observe(&[("build", "pass")], Some(&required))

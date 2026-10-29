@@ -10,6 +10,8 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 git -C "$tmp" init -q
 cd "$tmp"
 mkdir -p "$tmp/bin"
+# The stub expands $TEST_GIT_ROOT when it runs, so it stays literal here.
+# shellcheck disable=SC2016
 printf '#!/bin/sh\nprintf "%%s\\n" "$TEST_GIT_ROOT"\n' > "$tmp/bin/git"
 chmod +x "$tmp/bin/git"
 export PATH="$tmp/bin:$PATH" TEST_GIT_ROOT="$tmp"

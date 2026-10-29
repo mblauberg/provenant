@@ -547,99 +547,203 @@ impl ModelPolicies {
         EffectiveModelPolicy { policy, sources }
     }
 
+    /// Each invalid value is reported at its own field so recovery drops only
+    /// that value and its valid siblings, such as `lane.read_only`, survive.
+    /// Input whose recovery would lift an enforced lane restriction reports
+    /// code `restriction`, a configuration boundary.
     pub(crate) fn validate(&self, errors: &mut Vec<SectionError>) {
         if self.rules.len() > 128 {
             errors.push(SectionError {
                 field: "model_policy.rules".into(),
-                code: "limit",
+                code: if self.rules.iter().any(|rule| rule.policy.restricts()) {
+                    "restriction"
+                } else {
+                    "limit"
+                },
             });
         }
-        let invalid = |policy: &ModelPolicy| {
-            [
-                policy.cache.read_ratio,
-                policy.cache.write_ratio,
-                policy.cache.output_ratio,
-            ]
-            .into_iter()
-            .flatten()
-            .any(|n| !n.is_finite() || !(0.0..=1000.0).contains(&n))
-                || policy
-                    .cache
+        for (field, code) in self.defaults.invalid_fields() {
+            errors.push(SectionError {
+                field: format!("model_policy.defaults.{field}"),
+                code,
+            });
+        }
+        for (i, rule) in self.rules.iter().enumerate() {
+            for (field, code) in rule.policy.invalid_fields() {
+                errors.push(SectionError {
+                    field: format!("model_policy.rules.{i}.policy.{field}"),
+                    code,
+                });
+            }
+            // A malformed selector or schedule drops the whole rule, since a
+            // rule without either would apply more widely than written.
+            if !rule.scope_valid() {
+                errors.push(SectionError {
+                    field: format!("model_policy.rules.{i}"),
+                    code: if rule.policy.restricts() {
+                        "restriction"
+                    } else {
+                        "policy"
+                    },
+                });
+            }
+        }
+    }
+}
+
+/// Model policy paths whose loss would lift an enforced lane restriction.
+const ENFORCED: [&str; 3] = ["max_context", "max_turns", "read_only"];
+
+/// Whether invalid routing input must refuse the configuration: an enforced
+/// restriction, or a malformed value at or above one, which recovery would drop.
+pub(crate) fn boundary(error: &SectionError) -> bool {
+    if error.code == "restriction" {
+        return true;
+    }
+    if error.code == "policy" {
+        return false;
+    }
+    let Some(rest) = error.field.strip_prefix("model_policy") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('.').filter(|part| !part.is_empty()).collect();
+    let policy = match parts.as_slice() {
+        [] | ["rules"] | ["rules", _] => return true,
+        ["defaults", policy @ ..] => policy,
+        ["rules", index, "policy", policy @ ..] if index.parse::<usize>().is_ok() => policy,
+        _ => return false,
+    };
+    match policy {
+        [] | ["lane"] => true,
+        ["lane", leaf, ..] => ENFORCED.contains(leaf),
+        _ => false,
+    }
+}
+
+impl ModelPolicyRule {
+    fn scope_valid(&self) -> bool {
+        !(self.adapter.as_deref().is_some_and(|a| {
+            !crate::request::identifier(a) || self.model.as_ref().is_some_and(|m| m.adapter() != a)
+        }) || self.account.as_deref().is_some_and(|a| {
+            a.split('/').count() > 2 || a.split('/').any(|part| !crate::request::identifier(part))
+        }) || self
+            .schedule
+            .starts
+            .zip(self.schedule.expires)
+            .is_some_and(|(s, e)| s >= e)
+            || self.schedule.windows.len() > 16
+            || self.schedule.windows.iter().any(|w| {
+                w.start_hour >= 24
+                    || w.end_hour > 24
+                    || w.start_hour == w.end_hour
+                    || w.weekdays.len() > 7
+                    || w.weekdays.iter().any(|day| *day > 6)
+                    || w.weekdays
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        != w.weekdays.len()
+            }))
+    }
+}
+
+impl ModelPolicy {
+    /// Whether this policy sets an enforced lane restriction.
+    fn restricts(&self) -> bool {
+        self.lane.read_only == Some(true)
+            || self.lane.max_context.is_some()
+            || self.lane.max_turns.is_some()
+    }
+
+    /// Policy-relative paths of invalid values, each with its code.
+    fn invalid_fields(&self) -> Vec<(&'static str, &'static str)> {
+        let ratio =
+            |n: Option<f64>| n.is_some_and(|n| !n.is_finite() || !(0.0..=1000.0).contains(&n));
+        let checks = [
+            ("cache.read_ratio", ratio(self.cache.read_ratio), "policy"),
+            ("cache.write_ratio", ratio(self.cache.write_ratio), "policy"),
+            (
+                "cache.output_ratio",
+                ratio(self.cache.output_ratio),
+                "policy",
+            ),
+            (
+                "cache.price_multiplier",
+                self.cache
                     .price_multiplier
-                    .is_some_and(|n| !n.is_finite() || !(0.01..=1000.0).contains(&n))
-                || policy
-                    .cache
+                    .is_some_and(|n| !n.is_finite() || !(0.01..=1000.0).contains(&n)),
+                "policy",
+            ),
+            (
+                "cache.read_share_target",
+                self.cache
                     .read_share_target
-                    .is_some_and(|n| !n.is_finite() || !(0.0..=1.0).contains(&n))
-                || [
-                    policy.compaction.window,
-                    policy.cache.context_window,
-                    policy.lane.max_context,
-                    policy.lane.max_turns,
-                    policy.cache.ttl_seconds,
-                ]
-                .into_iter()
-                .flatten()
-                .any(|n| n == 0)
-                || policy.lane.max_continuations.is_some_and(|n| n > 8)
-                || policy
-                    .cache
+                    .is_some_and(|n| !n.is_finite() || !(0.0..=1.0).contains(&n)),
+                "policy",
+            ),
+            (
+                "compaction.window",
+                self.compaction.window == Some(0),
+                "policy",
+            ),
+            (
+                "cache.context_window",
+                self.cache.context_window == Some(0),
+                "policy",
+            ),
+            (
+                "cache.ttl_seconds",
+                self.cache.ttl_seconds == Some(0),
+                "policy",
+            ),
+            // A zero cap is invalid; dropping it would leave the lane uncapped.
+            (
+                "lane.max_context",
+                self.lane.max_context == Some(0),
+                "restriction",
+            ),
+            (
+                "lane.max_turns",
+                self.lane.max_turns == Some(0),
+                "restriction",
+            ),
+            (
+                "lane.max_continuations",
+                self.lane.max_continuations.is_some_and(|n| n > 8),
+                "policy",
+            ),
+            (
+                "cache.read_heavy_weight",
+                self.cache
                     .read_heavy_weight
-                    .is_some_and(|n| n == 0 || n > 10)
-                || policy.result.sections.as_ref().is_some_and(|s| {
+                    .is_some_and(|n| n == 0 || n > 10),
+                "policy",
+            ),
+            (
+                "result.sections",
+                self.result.sections.as_ref().is_some_and(|s| {
                     s.len() > 16
                         || s.iter().any(|s| {
                             s.trim().is_empty() || s.len() > 256 || s.chars().any(char::is_control)
                         })
-                })
-                || policy
-                    .result
+                }),
+                "policy",
+            ),
+            (
+                "result.fallback_effort",
+                self.result
                     .fallback_effort
                     .as_deref()
-                    .is_some_and(|e| !crate::request::effort_valid(e))
-        };
-        if invalid(&self.defaults) {
-            errors.push(SectionError {
-                field: "model_policy.defaults".into(),
-                code: "policy",
-            });
-        }
-        for (i, rule) in self.rules.iter().enumerate() {
-            if invalid(&rule.policy)
-                || rule.adapter.as_deref().is_some_and(|a| {
-                    !crate::request::identifier(a)
-                        || rule.model.as_ref().is_some_and(|m| m.adapter() != a)
-                })
-                || rule.account.as_deref().is_some_and(|a| {
-                    a.split('/').count() > 2
-                        || a.split('/').any(|part| !crate::request::identifier(part))
-                })
-                || rule
-                    .schedule
-                    .starts
-                    .zip(rule.schedule.expires)
-                    .is_some_and(|(s, e)| s >= e)
-                || rule.schedule.windows.len() > 16
-                || rule.schedule.windows.iter().any(|w| {
-                    w.start_hour >= 24
-                        || w.end_hour > 24
-                        || w.start_hour == w.end_hour
-                        || w.weekdays.len() > 7
-                        || w.weekdays.iter().any(|day| *day > 6)
-                        || w.weekdays
-                            .iter()
-                            .copied()
-                            .collect::<std::collections::BTreeSet<_>>()
-                            .len()
-                            != w.weekdays.len()
-                })
-            {
-                errors.push(SectionError {
-                    field: format!("model_policy.rules.{i}"),
-                    code: "policy",
-                });
-            }
-        }
+                    .is_some_and(|e| !crate::request::effort_valid(e)),
+                "policy",
+            ),
+        ];
+        checks
+            .into_iter()
+            .filter(|(_, invalid, _)| *invalid)
+            .map(|(field, _, code)| (field, code))
+            .collect()
     }
 }
 
