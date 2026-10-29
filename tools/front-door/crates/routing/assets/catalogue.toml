@@ -4,7 +4,7 @@
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
-revision = "route-pools-20261029-go-refresh"
+revision = "route-pools-20261030-free-flash"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -207,6 +207,9 @@ utility = [
     { model = "codex/gpt-6-luna", weight = 2, effort = "low", efforts = ["low"] },
 ]
 junior = [
+    # Prefer free capacity while it is eligible and available.
+    { model = "opencode/opencode/deepseek-v4.1-flash-free", weight = 20, efforts = [] },
+    { model = "opencode/opencode/glm-5.3-flash-free", weight = 20, efforts = [] },
     # Provisional pending local trial evidence.
     { model = "opencode/opencode-go/deepseek-v4.1-flash", weight = 2, efforts = [] },
     { model = "opencode/opencode-go/glm-5.3-flash", weight = 1, efforts = [] },
