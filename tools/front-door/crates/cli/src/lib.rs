@@ -18,6 +18,7 @@ pub use workflow::Workflow;
 mod grammar;
 pub mod inbox;
 pub mod install;
+pub mod limits;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
@@ -199,6 +200,7 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
     // Clap normally includes the rejected value. Fence tokens are secrets,
     // including malformed tokens, so redact them before either renderer.
     use clap::error::{ContextKind, ContextValue};
+    let suggestion = usage_suggestion(&error, argv);
     if error
         .get(ContextKind::InvalidArg)
         .is_some_and(|arg| arg.to_string().starts_with("--token"))
@@ -235,12 +237,164 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
         .next()
         .unwrap_or(&text)
         .trim();
-    CliError::Invalid(message.strip_prefix("error: ").unwrap_or(message).into())
+    let example = usage_example(argv);
+    let message = message.strip_prefix("error: ").unwrap_or(message);
+    let mut message = match example {
+        Some(example) => format!("{message}\nexample: {example}"),
+        None => message.into(),
+    };
+    if let Some(suggestion) = suggestion {
+        message.push_str(&format!("\ndid you mean `{suggestion}`?"));
+    }
+    CliError::Invalid(message)
+}
+fn usage_suggestion(error: &clap::Error, argv: &[OsString]) -> Option<String> {
+    use clap::error::ContextKind;
+    if !matches!(
+        error.kind(),
+        clap::error::ErrorKind::UnknownArgument | clap::error::ErrorKind::InvalidSubcommand
+    ) {
+        return None;
+    }
+    let flag = error.get(ContextKind::InvalidArg);
+    let rejected = flag
+        .or_else(|| error.get(ContextKind::InvalidSubcommand))?
+        .to_string();
+    if rejected.len() > 80 || !rejected.is_ascii() {
+        return None;
+    }
+    let model = expanded_model();
+    let (selected, path) = walk_subcommands(&model, argv, Some(&rejected))?;
+    let candidates: Vec<_> = if flag.is_some() {
+        selected
+            .get_arguments()
+            .filter_map(|arg| arg.get_long().map(|name| format!("--{name}")))
+            .collect()
+    } else {
+        selected
+            .get_subcommands()
+            .filter(|child| !child.is_hide_set())
+            .map(|child| child.get_name().to_owned())
+            .collect()
+    };
+    let candidate = candidates
+        .into_iter()
+        .map(|name| (edit_distance(&rejected, &name), name))
+        .filter(|(distance, _)| (1..=2).contains(distance))
+        .min()?;
+    Some(if flag.is_some() {
+        candidate.1
+    } else {
+        format!("{path} {}", candidate.1)
+    })
+}
+/// Follow the subcommand words in `argv` (skipping option values) down the
+/// command model, stopping at `stop` when given. Returns the deepest command
+/// reached and its spelled path, such as `provenant pr land`.
+fn walk_subcommands<'a>(
+    model: &'a clap::Command,
+    argv: &[OsString],
+    stop: Option<&str>,
+) -> Option<(&'a clap::Command, String)> {
+    let mut selected = model;
+    let mut path = String::from("provenant");
+    let mut words = argv.iter().skip(1);
+    while let Some(word) = words.next() {
+        let word = word.to_str()?;
+        if stop == Some(word) || word == "--" {
+            break;
+        }
+        if let Some(option) = word.strip_prefix("--") {
+            let (name, joined) = option
+                .split_once('=')
+                .map_or((option, false), |(name, _)| (name, true));
+            if !joined
+                && selected.get_arguments().any(|arg| {
+                    arg.get_long() == Some(name)
+                        && arg
+                            .get_num_args()
+                            .is_some_and(|range| range.min_values() > 0)
+                })
+            {
+                words.next();
+            }
+        } else if let Some(child) = selected.find_subcommand(word) {
+            selected = child;
+            path.push(' ');
+            path.push_str(child.get_name());
+        }
+    }
+    Some((selected, path))
+}
+fn edit_distance(left: &str, right: &str) -> usize {
+    let mut row: Vec<_> = (0..=right.len()).collect();
+    for (i, a) in left.bytes().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, b) in right.bytes().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (row[j] + 1)
+                .min(above + 1)
+                .min(diagonal + usize::from(a != b));
+            diagonal = above;
+        }
+    }
+    row[right.len()]
+}
+/// An example for the command the caller was invoking, chosen by the parsed
+/// subcommand path rather than by words anywhere in argv.
+fn usage_example(argv: &[OsString]) -> Option<String> {
+    let model = expanded_model();
+    let (_, mut path) = walk_subcommands(&model, argv, None)?;
+    // `pr land` is retired; the walk stops at `pr`, so look at the word after it.
+    let retired_pr_land = path == "provenant pr"
+        && argv
+            .iter()
+            .skip_while(|arg| *arg != "pr")
+            .nth(1)
+            .is_some_and(|arg| arg == "land");
+    if retired_pr_land {
+        path = "provenant land".into();
+    }
+    let lands = matches!(path.as_str(), "provenant land" | "provenant pr land");
+    if lands || path == "provenant pr status" {
+        // `--wait` takes its duration only as `--wait=5m`; a spaced one is
+        // read as a positional, so name the joined spelling.
+        let spaced = argv
+            .windows(2)
+            .filter(|pair| pair[0] == "--wait")
+            .filter_map(|pair| pair[1].to_str())
+            .find(|value| {
+                !value.starts_with('-')
+                    && value.len() <= 8
+                    && value.bytes().all(|b| b.is_ascii_alphanumeric())
+                    && value.bytes().next().is_some_and(|b| b.is_ascii_digit())
+            });
+        if let Some(value) = spaced {
+            let target = if lands { "land 2199" } else { "pr status 2199" };
+            return Some(format!("provenant {target} --wait={value}"));
+        }
+    }
+    let has_account = argv.iter().any(|arg| arg == "--account");
+    match path.as_str() {
+        "provenant land" | "provenant pr land" => Some("provenant land 2199 --wait".into()),
+        "provenant route resolve" => Some(
+            "provenant route resolve --model ADAPTER/ID (or provenant route resolve senior)".into(),
+        ),
+        "provenant output" => Some("provenant output ATTEMPT --host HOST".into()),
+        "provenant dispatch" | "provenant run" if has_account => {
+            Some("provenant run --prompt-file brief.md --route senior --account ACCOUNT".into())
+        }
+        _ => None,
+    }
 }
 fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<CliError>) {
     fn collect(matches: &clap::ArgMatches, into: &mut RawGlobals) {
         if let Some(values) = matches.get_many::<bool>("json") {
             into.json.extend(values.copied());
+        }
+        if let Some(values) = matches.get_many::<bool>("full") {
+            into.full.extend(values.copied());
         }
         if let Some(values) = matches.get_many::<std::path::PathBuf>("state_dir") {
             into.state_dir.extend(values.cloned());
@@ -254,11 +408,15 @@ fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<Cl
     }
     let mut raw = RawGlobals {
         json: Vec::new(),
+        full: Vec::new(),
         state_dir: Vec::new(),
         project: Vec::new(),
     };
     collect(matches, &mut raw);
-    let duplicate = (raw.json.len() > 1 || raw.state_dir.len() > 1 || raw.project.len() > 1)
+    let duplicate = (raw.json.len() > 1
+        || raw.full.len() > 1
+        || raw.state_dir.len() > 1
+        || raw.project.len() > 1)
         .then(|| CliError::Invalid("global options may occur only once".into()));
     fn unique<T>(mut values: Vec<T>) -> Option<T> {
         if values.len() == 1 {
@@ -270,6 +428,7 @@ fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<Cl
     (
         Globals {
             json,
+            full: !raw.full.is_empty(),
             state_dir: unique(raw.state_dir),
             project: unique(raw.project),
         },
@@ -286,8 +445,8 @@ const CORE_HELP: &str = "Provenant: run work, inspect progress and land changes.
             provenant run --prompt-file brief.md --route senior
   status    Active and recent lanes, newest first
             provenant status
-  land      Merge on green CI and prune the merged worktree
-            provenant land 1947
+  land      Wait for CI, merge and prune the merged worktree
+            provenant land 1947 --wait
   quota     Show provider quota
             provenant quota
   ask       Record a decision, assumption or question
@@ -298,6 +457,7 @@ const CORE_HELP: &str = "Provenant: run work, inspect progress and land changes.
             provenant help answer
   install   Install harness integrations
             provenant install
+  --full    Complete human detail; --json keeps machine output
   help --all  All commands and advanced options
               provenant help --all
 ";
@@ -331,7 +491,11 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             .disable_version_flag(true)
             .version(env!("CARGO_PKG_VERSION"));
         if command.get_name() == "resolve" {
-            command = command.group(ArgGroup::new("route_choice").args(["name", "model", "route"]));
+            command = command.group(
+                ArgGroup::new("route_choice")
+                    .args(["name", "model", "route"])
+                    .required(true),
+            );
         }
         if matches!(path.as_str(), "provenant dispatch" | "provenant run") {
             command = command
@@ -374,6 +538,10 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             )
         {
             let visible = [
+                "full",
+                "json",
+                "host",
+                "account",
                 "prompt_file",
                 "prompt_stdin",
                 "preset",
@@ -447,7 +615,12 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
     let base = RawInvocation::command();
     let globals: Vec<_> = base
         .get_arguments()
-        .filter(|arg| matches!(arg.get_id().as_str(), "json" | "state_dir" | "project"))
+        .filter(|arg| {
+            matches!(
+                arg.get_id().as_str(),
+                "json" | "full" | "state_dir" | "project"
+            )
+        })
         .cloned()
         .map(|arg| arg.global(false))
         .collect();
@@ -632,11 +805,13 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
                     long: arg.get_long().map(str::to_owned),
                     positional: arg.is_positional(),
                     required: arg.is_required_set(),
-                    repeatable: !matches!(arg.get_id().as_str(), "json" | "state_dir" | "project")
-                        && (matches!(arg.get_action(), ArgAction::Append)
-                            || arg
-                                .get_num_args()
-                                .is_some_and(|range| range.max_values() > 1)),
+                    repeatable: !matches!(
+                        arg.get_id().as_str(),
+                        "json" | "full" | "state_dir" | "project"
+                    ) && (matches!(arg.get_action(), ArgAction::Append)
+                        || arg
+                            .get_num_args()
+                            .is_some_and(|range| range.max_values() > 1)),
                     defaults: if path == "provenant chair log append"
                         && arg.get_id().as_str() == "operation_id"
                     {
@@ -713,6 +888,19 @@ pub fn usage_verbs() -> Vec<String> {
     verbs
 }
 fn constraints(path: &str) -> Vec<String> {
+    if path == "provenant output" {
+        return vec![
+            "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT".into(),
+            format!("tail above {0} lines is clamped to {0}", limits::TAIL_LINES),
+            format!(
+                "a result shows whole up to {} KiB, then its head and tail; at most {} changed paths of {} bytes are named; missing evidence is null",
+                limits::OUTPUT_BYTES / 1024,
+                limits::OUTPUT_PATHS,
+                limits::PATH_BYTES
+            ),
+            "peer tail scans share a 30-second deadline and reject changing artifacts".into(),
+        ];
+    }
     let values: &[&str] = match path {
         "provenant dispatch" => &[
             "single prompt requires exactly one of model or route",
@@ -749,9 +937,14 @@ fn constraints(path: &str) -> Vec<String> {
         "provenant chair log append" => &[
             "operation-id and issued-at are generated when omitted; supply both for planned retries",
         ],
-        "provenant output" => &[
-            "target is an ATTEMPT ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT",
-            "tail above 500 lines is clamped to 500",
+        "provenant land" => &[
+            "checks once by default; wait without a value means one hour; use --wait=30m for a duration",
+            "required checks must register and pass on the same head; head changes refuse merging",
+            "already-merged PRs retry safe cleanup without CI or another merge",
+        ],
+        "provenant pr status" => &[
+            "one head-and-checks snapshot per PR; unavailable PRs preserve other rows",
+            "wait without a value means five minutes; unchanged snapshots exit 124",
         ],
         "provenant hook" | "provenant internal" => &["json transport is invalid for execution"],
         _ => &[],
@@ -934,7 +1127,7 @@ mod tests {
         for length in [40, 64] {
             let sha = "a".repeat(length);
             let inv = valid(&["land", "1953", "--head", &sha]);
-            let Command::Land { number, head } = inv.command else {
+            let Command::Land { number, head, .. } = inv.command else {
                 panic!("land command");
             };
             assert_eq!(number, 1953);
@@ -950,6 +1143,59 @@ mod tests {
             panic!("advanced land help");
         };
         assert!(text.contains("--head"), "{text}");
+    }
+    #[test]
+    fn agent_output_controls_and_land_wait_are_global_and_bounded() {
+        valid(&["--full", "quota"]);
+        valid(&["route", "list", "--full"]);
+        valid(&["land", "2199", "--wait"]);
+        valid(&["land", "--wait=30m", "2199"]);
+        invalid(&["land", "2199", "--wait=0"]);
+        invalid(&["land", "2199", "--wait=5h"]);
+        let attempt = "11".repeat(16);
+        valid(&["output", "--host", "workshop", &attempt, "--json"]);
+        invalid(&["output", &attempt, "--summary"]);
+    }
+    #[test]
+    fn common_usage_errors_name_the_correct_invocation() {
+        for (words, example) in [
+            (
+                vec!["route", "resolve", "one", "two"],
+                "provenant route resolve --model ADAPTER/ID",
+            ),
+            (
+                vec!["output", "--host"],
+                "provenant output ATTEMPT --host HOST",
+            ),
+            (
+                vec!["land", "2199", "--wait", "5m"],
+                "provenant land 2199 --wait=5m",
+            ),
+            (
+                vec!["dispatch", "--account"],
+                "provenant run --prompt-file brief.md --route senior --account ACCOUNT",
+            ),
+            (vec!["pr", "land", "2199"], "provenant land 2199 --wait"),
+        ] {
+            let ParseOutcome::Invalid { error, .. } = parsed(&words) else {
+                panic!("expected usage error");
+            };
+            assert!(error.to_string().contains(example), "{error}");
+        }
+    }
+    #[test]
+    fn misspelt_subcommands_and_flags_suggest_the_scoped_form() {
+        for (words, suggestion) in [
+            (vec!["statsu"], "provenant status"),
+            (vec!["pr", "statsu"], "provenant pr status"),
+            (vec!["quota", "--fullx"], "--full"),
+        ] {
+            let ParseOutcome::Invalid { error, .. } = parsed(&words) else {
+                panic!("usage error");
+            };
+            assert!(error.to_string().contains("did you mean"), "{error}");
+            assert!(error.to_string().contains(suggestion), "{error}");
+        }
     }
     #[test]
     fn retired_disk_guard_is_absent_from_parsing_and_the_catalogue() {

@@ -405,7 +405,11 @@ fn failed_auth_refresh_shows_last_known_usage_age_and_auth_marker() -> Result {
     assert_eq!(row["status"], "auth_required");
     assert!(row["age_seconds"].as_u64().is_some_and(|age| age >= 10));
     assert_eq!(row["snapshot"]["windows"][0]["used_basis_points"], 5300);
-    let human = rig.command(&["quota", "show"])?;
+    let compact = rig.command(&["quota", "show"])?;
+    let compact = String::from_utf8(compact.stdout.bytes)?;
+    assert!(compact.contains("pro [claude]: auth_required"), "{compact}");
+    assert!(compact.contains("next: provenant quota tick"), "{compact}");
+    let human = rig.command(&["quota", "show", "--full"])?;
     let text = String::from_utf8(human.stdout.bytes)?;
     for expected in [
         "pro",

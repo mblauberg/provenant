@@ -1868,7 +1868,7 @@ fn receipt_output_resolves_run_task_and_attempt() -> Result {
         format!("Reviewer provenance: unknown, actor {actor}, model unknown, family unknown");
     let expected = format!("{receipt}\n{attribution}\n");
     for target in &targets {
-        let human = rig.command(&["output", target, "--part", "receipt"])?;
+        let human = rig.command(&["output", target, "--part", "receipt", "--full"])?;
         assert_eq!(
             code(&human),
             0,
@@ -1876,6 +1876,10 @@ fn receipt_output_resolves_run_task_and_attempt() -> Result {
             String::from_utf8_lossy(&human.stderr.bytes)
         );
         assert_eq!(String::from_utf8(human.stdout.bytes)?, expected);
+        let compact = rig.command(&["output", target, "--part", "receipt"])?;
+        assert_eq!(code(&compact), 0);
+        assert!(compact.stdout.bytes.len() <= 2048);
+        assert_eq!(String::from_utf8(compact.stdout.bytes)?, expected);
         let output = rig.command(&["output", target, "--part", "receipt", "--json"])?;
         assert_eq!(
             code(&output),
@@ -1936,7 +1940,7 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
             assert_eq!(data["data"]["role"], "writer");
             let line = data["data"]["receipt"].as_str().ok_or("receipt line")?;
             assert!(line.starts_with("Writer: codex/gpt-6.1-sol@unknown (openai;"));
-            let human = rig.command(&["output", &exact, "--part", "receipt"])?;
+            let human = rig.command(&["output", &exact, "--part", "receipt", "--full"])?;
             assert_eq!(code(&human), 0);
             assert_eq!(data["data"]["reviewer"]["provenance"], "observed");
             assert_eq!(data["data"]["reviewer"]["family"], "openai");
@@ -1956,7 +1960,7 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
                     .ok_or("message")?
                     .contains("exactly one attempt")
             );
-            let exact_output = rig.command(&["output", &exact, "--part", "receipt"])?;
+            let exact_output = rig.command(&["output", &exact, "--part", "receipt", "--full"])?;
             assert_eq!(code(&exact_output), 0);
         } else {
             assert_ne!(code(&output), 0, "{data}");
@@ -1996,7 +2000,7 @@ fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
         .ok_or("reviewer fact")?
         .actor_id;
     assert_eq!(data["data"]["reviewer"]["actor_id"], actor.to_string());
-    let human = rig.command(&["output", &target, "--part", "receipt"])?;
+    let human = rig.command(&["output", &target, "--part", "receipt", "--full"])?;
     assert_eq!(code(&human), 0);
     assert_eq!(
         String::from_utf8(human.stdout.bytes)?,

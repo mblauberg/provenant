@@ -51,7 +51,7 @@ pub fn run(globals: &Globals) -> u8 {
     };
     render(
         &result,
-        globals.json,
+        globals,
         &human,
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
@@ -62,20 +62,21 @@ pub fn run(globals: &Globals) -> u8 {
 // state and is forbidden for this command, even on its failure paths.
 fn render(
     result: &CommandResult<Option<DiskReport>>,
-    json: bool,
+    globals: &provenant_cli::Globals,
     human: &str,
     stdout: &mut impl io::Write,
     stderr: &mut impl io::Write,
 ) -> u8 {
-    let mode = if json {
-        RenderMode::Json
-    } else {
-        RenderMode::Human {
-            text: human,
-            read_only: true,
-        }
-    };
-    let rendered = if !json && result.error.is_some() {
+    let json = globals.json;
+    let mode = globals.render_mode(human, true, None);
+    // The result's size is a bound on the result, not on how it is presented:
+    // a compact view of an oversized result is still an oversized result.
+    let oversized = !json
+        && serde_json::to_vec(result)
+            .is_ok_and(|bytes| bytes.len() > provenant_cli::MAX_RESULT_BYTES);
+    let rendered = if oversized {
+        Err(RenderError::TooLarge)
+    } else if !json && result.error.is_some() {
         provenant_cli::render(result, mode, stderr)
     } else {
         provenant_cli::render(result, mode, stdout)
@@ -107,6 +108,7 @@ fn render(
                     RenderMode::Human {
                         text: "",
                         read_only: true,
+                        summary: None,
                     },
                     stderr,
                 );
@@ -411,7 +413,20 @@ mod tests {
         );
         let envelope = CommandResult::new("disk report", Outcome::Ok, Some(report));
         let mut output = Vec::new();
-        assert_eq!(render(&envelope, true, "", &mut output, &mut Vec::new()), 0);
+        assert_eq!(
+            render(
+                &envelope,
+                &provenant_cli::Globals {
+                    json: true,
+                    full: true,
+                    ..Default::default()
+                },
+                "",
+                &mut output,
+                &mut Vec::new()
+            ),
+            0
+        );
         let json: serde_json::Value = serde_json::from_slice(&output)?;
         assert_eq!(json["command"], "disk report");
         assert_eq!(json["data"]["schema_version"], 1);
@@ -559,7 +574,20 @@ mod tests {
         for json in [true, false] {
             let mut output = Vec::new();
             let mut errors = Vec::new();
-            assert_eq!(render(&result, json, &human, &mut output, &mut errors), 0);
+            assert_eq!(
+                render(
+                    &result,
+                    &provenant_cli::Globals {
+                        json,
+                        full: true,
+                        ..Default::default()
+                    },
+                    &human,
+                    &mut output,
+                    &mut errors
+                ),
+                0
+            );
             assert!(errors.is_empty());
             assert!(!output.is_empty());
             assert!(output.len() < RUNS as usize * 16, "{} bytes", output.len());
@@ -573,7 +601,20 @@ mod tests {
         report.error("/fixture", "x".repeat(provenant_cli::MAX_RESULT_BYTES));
         let result = CommandResult::new("disk report", Outcome::Ok, Some(report));
         let mut output = Vec::new();
-        assert_eq!(render(&result, true, "", &mut output, &mut Vec::new()), 3);
+        assert_eq!(
+            render(
+                &result,
+                &provenant_cli::Globals {
+                    json: true,
+                    full: true,
+                    ..Default::default()
+                },
+                "",
+                &mut output,
+                &mut Vec::new()
+            ),
+            3
+        );
         let value: serde_json::Value = serde_json::from_slice(&output)?;
         assert_eq!(value["command"], "disk report");
         assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");

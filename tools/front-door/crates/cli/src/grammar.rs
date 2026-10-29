@@ -22,6 +22,7 @@ pub struct Invocation {
 #[derive(Debug, Default)]
 pub struct Globals {
     pub json: bool,
+    pub full: bool,
     pub state_dir: Option<PathBuf>,
     pub project: Option<PathBuf>,
 }
@@ -30,6 +31,9 @@ pub(crate) struct RawGlobals {
     /// Print machine-readable JSON output
     #[arg(long, global = true, action = clap::ArgAction::Append, num_args = 0, default_missing_value = "true")]
     pub json: Vec<bool>,
+    /// Show all human-readable detail instead of a compact summary
+    #[arg(long, global = true, action = clap::ArgAction::Append, num_args = 0, default_missing_value = "true")]
+    pub full: Vec<bool>,
     /// Use this absolute directory for state
     #[arg(long, global = true, value_parser = clap::builder::PathBufValueParser::new().try_map(absolute))]
     pub state_dir: Vec<PathBuf>,
@@ -94,6 +98,9 @@ pub enum Command {
         /// Pin a reviewed head instead of using the current PR head
         #[arg(long, hide = true)]
         head: Option<GitOid>,
+        /// Wait for this head's CI (default 1 hour; maximum 4 hours)
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", value_parser = duration_seconds)]
+        wait: Option<u64>,
     },
     /// Start a provider lane or manifest of lanes
     Dispatch(Box<Dispatch>),
@@ -202,6 +209,9 @@ pub enum Pr {
         /// Pull requests to report; this account's open ones when omitted
         #[arg(value_parser = clap::value_parser!(u64).range(1..))]
         numbers: Vec<u64>,
+        /// Block until the snapshot changes (default 5 minutes; maximum 4 hours)
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "5m", value_parser = duration_seconds)]
+        wait: Option<u64>,
     },
 }
 #[derive(Debug, Args)]

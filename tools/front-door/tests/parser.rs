@@ -135,12 +135,29 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     );
     let human = rig.command(&["status"])?;
     let text = String::from_utf8(human.stdout.bytes)?;
-    // Twenty lanes, then the paths a writer may change without review.
-    assert_eq!(text.lines().count(), 21, "{text}");
-    assert!(text.starts_with(&attempts[24][..8]), "{text}");
+    assert!(text.len() <= 2048, "{text}");
+    assert!(text.starts_with("20 lanes"), "{text}");
+    assert!(text.contains(&attempts[24][..8]), "{text}");
     assert!(
-        text.ends_with("review-exempt paths: docs/release-notes/next.d/, docs/specs/, Cargo.lock, .tracker-input\n"),
+        text.contains("review-exempt paths: docs/release-notes/next.d/, docs/specs/, Cargo.lock, .tracker-input"),
         "{text}"
+    );
+    assert!(
+        text.contains(&format!("next: provenant output {}", attempts[24])),
+        "{text}"
+    );
+    let full = rig.command(&["status", "--full"])?;
+    let full = String::from_utf8(full.stdout.bytes)?;
+    // --full is complete detail, not --all: the older lanes stay out.
+    assert!(
+        full.contains(&attempts[24]) && !full.contains(&attempts[0]),
+        "{full}"
+    );
+    let everything = rig.command(&["status", "--all", "--full"])?;
+    let everything = String::from_utf8(everything.stdout.bytes)?;
+    assert!(
+        everything.contains(&attempts[0]) && everything.contains(&attempts[24]),
+        "{everything}"
     );
     let all = rig.command(&["status", "--all", "--json"])?;
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
@@ -172,7 +189,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert!(stats["data"]["totals"]["cost"]["known_lower_bound"].is_null());
     assert_eq!(stats["data"]["totals"]["cost"]["priced_attempts"], 0);
     assert_eq!(stats["data"]["totals"]["cost"]["missing_attempts"], 25);
-    let stats = rig.command(&["telemetry", "stats"])?;
+    let stats = rig.command(&["telemetry", "stats", "--full"])?;
     assert_eq!(code(&stats), 0);
     assert_eq!(
         String::from_utf8(stats.stdout.bytes)?,
@@ -756,7 +773,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     assert_eq!(hops[0]["run"], lane["run_id"]);
     assert_eq!(hops[0]["attempt"], lane["attempt_id"]);
     assert!(hops[0]["parent"].is_null());
-    let human = rig.command(&["output", &attempt, "--trace"])?;
+    let human = rig.command(&["output", &attempt, "--trace", "--full"])?;
     let line = String::from_utf8(human.stdout.bytes.clone())?;
     assert_eq!(line.lines().count(), 1, "{line}");
     assert!(line.contains(&format!(
@@ -992,7 +1009,15 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
     assert_eq!(assets.to_path_buf()?, fs::canonicalize(&release)?);
     assert_eq!(selected.to_path_buf()?, state);
     assert!(!state.exists());
-    let human = rig.execute(&executable, &["root"], None)?;
+    let compact = rig.execute(&executable, &["root"], None)?;
+    assert_eq!(code(&compact), 0);
+    let text = String::from_utf8_lossy(&compact.stdout.bytes);
+    assert!(
+        !text.contains("next:"),
+        "no owner next, no invented one: {text}"
+    );
+    assert!(compact.stdout.bytes.len() <= 2048);
+    let human = rig.execute(&executable, &["root", "--full"], None)?;
     assert_eq!(code(&human), 0);
     assert_eq!(
         human.stdout.bytes,
@@ -1157,7 +1182,7 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
     let value: serde_json::Value = serde_json::from_slice(&defaults.stdout.bytes)?;
     assert_eq!(value["data"]["profile"], "balanced");
     assert!(value["data"]["domains"]["quota"].is_object());
-    let human = rig.command(&["config", "show"])?;
+    let human = rig.command(&["config", "show", "--full"])?;
     assert_eq!(code(&human), 0);
     let text = String::from_utf8_lossy(&human.stdout.bytes);
     assert_eq!(text.lines().count(), 1, "{text}");

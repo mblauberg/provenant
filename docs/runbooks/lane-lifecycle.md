@@ -61,7 +61,7 @@ Writer lanes with open network can push and open pull requests using the host's
 read-only gh configuration and the pinned `gh auth git-credential` helper for
 HTTPS remotes; SSH remotes keep their own authentication. Custom gh configuration
 paths and keychain-only logins are not mirrored. Hosts without gh or
-`~/.config/gh` continue local work without publishing setup. Merge through `provenant land N`, or hand the merge to the chair. Landing
+`~/.config/gh` continue local work without publishing setup. Merge through `provenant land N --wait`, or hand the merge to the chair. Landing
 verifies green CI at the PR's current head; add `--head SHA` to pin a reviewed
 head. Publishing defaults on; disable it with
 `--knob lanes.publish=false`, Fabric `knobs: ["lanes.publish=false"]`, or host

@@ -1654,6 +1654,7 @@ mod gc_preview_tests {
             provenant_cli::RenderMode::Human {
                 text: "",
                 read_only: false,
+                summary: None,
             },
             &mut output,
         )?;

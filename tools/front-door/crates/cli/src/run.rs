@@ -3,7 +3,7 @@
 //! same-binary guardian holder shares.
 use crate::{
     Cancel, Condition, Dispatch, Lanes, Mode, Output, Part, Reconcile, Resume, Stats, Switch,
-    Target, Trace,
+    Target, Trace, limits,
 };
 use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId,
@@ -58,6 +58,10 @@ pub struct Edge<'a> {
 pub struct Reply {
     pub result: CommandResult<Value>,
     pub human: String,
+    /// The owner's compact view; without one the renderer truncates `human`.
+    pub summary: Option<crate::Summary>,
+    /// A read that may end quietly if its reader goes away.
+    pub read_only: bool,
 }
 /// A refused or failed owner call: envelope status, stable code and message.
 #[derive(Debug)]
@@ -143,6 +147,8 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
         Ok((data, human)) => Reply {
             result: CommandResult::new(command, Status::Ok, data),
             human,
+            summary: None,
+            read_only: false,
         },
         Err(fail) => {
             let mut result = CommandResult::new(command, fail.status, Value::Null);
@@ -155,6 +161,8 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
             Reply {
                 result,
                 human: String::new(),
+                summary: None,
+                read_only: false,
             }
         }
     }
@@ -1570,6 +1578,7 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         ));
     }
     let timed_out = result.result.status == Status::Timeout;
+    let mut next = None;
     for row in rows {
         let Some(id) = row["attempt_id"].as_str() else {
             continue;
@@ -1622,17 +1631,16 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                 ));
             }
         }
-        if timed_out && matches!(state, "queued" | "starting" | "running" | "settling") {
-            human.push_str(&format!(
-                "attempt {id}\nkeep waiting: provenant lanes --id {id} --wait 4m\n"
-            ));
+        // One typed next step: the first lane that needs one.
+        if next.is_none() {
+            if timed_out && matches!(state, "queued" | "starting" | "running" | "settling") {
+                next = Some(format!("provenant lanes --id {id} --wait 4m"));
+            } else if state == "input_required" {
+                next = Some(format!("provenant resume {id} --prompt-file ANSWER"));
+            } else if !matches!(state, "succeeded") {
+                next = Some(format!("provenant output {id}"));
+            }
         }
-        if state == "input_required" {
-            human.push_str(&format!(
-                "input required: provenant resume {id} --prompt-file ANSWER\n"
-            ));
-        }
-        human.push_str(&format!("more: provenant output {id}\n"));
         if !timed_out
             && !row["superseded_by"].is_string()
             && !matches!(state, "succeeded" | "review_required" | "input_required")
@@ -1640,13 +1648,16 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
             result.result.status = Status::Failed;
         }
     }
+    result.summary = Some(crate::Summary::verbatim(&human, next));
     result.human = human;
+    result.read_only = false;
     result
 }
 
 /// Active attempts plus the twenty most recent settled lanes.
 pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Reply {
-    reply(
+    let mut summary = None;
+    let mut out = reply(
         "status",
         (|| {
             let clock = SystemClock::new();
@@ -1741,33 +1752,159 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             } else {
                 compact_status(&rows, &waits, now)
             };
-            let human = match next {
-                Some(cursor) => {
-                    let target = targets
-                        .first()
-                        .map(|target| {
-                            [
-                                target.run.map(|id| id.to_string()),
-                                target.task.map(|id| id.to_string()),
-                                target.attempt.map(|id| id.to_string()),
-                            ]
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>()
-                            .join("/")
-                        })
-                        .unwrap_or_default();
-                    format!("{human}more: provenant status {target} --all --cursor {cursor}\n")
-                }
-                None => human,
-            };
+            let continuation = next.map(|cursor| {
+                let target = targets
+                    .first()
+                    .map(|target| {
+                        [
+                            target.run.map(|id| id.to_string()),
+                            target.task.map(|id| id.to_string()),
+                            target.attempt.map(|id| id.to_string()),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("/")
+                    })
+                    .unwrap_or_default();
+                format!("provenant status {target} --all --cursor {cursor}")
+            });
+            let lines: Vec<LaneLine> = rows
+                .iter()
+                .map(|lane| {
+                    let (state, reason) = state_and_reason(&lane.state);
+                    let reason = reason.or_else(|| {
+                        waits
+                            .iter()
+                            .find(|wait| wait.attempt_id == lane.attempt_id)
+                            .map(|wait| wait.waiting_for.clone())
+                    });
+                    LaneLine {
+                        id: lane.attempt_id.to_string(),
+                        state,
+                        model: lane
+                            .applied_route
+                            .as_ref()
+                            .and_then(|route| route.model.clone())
+                            .unwrap_or_else(|| "unresolved".into()),
+                        reason: reason.unwrap_or_default(),
+                    }
+                })
+                .collect();
+            let mut compact = lane_summary(&lines, continuation);
+            // The compact view keeps the paths a writer may change unreviewed.
+            compact.lines.push(exempt_line.trim_end().to_owned());
+            summary = Some(compact);
             let human = format!("{human}{exempt_line}");
             Ok((
                 json!({"lanes": rows, "next_cursor": next, "review_exempt": exempt}),
                 human,
             ))
         })(),
-    )
+    );
+    out.summary = summary;
+    out.read_only = true;
+    out
+}
+
+/// One lane as the compact views show it.
+struct LaneLine {
+    id: String,
+    state: String,
+    model: String,
+    reason: String,
+}
+/// Needs action (0), still moving (1), or finished well (2).
+fn lane_rank(state: &str) -> u8 {
+    match state {
+        "queued" | "starting" | "running" | "settling" => 1,
+        "succeeded" | "cancelled" => 2,
+        _ => 0,
+    }
+}
+/// Counts by state, then the lanes that need action, then those still moving,
+/// then the one typed next command. Finished lanes are counted, not listed.
+fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> crate::Summary {
+    if lanes.is_empty() {
+        return crate::Summary {
+            lines: vec!["no lanes".into()],
+            next: None,
+            omitted: 0,
+        };
+    }
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for lane in lanes {
+        match counts.iter_mut().find(|(state, _)| *state == lane.state) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((lane.state.clone(), 1)),
+        }
+    }
+    counts.sort_by_key(|(state, count)| (lane_rank(state), std::cmp::Reverse(*count)));
+    let tally = crate::Summary::tally(
+        &counts
+            .iter()
+            .map(|(state, count)| (state.as_str(), *count))
+            .collect::<Vec<_>>(),
+    );
+    let headline = format!(
+        "{} lane{}: {tally}",
+        lanes.len(),
+        if lanes.len() == 1 { "" } else { "s" }
+    );
+    let mut listed: Vec<&LaneLine> = lanes
+        .iter()
+        .filter(|lane| lane_rank(&lane.state) < 2)
+        .collect();
+    listed.sort_by_key(|lane| lane_rank(&lane.state));
+    let rows = listed
+        .iter()
+        .map(|lane| {
+            format!(
+                "{} {} {} {}",
+                &lane.id[..lane.id.len().min(8)],
+                lane.state,
+                plain_text(&lane.model, usize::MAX),
+                plain_text(&lane.reason, usize::MAX)
+            )
+            .trim_end()
+            .to_owned()
+        })
+        .collect();
+    let next = continuation.or_else(|| {
+        listed.first().map(|lane| {
+            if lane_rank(&lane.state) == 0 {
+                format!("provenant output {}", lane.id)
+            } else {
+                format!("provenant lanes --id {} --wait 4m", lane.id)
+            }
+        })
+    });
+    crate::Summary::new(headline, rows, next)
+}
+/// The lane rows of a `lanes` or `run` reply, in the shape `lane_summary` reads.
+fn lane_lines(data: &Value) -> Vec<LaneLine> {
+    data["lanes"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(LaneLine {
+                        id: row["attempt_id"].as_str()?.to_owned(),
+                        state: row["state"].as_str()?.to_owned(),
+                        model: row["applied_route"]["model"]
+                            .as_str()
+                            .unwrap_or("unresolved")
+                            .to_owned(),
+                        reason: row["reason"]
+                            .as_str()
+                            .or_else(|| row["waiting_for"].as_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 /// The paths a writer may change without review in this project, as JSON and
 /// as the line `status` ends with, so the chair sees what will not stop a lane.
@@ -3933,7 +4070,16 @@ pub fn lanes_streaming(
     } else {
         lanes_inner(&command, edge, json, out, None)
     };
-    reply_waited("lanes", result)
+    let mut out = reply_waited("lanes", result);
+    // A watch already printed its events; its final line is its own summary.
+    if out.result.error.is_none()
+        && out.result.data["lanes"].is_array()
+        && !(command.watch.is_some() && !json)
+    {
+        out.summary = Some(lane_summary(&lane_lines(&out.result.data), None));
+    }
+    out.read_only = true;
+    out
 }
 #[allow(clippy::disallowed_methods)]
 fn lanes_wait_entry(
@@ -4278,7 +4424,93 @@ pub fn attempt_facts(
 }
 
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
-    reply("output", output_inner(command, edge))
+    let receipt_tail = matches!(command.part, Part::Receipt)
+        .then_some(command.tail)
+        .flatten();
+    let headed = matches!(command.part, Part::Result) && !command.trace;
+    let mut out = reply(
+        "output",
+        output_inner(command, edge).map(|(mut data, mut text)| {
+            if let Some(lines) = receipt_tail {
+                text =
+                    text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
+                data["tail"] = json!(lines.min(limits::TAIL_LINES));
+                data["tail_text"] = json!(text);
+            }
+            (data, text)
+        }),
+    );
+    out.read_only = true;
+    if out.result.error.is_none() {
+        out.summary = Some(output_summary(&out.result.data, &out.human, headed));
+    }
+    out
+}
+
+/// What an agent needs from a read: how the attempt settled, what it changed,
+/// and the whole final text up to a generous bound, then its head and tail.
+/// Missing changed-file evidence stays null; it must never read as an empty diff.
+fn output_summary(data: &Value, text: &str, headed: bool) -> crate::Summary {
+    let mut lines = Vec::new();
+    if headed && let Some(state) = data["state"].as_str() {
+        let reason = data["reason"].as_str();
+        lines.push(match reason {
+            Some(reason) => format!(
+                "settlement: {} ({})",
+                crate::bounded_text(state, 64),
+                crate::bounded_text(reason, 160)
+            ),
+            None => format!("settlement: {}", crate::bounded_text(state, 64)),
+        });
+    }
+    if headed && let Some(files) = data.get("changed_files") {
+        lines.push(match files.as_array() {
+            Some(paths) => {
+                let total = data["changed_files_total"]
+                    .as_u64()
+                    .map_or(paths.len(), |total| total as usize);
+                let more = total.saturating_sub(paths.len());
+                let listed = paths
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let more = if more > 0 {
+                    format!(" (+{more} more)")
+                } else {
+                    String::new()
+                };
+                format!("changed files ({total}): {listed}{more}")
+            }
+            None => "changed files: unavailable".into(),
+        });
+    }
+    let body = crate::head_and_tail(text, limits::OUTPUT_BYTES);
+    lines.extend(body.lines().map(str::to_owned));
+    let target = data["attempt_id"].as_str().map(|id| {
+        data["host"]
+            .as_str()
+            .map_or_else(|| id.to_owned(), |host| format!("{host}/{id}"))
+    });
+    let state = data["state"].as_str().unwrap_or_default();
+    let next = target.and_then(|target| {
+        if data["eof"] == json!(false) {
+            let offset = data["next_offset"].as_u64()?;
+            Some(format!(
+                "provenant output {target} --part {} --offset {offset}",
+                data["part"].as_str().unwrap_or("result")
+            ))
+        } else if matches!(state, "queued" | "starting" | "running" | "settling") {
+            Some(format!("provenant lanes --id {target} --wait 4m"))
+        } else {
+            None
+        }
+    });
+    crate::Summary {
+        lines,
+        next,
+        omitted: 0,
+    }
 }
 fn receipt_model(adapter: Option<&str>, model: Option<&str>) -> Option<String> {
     let adapter = adapter.filter(|value| !value.is_empty())?;
@@ -4414,7 +4646,7 @@ fn reviewer_receipt(
     ))
 }
 /// The most lines `output --tail` returns; a larger request is clamped.
-const TAIL_MAX: u64 = 500;
+const TAIL_MAX: u64 = limits::TAIL_LINES;
 
 fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
     let site = match command.host.as_deref() {
@@ -4536,9 +4768,41 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         Part::Transcript => run::ArtifactPart::Transcript,
         Part::Events => {
             // An attempt has a handful of revisions; offset is an event cursor.
-            let events = session
+            let mut events = session
                 .service()
                 .events(command.offset, 64, Some(id), &call)?;
+            if let Some(lines) = command.tail {
+                let mut cursor = events.last().map_or(command.offset, |event| event.sequence);
+                let mut more = events.len() == 64;
+                while more {
+                    let page = session.service().events(cursor, 64, Some(id), &call)?;
+                    more = page.len() == 64;
+                    let next = page.last().map_or(cursor, |event| event.sequence);
+                    if more && next <= cursor {
+                        return Err(Fail::new(
+                            Status::Error,
+                            ErrorKind::StateCorrupt,
+                            "event cursor did not advance",
+                        ));
+                    }
+                    cursor = next;
+                    events.extend(page);
+                    let excess = events.len().saturating_sub(lines.min(TAIL_MAX) as usize);
+                    events.drain(..excess);
+                }
+                let excess = events.len().saturating_sub(lines.min(TAIL_MAX) as usize);
+                events.drain(..excess);
+                while !events.is_empty()
+                    && serde_json::to_vec(&events)
+                        .map_err(|error| {
+                            Fail::new(Status::Error, ErrorKind::Io, error.to_string())
+                        })?
+                        .len() as u64
+                        > command.max_bytes
+                {
+                    events.remove(0);
+                }
+            }
             let human = events
                 .iter()
                 .map(|e| format!("{} {}\n", e.revision, state_name(&e.change)))
@@ -4558,15 +4822,7 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         if !matches!(part, run::ArtifactPart::Transcript) || range.offset != chunk.offset {
             chunk = session.service().output(id, part, range, &call)?;
         }
-        let text = &chunk.bytes;
-        let body = text.strip_suffix(b"\n").unwrap_or(text);
-        let start = body
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, b)| **b == b'\n')
-            .nth(usize::try_from(lines - 1).unwrap_or(usize::MAX))
-            .map_or(0, |(i, _)| i + 1);
+        let start = tail_start(&chunk.bytes, lines);
         chunk.offset += start as u64;
         chunk.bytes.drain(..start);
     }
@@ -4595,7 +4851,84 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         data["tail"] = json!(lines);
         data["tail_clamped"] = json!(command.tail != tail);
     }
+    if matches!(command.part, Part::Result) && command.tail.is_none() && command.offset == 0 {
+        let (paths, total) = changed_file_evidence(&session, &record, &call);
+        data["changed_files"] = paths;
+        data["changed_files_total"] = total;
+    }
     Ok((data, text))
+}
+
+/// Use the recorded base and final head, never the caller's current checkout
+/// diff. Pruned/private objects and read-only attempts may have no evidence.
+fn changed_file_evidence(
+    session: &Session,
+    record: &run::AttemptRecord,
+    call: &run::Request<'_>,
+) -> (Value, Value) {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let read = || -> Option<(Vec<String>, usize)> {
+        let task = session
+            .store
+            .request(record.run_id, call)
+            .ok()?
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == record.task_id)?;
+        let project = task.writer?.project;
+        let base: provenant_core::GitOid = task.base?.parse().ok()?;
+        let head = record.head?;
+        let git = provenant_os::git::git_executable()?;
+        let argv = [
+            git.into_os_string(),
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--name-only".into(),
+            "-z".into(),
+            base.to_string().into(),
+            head.to_string().into(),
+            "--".into(),
+        ];
+        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        options.stdout = StreamPolicy::Capture { limit: 65536 };
+        options.stderr = StreamPolicy::Discard;
+        options.stop_on_output_limit = true;
+        let output = SystemExecutor::new(1).ok()?.execute(options).ok()?;
+        if output.termination != Termination::Exit(0)
+            || output.timed_out
+            || output.cancelled
+            || output.stdout.truncated
+            || output.stdout.read_failed
+            || output.drain_truncated
+        {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout.bytes).ok()?;
+        let all: Vec<_> = text.split('\0').filter(|path| !path.is_empty()).collect();
+        Some((
+            all.iter()
+                .take(limits::OUTPUT_PATHS)
+                .map(|path| crate::bounded_text(path, limits::PATH_BYTES))
+                .collect(),
+            all.len(),
+        ))
+    };
+    read().map_or((Value::Null, Value::Null), |(paths, total)| {
+        (json!(paths), json!(total))
+    })
+}
+
+fn tail_start(bytes: &[u8], lines: u64) -> usize {
+    bytes
+        .strip_suffix(b"\n")
+        .unwrap_or(bytes)
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, b)| **b == b'\n')
+        .nth(usize::try_from(lines.saturating_sub(1)).unwrap_or(usize::MAX))
+        .map_or(0, |(i, _)| i + 1)
 }
 
 /// The attempt's trace, then each parent's, nearest first. The chain ends at an
@@ -6499,23 +6832,16 @@ mod tests {
                 .contains("codex/test (effort: high, network: open)")
         );
         assert_eq!(report.result.status, Status::Timeout);
+        let next = |reply: &super::Reply| {
+            reply
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.next.clone())
+        };
+        assert!(!report.human.contains("keep waiting:"), "{}", report.human);
         assert_eq!(
-            report.human.matches("keep waiting:").count(),
-            1,
-            "{}",
-            report.human
-        );
-        assert!(
-            report
-                .human
-                .contains("provenant lanes --id 01010101010101010101010101010101 --wait 4m")
-        );
-        assert!(
-            report
-                .human
-                .contains("provenant resume 03030303030303030303030303030303 --prompt-file ANSWER"),
-            "{}",
-            report.human
+            next(&report).as_deref(),
+            Some("provenant lanes --id 01010101010101010101010101010101 --wait 4m")
         );
         let input = super::reply(
             "dispatch",
@@ -6529,7 +6855,10 @@ mod tests {
         );
         let input = super::render_run(input, &edge);
         assert_eq!(input.result.status, Status::Ok);
-        assert!(input.human.contains("input required: provenant resume"));
+        assert_eq!(
+            next(&input).as_deref(),
+            Some("provenant resume 03030303030303030303030303030303 --prompt-file ANSWER")
+        );
         assert!(!input.human.contains("keep waiting:"));
         Ok(())
     }

@@ -606,8 +606,18 @@ keep running after the SSH call returns. Fabric MCP `fabric_run`
 (`op: submit`) takes the same placement as an optional `host` field.
 To read a peer's own attempt without a local placement record, use
 `provenant output ATTEMPT --host workshop`, or `output HOST/ATTEMPT` with
-the host ID. Output also accepts `RUN/ATTEMPT`; a local `--tail` above 500
-is clamped to 500 lines. For a settled local attempt, `output RUN --part receipt`
+the host ID. Output also accepts `RUN/ATTEMPT`. The default human result is a
+settlement line and the whole final result up to 12 KiB (head and tail above
+that, naming the omitted bytes); `--full` reads the full byte window and
+`--json` retains the machine envelope. Changed files use the recorded base and final head where
+their objects remain readable; peer summaries report this evidence as
+unavailable rather than guessing a diff.
+
+`--tail N` works locally and on peers, is clamped to 500 lines and retains at
+most `--max-bytes`. Peer tails page within a shared 30-second budget and
+refuse a changing artifact. Event tails retain whole records; local receipt
+tails return the requested provenance lines, including `tail_text` in JSON.
+For a settled local attempt, `output RUN --part receipt`
 prints its provenance when the run has exactly one attempt. Read-only tasks
 use `Reviewer:` and writer tasks use `Writer:`; JSON includes the matching `role`.
 Missing route, effort, catalogue family or resolution evidence is `unknown`, never
@@ -647,7 +657,8 @@ placement in any mode: the flag is dropped and the task runs here, where
 Other limits on a peer run:
 
 - explicit task IDs and route fallback are refused;
-- `output` reads the result and stderr only, without `--tail`;
+- `output` reads result, prompt, stderr and events; transcripts and receipts
+  require running the command on the peer host;
 - `cancel` does not forward `--reason`; the peer records its own;
 - `lanes` without `--id` lists only lanes on the calling host, and mixing
   local and peer runs in one call is refused. `lanes --host workshop` lists

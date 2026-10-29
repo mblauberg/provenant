@@ -1302,6 +1302,61 @@ fn quota_human(report: &QuotaReport) -> String {
     human.push_str(&format!("Report: {}\n", report.report_path));
     human
 }
+/// Counts by state, then the accounts that need attention, then the command
+/// that shows the rest.
+fn quota_summary(report: &QuotaReport) -> crate::Summary {
+    let state = |row: &provenant_quota::AccountRow| {
+        serde_json::to_value(row.status)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into())
+    };
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for row in &report.accounts {
+        let name = state(row);
+        match counts.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((name, 1)),
+        }
+    }
+    let tally = crate::Summary::tally(
+        &counts
+            .iter()
+            .map(|(n, c)| (n.as_str(), *c))
+            .collect::<Vec<_>>(),
+    );
+    let mut rows: Vec<String> = report
+        .display_icon_warning
+        .iter()
+        .map(|warning| format!("Warning: {warning}"))
+        .collect();
+    rows.extend(
+        report
+            .accounts
+            .iter()
+            .filter(|row| state(row) != "current")
+            .map(|row| {
+                format!(
+                    "{} [{}]: {}",
+                    row.account.label,
+                    row.account.adapter,
+                    state(row)
+                )
+            }),
+    );
+    let next = (!rows.is_empty()).then(|| "provenant quota tick".to_owned());
+    crate::Summary::new(
+        format!(
+            "quota {}/{} current{}{}",
+            report.coverage.known,
+            report.coverage.total,
+            if tally.is_empty() { "" } else { ": " },
+            tally
+        ),
+        rows,
+        next,
+    )
+}
 pub fn run(
     command: Quota,
     globals: &crate::Globals,
@@ -1318,10 +1373,14 @@ pub fn run(
         Quota::Display { .. } => "quota display",
         Quota::Tick { .. } => "quota tick",
     };
+    let mut summary = None;
     let result = match &command {
         Quota::Usage { adapter, days } => usage_report(roots, adapter, *days),
         _ => execute(&command, roots, registry, effects).and_then(|report| {
             let human = quota_human(&report);
+            if matches!(command, Quota::Show(_)) {
+                summary = Some(quota_summary(&report));
+            }
             Ok((serde_json::to_value(report)?, human))
         }),
     };
@@ -1350,14 +1409,11 @@ pub fn run(
             (result, String::new())
         }
     };
-    let mode = if globals.json {
-        crate::RenderMode::Json
-    } else {
-        crate::RenderMode::Human {
-            text: &human,
-            read_only: matches!(command, Quota::Show(_) | Quota::Usage { .. }),
-        }
-    };
+    let mode = globals.render_mode(
+        &human,
+        matches!(command, Quota::Show(_) | Quota::Usage { .. }),
+        summary.as_ref(),
+    );
     let outcome = crate::render_or_publish(
         &envelope,
         mode,

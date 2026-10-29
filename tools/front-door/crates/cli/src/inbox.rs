@@ -1,5 +1,5 @@
 //! Human inbox grammar and thin CLI adapter over Fabric's service.
-use crate::{Globals, RenderMode, fabric::Context};
+use crate::{Globals, fabric::Context};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Clock, HumanAnswerId, HumanRequestId, OperationId, WaitBudget};
 use provenant_fabric_runtime::inbox::{InboxError, InboxInput, InboxResult};
@@ -650,17 +650,14 @@ pub fn run(
         Ok(text) => text.unwrap_or_default(),
         Err(_) => return 3,
     };
-    let mode = if globals.json {
-        RenderMode::Json
-    } else {
-        RenderMode::Human {
-            text: &human,
-            read_only: matches!(
-                result.data,
-                Some(InboxResult::Item { .. } | InboxResult::Listed { .. })
-            ),
-        }
-    };
+    let mode = globals.render_mode(
+        &human,
+        matches!(
+            result.data,
+            Some(InboxResult::Item { .. } | InboxResult::Listed { .. })
+        ),
+        None,
+    );
     match crate::render_or_publish(
         &result,
         mode,
