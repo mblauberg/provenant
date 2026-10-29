@@ -55,6 +55,12 @@ const WORKTREE_ROOT: &str = ".worktrees";
 pub enum WorktreeError {
     #[error("worktree request is invalid")]
     InvalidRequest,
+    #[error("worktree name {name} matches more than one checkout")]
+    AmbiguousName { name: String },
+    #[error("primary checkout has a detached HEAD; an integration branch is required")]
+    DetachedPrimary,
+    #[error("detached HEAD at {head} is not merged into the integration branch")]
+    DetachedUnmerged { head: GitOid },
     #[error("branch name collides with existing ref {existing}")]
     BranchCollision { existing: String },
     #[error("worktree or branch was not found")]
@@ -162,7 +168,35 @@ impl WorktreeError {
                 "wait for the lane that reserved the tree to finish (see `provenant status`), then retry"
             }
             Self::LiveProcess(_) => {
-                "stop that process or change its directory out of the tree, then retry"
+                "stop that process or change its directory out of the tree, then run `provenant worktree list` and retry"
+            }
+            Self::LiveWriter => {
+                "run `provenant status` and wait for the writer holding the lock to finish, then retry"
+            }
+            Self::Dirty => {
+                "run `git -C PATH status`, then commit or preserve the changes before retrying"
+            }
+            Self::IgnoredPaths(_) => {
+                "run `git -C PATH status --ignored`, then preserve the named files or declare regenerable output before retrying"
+            }
+            Self::GitOperationInProgress => {
+                "run `git -C PATH status` and complete or abort the Git operation before retrying"
+            }
+            Self::UnknownWriter | Self::IncompleteCensus => {
+                "run `provenant worktree list` and retry when writer observation is available"
+            }
+            Self::Primary => {
+                "run `provenant worktree list` and select a linked checkout instead of the primary"
+            }
+            Self::IdentityChanged => {
+                "run `provenant worktree list` and retry against the current checkout identity"
+            }
+            Self::AmbiguousName { .. } => {
+                "run `provenant worktree list` and select an unambiguous branch or directory name"
+            }
+            Self::DetachedPrimary => "run `provenant worktree remove NAME --integration BRANCH`",
+            Self::DetachedUnmerged { .. } => {
+                "run `git -C PATH branch NAME HEAD` to preserve the commit before repeating `provenant worktree remove NAME --discard`, or use --discard directly if the commit is no longer needed"
             }
             _ => return None,
         })
@@ -1116,10 +1150,6 @@ fn read_worktree_identity(
             locked: entry.locked,
         });
     }
-    let branch = entry
-        .branch
-        .as_ref()
-        .ok_or(WorktreeError::RegistrationMismatch { field: "branch" })?;
     let verified =
         verify_probed_worktree(context, &entry.path, cancel).map_err(|error| match error {
             WorktreeError::Repository(
@@ -1137,12 +1167,20 @@ fn read_worktree_identity(
         .project_state
         .open_verified_directory(&name)
         .map_err(|_| WorktreeError::UnreadableRecord)?;
+    // A detached checkout still has custody over the same registered tree.
+    // Preserve its recorded branch in the tombstone without claiming that a
+    // writer may use that branch while HEAD is detached.
+    let branch = match &entry.branch {
+        Some(branch) => branch.clone(),
+        None => GitRefName::new(read_identity(&state)?.branch)
+            .map_err(|_| WorktreeError::UnreadableRecord)?,
+    };
     let identity = refresh_identity(
         &state,
         context.binding.project_id(),
         &verified,
         &canonical,
-        branch,
+        &branch,
         require_active,
     )?;
     Ok((verified, state, identity))
@@ -2063,7 +2101,6 @@ fn remove_tree_when(
             locked: entry.locked,
         });
     }
-    let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
     let canonical = canonicalize(&entry.path)?;
     if canonical == canonicalize(context.repo.root_path())? {
         return Err(WorktreeError::Primary);
@@ -2071,9 +2108,12 @@ fn remove_tree_when(
     let mut locked = lock_worktree_for_mutation(context, entry, cancel)?;
     context.repo.revalidate()?;
     let fresh = read_worktrees(context, cancel)?;
-    let current = matching_worktree(&fresh, branch, context.repo.root_path())?
+    let current = fresh
+        .iter()
+        .find(|tree| canonicalize(&tree.path).ok().as_deref() == Some(&canonical))
         .ok_or(WorktreeError::IdentityChanged)?;
     if canonicalize(&current.path)? != canonical
+        || current.branch != entry.branch
         || current.head != expected_head
         || current.locked
         || current.prunable
@@ -2121,7 +2161,10 @@ fn remove_tree_when(
     // Cleanup remains best-effort after Git has removed the worktree.
     let info = WorktreeInfo {
         path: canonical,
-        branch: Some(branch.as_str().to_owned()),
+        branch: entry
+            .branch
+            .as_ref()
+            .map(|branch| branch.as_str().to_owned()),
         head: expected_head,
         dirty: WorktreeCondition::Clean,
         writer: WriterState::Free,
@@ -2198,7 +2241,7 @@ fn named_worktree<'a>(
         }
         match found {
             Some(first) if !std::ptr::eq(first, entry) => {
-                return Err(WorktreeError::InvalidRequest);
+                return Err(WorktreeError::AmbiguousName { name: name.into() });
             }
             _ => found = Some(entry),
         }
@@ -2452,7 +2495,7 @@ fn primary_integration(
     let name = text
         .trim_end()
         .strip_prefix("ref: ")
-        .ok_or(WorktreeError::InvalidRequest)?;
+        .ok_or(WorktreeError::DetachedPrimary)?;
     pin_branch_ref(context, name, cancel)
 }
 
@@ -2516,20 +2559,27 @@ pub fn remove_with_output(
                 };
                 let branch_tips = read_branch_tips(context, cancel)?;
                 let entry = named_worktree(&entries, &name, context.repo.root_path())?;
-                let branch = entry.branch.clone().ok_or(WorktreeError::InvalidRequest)?;
-                let tip = branch_tips
-                    .get(&branch)
-                    .copied()
-                    .filter(|tip| *tip == entry.head)
-                    .ok_or(WorktreeError::IdentityChanged)?;
+                let tip = entry.head;
                 // `remove_tree` rechecks this tip under the worktree lock, so
                 // a commit made after the caller's check cannot be removed.
                 if expected_head.is_some_and(|expected| expected != tip) {
                     return Err(WorktreeError::IdentityChanged);
                 }
+                let Some(branch) = &entry.branch else {
+                    if !discard && !is_ancestor(context, tip, integration_tip, cancel)? {
+                        return Err(WorktreeError::DetachedUnmerged { head: tip });
+                    }
+                    let removed = remove_tree(context, entry, tip, cancel, output)?;
+                    outcome.removed.push(removed.info.clone());
+                    detached.push(removed);
+                    return Ok(outcome);
+                };
+                if branch_tips.get(branch) != Some(&tip) {
+                    return Err(WorktreeError::IdentityChanged);
+                }
                 let disposition = keep_disposition(
                     context,
-                    &branch,
+                    branch,
                     tip,
                     PruneRange {
                         integration: &integration,
@@ -2542,7 +2592,7 @@ pub fn remove_with_output(
                 let removed = remove_tree(context, entry, tip, cancel, output)?;
                 outcome.removed.push(removed.info.clone());
                 detached.push(removed);
-                settle_branch(context, &branch, tip, disposition, cancel, &mut outcome)?;
+                settle_branch(context, branch, tip, disposition, cancel, &mut outcome)?;
             }
             WorktreeRemove::Merged { integration, scope } => {
                 let (integration, integration_tip) =
@@ -3537,6 +3587,177 @@ mod lifecycle_tests {
     }
 
     struct UnknownWorkers;
+
+    #[test]
+    fn remove_registered_detached_worktree() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "detached".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        run_in_worktree(&fixture, &info.path, &["checkout", "--detach"])?;
+        let removed = remove(
+            &context,
+            WorktreeRemove::Name {
+                name: "detached".into(),
+                discard: false,
+                integration: None,
+                expected_head: Some(info.head),
+            },
+            &cancel(),
+        )?;
+        assert_eq!(removed.removed.len(), 1);
+        assert_eq!(removed.removed[0].branch, None);
+        assert_eq!(removed.removed[0].head, info.head);
+        assert!(!info.path.exists());
+        assert!(removed.pruned_refs.is_empty());
+        assert!(
+            read_branch_tips(&context, &cancel())?.contains_key(&GitRefName::branch("detached")?)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn detached_removal_keeps_dirty_unmerged_and_live_work() -> Result<(), Box<dyn Error>> {
+        for scenario in ["dirty", "unmerged", "live", "reserved", "changed-head"] {
+            let fixture = Fixture::new()?;
+            let test = TestContext::new(&fixture)?;
+            let mut context = test.context();
+            let info = create(
+                &context,
+                WorktreeCreate {
+                    branch: "detached".into(),
+                    base: None,
+                },
+                &cancel(),
+            )?;
+            run_in_worktree(&fixture, &info.path, &["checkout", "--detach"])?;
+            match scenario {
+                "dirty" => fs::write(info.path.join("notes"), "preserve")?,
+                "unmerged" | "changed-head" => run_in_worktree(
+                    &fixture,
+                    &info.path,
+                    &["commit", "--allow-empty", "-m", "detached work"],
+                )?,
+                "live" => context.workers = &NamedLive,
+                "reserved" => {
+                    let state = context
+                        .project_state
+                        .open_verified_directory(&state_dir_name(&info.path))?;
+                    state
+                        .atomic_write(
+                            OsStr::new(RESERVATION),
+                            ".test-",
+                            b"{}",
+                            PublishMode::Replace,
+                        )?
+                        .require_durable()?;
+                }
+                _ => {}
+            }
+            let request = |discard| WorktreeRemove::Name {
+                name: "detached".into(),
+                discard,
+                integration: None,
+                expected_head: (scenario == "changed-head").then_some(info.head),
+            };
+            let error = remove(&context, request(false), &cancel())
+                .err()
+                .ok_or("removed protected tree")?;
+            assert!(
+                match scenario {
+                    "dirty" => matches!(error, WorktreeError::Dirty),
+                    "unmerged" => matches!(error, WorktreeError::DetachedUnmerged { .. }),
+                    "live" => matches!(error, WorktreeError::LiveProcess(_)),
+                    "reserved" => matches!(error, WorktreeError::ReservationPresent),
+                    "changed-head" => matches!(error, WorktreeError::IdentityChanged),
+                    _ => false,
+                },
+                "{scenario}: {error}"
+            );
+            assert!(error.repair().is_some(), "{scenario}: {error}");
+            assert!(info.path.exists());
+            if scenario == "unmerged" {
+                let removed = remove(&context, request(true), &cancel())?;
+                assert_eq!(removed.removed.len(), 1);
+                assert_ne!(removed.removed[0].head, info.head);
+                assert!(removed.pruned_refs.is_empty());
+                assert!(!info.path.exists());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn adopt_fresh_worktree_with_incomplete_native_census() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let mut context = test.context();
+        context.workers = &UnknownWorkers;
+        let path = fixture.root.join(".worktrees/fresh");
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "fresh",
+            path.to_str().ok_or("path")?,
+        ])?;
+        let owner = WorktreeOwner {
+            attempt_id: None,
+            operation_id: None,
+            branch: "fresh".into(),
+            base: fixture.head()?.to_string(),
+            host: provenant_core::HostId::from_bytes([3; 16]),
+            created_at: context.clock.wall_now()?,
+            origin: WorktreeOrigin::Adopted,
+            label: Some("manual".into()),
+        };
+        struct StrictCensus;
+        impl WorkerObserver for StrictCensus {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+                UnknownWorkers.observe_roots(roots)
+            }
+            fn requires_complete_census(&self) -> bool {
+                true
+            }
+        }
+        let strict = WorktreeContext {
+            workers: &StrictCensus,
+            ..test.context()
+        };
+        assert!(matches!(
+            adopt(&strict, &path, &owner, &cancel()),
+            Err(WorktreeError::IncompleteCensus)
+        ));
+        let info = adopt(&context, &path, &owner, &cancel())?;
+        assert_eq!(info.writer, WriterState::Free);
+        assert_eq!(
+            load_owner(&verify_worktree(&fixture.repo, &path)?)?,
+            Some(owner)
+        );
+        let state = context
+            .project_state
+            .open_verified_directory(&state_dir_name(&path))?;
+        let _held = state.lock(
+            OsStr::new(WRITER_LOCK),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(context.clock.mono_now()),
+            &cancel(),
+            context.clock,
+        )?;
+        let owner = load_owner(&verify_worktree(&fixture.repo, &path)?)?.ok_or("owner")?;
+        assert!(matches!(
+            adopt(&context, &path, &owner, &cancel()),
+            Err(WorktreeError::LiveWriter)
+        ));
+        Ok(())
+    }
 
     impl WorkerObserver for UnknownWorkers {
         fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {

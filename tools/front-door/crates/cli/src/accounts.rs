@@ -54,6 +54,33 @@ pub enum Accounts {
         #[arg(long)]
         billing_anchor: Option<String>,
     },
+    /// Bring every registered account directory to the installed release
+    ///
+    /// Reapplies the installed release to each registered account directory and
+    /// to every recorded install target. What is synced: the managed hooks, the
+    /// managed skills, the Fabric MCP entry, and the allow-listed keys of the
+    /// shared Claude `settings.json` (`[domains.accounts.shared_settings]`).
+    /// Never touched: identity and credentials, `.claude.json` identity fields,
+    /// settings keys outside the allow-list, and hooks you edited or removed.
+    /// A shared setting you edited in one account is reported as
+    /// `settings_conflict`, not overwritten. `provenant check install` reports
+    /// the drift this repairs.
+    Sync {
+        /// Plan the repair without changing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Pull this account's locally edited shared settings into the source
+        /// settings file, then sync every account (ACCOUNT as for `accounts set`)
+        #[arg(long, value_name = "ACCOUNT")]
+        adopt: Option<String>,
+        /// Overwrite locally edited shared settings with the source's values
+        #[arg(long)]
+        force_settings: bool,
+        /// Remove managed content from install targets whose account is no
+        /// longer registered
+        #[arg(long)]
+        prune_orphans: bool,
+    },
     /// Set how an account appears in the menu bar
     ///
     /// ACCOUNT is an entry id such as `claude-work`, or a label that is unique
@@ -96,6 +123,33 @@ pub fn resolve(settings: &Settings, account: &str) -> Result<String, String> {
         _ => Err(format!("unknown account `{account}`")),
     }
 }
+/// Account configuration directories, in entry order. Only adapters whose
+/// accounts are separate configuration directories (`registered_account`:
+/// Claude and Codex) qualify. For the others the registered directory is an
+/// identity or ledger location, not where the client reads skills and settings.
+/// Directories are canonical (symlinks and `..` resolved), and two
+/// registrations of one directory count once.
+pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
+    let mut seen = std::collections::BTreeSet::new();
+    settings
+        .entries
+        .values()
+        .filter_map(|entry| {
+            let spec = provenant_records::AdapterSpec::get(&entry.adapter)?;
+            if !spec.registered_account {
+                return None;
+            }
+            let home = provenant_config::shared_settings::canonical(&entry.directory);
+            seen.insert((spec.name, home.clone()))
+                .then(|| provenant_config::AccountHome {
+                    harness: spec.id,
+                    label: entry.label.clone(),
+                    home,
+                })
+        })
+        .collect()
+}
+
 pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Settings, String> {
     let mut settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
         .map_err(|e| e.to_string())?
@@ -206,6 +260,7 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             hidden: false,
             order: None,
             headline: None,
+            settings: Default::default(),
         };
         entry.registered().map_err(|e| e.to_string())?;
         // The config lock and held parent make the read/edit/replace one operation.
@@ -462,4 +517,84 @@ fn ensure_state_directory(path: &Path) -> Result<Directory, String> {
         };
     }
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registration(
+        adapter: &str,
+        label: &str,
+        directory: &str,
+    ) -> provenant_providers::accounts::Registration {
+        provenant_providers::accounts::Registration {
+            adapter: adapter.into(),
+            label: label.into(),
+            key: format!("{adapter}-{label}"),
+            org_fingerprint: None,
+            directory: directory.into(),
+            plan: None,
+            priority: None,
+            billing_anchor: None,
+            limits: None,
+            display_name: None,
+            hidden: false,
+            order: None,
+            headline: None,
+            settings: Default::default(),
+        }
+    }
+
+    #[test]
+    fn only_accounts_that_are_configuration_directories_become_install_targets() {
+        let mut settings = Settings::default();
+        for (adapter, label, directory) in [
+            ("claude", "work", "/home/u/.claude-work"),
+            ("codex", "alt", "/home/u/.codex-alt"),
+            ("cursor", "me", "/home/u/Library/Cursor"),
+            ("opencode", "local", "/home/u/ledger"),
+        ] {
+            settings.entries.insert(
+                format!("{adapter}-{label}"),
+                registration(adapter, label, directory),
+            );
+        }
+        let homes: Vec<_> = homes(&settings)
+            .into_iter()
+            .map(|account| (account.harness.spec().name, account.home))
+            .collect();
+        assert_eq!(
+            homes,
+            [
+                ("claude", PathBuf::from("/home/u/.claude-work")),
+                ("codex", PathBuf::from("/home/u/.codex-alt")),
+            ]
+        );
+    }
+
+    #[test]
+    fn registered_directories_are_canonical_and_counted_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let real = temp.path().canonicalize()?.join(".claude-work");
+        std::fs::create_dir(&real)?;
+        let link = temp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &link)?;
+        let mut settings = Settings::default();
+        for (id, label, directory) in [
+            ("a", "work", real.clone()),
+            ("b", "again", link),
+            ("c", "dotted", real.join("..").join(".claude-work")),
+        ] {
+            settings.entries.insert(
+                id.into(),
+                registration("claude", label, &directory.to_string_lossy()),
+            );
+        }
+        let homes = homes(&settings);
+        assert_eq!(homes.len(), 1, "{homes:?}");
+        assert_eq!(homes[0].home, real);
+        Ok(())
+    }
 }

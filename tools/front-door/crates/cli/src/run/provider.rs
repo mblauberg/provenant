@@ -222,6 +222,7 @@ fn prepare_with(
                 hidden: false,
                 order: None,
                 headline: None,
+                settings: Default::default(),
             });
         }
     }
@@ -251,6 +252,7 @@ fn prepare_with(
                 hidden: false,
                 order: None,
                 headline: None,
+                settings: Default::default(),
             });
         }
     }
@@ -261,6 +263,7 @@ fn prepare_with(
             .enumerate()
             .map(|(i, entry)| (i.to_string(), entry))
             .collect(),
+        ..Default::default()
     }
     .with_derived_accounts();
     let entries: Vec<_> = settings.entries.into_values().collect();
@@ -648,13 +651,7 @@ fn prepare_with(
                 continue;
             }
         };
-        let build_settings = provenant_config::LaneBuildSettings {
-            max_concurrent_builds: config.domains.fabric.lanes.max_concurrent_builds,
-            cargo_build_jobs: config.domains.fabric.lanes.cargo_build_jobs,
-            max_writer_lanes: config.domains.fabric.lanes.max_writer_lanes,
-            max_project_writer_lanes: config.domains.fabric.lanes.max_project_writer_lanes,
-            build_wait_minutes: config.domains.fabric.lanes.build_wait_minutes,
-        };
+        let build_settings = config.domains.fabric.lanes.build_settings();
         // Builds, not lanes, share the host's build slots: a `cargo` shim takes
         // one around each compiling command. The host (this process, outside
         // the sandbox) creates the slot files; the lane may only read and lock
@@ -703,6 +700,7 @@ fn prepare_with(
                 spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
             }
         }
+        set_cargo_profile(&mut spec.env, &build_settings);
         set_cargo_jobs(
             &mut spec.env,
             registry
@@ -825,6 +823,71 @@ fn set_cargo_jobs(
                 .map_or_else(|| jobs.to_string(), str::to_owned)
                 .into(),
         ));
+    }
+}
+
+/// Keep lane build output small: no incremental sessions and line tables
+/// instead of full debug info. A value the submitting environment or brief
+/// already supplied is left alone; `domains.fabric.lanes` overrides the defaults.
+fn set_cargo_profile(
+    env: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    settings: &provenant_config::LaneBuildSettings,
+) {
+    for (name, value) in [
+        (
+            "CARGO_INCREMENTAL",
+            if settings.incremental() { "1" } else { "0" },
+        ),
+        ("CARGO_PROFILE_DEV_DEBUG", settings.debug_level()),
+    ] {
+        if !env.iter().any(|(existing, _)| existing == name) {
+            env.push((name.into(), value.into()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod cargo_profile_tests {
+    use super::set_cargo_profile;
+    use provenant_config::LaneBuildSettings;
+    fn value(env: &[(std::ffi::OsString, std::ffi::OsString)], name: &str) -> Option<String> {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.to_string_lossy().into_owned())
+    }
+    #[test]
+    fn lane_defaults_disable_incremental_and_trim_debug_info() {
+        let mut env = Vec::new();
+        set_cargo_profile(&mut env, &LaneBuildSettings::default());
+        assert_eq!(value(&env, "CARGO_INCREMENTAL").as_deref(), Some("0"));
+        assert_eq!(
+            value(&env, "CARGO_PROFILE_DEV_DEBUG").as_deref(),
+            Some("line-tables-only")
+        );
+    }
+    #[test]
+    fn configuration_overrides_the_defaults() {
+        let mut env = Vec::new();
+        set_cargo_profile(
+            &mut env,
+            &LaneBuildSettings {
+                cargo_incremental: Some(true),
+                cargo_debug: Some("full".into()),
+                ..LaneBuildSettings::default()
+            },
+        );
+        assert_eq!(value(&env, "CARGO_INCREMENTAL").as_deref(), Some("1"));
+        assert_eq!(
+            value(&env, "CARGO_PROFILE_DEV_DEBUG").as_deref(),
+            Some("full")
+        );
+    }
+    #[test]
+    fn supplied_environment_takes_precedence() {
+        let mut env = vec![("CARGO_INCREMENTAL".into(), "1".into())];
+        set_cargo_profile(&mut env, &LaneBuildSettings::default());
+        assert_eq!(value(&env, "CARGO_INCREMENTAL").as_deref(), Some("1"));
+        assert_eq!(env.len(), 2);
     }
 }
 

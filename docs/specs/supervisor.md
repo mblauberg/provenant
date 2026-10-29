@@ -382,9 +382,15 @@ requesting call. Landing and driver leases never substitute for it.
 writer and any reservation, and has no force; it deletes the branch only when
 contained in the integration branch or named by `--discard`. `worktree list`
 never creates a lock.
+Registered detached checkouts use the same checks and preserve all branches.
+An unmerged detached HEAD refuses unless `--discard` is explicit, naming the
+commit and a command to preserve it. Removal rechecks the exact HEAD and
+optional branch by canonical path under writer custody.
 - Why: removing a tree under a live writer destroys its work.
 - Test: `src/worktree_tests.rs::second_writer_is_refused_while_first_holds_the_worktree`;
-  `crates/confinement/src/worktrees.rs::removal_refuses_live_writer_and_any_reservation_record`
+  `crates/confinement/src/worktrees.rs::removal_refuses_live_writer_and_any_reservation_record`;
+  `::remove_registered_detached_worktree`;
+  `::detached_removal_keeps_dirty_unmerged_and_live_work`
 - Owner: `crates/confinement/src/worktrees.rs`
 
 ### Pruning and rollback need proof

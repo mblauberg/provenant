@@ -1672,3 +1672,55 @@ fn concrete_cross_directory_rename_preserves_open_inode_and_refuses_collision() 
     );
     assert!(!temp.path().join("source/file").exists());
 }
+
+#[test]
+fn foreign_lock_probe_reports_absent_held_and_acquired_without_creating() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let name = OsStr::new(".cargo-lock");
+    assert!(matches!(
+        directory
+            .try_flock_foreign(name, LockMode::Exclusive)
+            .unwrap(),
+        ForeignLock::Absent
+    ));
+    assert!(!temp.path().join(".cargo-lock").exists());
+    std::fs::write(temp.path().join(".cargo-lock"), b"").unwrap();
+    let guard = match directory
+        .try_flock_foreign(name, LockMode::Exclusive)
+        .unwrap()
+    {
+        ForeignLock::Acquired(guard) => guard,
+        other => panic!("expected an idle lock, got {other:?}"),
+    };
+    assert!(matches!(
+        directory
+            .try_flock_foreign(name, LockMode::Exclusive)
+            .unwrap(),
+        ForeignLock::Held
+    ));
+    drop(guard);
+    assert!(matches!(
+        directory
+            .try_flock_foreign(name, LockMode::Exclusive)
+            .unwrap(),
+        ForeignLock::Acquired(_)
+    ));
+}
+
+#[test]
+fn foreign_lock_probe_refuses_links_and_non_regular_files() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("target"), b"").unwrap();
+    std::os::unix::fs::symlink("target", temp.path().join("link")).unwrap();
+    std::fs::create_dir(temp.path().join("directory")).unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    for name in ["link", "directory"] {
+        assert!(
+            directory
+                .try_flock_foreign(OsStr::new(name), LockMode::Exclusive)
+                .is_err(),
+            "{name}"
+        );
+    }
+}
