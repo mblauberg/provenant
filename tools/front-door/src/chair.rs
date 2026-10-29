@@ -444,6 +444,8 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
         Chair::Log(log) => return log_run(log, globals),
         Chair::Summary(summary) => return summary_run(summary, globals),
         Chair::Viewer(viewer) => return viewer_run(viewer, globals),
+        // Dispatched through the human inbox owner before reaching here.
+        Chair::Message(_) => unreachable!(),
         chair => chair,
     };
     let Chair::Switch {

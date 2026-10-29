@@ -104,6 +104,13 @@ fn field(path: &str) -> InputError {
     InputError::new(path)
 }
 
+fn mail_session(session: Option<&str>) -> Result<(), InputError> {
+    match session {
+        Some(session) => crate::inbox::session_id(session).map_err(|_| field("session")),
+        None => Ok(()),
+    }
+}
+
 fn bounded_text(value: &str, path: &str, max: usize) -> Result<(), InputError> {
     if value.is_empty() || value.len() > max || value.contains('\0') {
         return Err(field(path));
@@ -236,14 +243,26 @@ impl ValidateInput for MailInput {
                 artifacts(values, "artifacts")?;
                 Ok(())
             }
-            Self::Read { after, limit, .. } => {
+            Self::Read {
+                after,
+                limit,
+                session,
+                ..
+            } => {
                 if after.is_some_and(|value| value < 0) {
                     return Err(field("after"));
                 }
+                mail_session(session.as_deref())?;
                 page(*limit, "limit")
             }
-            Self::MarkRead { through, .. } if *through < 0 => Err(field("through")),
-            Self::MarkRead { .. } => Ok(()),
+            Self::MarkRead {
+                through, session, ..
+            } => {
+                if *through < 0 {
+                    return Err(field("through"));
+                }
+                mail_session(session.as_deref())
+            }
         }
     }
 }

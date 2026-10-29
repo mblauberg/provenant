@@ -1109,6 +1109,16 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 provenant_cli::mileage::run(cmd, edge)
             })
         }
+        Command::Steer(args) => human_inbox(
+            provenant_cli::inbox::HumanCommand::Steer(args),
+            &inv.leaf,
+            globals,
+        ),
+        Command::Chair(provenant_cli::Chair::Message(args)) => human_inbox(
+            provenant_cli::inbox::HumanCommand::ChairMessage(args),
+            &inv.leaf,
+            globals,
+        ),
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Console(cmd) => console::run(cmd, globals),
         Command::Quota { command } => {

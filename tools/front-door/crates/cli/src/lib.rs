@@ -780,6 +780,7 @@ fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
 fn scoped(mut catalogue: HelpCatalogue, scope: &str) -> HelpCatalogue {
     if scope != "provenant" {
         catalogue.error_codes.clear();
+        catalogue.provider_controls.clear();
     }
     catalogue.commands.retain(|command| {
         command
@@ -879,6 +880,7 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
     HelpCatalogue {
         commands,
         error_codes,
+        provider_controls: provenant_records::control::control_capabilities(),
     }
 }
 /// Canonical installed verb paths. Never derived from raw caller arguments.
@@ -1914,6 +1916,58 @@ mod tests {
             panic!("resume");
         };
         assert!(resume.no_fallback);
+    }
+    #[test]
+    fn control_commands_require_piped_text_and_a_channel() {
+        let attempt = "11111111111111111111111111111111";
+        valid(&["steer", attempt, "--text-stdin", "--operation-id", "s-1"]);
+        invalid(&["steer", attempt]);
+        valid(&[
+            "chair",
+            "message",
+            "chair-a",
+            "--text-stdin",
+            "--channel",
+            "console",
+        ]);
+        invalid(&["chair", "message", "chair-a", "--text-stdin"]);
+        invalid(&["chair", "message", "chair-a", "--channel", "console"]);
+        invalid(&["steer", attempt, "--text-stdin", "--approve"]);
+    }
+    #[test]
+    fn mail_cursors_can_be_scoped_to_one_chair_session() {
+        valid(&["fabric", "mail", "read", "--session", "chair-a"]);
+        valid(&[
+            "fabric",
+            "mail",
+            "mark-read",
+            "3",
+            "--session",
+            "chair-a",
+            "--operation-id",
+            "mark-1",
+        ]);
+        invalid(&["fabric", "mail", "read", "--session"]);
+    }
+    #[test]
+    fn full_help_publishes_provider_controls_and_scoped_help_does_not() {
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all", "--json"]) else {
+            panic!("catalog")
+        };
+        assert_eq!(
+            catalog.provider_controls,
+            provenant_records::control::control_capabilities()
+        );
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "steer", "--json"]) else {
+            panic!("catalog")
+        };
+        assert!(catalog.provider_controls.is_empty());
+        assert!(
+            catalog
+                .commands
+                .iter()
+                .any(|c| c.command == "provenant steer")
+        );
     }
     #[test]
     fn native_claude_import_requires_unfiltered_stats() {

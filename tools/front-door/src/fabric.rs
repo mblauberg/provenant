@@ -523,6 +523,18 @@ impl F3Facade for BoundFacade<'_> {
                     call.cancel,
                 )
             },
+            &|input, _| {
+                provenant_cli::inbox::resolve_control(
+                    &provenant_cli::run::Edge {
+                        roots: &ctx.roots,
+                        home: &self.factory.home,
+                        assets: &self.factory.assets,
+                        cwd: &self.factory.cwd,
+                    },
+                    &ctx.identity,
+                    input,
+                )
+            },
         )
     }
     fn refresh_events(
@@ -1184,7 +1196,10 @@ pub fn peer(
                 use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
                 if matches!(
                     input,
-                    InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
+                    InboxInput::Close { .. }
+                        | InboxInput::Acknowledge { .. }
+                        | InboxInput::Steer { .. }
+                        | InboxInput::ChairMessage { .. }
                 ) {
                     PeerResult::Inbox {
                         data: InboxReply::Error {
@@ -1221,6 +1236,10 @@ pub fn peer(
                                     call.clock,
                                     call.cancel,
                                 )
+                            },
+                            // Peers carry no control requests; they are local-only.
+                            &|_, _| {
+                                Err(provenant_fabric_runtime::inbox::InboxError::UnsupportedOwner)
                             },
                         )
                     };
