@@ -177,7 +177,7 @@ fn lane_messaging_uses_the_host_attempt_actor_and_closes_with_the_endpoint() -> 
     )?;
     lane_environment(&mut rig, attempt)?;
     // The request and even a forged lane environment cannot choose the sender.
-    let args = json!({"op":"send","recipients":[identity["data"]["inbox"]["actor"]],"kind":"note","body":"host-relayed message","operation_id":"lane-message"});
+    let args = json!({"op":"send","recipients":[identity["data"]["inbox"]["actor"]],"kind":"note","body":"host-relayed message","artifacts":[],"operation_id":"lane-message"});
     let first = mcp(&rig, "fabric_mail", args.clone())?;
     assert_ne!(first["isError"], true, "{first}");
     assert_eq!(first, mcp(&rig, "fabric_mail", args)?);
