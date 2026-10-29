@@ -52,6 +52,7 @@ pub(crate) fn harness_parser() -> impl clap::builder::TypedValueParser<Value = H
     clap::builder::PossibleValuesParser::new(
         provenant_records::ADAPTER_SPECS
             .iter()
+            .filter(|spec| !spec.binary.is_empty())
             .map(|spec| spec.name),
     )
     .try_map(|name| serde_json::from_value::<Harness>(serde_json::Value::String(name)))
@@ -121,7 +122,14 @@ mod tests {
             .ok_or("CLI values missing")?
             .map(|value| value.get_name().to_owned())
             .collect();
-        assert_eq!(cli, specs.iter().map(|name| (*name).to_owned()).collect());
+        assert_eq!(
+            cli,
+            ADAPTER_SPECS
+                .iter()
+                .filter(|spec| !spec.binary.is_empty())
+                .map(|spec| spec.name.to_owned())
+                .collect()
+        );
         let harnesses = [
             Harness::Claude,
             Harness::Codex,

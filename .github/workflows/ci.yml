@@ -270,7 +270,7 @@ jobs:
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=dispatch_provider)'
+        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=dispatch_provider) | binary(=command_adapter)'
       - name: Require Claude network and native TLS file probes
         working-directory: tools/front-door
         env:

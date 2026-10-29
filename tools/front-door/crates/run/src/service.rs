@@ -99,6 +99,13 @@ impl<'a> Service<'a> {
                     "a nested dispatch cannot set network, capability, read-root or write-root access",
                 ));
             }
+            if let RequestedRoute::Adapter { provider, .. } = &task.route
+                && let Some(spec) = provenant_records::AdapterSpec::get(provider)
+            {
+                task.access
+                    .network
+                    .get_or_insert(spec.launch.default_network);
+            }
             if task.deliver.is_some() && task.worktree.is_none() {
                 return Err(input_error(
                     ErrorKind::Invalid,
@@ -331,6 +338,22 @@ impl<'a> Service<'a> {
     /// Canonical model IDs carry the provider prefix in every stored request.
     pub fn route(route: RequestedRoute) -> Result<RequestedRoute> {
         match route {
+            RequestedRoute::Adapter {
+                provider,
+                name,
+                extra,
+            } if !provider.is_empty()
+                && !provider.contains('/')
+                && !name.is_empty()
+                && !extra.contains_key("model")
+                && !extra.contains_key("effort") =>
+            {
+                Ok(RequestedRoute::Adapter {
+                    provider,
+                    name,
+                    extra,
+                })
+            }
             RequestedRoute::Model {
                 provider,
                 model,
@@ -665,11 +688,12 @@ fn fresh<T>(make: impl FnOnce([u8; 16]) -> T) -> Result<T> {
 /// Named routes resolve their adapter later, where routing checks effort.
 fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Result<()> {
     let write = task.worktree.is_some() || !task.access.write_roots.is_empty();
-    let check = |provider: &str, effort: Option<&str>| {
+    let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
             return Ok(());
         };
         spec.check_launch(&provenant_records::LaunchRequest {
+            model,
             effort,
             resume: false,
             network: task.access.network,
@@ -677,11 +701,15 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
         })
         .map_err(|error| input_error(ErrorKind::Unsupported, error.to_string()))
     };
-    if let RequestedRoute::Model {
-        provider, effort, ..
-    } = route
-    {
-        check(provider, effort.as_deref())?;
+    match route {
+        RequestedRoute::Model {
+            provider,
+            model,
+            effort,
+            ..
+        } => check(provider, Some(model), effort.as_deref())?,
+        RequestedRoute::Adapter { provider, .. } => check(provider, None, None)?,
+        _ => {}
     }
     for route in &task.fallback {
         if let Some(provider) = route.provider.as_deref().or_else(|| {
@@ -691,7 +719,7 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
                 .and_then(|model| model.split_once('/'))
                 .map(|(provider, _)| provider)
         }) {
-            check(provider, route.effort.as_deref())?;
+            check(provider, route.model.as_deref(), route.effort.as_deref())?;
         }
     }
     Ok(())

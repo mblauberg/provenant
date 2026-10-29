@@ -605,6 +605,15 @@ mod tests {
         let token = crate::tests::fixture_token();
         for entry in crate::REGISTRY {
             let id = entry.adapter.id();
+            if id == "command" {
+                assert!(
+                    !provenant_records::AdapterSpec::get(id)
+                        .expect("registered adapter spec")
+                        .launch
+                        .write
+                );
+                continue;
+            }
             let mut route = crate::tests::route(id, "fixture-model");
             route.account_key = None;
             let plan = crate::tests::fixture_access_plan(

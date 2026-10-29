@@ -182,9 +182,12 @@ pub struct Registry<'a> {
     pub cancel: Option<&'a CancelToken>,
 }
 impl Registry<'_> {
-    /// Each adapter supports resume; the attempt must carry a session handle.
+    /// Whether any registered adapter can continue a recorded session.
     pub fn continues_sessions(&self) -> bool {
-        !REGISTRY.is_empty()
+        REGISTRY.iter().any(|entry| {
+            provenant_records::AdapterSpec::get(entry.adapter.id())
+                .is_some_and(|spec| spec.launch.resume)
+        })
     }
     /// Refuse before the attempt's one continuation is spent.
     fn check_continuable(&self, prior: &run::AttemptRecord) -> Result<(), Fail> {
@@ -204,6 +207,7 @@ impl Registry<'_> {
         }
         if let Some(spec) = provenant_records::AdapterSpec::get(adapter) {
             spec.check_launch(&provenant_records::LaunchRequest {
+                model: None,
                 resume: true,
                 ..Default::default()
             })
@@ -819,6 +823,17 @@ impl Registry<'_> {
                 _ => {}
             }
         }
+        if adapter.id() == "command" {
+            decoded.observed_route = Some(run::RouteRecord {
+                source: Some("command_exit".into()),
+                ..route.clone()
+            });
+            if exit.stdout.bytes > stdout.len() as u64 {
+                decoded
+                    .result
+                    .insert_str(0, "[output truncated; retained tail]\n");
+            }
+        }
         if (is_claude || adapter.id() == "claude") && !has_usage {
             let has_result = stdout.split(|&b| b == b'\n').any(|line| {
                 serde_json::from_slice::<serde_json::Value>(line)
@@ -1039,6 +1054,9 @@ impl Registry<'_> {
 fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequest, String> {
     let model = |text: &str| ModelId::parse(text).map_err(|error| error.to_string());
     let (choice, effort) = match &task.route {
+        run::RequestedRoute::Adapter { .. } => {
+            return Err("model-less adapter routes are prepared directly".into());
+        }
         run::RequestedRoute::Model {
             model: id, effort, ..
         } => (RouteChoice::Model(model(id)?), effort.clone()),
@@ -2292,6 +2310,7 @@ pub(crate) fn pool_effort_refusal(
     effort: &str,
 ) -> Option<provenant_records::UnsupportedLaunch> {
     let request = provenant_records::LaunchRequest {
+        model: None,
         effort: Some(effort),
         ..Default::default()
     };
@@ -2325,11 +2344,12 @@ pub(crate) fn check_flag_capabilities(
         None => None,
     };
     let write = matches!(command.access.mode, Mode::WorktreeWrite);
-    let check = |provider: &str, effort: Option<&str>| {
+    let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
             return Ok(());
         };
         spec.check_launch(&provenant_records::LaunchRequest {
+            model,
             effort,
             resume: false,
             network,
@@ -2339,9 +2359,13 @@ pub(crate) fn check_flag_capabilities(
     };
     let check_route = |route: run::RequestedRoute| -> Result<(), Fail> {
         match run::Service::route(route) {
+            Ok(run::RequestedRoute::Adapter { provider, .. }) => check(&provider, None, None)?,
             Ok(run::RequestedRoute::Model {
-                provider, effort, ..
-            }) => check(&provider, effort.as_deref())?,
+                provider,
+                model,
+                effort,
+                ..
+            }) => check(&provider, Some(&model), effort.as_deref())?,
             // A pool whose every member's adapter takes no effort cannot serve one.
             Ok(run::RequestedRoute::Named {
                 name,
@@ -2365,11 +2389,12 @@ pub(crate) fn check_flag_capabilities(
     };
     let check_fallback = |model: &str, effort: Option<&str>| -> Result<(), Fail> {
         match model.split_once('/') {
-            Some((provider, _)) => check(provider, effort),
+            Some((provider, _)) => check(provider, Some(model), effort),
             None => Ok(()),
         }
     };
     let effort_of = |route: &run::RequestedRoute| match route {
+        run::RequestedRoute::Adapter { .. } => None,
         run::RequestedRoute::Model { effort, .. }
         | run::RequestedRoute::Named { effort, .. }
         | run::RequestedRoute::Review { effort, .. } => effort.clone(),
@@ -4708,7 +4733,11 @@ fn route_label(record: &run::AttemptRecord) -> String {
         .as_ref()
         .or(record.applied_route.as_ref())
         .or(record.resolved_route.as_ref());
+    if let run::RequestedRoute::Adapter { provider, name, .. } = &record.requested_route {
+        return format!("{provider}:{name}");
+    }
     let (requested_model, requested_effort) = match &record.requested_route {
+        run::RequestedRoute::Adapter { .. } => (None, None),
         run::RequestedRoute::Model { model, effort, .. } => (Some(model.clone()), effort.clone()),
         run::RequestedRoute::Named { effort, .. } | run::RequestedRoute::Review { effort, .. } => {
             (None, effort.clone())
