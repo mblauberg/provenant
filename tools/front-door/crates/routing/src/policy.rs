@@ -766,7 +766,7 @@ mod tests {
         assert!(window.contains("Monday to Friday"), "{comment}");
         let multiplier = numbers(rest).first().copied().ok_or("multiplier missing")? as f64;
         let model = ModelId::parse(model)?;
-        // 1970-01-05 is a Monday; sample every hour of a full week.
+        // 1970-01-05 is a Monday; sample every hour of a full week. // timebomb: allow evaluated at an injected instant
         let monday = 4 * 86_400;
         for hour in 0..7 * 24 {
             let at = monday + hour * 3600;
@@ -903,7 +903,7 @@ mod tests {
     fn legacy_schedule_migrates_and_shared_evaluator_handles_local_windows()
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelId::parse("codex/gpt-6.1-terra")?;
-        let starts = "2026-10-29T23:00:00Z"
+        let starts = "2026-10-29T23:00:00Z" // timebomb: allow evaluated at an injected instant
             .parse::<jiff::Timestamp>()?
             .as_second();
         let legacy: ModelPolicies = toml_edit::de::from_str(&format!(
@@ -963,14 +963,14 @@ mod tests {
         )?;
         assert!(
             dst.active(
-                "2026-03-08T06:30:00Z"
+                "2026-03-08T06:30:00Z" // timebomb: allow evaluated at an injected instant
                     .parse::<jiff::Timestamp>()?
                     .as_second()
             )
         );
         assert!(
             dst.active(
-                "2026-03-08T07:30:00Z"
+                "2026-03-08T07:30:00Z" // timebomb: allow evaluated at an injected instant
                     .parse::<jiff::Timestamp>()?
                     .as_second()
             )
@@ -978,7 +978,7 @@ mod tests {
         let unknown: Schedule = toml_edit::de::from_str(
             "tz='Mars/Olympus_Mons'\nwindows=[{weekdays=[6],start_hour=1,end_hour=4}]",
         )?;
-        let sunday_utc = "2026-03-08T01:30:00Z"
+        let sunday_utc = "2026-03-08T01:30:00Z" // timebomb: allow evaluated at an injected instant
             .parse::<jiff::Timestamp>()?
             .as_second();
         assert!(unknown.active(sunday_utc));

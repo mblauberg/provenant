@@ -2845,7 +2845,7 @@ fn fixed_deadlines_use_host_local_weekly_monthly_and_absolute_times()
         ),
         ("day 25", "monthly", 2_678_400, local(2, 1)?, local(1, 25)?),
         (
-            "1970-01-03T00:00",
+            "1970-01-03T00:00", // timebomb: allow fixed epoch fixture, not the live clock
             "seven_day",
             604_800,
             local(1, 7)?,
@@ -3179,7 +3179,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
             five_hour: Some(43),
             seven_day: Some(17),
             thirty_day: Some(59),
-            expires: "1970-01-01T00:01:41Z".into(),
+            expires: "1970-01-01T00:01:41Z".into(), // timebomb: allow fixed epoch fixture, not the live clock
         },
     );
     let apply = |observation: &QuotaObservation| {
@@ -3209,7 +3209,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
                 five_hour,
                 seven_day,
                 thirty_day: Some(59),
-                expires: "1970-01-01T00:01:41Z".into(),
+                expires: "1970-01-01T00:01:41Z".into(), // timebomb: allow fixed epoch fixture, not the live clock
             },
         );
         let mut record = AccountRecord::empty(raw.snapshot.account.clone());
