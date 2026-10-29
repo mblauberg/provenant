@@ -332,6 +332,12 @@ impl LogStore {
         let tx = db.transaction()?;
         let count = Self::prune(&tx, retention, now)?;
         tx.commit()?;
+        if count > 0 {
+            provenant_os::changes::hint(
+                self.root.as_path(),
+                &[provenant_core::changes::Scope::Chair],
+            );
+        }
         Ok(count)
     }
     pub fn append(&self, input: Append, retention: Retention, now: i64) -> Result<LogEntry, Error> {
@@ -467,6 +473,10 @@ impl LogStore {
         tx.execute("UPDATE meta SET total_appended=?1 WHERE id=1", [sequence])?;
         Self::prune(&tx, retention, now)?;
         tx.commit()?;
+        provenant_os::changes::hint(
+            self.root.as_path(),
+            &[provenant_core::changes::Scope::Chair],
+        );
         Ok(entry)
     }
     pub fn page(
@@ -603,6 +613,16 @@ mod tests {
             max_bytes: 65536,
             replay_horizon_seconds: 10,
         }
+    }
+    #[test]
+    fn log_commit_signals_chair() {
+        let (_tmp, store) = fixture();
+        let before = provenant_os::changes::read(store.root.as_path()).unwrap();
+        store
+            .append(update("signal", 1, "entry"), retention(), 1)
+            .unwrap();
+        let after = provenant_os::changes::read(store.root.as_path()).unwrap();
+        assert!(after.chair > before.chair);
     }
     #[test]
     fn log_operation_replay_pagination_correction_pruning_and_restart() {

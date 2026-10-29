@@ -19,6 +19,11 @@ pub struct Summary {
 #[derive(Debug, Error)]
 #[error("invalid or unsupported checkpoint summary header")]
 pub struct SummaryError;
+impl SummaryError {
+    pub fn code(&self) -> &'static str {
+        "invalid_summary_header"
+    }
+}
 
 /// Fields omitted from a patch retain their existing values. Revision zero
 /// creates a summary on an existing checkpoint.
@@ -683,7 +688,12 @@ mod tests {
             Some(summary.clone())
         );
         assert!(parse_summary(&source.replace("2026-10-28T03:00:00Z", "yesterday")).is_err());
-        assert!(parse_summary(&source.replace("schema_version: 1", "schema_version: 2")).is_err());
+        assert_eq!(
+            parse_summary(&source.replace("schema_version: 1", "schema_version: 2"))
+                .unwrap_err()
+                .code(),
+            "invalid_summary_header"
+        );
         assert!(
             parse_summary(&source.replace("revision: 12", "revision: 12\n  revision: 13")).is_err()
         );

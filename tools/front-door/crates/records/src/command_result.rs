@@ -47,6 +47,9 @@ pub struct HelpCatalogue {
     /// Stable `error.code` values and their meanings. Only the whole
     /// catalogue lists them; a scoped `help COMMAND` leaves this empty.
     pub error_codes: Vec<HelpErrorCode>,
+    /// Provider control capabilities and the actions each provider takes.
+    /// Like the error codes, only the whole catalogue lists them.
+    pub provider_controls: Vec<crate::control::ControlCapability>,
 }
 #[derive(Debug, Serialize)]
 pub struct HelpErrorCode {

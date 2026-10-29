@@ -1,4 +1,5 @@
 import Foundation
+import ProvenantKit
 
 /// A lane (one attempt) as `provenant lanes --all --json` reports it, reduced to what the panel needs.
 struct Lane: Sendable, Equatable {

@@ -1,6 +1,6 @@
 //! Durable non-secret registrations and host identity checks.
 use crate::{ProviderError, host::PROBE_DIR_OPERATION, identity::RegisteredAccount};
-use provenant_config::{DomainConfig, DomainSection, Profile, SectionError};
+use provenant_config::{DomainConfig, DomainSection, FieldMetadata, Profile, SectionError};
 use provenant_os::{
     exec::{ExecError, ExecOptions, Executor, StreamPolicy, Termination},
     fs::{ReadOptions, read_following},
@@ -320,8 +320,17 @@ fn boundary_error(error: &SectionError) -> bool {
         )
     )
 }
-pub const SECTION: DomainSection =
-    DomainSection::new::<Settings>("accounts", defaults).with_boundary_check(boundary_error);
+pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::int("entries.{id}.order", 1, 999),
+    FieldMetadata::new("entries.{id}.hidden", "bool"),
+    FieldMetadata::new("entries.{id}.display_name", "string"),
+    FieldMetadata::enumeration("entries.{id}.headline", &["auto", "5h", "weekly"]),
+    FieldMetadata::new("shared_settings.source", "string"),
+    FieldMetadata::new("shared_settings.keys", "array"),
+];
+pub const SECTION: DomainSection = DomainSection::new::<Settings>("accounts", defaults)
+    .with_boundary_check(boundary_error)
+    .with_fields(FIELD_METADATA);
 
 fn exec_error(error: ExecError) -> ProviderError {
     match error {

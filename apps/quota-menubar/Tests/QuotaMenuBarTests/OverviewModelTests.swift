@@ -1,5 +1,6 @@
 import XCTest
 @testable import QuotaMenuBar
+import ProvenantKit
 
 @MainActor
 final class OverviewModelTests: XCTestCase {

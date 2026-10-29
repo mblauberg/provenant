@@ -214,6 +214,31 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                     args.extend(["--hosts".into(), hosts]);
                 }
             }
+            ConsoleInput::Detail { id } => {
+                args.extend(["detail".into(), id]);
+            }
+            ConsoleInput::Search {
+                query,
+                part,
+                session,
+                limit,
+                cursor,
+            } => {
+                args.extend([
+                    "search".into(),
+                    "--part".into(),
+                    part,
+                    "--limit".into(),
+                    limit.to_string(),
+                ]);
+                if let Some(session) = session {
+                    args.extend(["--session".into(), session]);
+                }
+                if let Some(cursor) = cursor {
+                    args.extend(["--cursor".into(), cursor]);
+                }
+                args.extend(["--".into(), query]);
+            }
             ConsoleInput::Tree {
                 max_depth,
                 max_nodes,
@@ -521,6 +546,18 @@ impl F3Facade for BoundFacade<'_> {
                     work,
                     call.clock,
                     call.cancel,
+                )
+            },
+            &|input, _| {
+                provenant_cli::inbox::resolve_control(
+                    &provenant_cli::run::Edge {
+                        roots: &ctx.roots,
+                        home: &self.factory.home,
+                        assets: &self.factory.assets,
+                        cwd: &self.factory.cwd,
+                    },
+                    &ctx.identity,
+                    input,
                 )
             },
         )
@@ -1039,7 +1076,9 @@ pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObser
 fn peer_read_only(action: &PeerAction) -> bool {
     use provenant_fabric_runtime::inbox::InboxInput;
     match action {
-        PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. } => true,
+        PeerAction::ConsoleBoard { .. }
+        | PeerAction::ConsoleTree { .. }
+        | PeerAction::ConsoleDetail { .. } => true,
         PeerAction::Inbox { input, .. } => !matches!(
             input,
             InboxInput::Answer {
@@ -1184,7 +1223,10 @@ pub fn peer(
                 use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
                 if matches!(
                     input,
-                    InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
+                    InboxInput::Close { .. }
+                        | InboxInput::Acknowledge { .. }
+                        | InboxInput::Steer { .. }
+                        | InboxInput::ChairMessage { .. }
                 ) {
                     PeerResult::Inbox {
                         data: InboxReply::Error {
@@ -1221,6 +1263,10 @@ pub fn peer(
                                     call.clock,
                                     call.cancel,
                                 )
+                            },
+                            // Peers carry no control requests; they are local-only.
+                            &|_, _| {
+                                Err(provenant_fabric_runtime::inbox::InboxError::UnsupportedOwner)
                             },
                         )
                     };
@@ -1319,6 +1365,22 @@ pub fn peer(
                             extra: Default::default(),
                         },
                     }
+                }
+            }
+            PeerAction::ConsoleDetail { id, .. } => {
+                let command = provenant_cli::console::Console::Detail { id: id.clone() };
+                match provenant_cli::console::read(&context.roots, None, &command) {
+                    Ok(value) => PeerResult::Console {
+                        data: value,
+                        extra: Default::default(),
+                    },
+                    Err(_) => PeerResult::Error {
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::InvalidInput,
+                        },
+                        extra: Default::default(),
+                    },
                 }
             }
             PeerAction::RunStatuses { targets, .. } => {

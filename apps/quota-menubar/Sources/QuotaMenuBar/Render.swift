@@ -1,4 +1,5 @@
 import AppKit
+import ProvenantKit
 
 /// `quota-menubar --render <report.json> <out.png> [--dark] [--expand <account id>] [--lanes <lanes.json>]
 /// [--now <ISO time>] [--scale <factor>]` draws the menu from a saved report into a PNG, offscreen, without running

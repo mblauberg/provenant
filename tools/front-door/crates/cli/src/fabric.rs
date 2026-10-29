@@ -146,13 +146,22 @@ pub enum Mail {
         #[command(flatten)]
         operation: Operation,
     },
-    /// Read inbox messages
-    Read(SequencePage),
+    /// Read inbox messages; --session reads that chair session's control mail
+    Read {
+        #[command(flatten)]
+        page: SequencePage,
+        /// Exact chair session whose mailbox to read, instead of this agent's
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Mark messages read up to a sequence number
     MarkRead {
         /// Last sequence number to mark read
         #[arg(value_parser = clap::value_parser!(i64).range(0..))]
         through: i64,
+        /// Exact chair session whose mailbox to mark, instead of this agent's
+        #[arg(long)]
+        session: Option<String>,
         #[command(flatten)]
         operation: Operation,
     },
@@ -559,7 +568,7 @@ impl Fabric {
                 "mail",
                 match v {
                     Mail::Send { .. } => "send",
-                    Mail::Read(_) => "read",
+                    Mail::Read { .. } => "read",
                     Mail::MarkRead { .. } => "mark-read",
                 },
             ),
@@ -617,7 +626,7 @@ impl Fabric {
         matches!(
             self,
             Self::Identity
-                | Self::Mail(Mail::Read(_))
+                | Self::Mail(Mail::Read { .. })
                 | Self::Task(Task::List { .. })
                 | Self::Events(Events::Read { .. })
                 | Self::Claim(Claim::Verify(_) | Claim::List { .. })
@@ -786,18 +795,24 @@ fn execute(
                 operation,
             )?
         }
-        Fabric::Mail(Mail::Read(page)) => {
+        Fabric::Mail(Mail::Read { page, session }) => {
             ctx.page(page.limit)?;
             observe(Mutation::Mail(MailInput::Read {
                 extra: Default::default(),
                 after: page.after,
                 limit: page.limit,
+                session,
             }))?
         }
-        Fabric::Mail(Mail::MarkRead { through, operation }) => mutate(
+        Fabric::Mail(Mail::MarkRead {
+            through,
+            session,
+            operation,
+        }) => mutate(
             Mutation::Mail(MailInput::MarkRead {
                 extra: Default::default(),
                 through,
+                session,
             }),
             operation,
         )?,

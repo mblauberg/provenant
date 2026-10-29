@@ -5,6 +5,10 @@ use provenant_core::{
     WaitBudget, WallTime,
 };
 use provenant_fabric_runtime::coordination::{CoordinationService, ThreadPause};
+use provenant_fabric_runtime::inbox::{InboxError, InboxInput, InboxResult};
+use provenant_records::control::{
+    ControlKind, ControlReceipt, ControlState, ControlSupport, LaunchKind,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -187,6 +191,36 @@ impl F3Facade for FakeFacade {
     type Submit = Fact;
     type Run = Fact;
     type Hosts = Fact;
+    // An existing Codex attempt has no live path, so steering gets an ordinary receipt.
+    fn inbox(
+        &mut self,
+        input: InboxInput,
+        _: WaitBudget,
+        _: &CancelToken,
+    ) -> Result<InboxResult, InboxError> {
+        let InboxInput::Steer {
+            attempt,
+            operation_id,
+            ..
+        } = input
+        else {
+            return Err(InboxError::OwnerUnavailable);
+        };
+        Ok(InboxResult::Control {
+            receipt: ControlReceipt {
+                extra: Default::default(),
+                operation_id: operation_id.ok_or(InboxError::Invalid("operation_id"))?,
+                control: ControlKind::Steer,
+                target: attempt.to_string(),
+                launch: LaunchKind::Lane,
+                support: ControlSupport::ContinuationOnly,
+                transport: None,
+                state: ControlState::Unsupported,
+                reason: ControlSupport::ContinuationOnly.reason().into(),
+                message_id: None,
+            },
+        })
+    }
     fn identity(
         &mut self,
         _: IdentityInput,
@@ -376,6 +410,41 @@ local_inbox_owner!(SubmitFacade);
 local_inbox_owner!(FakeFacade);
 
 #[test]
+fn unsupported_steer_is_an_mcp_refusal_with_the_stable_code() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.join("state"));
+    let root = inputs.resolve(&Resolver)?.state;
+    let clock = TestClock::new(
+        WallTime::from_micros(2_000_000_000_000_000)?,
+        MonoTime::from_micros(0),
+    );
+    let coordination = CoordinationService::open(
+        &root,
+        ProjectId::from_bytes([1; 16]),
+        ActorId::from_bytes([2; 16]),
+        &clock,
+        &ThreadPause,
+        &CancelToken::new(),
+    )?;
+    let mut service = Service::new(coordination, FakeFacade, &clock);
+    let steer = json!({"op":"steer","attempt":"00000000000000000000000000000001",
+        "text":"slow down","operation_id":"steer-1"});
+    let Err(error) =
+        ToolCall::parse("fabric_inbox", steer)?.execute(&mut service, &CancelToken::new())
+    else {
+        return Err("unsupported steer returned a success response".into());
+    };
+    assert_eq!(error.code(), "control_unsupported");
+    let detail = error.structured_error();
+    assert_eq!(detail["code"], "control_unsupported");
+    assert_eq!(detail["state"], "unsupported");
+    assert_eq!(detail["operation_id"], "steer-1");
+    Ok(())
+}
+
+#[test]
 #[allow(clippy::disallowed_methods)] // Native socket framing and read-only WAL deadlines.
 fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
 -> Result<(), Box<dyn Error>> {
@@ -477,6 +546,7 @@ fn lane_relay_binds_sender_replays_receipts_and_refreshes_read_only_wal()
             extra: Default::default(),
             after: Some(0),
             limit: 10,
+            session: None,
         },
         budget,
         &CancelToken::new(),

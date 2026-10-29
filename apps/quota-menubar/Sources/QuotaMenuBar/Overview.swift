@@ -1,4 +1,5 @@
 import Foundation
+import ProvenantKit
 
 /// The bounded local projection, without artifact bodies.
 struct ConsoleOverview: Decodable, Equatable, Sendable {

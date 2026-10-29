@@ -376,8 +376,9 @@ jobs:
             fi
           fi
       # Clippy lives in the macOS test job, which compiles and caches the
-      # workspace; only the menu bar tests stay here, to balance the two jobs.
-      - name: Run menu bar tests
+      # workspace; only the Swift package tests (shared client, menu bar and
+      # console) stay here, to balance the two jobs.
+      - name: Run Swift package tests
         working-directory: apps/quota-menubar
         run: swift test
 

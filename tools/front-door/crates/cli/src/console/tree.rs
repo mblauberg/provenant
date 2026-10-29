@@ -14,6 +14,17 @@ pub(super) fn read(
     max_nodes: u64,
     detail: bool,
 ) -> Result<Value, Error> {
+    read_inner(roots, selected, max_depth, max_nodes, detail, false)
+}
+
+pub(super) fn read_inner(
+    roots: &Roots,
+    selected: Option<ProjectId>,
+    max_depth: u64,
+    max_nodes: u64,
+    detail: bool,
+    include_store_path: bool,
+) -> Result<Value, Error> {
     if !(1..=16).contains(&max_depth) || !(1..=100).contains(&max_nodes) {
         return Err(provenant_run::RunError::Validation("tree bounds").into());
     }
@@ -178,7 +189,7 @@ pub(super) fn read(
                         ),
                     },
                 }
-                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"run_id":attempt.run_id,"task_id":attempt.task_id,"attempt_id":attempt.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"metadata":lane}));
+                nodes.push(json!({"lane_id":{"host":host,"project_id":attempt.project_id,"run_id":attempt.run_id,"task_id":attempt.task_id,"attempt_id":attempt.attempt_id},"depth":depth,"store_parent_attempt":owner_attempt,"store_path":store_path,"metadata":lane}));
             }
             match page.next {
                 Some(next) => after = next,
@@ -221,6 +232,11 @@ pub(super) fn read(
             .map(|edge| json!({"kind":edge["kind"],"attempt_id":edge["child_attempt"]}))
             .collect();
         let metadata = node["metadata"].clone();
+        if !include_store_path {
+            node.as_object_mut()
+                .ok_or(Error::Encode)?
+                .remove("store_path");
+        }
         node["children"] = json!(children);
         node["status"] = metadata["attempt"]["state"].clone();
         node["title"] = metadata["attempt"]["title"].clone();
@@ -336,6 +352,19 @@ mod tests {
         request.parent = Some(AttemptId::from_bytes([2; 16]));
         request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
         child_store.create(&prepared(3, 3, request.clone())?, &call)?;
+        let local_detail =
+            super::super::detail::read(&roots, &AttemptId::from_bytes([1; 16]).to_string())?;
+        assert_eq!(local_detail["status"], "found");
+        assert_eq!(local_detail["artifacts"][0]["bytes"], 4);
+        assert_eq!(local_detail["artifacts"][0]["present"], true);
+        assert_eq!(local_detail["usage"]["reasoning"], serde_json::Value::Null);
+        let nested_detail =
+            super::super::detail::read(&roots, &AttemptId::from_bytes([2; 16]).to_string())?;
+        assert_eq!(nested_detail["status"], "found");
+        assert_eq!(
+            nested_detail["lane_id"]["attempt_id"],
+            json!(AttemptId::from_bytes([2; 16]))
+        );
         let missing = read(&roots, None, 3, 100, false)?;
         assert_eq!(missing["identity_conflicts"], json!([]));
         assert_eq!(missing["unfetched_children"], json!([]));

@@ -268,6 +268,18 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           "operation_id": {
             "$ref": "#/$defs/OperationId"
           },
+          "session": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "through": {
             "maximum": 9223372036854775807,
             "minimum": 0,
@@ -302,6 +314,18 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           },
           "op": {
             "const": "read"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -1901,7 +1925,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Post human requests, list, answer, close or acknowledge; route to an owner host when needed.",
+  "description": "Post human requests, list, answer, close or acknowledge; route to an owner host when needed. Steer a lane or message a chair session, both local-only and refused when unsupported.",
   "inputSchema": {
     "$defs": {
       "Id": {
@@ -2279,6 +2303,50 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
       {
         "additionalProperties": false,
         "properties": {
+          "channel": {
+            "enum": [
+              "chat",
+              "console",
+              "phone_remote",
+              "cli",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "op": {
+            "const": "chair_message"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OperationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session": {
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]([a-z0-9_-]|\\.[a-z0-9_-])*\\.?$",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "op",
+          "session",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
           "expect_revision": {
             "maximum": 18446744073709551615,
             "minimum": 1,
@@ -2400,6 +2468,37 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           "op"
         ],
         "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "$ref": "#/$defs/Id"
+          },
+          "op": {
+            "const": "steer"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OperationId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text": {
+            "maxLength": 4096,
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "op",
+          "text"
+        ],
+        "type": "object"
       }
     ],
     "type": "object"
@@ -2415,7 +2514,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Read projects, sessions, board, tree and overview; board and tree can include peers.",
+  "description": "Read projects, sessions, board, tree, overview and attempt detail. Search is local only, returns the first match per artifact and rescans on each cursor page; board and tree can include peers.",
   "inputSchema": {
     "oneOf": [
       {
@@ -2463,6 +2562,23 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
       {
         "additionalProperties": false,
         "properties": {
+          "id": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "op": {
+            "const": "detail"
+          }
+        },
+        "required": [
+          "id",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
           "op": {
             "const": "overview"
           }
@@ -2481,6 +2597,58 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
         },
         "required": [
           "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "search"
+          },
+          "part": {
+            "enum": [
+              "prompt",
+              "result"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "op",
+          "part",
+          "query"
         ],
         "type": "object"
       },

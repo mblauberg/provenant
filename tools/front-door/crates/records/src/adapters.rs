@@ -1,5 +1,8 @@
 //! Closed adapter identities and shared facts. Mechanics stay in their modules.
-use crate::run::NetworkAccess;
+use crate::{
+    control::{ControlCapabilities, ControlSupport},
+    run::NetworkAccess,
+};
 use serde::{Deserialize, Serialize};
 
 /// Latest command output retained by the guardian and adapter.
@@ -75,8 +78,8 @@ pub struct LaunchCapabilities {
     pub effort: bool,
     /// Continues a recorded provider session.
     pub resume: bool,
-    /// Accepts follow-up input into a live session. No adapter offers this yet.
-    pub steering: bool,
+    /// What a control message can do for this adapter, per launch kind.
+    pub control: ControlCapabilities,
     /// Network modes the adapter's sandbox profile can enforce.
     pub network: &'static [NetworkAccess],
     /// Accepts image input in a prompt. No adapter offers this yet.
@@ -210,7 +213,10 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             default_network: NetworkAccess::Open,
             effort: true,
             resume: true,
-            steering: false,
+            control: ControlCapabilities {
+                lane: ControlSupport::ContinuationOnly,
+                chair: ControlSupport::MailOnly,
+            },
             network: ALL_NETWORK,
             image_input: false,
             write: true,
@@ -240,7 +246,10 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             default_network: NetworkAccess::Open,
             effort: true,
             resume: true,
-            steering: false,
+            control: ControlCapabilities {
+                lane: ControlSupport::ContinuationOnly,
+                chair: ControlSupport::MailOnly,
+            },
             network: ALL_NETWORK,
             image_input: false,
             write: true,
@@ -270,7 +279,10 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             default_network: NetworkAccess::Open,
             effort: false,
             resume: true,
-            steering: false,
+            control: ControlCapabilities {
+                lane: ControlSupport::ContinuationOnly,
+                chair: ControlSupport::MailOnly,
+            },
             network: ALL_NETWORK,
             image_input: false,
             write: true,
@@ -300,7 +312,10 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             default_network: NetworkAccess::Open,
             effort: true,
             resume: true,
-            steering: false,
+            control: ControlCapabilities {
+                lane: ControlSupport::ContinuationOnly,
+                chair: ControlSupport::MailOnly,
+            },
             network: ALL_NETWORK,
             image_input: false,
             write: true,
@@ -330,7 +345,10 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             default_network: NetworkAccess::Open,
             effort: true,
             resume: true,
-            steering: false,
+            control: ControlCapabilities {
+                lane: ControlSupport::ContinuationOnly,
+                chair: ControlSupport::MailOnly,
+            },
             network: ALL_NETWORK,
             image_input: false,
             write: true,
@@ -360,7 +378,10 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             default_network: NetworkAccess::Open,
             effort: false,
             resume: false,
-            steering: false,
+            control: ControlCapabilities {
+                lane: ControlSupport::Unsupported,
+                chair: ControlSupport::Unsupported,
+            },
             network: ALL_NETWORK,
             image_input: false,
             write: false,
@@ -392,7 +413,10 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             default_network: NetworkAccess::Open,
             effort: false,
             resume: false,
-            steering: false,
+            control: ControlCapabilities {
+                lane: ControlSupport::Unsupported,
+                chair: ControlSupport::Unsupported,
+            },
             network: ALL_NETWORK,
             image_input: false,
             write: true,

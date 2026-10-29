@@ -9,6 +9,7 @@ pub use provenant_fabric_runtime::coordination::{
     MailInput, Mutation, TaskInput,
 };
 use provenant_fabric_runtime::inbox::{InboxError, InboxInput};
+use provenant_records::control::CONTROL_UNSUPPORTED;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -41,6 +42,17 @@ pub enum ConsoleInput {
         limit: u64,
         cursor: Option<String>,
         hosts: Option<String>,
+    },
+    Detail {
+        id: String,
+    },
+    Search {
+        query: String,
+        part: String,
+        session: Option<String>,
+        #[serde(default = "page_default")]
+        limit: u64,
+        cursor: Option<String>,
     },
     Tree {
         #[serde(default = "depth_default")]
@@ -92,6 +104,15 @@ impl ConsoleInput {
                 if !(1..=100).contains(limit) =>
             {
                 Err(bad("limit"))
+            }
+            Self::Search {
+                query, part, limit, ..
+            } if query.is_empty()
+                || query.len() > 1_024
+                || !matches!(part.as_str(), "prompt" | "result")
+                || !(1..=100).contains(limit) =>
+            {
+                Err(bad("search"))
             }
             Self::Tree { max_depth, .. } if !(1..=16).contains(max_depth) => Err(bad("max_depth")),
             Self::Tree { max_nodes, .. } if !(1..=100).contains(max_nodes) => Err(bad("max_nodes")),
@@ -251,6 +272,10 @@ impl ToolCall {
                 _,
             ) => body(text, "text"),
             Self::Inbox(InboxInput::Close { reason, .. }, _) => body(reason, "reason"),
+            Self::Inbox(
+                InboxInput::Steer { text, .. } | InboxInput::ChairMessage { text, .. },
+                _,
+            ) => body(text, "text"),
             Self::Mail(MailInput::Send { body: value, .. }, _) => body(value, "body"),
             Self::Mail(MailInput::Read { limit, .. }, _) => page(*limit),
             Self::Task(
@@ -550,7 +575,7 @@ impl ToolCall {
         }
         let host = if schema::tool_kind(name) == Some(schema::ToolKind::Inbox) {
             let host = arguments.as_object_mut().and_then(|o| o.remove("host"));
-            if host.is_some() && operation == "ask" {
+            if host.is_some() && matches!(operation.as_str(), "ask" | "steer" | "chair_message") {
                 return Err(InvalidInput::Arguments {
                     path: "arguments.host".into(),
                 });
@@ -708,7 +733,9 @@ impl ToolCall {
             InboxInput::Ask { operation_id, .. }
             | InboxInput::Answer { operation_id, .. }
             | InboxInput::Close { operation_id, .. }
-            | InboxInput::Acknowledge { operation_id, .. },
+            | InboxInput::Acknowledge { operation_id, .. }
+            | InboxInput::Steer { operation_id, .. }
+            | InboxInput::ChairMessage { operation_id, .. },
             _,
         ) = &mut self
             && operation_id.is_none()
@@ -735,7 +762,9 @@ impl ToolCall {
                 InboxInput::Ask { operation_id, .. }
                 | InboxInput::Answer { operation_id, .. }
                 | InboxInput::Close { operation_id, .. }
-                | InboxInput::Acknowledge { operation_id, .. },
+                | InboxInput::Acknowledge { operation_id, .. }
+                | InboxInput::Steer { operation_id, .. }
+                | InboxInput::ChairMessage { operation_id, .. },
                 _,
             ) => operation_id.clone(),
             Self::Chair(
@@ -845,10 +874,18 @@ impl ToolCall {
             ($owner:ident, $method:ident, $input:ident) => {{ response(tool_name, service.$owner.$method($input, budget, cancel)?) }};
         }
         let result = match self {
-            Self::Inbox(input, host) => response(
-                tool_name,
-                service.facade.inbox_owner(input, host, budget, cancel)?,
-            ),
+            Self::Inbox(input, host) => {
+                let result = service.facade.inbox_owner(input, host, budget, cancel)?;
+                // Refused as the CLI refuses it, with the receipt kept as structured data.
+                if let Some(receipt) = result.unsupported_control() {
+                    return Err(ServiceError::Cli {
+                        code: CONTROL_UNSUPPORTED.into(),
+                        message: receipt.refusal_message(),
+                        data: serde_json::to_value(receipt)?,
+                    });
+                }
+                response(tool_name, result)
+            }
             Self::Console(input) => {
                 response(tool_name, service.facade.console(input, budget, cancel)?)
             }

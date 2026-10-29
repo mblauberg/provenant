@@ -5718,6 +5718,31 @@ pub fn align_utf8_tail(chunk: &mut run::OutputChunk) {
     }
 }
 
+/// The adapter recorded for a local attempt, read from its run record alone:
+/// no transcript, output or provider is touched.
+pub fn attempt_provider(
+    edge: &Edge<'_>,
+    attempt: provenant_core::AttemptId,
+) -> Result<Option<String>, Fail> {
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let target = Target {
+        selection: None,
+        run: None,
+        task: None,
+        attempt: Some(attempt),
+    };
+    let (session, selected) = targets::open(edge, &target, false, &call)?;
+    let record = session
+        .store
+        .record(selected.attempt.unwrap_or(attempt), &call)?;
+    Ok([&record.applied_route, &record.resolved_route]
+        .into_iter()
+        .flatten()
+        .find_map(|route| route.provider.clone()))
+}
+
 /// Cancel every attempt the target names. Queued work ends at once; started
 /// work gets a stop request its guardian acts on. Requested is not exit.
 pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {

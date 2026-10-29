@@ -1,0 +1,12 @@
+{
+ "schema_version": 1,
+ "command": "answer",
+ "status": "error",
+ "data": null,
+ "error": {
+  "code": "conflict",
+  "message": "request revision or delivery target conflicts with current state",
+  "cause": null,
+  "repair": "Inspect `provenant inbox --state all --json` before submitting another operation; preserve the authoritative answer and its revision."
+ }
+}

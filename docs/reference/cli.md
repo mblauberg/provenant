@@ -434,6 +434,65 @@ Accepted by every command, before or after the subcommand.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant config schema`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant config apply`
+
+| Argument | Contract |
+|---|---|
+| `--file` | `{"name": "file", "required": true}` |
+| `--expect-revision` | `{"name": "expect_revision", "required": true}` |
+| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "file",
+        "expect_revision",
+        "dry_run"
+      ],
+      "multiple": true,
+      "name": "Apply",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant config history`
+
+| Argument | Contract |
+|---|---|
+| `--since` | `{"name": "since"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "since",
+        "limit"
+      ],
+      "multiple": true,
+      "name": "History",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant config set`
 
 | Argument | Contract |
@@ -667,12 +726,19 @@ Accepted by every command, before or after the subcommand.
 |---|---|
 | `--after` | `{"name": "after"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "name": "limit"}` |
+| `--session` | `{"name": "session"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
 ```json
 {
   "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "Read",
+      "required": false
+    },
     {
       "arguments": [
         "after",
@@ -691,6 +757,7 @@ Accepted by every command, before or after the subcommand.
 | Argument | Contract |
 |---|---|
 | `through` | `{"name": "through", "positional": true, "required": true}` |
+| `--session` | `{"name": "session"}` |
 | `--operation-id` | `{"name": "operation_id", "required": true}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
@@ -2466,6 +2533,33 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant steer`
+
+| Argument | Contract |
+|---|---|
+| `attempt` | `{"name": "attempt", "positional": true, "required": true}` |
+| `--text-stdin` | `{"defaults": ["false"], "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
+| `--operation-id` | `{"name": "operation_id"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "attempt",
+        "text_stdin",
+        "operation_id"
+      ],
+      "multiple": true,
+      "name": "Steer",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant lane`
 
 | Argument | Contract |
@@ -2883,6 +2977,29 @@ Accepted by every command, before or after the subcommand.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant console changes`
+
+| Argument | Contract |
+|---|---|
+| `--since` | `{"name": "since"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "since"
+      ],
+      "multiple": true,
+      "name": "Changes",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant console tree`
 
 | Argument | Contract |
@@ -2941,7 +3058,70 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant console detail`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "id"
+      ],
+      "multiple": true,
+      "name": "Detail",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant console search`
+
+Search is local only; peers are not searched. Only the first match per artifact is returned, and each cursor page rescans.
+
+| Argument | Contract |
+|---|---|
+| `query` | `{"name": "query", "positional": true, "required": true}` |
+| `--part` | `{"name": "part", "required": true, "values": ["prompt", "result"]}` |
+| `--session` | `{"name": "session"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--cursor` | `{"name": "cursor"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "query",
+        "part",
+        "session",
+        "limit",
+        "cursor"
+      ],
+      "multiple": true,
+      "name": "Search",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant console overview`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant console open`
 
 | Argument | Contract |
 |---|---|
@@ -3277,6 +3457,35 @@ Accepted by every command, before or after the subcommand.
       ],
       "multiple": true,
       "name": "List",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant chair message`
+
+| Argument | Contract |
+|---|---|
+| `session` | `{"name": "session", "positional": true, "required": true}` |
+| `--text-stdin` | `{"defaults": ["false"], "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
+| `--channel` | `{"name": "channel", "required": true, "values": ["chat", "console", "phone_remote", "cli", "unknown"]}` |
+| `--operation-id` | `{"name": "operation_id"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "session",
+        "text_stdin",
+        "channel",
+        "operation_id"
+      ],
+      "multiple": true,
+      "name": "ChairMessage",
       "required": false
     }
   ]

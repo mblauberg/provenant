@@ -199,7 +199,7 @@ fn build_strict() -> Vec<Value> {
             "Send and read mail with explicit cursors.",
             json!({
                 "send":{"recipients":recipients,"kind":choices(&["note","request","response"]),"body":text(MAX_TEXT_BYTES),"artifacts":artifacts,"reply_to?":nullable(reference("MessageRef")),"task?":nullable(reference("MessageRef"))},
-                "read":{"after?":nullable(seq.clone()),"limit":page.clone()},"mark_read":{"through":seq.clone()}
+                "read":{"after?":nullable(seq.clone()),"limit":page.clone(),"session?":nullable(inbox_session.clone())},"mark_read":{"through":seq.clone(),"session?":nullable(inbox_session.clone())}
             }),
         ),
         (
@@ -258,22 +258,26 @@ fn build_strict() -> Vec<Value> {
             json!({"discover":{}}),
         ),
         (
-            "Post human requests, list, answer, close or acknowledge; route to an owner host when needed.",
+            "Post human requests, list, answer, close or acknowledge; route to an owner host when needed. Steer a lane or message a chair session, both local-only and refused when unsupported.",
             json!({
                 "ask":{"session":inbox_session.clone(),"request":inbox_request,"operation_id?":nullable(reference("OperationId"))},
                 "list":{"host?":nullable(text(128)),"id?":nullable(reference("Id")),"session?":nullable(inbox_session.clone()),"state?":choices(&["open","all"]),"limit?":integer(1,100),"cursor?":nullable(pattern(r"^[0-9a-f]{32}\.sha256:[0-9a-f]{64}\.[0-9]{1,20}$"))},
                 "answer":{"host?":nullable(text(128)),"id":reference("Id"),"action":choices(&["choose","reply","confirm","override"]),"option_id?":nullable(reference("OperationId")),"text?":nullable(text(provenant_records::inbox::ANSWER_TEXT_BYTES)),"expect_revision":integer(1,u64::MAX),"channel":choices(&["chat","console","phone_remote","cli","unknown"]),"operation_id?":nullable(reference("OperationId"))},
                 "close":{"host?":nullable(text(128)),"id":reference("Id"),"state":choices(&["withdrawn","superseded","expired"]),"reason":text(1024),"expect_revision":integer(1,u64::MAX),"operation_id?":nullable(reference("OperationId"))},
-                "acknowledge":{"host?":nullable(text(128)),"id":reference("Id"),"answer_id":reference("Id"),"session":inbox_session.clone(),"operation_id?":nullable(reference("OperationId"))}
+                "acknowledge":{"host?":nullable(text(128)),"id":reference("Id"),"answer_id":reference("Id"),"session":inbox_session.clone(),"operation_id?":nullable(reference("OperationId"))},
+                "steer":{"attempt":reference("Id"),"text":text(provenant_records::control::CONTROL_TEXT_BYTES),"operation_id?":nullable(reference("OperationId"))},
+                "chair_message":{"session":inbox_session.clone(),"text":text(provenant_records::control::CONTROL_TEXT_BYTES),"channel":choices(&["chat","console","phone_remote","cli","unknown"]),"operation_id?":nullable(reference("OperationId"))}
             }),
         ),
         (
-            "Read projects, sessions, board, tree and overview; board and tree can include peers.",
+            "Read projects, sessions, board, tree, overview and attempt detail. Search is local only, returns the first match per artifact and rescans on each cursor page; board and tree can include peers.",
             json!({
                 "projects":{}, "overview":{},
                 "sessions":{"session?":nullable(inbox_session.clone()),"limit?":integer(1,100),"cursor?":nullable(pattern(r"^sha256:[0-9a-f]{64}:[0-9]{1,20}$"))},
                 "board":{"all?":{"type":"boolean"},"limit?":integer(1,100),"cursor?":nullable(pattern(r"^2\.[0-9]{1,20}\.[0-9]{1,20}\.sha256:[0-9a-f]{64}$")),"hosts?":nullable(text(1024))},
-                "tree":{"max_depth?":integer(1,16),"max_nodes?":integer(1,100),"detail?":{"type":"boolean"},"hosts?":nullable(text(1024))}
+                "tree":{"max_depth?":integer(1,16),"max_nodes?":integer(1,100),"detail?":{"type":"boolean"},"hosts?":nullable(text(1024))},
+                "detail":{"id":text(256)},
+                "search":{"query":text(1024),"part":choices(&["prompt","result"]),"session?":nullable(text(256)),"limit?":integer(1,100),"cursor?":nullable(text(512))}
             }),
         ),
         (

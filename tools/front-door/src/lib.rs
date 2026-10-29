@@ -419,36 +419,91 @@ fn sync_registered_account(
         }
     }
 }
-/// Apply an optional knob edit, then print the effective config read back.
-fn config_command(
-    command: &str,
-    edit: Option<provenant_config::KnobEdit>,
-    globals: &provenant_cli::Globals,
-) -> u8 {
-    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+/// What a config command does: show, describe the schema, edit, or list history.
+enum ConfigAction<'a> {
+    Show,
+    Schema,
+    Edit(provenant_config::KnobEdit<'a>),
+    Apply {
+        patch: &'a std::path::Path,
+        revision: &'a str,
+        dry_run: bool,
+    },
+    History {
+        since: Option<jiff::Timestamp>,
+        limit: usize,
+    },
+}
+fn read_patch(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("patch file exceeds 1 MiB".into());
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+/// Run one config action and print the result: the effective config read back
+/// for show and edits, or the schema, apply report or history.
+fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::Globals) -> u8 {
+    use provenant_config as config;
+    let result = (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         let roots = roots::resolve(globals, Workspace::Project, Product::Required)?.roots;
         let sections = &provenant_cli::domains::SECTIONS;
-        Ok(match edit {
-            Some(edit) => provenant_config::edit_config(&roots, sections, |doc| edit.apply(doc))?,
-            None => provenant_config::config_show(&roots, sections)?,
+        let options = config::EditOptions::new("cli");
+        Ok(match action {
+            ConfigAction::Show => {
+                let (resolved, revision) = config::show(&roots, sections)?;
+                let mut value = serde_json::to_value(&resolved)?;
+                value["revision"] = revision.into();
+                value
+            }
+            ConfigAction::Schema => {
+                let (resolved, revision) = config::show(&roots, sections)?;
+                serde_json::to_value(config::schema(&resolved, sections, revision)?)?
+            }
+            ConfigAction::Edit(edit) => {
+                let edited =
+                    config::edit_config(&roots, sections, &options, |doc, _| edit.apply(doc))?;
+                let mut value = serde_json::to_value(&edited.config)?;
+                value["revision"] = edited.after_revision.into();
+                value
+            }
+            ConfigAction::Apply {
+                patch,
+                revision,
+                dry_run,
+            } => {
+                let patch = read_patch(patch)?;
+                let options = config::EditOptions {
+                    expect_revision: Some(revision),
+                    dry_run,
+                    ..options
+                };
+                let edited = config::edit_config(&roots, sections, &options, |doc, current| {
+                    config::apply_patch(&patch, doc, current, sections)
+                })?;
+                serde_json::json!({
+                    "dry_run": edited.dry_run,
+                    "before_revision": edited.before_revision,
+                    "after_revision": edited.after_revision,
+                    "changes": edited.changes,
+                })
+            }
+            ConfigAction::History { since, limit } => {
+                serde_json::json!({ "entries": config::history(&roots, since, limit)? })
+            }
         })
     })();
     match result {
-        Ok(config) => match serde_json::to_value(&config) {
-            Ok(value) => emit(
-                &CommandResult::new(command, Outcome::Ok, config),
-                globals,
-                &provenant_cli::terse(&value),
-                true,
-            ),
-            Err(_) => fail(
-                command,
-                Outcome::Error,
-                "ENCODE",
-                "cannot encode config",
-                globals,
-            ),
-        },
+        Ok(value) => emit(
+            &CommandResult::new(command, Outcome::Ok, value.clone()),
+            globals,
+            &provenant_cli::terse(&value),
+            true,
+        ),
         Err(error) => {
             let status = match error.downcast_ref::<provenant_config::ConfigError>() {
                 Some(
@@ -458,7 +513,11 @@ fn config_command(
                 | None => Outcome::Error,
                 Some(_) => Outcome::Invalid,
             };
-            fail(command, status, "CONFIG", &error.to_string(), globals)
+            let code = match error.downcast_ref::<provenant_config::ConfigError>() {
+                Some(provenant_config::ConfigError::StaleRevision { .. }) => "STALE_REVISION",
+                _ => "CONFIG",
+            };
+            fail(command, status, code, &error.to_string(), globals)
         }
     }
 }
@@ -793,11 +852,35 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         ),
         Command::Config(provenant_cli::Config::Check(page)) => checks::config(page, globals),
         Command::Config(provenant_cli::Config::Show) => {
-            config_command("config show", None, globals)
+            config_command("config show", ConfigAction::Show, globals)
         }
+        Command::Config(provenant_cli::Config::Schema) => {
+            config_command("config schema", ConfigAction::Schema, globals)
+        }
+        Command::Config(provenant_cli::Config::Apply {
+            file,
+            expect_revision,
+            dry_run,
+        }) => config_command(
+            "config apply",
+            ConfigAction::Apply {
+                patch: &file,
+                revision: &expect_revision,
+                dry_run,
+            },
+            globals,
+        ),
+        Command::Config(provenant_cli::Config::History { since, limit }) => config_command(
+            "config history",
+            ConfigAction::History {
+                since,
+                limit: limit as usize,
+            },
+            globals,
+        ),
         Command::Config(provenant_cli::Config::Set { name, value }) => config_command(
             "config set",
-            Some(if name == "profile" {
+            ConfigAction::Edit(if name == "profile" {
                 provenant_config::KnobEdit::Profile(&value)
             } else {
                 provenant_config::KnobEdit::Set {
@@ -809,7 +892,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         ),
         Command::Config(provenant_cli::Config::Unset { name }) => config_command(
             "config unset",
-            Some(provenant_config::KnobEdit::Unset(&name)),
+            ConfigAction::Edit(provenant_config::KnobEdit::Unset(&name)),
             globals,
         ),
         Command::Ask(args) => human_inbox(
@@ -1026,6 +1109,16 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 provenant_cli::mileage::run(cmd, edge)
             })
         }
+        Command::Steer(args) => human_inbox(
+            provenant_cli::inbox::HumanCommand::Steer(args),
+            &inv.leaf,
+            globals,
+        ),
+        Command::Chair(provenant_cli::Chair::Message(args)) => human_inbox(
+            provenant_cli::inbox::HumanCommand::ChairMessage(args),
+            &inv.leaf,
+            globals,
+        ),
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Console(cmd) => console::run(cmd, globals),
         Command::Quota { command } => {
@@ -1238,6 +1331,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
             | "workflow session diff"
             | "chair summary show"
             | "chair summary diff"
+            | "console changes"
             | "console projects"
             | "console sessions"
             | "console overview"

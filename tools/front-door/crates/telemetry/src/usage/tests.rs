@@ -29,7 +29,7 @@ fn inventory() -> Vec<(String, String)> {
 fn usage_log_read_errors_include_the_os_cause() {
     let error = UsageError::Io(std::io::Error::from_raw_os_error(13));
     let rendered = error.to_string();
-    assert!(rendered.starts_with("cannot read the usage log: "));
+    assert_eq!(error.code(), "io");
     assert!(rendered.contains("os error 13"));
 }
 

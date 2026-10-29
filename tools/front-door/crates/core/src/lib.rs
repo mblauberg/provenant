@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod bytes;
+pub mod changes;
 mod refs;
 pub use refs::*;
 mod ids;
