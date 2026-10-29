@@ -35,11 +35,11 @@ actual host session:
 provenant workflow session save <session-id> --file <checkpoint.md>
 ```
 
-The checkpoint records the goal, authority and evidence references, verified
-progress, next actions, blockers, and resume trigger. SessionStart injects only
-that session key's checkpoint or an explicit missing/stale status. PreCompact
-reports whether it needs saving. The checkpoint is capped at 32 KiB and hook
-output at 8 KiB. Reopen live task records and verify cited work after resume.
+The checkpoint records the goal, direction, process, and plan with its resume
+trigger, near 2 KiB. Milestones go to the chair log (`provenant chair log
+append`). SessionStart injects only that session key's checkpoint or an explicit
+missing/stale status. PreCompact reports whether it needs saving. The hard limit
+is 256 KiB; hook output is capped at 8 KiB. Reopen live task records and verify cited work after resume.
 
 ## Idle and STOP
 

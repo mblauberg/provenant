@@ -5,6 +5,8 @@ Fabric tasks to follow assignments and results, and the run's `output` command
 to read returned artifacts. After interruption, use `provenant reconcile` to
 recover queued or orphaned work and `fabric_run` `resume` to continue the run.
 Do not keep a parallel queue, lease ledger, or per-chair live status file.
+Progress history for the user is the chair log (`provenant chair log append`),
+not the checkpoint.
 
 A host-session checkpoint is separate, bounded Markdown saved for its explicit
 session key. Include only context that helps the same session resume: goal,
@@ -19,7 +21,8 @@ provenant workflow session save <session-id> --file <checkpoint.md>
 
 SessionStart injects that key's checkpoint and save command, or an explicit
 missing or stale status. PreCompact reports whether the checkpoint needs a
-save. Hook output is limited to 8 KiB; checkpoint content is limited to 32 KiB.
+save. Hook output is limited to 8 KiB; checkpoint content is limited to 256 KiB,
+with about 2 KiB as the working budget.
 Neither hook reads transcripts, and injected text remains subject to owner and
 authority checks.
 
