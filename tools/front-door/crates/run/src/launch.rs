@@ -282,6 +282,18 @@ impl RunStore {
     }
 }
 pub trait Providers {
+    /// Host policy can reject a result and request a bounded successor. The
+    /// store preserves authority and refuses writer route fallback.
+    fn assess_result(
+        &self,
+        _task: &TaskRequest,
+        _record: &AttemptRecord,
+        _decoded: &Decoded,
+        _context: Option<&crate::HolderContext>,
+        _policy_attempt: u64,
+    ) -> std::result::Result<crate::ResultAssessment, String> {
+        Ok(crate::ResultAssessment::default())
+    }
     /// Host-selected minimum nice value for this lane.
     fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
         Ok(if task.writer.is_some() { 10 } else { 5 })
@@ -914,8 +926,48 @@ impl RunStore {
                 .enumerate()
                 .find(|(_, task)| task.task_id == record.task_id)
                 .ok_or(RunError::Validation("attempt task missing from request"))?;
-            let effective_task =
+            let mut effective_task =
                 self.effective_launch_task(&request, task, child.map(|(validated, _)| validated));
+            let policy_retry = matches!(
+                record.continuation.as_deref(),
+                Some("policy_continuation" | "policy_fallback")
+            );
+            if policy_retry {
+                if self.sealed_requester.is_some()
+                    || request.parent_attempt.is_some()
+                    || self.context.state_root.as_path() != self.writer_registry()
+                {
+                    return Err(RunError::Validation(
+                        "policy retry requires a host-owned store",
+                    ));
+                }
+                effective_task.route = record.requested_route.clone();
+                effective_task.fallback.clear();
+                // An account pin belongs to its original provider. A fallback
+                // resolves a fresh account for the replacement provider.
+                if record.continuation.as_deref() == Some("policy_fallback") {
+                    let original_provider = record
+                        .retry_of
+                        .map(|prior| self.record(prior, call))
+                        .transpose()?
+                        .and_then(|prior| prior.applied_route.and_then(|route| route.provider));
+                    let replacement_provider = match &record.requested_route {
+                        RequestedRoute::Model { provider, .. } => Some(provider.as_str()),
+                        _ => None,
+                    };
+                    if original_provider.as_deref() != replacement_provider {
+                        effective_task.account = None;
+                    }
+                }
+            }
+            let policy_resume = if record.continuation.as_deref() == Some("policy_continuation") {
+                record
+                    .retry_of
+                    .map(|prior| self.record(prior, call))
+                    .transpose()?
+            } else {
+                None
+            };
             let task = &effective_task;
             let task_index = u64::try_from(task_index)
                 .map_err(|_| RunError::Validation("attempt task index"))?;
@@ -993,7 +1045,16 @@ impl RunStore {
                 })
                 .and_then(|priority| {
                     providers
-                        .prepare(task, &prompt, &paths, resume.as_ref())
+                        .prepare(
+                            task,
+                            &prompt,
+                            &paths,
+                            policy_resume.as_ref().or(if policy_retry {
+                                None
+                            } else {
+                                resume.as_ref()
+                            }),
+                        )
                         .map(|plan| (plan, priority))
                         .map_err(|reason| (RefusalKind::Preparation, reason))
                 });

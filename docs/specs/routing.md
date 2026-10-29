@@ -21,7 +21,7 @@ A request names exactly one `--model ADAPTER/ID` or `--route NAME`. No
 adapter, upgrade, effort default or downgrade is inferred, and an unknown
 explicit ID runs only if availability, disclosure and confinement are
 independently established. A pool draws among ready members, weighted by
-the provider's pacing factor (0.25 to 2.0) and seeded from the operation ID
+the provider's pacing factor (0.25 to 2.0), optional cache preference and seeded from the operation ID
 and task index; the receipt records each weight, the random roll and the chosen member.
 - Why: retries pick the same model without stored state, and the receipt
   names what ran.
@@ -48,13 +48,25 @@ setting `domains.routing.capacity_cooldown_seconds` defaults to 600 seconds; zer
 Resolution runs once against immutable catalogue, availability and quota
 snapshots and returns one route with at most two ordered alternatives, each
 passing the same checks; Run never rebuilds candidates. Fallback is
-read-only and opt-in. Unsupported effort fails; where clamping is permitted, the requested,
+read-only and explicit, except for configurable result-policy fallback on
+restricted routes. Unsupported effort fails; where clamping is permitted, the requested,
 applied and observed values are recorded. `route list` and `resolve` start no
 process and mutate nothing.
 - Why: the fallback plan is decided once and visible.
 - Test: `crates/routing/src/tests.rs::alternatives_are_bounded_distinct_and_keep_the_callers_order`;
   `tests/route.rs::help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates`
 - Owner: `crates/routing/src/`
+
+### Model policy
+
+Model/account policy, UTC schedules and expiring overrides are documented in
+[model policy](../runbooks/model-policy.md). Dispatch supplies actual write
+intent, applies guidance and the Claude window, and checks restricted results
+before success. Run retains bounded host-owned retries as separate attempts in
+the same run. Telemetry reporting reads existing categories without changing
+capture. Tests live in `crates/routing/src/policy.rs::tests`,
+`crates/run/src/policy.rs::tests` and
+`tests/dispatch_provider.rs::policy_empty_result_falls_back_without_a_chair_turn`.
 
 ### Go monthly allowance floor
 

@@ -91,6 +91,94 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("supported efforts: none"));
     Ok(())
 }
+
+#[test]
+fn valid_pairs_and_policy_preview_are_pure() -> Result {
+    let rig = rig()?.without_state()?;
+    let listed = call(&rig, &["route", "list", "--valid", "--adapter", "codex"], 0)?;
+    let pairs = listed["data"]["valid_pairs"]
+        .as_array()
+        .ok_or("valid pairs")?;
+    assert!(!pairs.is_empty());
+    assert!(
+        listed["data"]["models"]
+            .as_array()
+            .ok_or("models")?
+            .is_empty()
+    );
+    for pair in pairs {
+        let model = pair["model"].as_str().ok_or("model")?;
+        let mut args = vec!["route", "resolve", model];
+        if let Some(effort) = pair["effort"].as_str() {
+            args.extend(["--effort", effort]);
+        }
+        assert_eq!(call(&rig, &args, 0)?["data"]["eligibility"], "eligible");
+    }
+    let claude = call(&rig, &["route", "resolve", "claude/claude-opus-5-5"], 0)?;
+    assert_eq!(
+        claude["data"]["model_policy"]["compaction"]["window"],
+        275000
+    );
+    assert_eq!(
+        claude["data"]["model_policy"]["compaction"]["mode"],
+        "task_boundary"
+    );
+    assert!(
+        claude["data"]["compaction_break_even_turns"]
+            .as_f64()
+            .is_some()
+    );
+    let restricted = call(
+        &rig,
+        &["route", "resolve", "agy/gemini-3.8-flash", "--writes"],
+        2,
+    )?;
+    assert!(
+        restricted["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("read-only"))
+    );
+    assert!(!rig.state.exists());
+    Ok(())
+}
+
+#[test]
+fn account_override_is_applied_before_preview_write_admission() -> Result {
+    let rig = rig()?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\naccount='agy/work'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=false\n",
+    )?;
+    let preview = call(
+        &rig,
+        &[
+            "route",
+            "resolve",
+            "agy/gemini-3.8-flash",
+            "--account",
+            "agy/work",
+            "--writes",
+        ],
+        0,
+    )?;
+    assert_eq!(preview["data"]["model_policy"]["lane"]["read_only"], false);
+    // A preview hint never supplies observed account identity or readiness.
+    assert!(preview["data"]["account_key"].is_null());
+    assert_eq!(preview["data"]["readiness"]["status"], "unavailable");
+    call(
+        &rig,
+        &[
+            "route",
+            "resolve",
+            "agy/gemini-3.8-flash",
+            "--account",
+            "agy/other",
+            "--writes",
+        ],
+        2,
+    )?;
+    Ok(())
+}
 #[test]
 fn pacing_override_persists_replaces_and_clears() -> Result {
     let rig = rig()?;

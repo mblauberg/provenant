@@ -29,6 +29,12 @@
     }
   },
   "knobs": {
+    "routing.workload": {
+      "type": "enum", "values": ["general", "read_heavy", "edit_heavy", "review"], "default": "general", "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run.rs",
+      "effect": "Describe the task for model policy. Read-heavy and review work give cheap-cache, million-token models a configurable preference in pools.",
+      "trade_off": "A preference preserves model choice and readiness gates; it does not force every read-heavy task onto one model."
+    },
     "domains.routing.capacity_cooldown_seconds": {
       "type": "int", "min": 0, "default": 600, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs",

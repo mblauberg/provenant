@@ -11,6 +11,14 @@ and pacing policy; pacing and readiness apply at dispatch. Use
 `provenant route resolve NAME` also accepts a route name or an unambiguous
 model name. Unknown or ambiguous names report suggestions and examples.
 
+`provenant route list --valid` lists catalogued model/effort pairs accepted by
+resolution and the configured Go allowance floor. It includes an unspecified
+effort row where accepted. Combine it with `--adapter` or `--pool`. It does not
+probe executables, credentials, quota or live availability.
+
+See [model policy](model-policy.md) for compaction, cache economics, account
+overrides, read-heavy selection, result checks and cache-read share targets.
+
 The resolver draws among ready positive-weight members using weight multiplied
 by the effective pacing factor. `pace` uses the selected account's latest fresh
 quota snapshot and takes the lowest factor across windows with a future reset.
