@@ -138,14 +138,10 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             .map(provenant_cli::terse)
             .unwrap_or_default()
     };
-    let human = if globals.full {
-        human
-    } else {
-        provenant_cli::compact_text("console", &human)
-    };
     render(
         &result,
         globals.json,
+        globals.full,
         &human,
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
@@ -265,14 +261,20 @@ where
 fn render(
     result: &CommandResult<Option<serde_json::Value>>,
     json: bool,
+    full: bool,
     human: &str,
     stdout: &mut impl io::Write,
     stderr: &mut impl io::Write,
 ) -> u8 {
     let mode = if json {
         RenderMode::Json
-    } else {
+    } else if full {
         RenderMode::Human {
+            text: human,
+            read_only: true,
+        }
+    } else {
+        RenderMode::Compact {
             text: human,
             read_only: true,
         }
@@ -378,7 +380,7 @@ mod tests {
         );
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         assert_eq!(
-            super::render(&result, true, "", &mut stdout, &mut stderr),
+            super::render(&result, true, true, "", &mut stdout, &mut stderr),
             3
         );
         let failure: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
@@ -402,7 +404,7 @@ mod tests {
         );
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         assert_eq!(
-            super::render(&result, false, &human, &mut stdout, &mut stderr),
+            super::render(&result, false, true, &human, &mut stdout, &mut stderr),
             3
         );
         assert!(stdout.is_empty());

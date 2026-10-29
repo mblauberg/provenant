@@ -263,7 +263,7 @@ fn land_wait_is_bounded_and_requires_the_exact_head() -> Result {
     no_merge(&rig)
 }
 
-fn land_wait_handles_pending_exit_eight_then_passes() -> Result {
+fn land_wait_handles_pending_checks_then_passes() -> Result {
     let rig = self::rig()?;
     fs::write(rig.project.join("ruleset-only"), "")?;
     fs::write(
@@ -353,6 +353,32 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             if Path::new("required.json").exists() { io::stdout().write_all(&fs::read("required.json")?)?; }
             else { io::stdout().write_all(b"[[]]")?; }
         }
+        value if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
+            && value.ends_with("/statuses?per_page=100") => {
+            assert!(value.contains(HEAD));
+            io::stdout().write_all(b"[[]]")?;
+        }
+        value if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
+            && value.ends_with("/check-runs?per_page=100&filter=latest") => {
+            assert!(value.contains(HEAD));
+            if Path::new("checks-fail").exists() { return Ok(1); }
+            let raw = fs::read("checks.json")?;
+            let Ok(checks) = serde_json::from_slice::<Vec<serde_json::Value>>(&raw) else {
+                io::stdout().write_all(&raw)?;
+                return Ok(0);
+            };
+            let runs: Vec<_> = checks.iter().enumerate().map(|(index, check)| {
+                let (status, conclusion) = match check["bucket"].as_str().unwrap_or_default() {
+                    "pass" => ("completed", "success"), "skipping" => ("completed", "skipped"),
+                    "pending" => ("in_progress", ""), "fail" => ("completed", "failure"),
+                    "cancel" => ("completed", "cancelled"), _ => ("unknown", ""),
+                };
+                let name = check["name"].as_str().map(str::to_owned).unwrap_or_else(|| format!("check-{index}"));
+                serde_json::json!({"name":name,"head_sha":HEAD,"status":status,"conclusion":conclusion})
+            }).collect();
+            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([{"check_runs":runs}]))?)?;
+            if Path::new("checks-next.json").exists() { fs::rename("checks-next.json", "checks.json")?; }
+        }
         "pr checks 1668 --json bucket" | "pr checks 1668 --json name,bucket" => {
             if Path::new("checks-fail").exists() {
                 return Ok(8);
@@ -423,8 +449,8 @@ fn main() -> ExitCode {
                 land_wait_is_bounded_and_requires_the_exact_head,
             ),
             (
-                "land_wait_handles_pending_exit_eight_then_passes",
-                land_wait_handles_pending_exit_eight_then_passes,
+                "land_wait_handles_pending_checks_then_passes",
+                land_wait_handles_pending_checks_then_passes,
             ),
             (
                 "pr_status_waits_for_change_and_preserves_partial_results",

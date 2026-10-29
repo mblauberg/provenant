@@ -239,6 +239,13 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let warning = String::from_utf8(opened.stderr.bytes)?;
     assert!(warning.contains("warning:"));
     assert!(warning.contains("provenant pr contributions 1668 --bind"));
+    let closed_view = fs::read(landing.rig.project.join("view.json"))?;
+    let mut open_view: serde_json::Value = serde_json::from_slice(&closed_view)?;
+    open_view["state"] = serde_json::json!("OPEN");
+    fs::write(
+        landing.rig.project.join("view.json"),
+        serde_json::to_vec(&open_view)?,
+    )?;
     fs::write(landing.rig.project.join("checks-fail"), "")?;
     let unbound_land = command(&landing.rig, &["land", NUMBER, "--json"])?;
     assert_ne!(code(&unbound_land), 0);
@@ -246,6 +253,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         String::from_utf8_lossy(&unbound_land.stderr.bytes)
             .contains("no open contribution binding")
     );
+    fs::write(landing.rig.project.join("view.json"), closed_view)?;
     fs::remove_file(landing.rig.project.join("checks-fail"))?;
     db.execute_batch("DROP TRIGGER reject_binding;")?;
     let retry = || -> Result {
@@ -279,9 +287,17 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     // A failed bind/head refresh cannot prevent recording an observed closure,
     // even when CI is unavailable after the merge.
     fs::write(landing.rig.project.join("checks-fail"), "")?;
+    let retained = landing.worktree.join("cleanup-pending.txt");
+    fs::write(&retained, "uncommitted work must survive\n")?;
+    let before = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
     let refused = command(&landing.rig, &["land", NUMBER, "--json"])?;
     assert_eq!(code(&refused), 0);
     assert_eq!(json(&refused)?["data"]["merged"], true);
+    assert_eq!(json(&refused)?["data"]["cleanup_pending"], true);
+    assert!(retained.exists());
+    let after = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
+    assert!(!after[before.len()..].contains("pr merge"));
+    assert!(!after[before.len()..].contains("/commits/"));
     assert_eq!(
         db.query_row(
             "SELECT min(closed) FROM branch_prs WHERE number=1668",
@@ -290,6 +306,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         )?,
         1
     );
+    fs::remove_file(retained)?;
     fs::remove_file(landing.rig.project.join("checks-fail"))?;
     let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
     assert_eq!(
@@ -742,6 +759,25 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         }
         "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" => {
             io::stdout().write_all(b"[[]]")?;
+        }
+        value
+            if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
+                && value.ends_with("/statuses?per_page=100") =>
+        {
+            io::stdout().write_all(b"[[]]")?;
+        }
+        value
+            if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
+                && value.ends_with("/check-runs?per_page=100&filter=latest") =>
+        {
+            if dir.join("checks-fail").exists() {
+                return Ok(1);
+            }
+            let head: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
+            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([{"check_runs":[{
+                "name":"build","head_sha":head["headRefOid"],"status":"completed","conclusion":"success"
+            }]}]))?)?;
         }
         "pr checks 1668 --json bucket" | "pr checks 1668 --json name,bucket" => {
             if dir.join("checks-fail").exists() {

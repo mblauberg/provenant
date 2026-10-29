@@ -790,6 +790,7 @@ pub(crate) fn run(
             "merged": merged,
             "reason": if cleanup_pending { "cleanup_pending" } else if merged { "landed" } else if result.is_ok() { "merge_pending" } else { failure_code },
             "cleanup_pending": cleanup_pending,
+            "cleanup_error": if merged { result.as_ref().err().map(ToString::to_string) } else { None },
             "cleanup_refused": refused,
             "state": state,
             "steps": steps,

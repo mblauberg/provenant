@@ -1246,6 +1246,7 @@ fn collect_tail(
     mut read: impl FnMut(u64) -> Result<OutputResult, Fail>,
 ) -> Result<OutputResult, Fail> {
     let mut retained = Vec::new();
+    let mut retained_events = Vec::new();
     let mut expected_digest = None;
     for _ in 0..1024 {
         let OutputResult::Chunk {
@@ -1273,9 +1274,23 @@ fn collect_tail(
                 provenant_fabric_runtime::handoff::decode_base64(text).ok_or_else(corrupt)?
             }
         };
-        retained.extend_from_slice(&raw);
-        let excess = retained.len().saturating_sub(max_bytes as usize);
-        retained.drain(..excess);
+        if matches!(part, OutputPart::Events) {
+            let page: Vec<Value> = serde_json::from_slice(&raw).map_err(|_| corrupt())?;
+            retained_events.extend(page);
+            let excess = retained_events
+                .len()
+                .saturating_sub(lines.min(super::TAIL_MAX) as usize);
+            retained_events.drain(..excess);
+            retained = serde_json::to_vec(&retained_events).map_err(io_fail)?;
+            while retained.len() as u64 > max_bytes && !retained_events.is_empty() {
+                retained_events.remove(0);
+                retained = serde_json::to_vec(&retained_events).map_err(io_fail)?;
+            }
+        } else {
+            retained.extend_from_slice(&raw);
+            let excess = retained.len().saturating_sub(max_bytes as usize);
+            retained.drain(..excess);
+        }
         if *eof {
             let start = super::tail_start(&retained, lines.min(super::TAIL_MAX));
             retained.drain(..start);
@@ -1600,6 +1615,41 @@ mod tests {
                 2
             )))
             .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn peer_event_tail_preserves_whole_records_across_pages() -> Result {
+        let target = AttemptTarget {
+            attempt: AttemptId::from_bytes([1; 16]),
+            host: None,
+        };
+        let chunk = |sequence, eof| OutputResult::Chunk {
+            target: target.clone(),
+            part: OutputPart::Events,
+            state: "succeeded".into(),
+            reason: None,
+            offset: sequence - 1,
+            next_offset: sequence,
+            eof,
+            digest: provenant_core::Digest::from_bytes([sequence as u8; 32]),
+            bytes: OutputBytes::Utf8(json!([{"sequence":sequence}]).to_string()),
+        };
+        let last = collect_tail(chunk(1, false), 1, 1024, |offset| {
+            assert_eq!(offset, 1);
+            Ok(chunk(2, true))
+        })
+        .map_err(|fail| fail.message)?;
+        let (_, text) = chunk_response(
+            target.attempt,
+            HostId::from_bytes([2; 16]),
+            &Part::Events,
+            last,
+        )
+        .map_err(|fail| fail.message)?;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text)?,
+            json!([{"sequence":2}])
         );
         Ok(())
     }

@@ -118,7 +118,14 @@ fn observe_ci_with(
 // Both classic protection and rulesets may apply. Only trust the resolved
 // policy when both sources are readable.
 pub(super) fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
-    required_policy(project, target, None).filter(|names| !names.is_empty())
+    required_policy(project, target, None)
+        .map(|policy| policy.checks)
+        .filter(|names| !names.is_empty())
+}
+
+pub(super) struct Policy {
+    pub repository: String,
+    pub checks: Vec<String>,
 }
 
 // A known empty policy is distinct from an unavailable policy. Landing still
@@ -128,7 +135,7 @@ pub(super) fn required_policy(
     project: &Path,
     target: &str,
     deadline: Option<std::time::Instant>,
-) -> Option<Vec<String>> {
+) -> Option<Policy> {
     let read = |argv: &[&str]| {
         let timeout = deadline.map_or(std::time::Duration::from_secs(60), |end| {
             end.saturating_duration_since(std::time::Instant::now())
@@ -209,7 +216,10 @@ pub(super) fn required_policy(
         true,
     )?)
     .ok()?;
-    parse_required_checks(protection.as_ref(), &pages)
+    Some(Policy {
+        repository: repo,
+        checks: parse_required_checks(protection.as_ref(), &pages)?,
+    })
 }
 
 // A ruleset can mark a branch protected without classic branch protection.
@@ -325,9 +335,9 @@ fn open_numbers(project: &Path) -> Result<Vec<u64>> {
     listed.sort_by_key(|entry| entry.number);
     Ok(listed.into_iter().map(|entry| entry.number).collect())
 }
-fn line(project: &Path, number: u64) -> Result<Line> {
+fn line(project: &Path, number: u64, timeout: std::time::Duration) -> Result<Line> {
     let text = number.to_string();
-    let bytes = successful(execute(
+    let bytes = successful(super::execute_for(
         project,
         &[
             "gh",
@@ -337,6 +347,7 @@ fn line(project: &Path, number: u64) -> Result<Line> {
             "--json",
             "state,headRefOid,mergeStateStatus,reviewDecision,isDraft,statusCheckRollup",
         ],
+        timeout,
         false,
     )?)?;
     let view: View = serde_json::from_slice(&bytes)?;
@@ -428,11 +439,21 @@ fn rollup_checks(values: &[serde_json::Value]) -> Option<Vec<Check>> {
         .collect()
 }
 
-fn snapshot(project: &Path, numbers: &[u64]) -> Vec<Line> {
+#[allow(clippy::disallowed_methods)]
+fn snapshot(project: &Path, numbers: &[u64], deadline: Option<std::time::Instant>) -> Vec<Line> {
     numbers
         .iter()
         .map(|&number| {
-            line(project, number).unwrap_or_else(|error| Line {
+            let timeout = deadline.map_or(std::time::Duration::from_secs(60), |end| {
+                end.saturating_duration_since(std::time::Instant::now())
+                    .min(std::time::Duration::from_secs(60))
+            });
+            let observed = if timeout.is_zero() {
+                Err("status wait expired".into())
+            } else {
+                line(project, number, timeout)
+            };
+            observed.unwrap_or_else(|error| Line {
                 number,
                 state: "UNAVAILABLE".into(),
                 head: "unknown".into(),
@@ -460,14 +481,18 @@ pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8
         } else {
             numbers
         };
-        let initial = snapshot(&project, &numbers);
-        let Some(seconds) = wait else {
+        let deadline =
+            wait.map(|seconds| std::time::Instant::now() + std::time::Duration::from_secs(seconds));
+        let initial = snapshot(&project, &numbers, deadline);
+        let Some(deadline) = deadline else {
             return Ok((initial, false));
         };
+        if std::time::Instant::now() >= deadline {
+            return Ok((initial, true));
+        }
         if initial.is_empty() || initial.iter().all(|line| line.error.is_some()) {
             return Ok((initial, false));
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
@@ -477,7 +502,10 @@ pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8
             if std::time::Instant::now() >= deadline {
                 return Ok((initial, true));
             }
-            let current = snapshot(&project, &numbers);
+            let current = snapshot(&project, &numbers, Some(deadline));
+            if std::time::Instant::now() >= deadline {
+                return Ok((initial, true));
+            }
             if current != initial {
                 return Ok((current, false));
             }

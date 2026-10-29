@@ -49,14 +49,10 @@ pub fn run(globals: &Globals) -> u8 {
             }
         }
     };
-    let human = if globals.full {
-        human
-    } else {
-        provenant_cli::compact_text("disk report", &human)
-    };
     render(
         &result,
         globals.json,
+        globals.full,
         &human,
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
@@ -68,14 +64,20 @@ pub fn run(globals: &Globals) -> u8 {
 fn render(
     result: &CommandResult<Option<DiskReport>>,
     json: bool,
+    full: bool,
     human: &str,
     stdout: &mut impl io::Write,
     stderr: &mut impl io::Write,
 ) -> u8 {
     let mode = if json {
         RenderMode::Json
-    } else {
+    } else if full {
         RenderMode::Human {
+            text: human,
+            read_only: true,
+        }
+    } else {
+        RenderMode::Compact {
             text: human,
             read_only: true,
         }
@@ -416,7 +418,10 @@ mod tests {
         );
         let envelope = CommandResult::new("disk report", Outcome::Ok, Some(report));
         let mut output = Vec::new();
-        assert_eq!(render(&envelope, true, "", &mut output, &mut Vec::new()), 0);
+        assert_eq!(
+            render(&envelope, true, true, "", &mut output, &mut Vec::new()),
+            0
+        );
         let json: serde_json::Value = serde_json::from_slice(&output)?;
         assert_eq!(json["command"], "disk report");
         assert_eq!(json["data"]["schema_version"], 1);
@@ -564,7 +569,10 @@ mod tests {
         for json in [true, false] {
             let mut output = Vec::new();
             let mut errors = Vec::new();
-            assert_eq!(render(&result, json, &human, &mut output, &mut errors), 0);
+            assert_eq!(
+                render(&result, json, true, &human, &mut output, &mut errors),
+                0
+            );
             assert!(errors.is_empty());
             assert!(!output.is_empty());
             assert!(output.len() < RUNS as usize * 16, "{} bytes", output.len());
@@ -578,7 +586,10 @@ mod tests {
         report.error("/fixture", "x".repeat(provenant_cli::MAX_RESULT_BYTES));
         let result = CommandResult::new("disk report", Outcome::Ok, Some(report));
         let mut output = Vec::new();
-        assert_eq!(render(&result, true, "", &mut output, &mut Vec::new()), 3);
+        assert_eq!(
+            render(&result, true, true, "", &mut output, &mut Vec::new()),
+            3
+        );
         let value: serde_json::Value = serde_json::from_slice(&output)?;
         assert_eq!(value["command"], "disk report");
         assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");

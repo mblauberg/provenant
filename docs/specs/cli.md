@@ -482,7 +482,8 @@ incomplete evidence.
 
 `land NUMBER` checks CI once; `--wait` waits up to one hour and
 `--wait=30m` selects a bounded limit up to four hours. Landing verifies
-required-check registration, checks the exact head around each sample and
+required-check registration using check runs and legacy statuses addressed by
+the pinned commit SHA, checks the exact head around each sample and
 uses a matching-head merge guard. Progress is capped at eight stderr lines.
 `pr status` reads head and checks from one snapshot per PR; `--wait` blocks
 until that snapshot changes and exits 124 if unchanged at the limit. A failed

@@ -3910,9 +3910,17 @@ pub fn attempt_facts(
 
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
     let summary = command.summary;
+    let receipt_tail = matches!(command.part, Part::Receipt)
+        .then_some(command.tail)
+        .flatten();
     reply(
         "output",
-        output_inner(command, edge).map(|(data, text)| {
+        output_inner(command, edge).map(|(mut data, mut text)| {
+            if let Some(lines) = receipt_tail {
+                text = text[tail_start(text.as_bytes(), lines.min(TAIL_MAX))..].to_owned();
+                data["tail"] = json!(lines.min(TAIL_MAX));
+                data["tail_text"] = json!(text);
+            }
             if summary {
                 summarise_output(data, &text)
             } else {
@@ -3933,9 +3941,13 @@ pub fn summarise_output(mut data: Value, text: &str) -> (Value, String) {
     let paragraph = paragraph.trim();
     let paragraph = if paragraph.len() > 768 {
         let mut start = paragraph.len() - 765;
-        while !paragraph.is_char_boundary(start) { start += 1; }
+        while !paragraph.is_char_boundary(start) {
+            start += 1;
+        }
         format!("...{}", &paragraph[start..])
-    } else { paragraph.to_owned() };
+    } else {
+        paragraph.to_owned()
+    };
     let state = crate::bounded_text(data["state"].as_str().unwrap_or("unknown"), 64);
     let reason = crate::bounded_text(data["reason"].as_str().unwrap_or("none"), 128);
     let files: Option<Vec<_>> = data["changed_files"].as_array().map(|files| {
@@ -3950,13 +3962,21 @@ pub fn summarise_output(mut data: Value, text: &str) -> (Value, String) {
         .as_ref()
         .map(|files| files.join(", "))
         .unwrap_or_else(|| "unavailable".into());
-    let mut human = format!("settlement: {state} ({reason})\nchanged files: {changed}\n{paragraph}\n");
-    let target = data["attempt_id"].as_str().and_then(|id| id.parse::<AttemptId>().ok()).map(|id| {
-        data["host"].as_str().and_then(|host| host.parse::<provenant_core::HostId>().ok())
-            .map_or_else(|| id.to_string(), |host| format!("{host}/{id}"))
-    });
-    human.push_str(&target.map_or_else(|| "next: provenant help output\n".into(), |target|
-        format!("next: provenant output {target} --full\n")));
+    let mut human =
+        format!("settlement: {state} ({reason})\nchanged files: {changed}\n{paragraph}\n");
+    let target = data["attempt_id"]
+        .as_str()
+        .and_then(|id| id.parse::<AttemptId>().ok())
+        .map(|id| {
+            data["host"]
+                .as_str()
+                .and_then(|host| host.parse::<provenant_core::HostId>().ok())
+                .map_or_else(|| id.to_string(), |host| format!("{host}/{id}"))
+        });
+    human.push_str(&target.map_or_else(
+        || "next: provenant help output\n".into(),
+        |target| format!("next: provenant output {target} --full\n"),
+    ));
     data["summary"] = json!({"settlement": state, "reason": reason, "changed_files": files, "final_paragraph": paragraph});
     data.as_object_mut().map(|map| map.remove("bytes"));
     (data, human)
@@ -4100,7 +4120,7 @@ const TAIL_MAX: u64 = 500;
 fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
     if command.summary {
         command.tail = Some(500);
-        command.max_bytes = 8192;
+        command.max_bytes = command.max_bytes.min(8192);
     }
     let site = match command.host.as_deref() {
         Some(host) => Some(remote::site(edge, host)?),
@@ -4221,9 +4241,41 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         Part::Transcript => run::ArtifactPart::Transcript,
         Part::Events => {
             // An attempt has a handful of revisions; offset is an event cursor.
-            let events = session
+            let mut events = session
                 .service()
                 .events(command.offset, 64, Some(id), &call)?;
+            if let Some(lines) = command.tail {
+                let mut cursor = events.last().map_or(command.offset, |event| event.sequence);
+                let mut more = events.len() == 64;
+                while more {
+                    let page = session.service().events(cursor, 64, Some(id), &call)?;
+                    more = page.len() == 64;
+                    let next = page.last().map_or(cursor, |event| event.sequence);
+                    if more && next <= cursor {
+                        return Err(Fail::new(
+                            Status::Error,
+                            ErrorKind::StateCorrupt,
+                            "event cursor did not advance",
+                        ));
+                    }
+                    cursor = next;
+                    events.extend(page);
+                    let excess = events.len().saturating_sub(lines.min(TAIL_MAX) as usize);
+                    events.drain(..excess);
+                }
+                let excess = events.len().saturating_sub(lines.min(TAIL_MAX) as usize);
+                events.drain(..excess);
+                while !events.is_empty()
+                    && serde_json::to_vec(&events)
+                        .map_err(|error| {
+                            Fail::new(Status::Error, ErrorKind::Io, error.to_string())
+                        })?
+                        .len() as u64
+                        > command.max_bytes
+                {
+                    events.remove(0);
+                }
+            }
             let human = events
                 .iter()
                 .map(|e| format!("{} {}\n", e.revision, state_name(&e.change)))

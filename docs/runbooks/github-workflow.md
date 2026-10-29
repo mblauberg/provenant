@@ -293,8 +293,9 @@ row and preserves other PRs' results. Human output is bounded to 2 KiB;
 `provenant land 148 --wait` waits up to one hour for CI, merges at the verified
 PR head, then runs the local follow-up below. `--wait=30m` changes the limit,
 up to four hours; omit `--wait` for one check. `--head <reviewed-sha>` pins
-the reviewed head. Waiting verifies required check names have registered and
-checks the head before and after each sample. Failed checks or head movement
+the reviewed head. Waiting reads check runs and legacy statuses by the pinned commit SHA,
+verifies required check names have registered and checks the head before and
+after each sample. Failed checks or head movement
 stop the wait. Progress uses at most eight stderr lines; JSON stdout remains
 one machine envelope. CI timeout exits 124 without attempting a merge.
 

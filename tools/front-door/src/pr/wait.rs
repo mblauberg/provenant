@@ -69,6 +69,87 @@ fn state(checks: &[Check], required: &[String]) -> State {
     State::Passed
 }
 
+/// Both check runs and legacy status contexts are addressed by immutable SHA.
+/// GitHub lists statuses newest first; older states of a context cannot veto a
+/// successful retry. Pagination is needed even when required checks arrive late.
+fn commit_checks(
+    repository: &str,
+    head: GitOid,
+    read: &impl Fn(&[&str]) -> Result<provenant_os::exec::ExecOutcome>,
+) -> Result<Vec<Check>> {
+    let load = |suffix: &str| -> Result<serde_json::Value> {
+        let endpoint = format!("{repository}/commits/{head}/{suffix}");
+        let output = read(&["gh", "api", "--paginate", "--slurp", &endpoint])?;
+        if output.termination != Termination::Exit(0) {
+            return Err(failure(
+                "CI_UNAVAILABLE",
+                "cannot read CI for the pinned commit",
+            ));
+        }
+        serde_json::from_slice(&output.stdout.bytes)
+            .map_err(|_| failure("CI_UNAVAILABLE", "CI did not return valid JSON"))
+    };
+    let runs = load("check-runs?per_page=100&filter=latest")?;
+    let statuses = load("statuses?per_page=100")?;
+    parse_commit_checks(&runs, &statuses, head).ok_or_else(|| {
+        failure(
+            "CI_UNAVAILABLE",
+            "CI evidence is incomplete or belongs to another head",
+        )
+    })
+}
+fn parse_commit_checks(
+    runs: &serde_json::Value,
+    statuses: &serde_json::Value,
+    head: GitOid,
+) -> Option<Vec<Check>> {
+    let mut checks = Vec::new();
+    for page in runs.as_array()? {
+        for check in page.get("check_runs")?.as_array()? {
+            if check.get("head_sha")?.as_str()? != head.to_string() {
+                return None;
+            }
+            let bucket = match check.get("status")?.as_str()? {
+                "completed" => match check.get("conclusion")?.as_str()? {
+                    "success" => "pass",
+                    "neutral" | "skipped" => "skipping",
+                    "cancelled" => "cancel",
+                    "failure" | "timed_out" | "action_required" | "startup_failure" | "stale" => {
+                        "fail"
+                    }
+                    _ => return None,
+                },
+                "queued" | "in_progress" | "pending" | "waiting" | "requested" => "pending",
+                _ => return None,
+            };
+            checks.push(Check {
+                name: check.get("name")?.as_str()?.into(),
+                bucket: bucket.into(),
+            });
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for page in statuses.as_array()? {
+        for check in page.as_array()? {
+            let name = check.get("context")?.as_str()?;
+            if !seen.insert(name) {
+                continue;
+            }
+            let bucket = match check.get("state")?.as_str()? {
+                "success" => "pass",
+                "pending" | "expected" => "pending",
+                "failure" | "error" => "fail",
+                _ => return None,
+            };
+            checks.push(Check {
+                name: name.into(),
+                bucket: bucket.into(),
+            });
+        }
+    }
+    Some(checks)
+}
+
 // This CLI edge owns the real wait deadline and polling interval.
 #[allow(clippy::disallowed_methods)]
 pub(super) fn checks(
@@ -80,7 +161,7 @@ pub(super) fn checks(
 ) -> Result<()> {
     let target = number.to_string();
     let deadline = Instant::now() + Duration::from_secs(wait.unwrap_or(60));
-    let required =
+    let policy =
         super::status::required_policy(project, &target, Some(deadline)).ok_or_else(|| {
             if Instant::now() >= deadline {
                 failure(
@@ -139,14 +220,11 @@ pub(super) fn checks(
     let mut progress = 0;
     loop {
         check_head()?;
-        let output = read(&["gh", "pr", "checks", &target, "--json", "name,bucket"])?;
-        if !matches!(output.termination, Termination::Exit(0 | 1 | 8)) {
-            return Err(failure("CI_UNAVAILABLE", "cannot read CI checks"));
-        }
-        let checks: Vec<Check> = serde_json::from_slice(&output.stdout.bytes)
-            .map_err(|_| failure("CI_UNAVAILABLE", "CI checks did not return valid JSON"))?;
+        // Read the pinned commit, not whichever head the PR has while gh runs.
+        // Before/after head reads alone cannot protect against an A-B-A update.
+        let checks = commit_checks(&policy.repository, expected, &read)?;
         check_head()?;
-        match state(&checks, &required) {
+        match state(&checks, &policy.checks) {
             State::Passed => return Ok(()),
             State::Failed => return Err(failure("CI_FAILED", "required CI checks failed")),
             State::Unavailable => {
@@ -191,6 +269,24 @@ pub(super) fn checks(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn commit_ci_rejects_wrong_heads_and_keeps_latest_legacy_status() {
+        use super::*;
+        use serde_json::json;
+        let head = GitOid::parse(&"1".repeat(40)).expect("head");
+        let mut runs = json!([{"check_runs":[{"name":"build","head_sha":head,"status":"in_progress","conclusion":"success"}]}]);
+        let statuses = json!([[{"context":"external","state":"success"},{"context":"external","state":"failure"}]]);
+        let checks = parse_commit_checks(&runs, &statuses, head).expect("valid evidence");
+        assert_eq!(
+            checks
+                .iter()
+                .map(|check| check.bucket.as_str())
+                .collect::<Vec<_>>(),
+            ["pending", "pass"]
+        );
+        runs[0]["check_runs"][0]["head_sha"] = json!("2".repeat(40));
+        assert!(parse_commit_checks(&runs, &statuses, head).is_none());
+    }
     #[test]
     fn ci_requires_registration_and_rejects_failed_unknown_or_pending_checks() {
         use super::*;

@@ -42,12 +42,15 @@ pub fn compact_text(command: &str, text: &str) -> String {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
-    let next = lines.iter().rev().find_map(|line| {
-        line.trim()
-            .strip_prefix("next: ")
-            .or_else(|| line.trim().strip_prefix("keep waiting: "))
-            .filter(|next| next.len() <= 384)
-    });
+    let next = ["next: ", "keep waiting: ", "more: "]
+        .into_iter()
+        .find_map(|prefix| {
+            lines.iter().rev().find_map(|line| {
+                line.trim()
+                    .strip_prefix(prefix)
+                    .filter(|next| next.len() <= 384)
+            })
+        });
     let mut out = String::new();
     let row_bytes = if text.len() <= 1536 { 1536 } else { 200 };
     for line in lines.iter().take(6) {
@@ -298,6 +301,19 @@ pub fn terse(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compact_run_preserves_the_wait_command_after_omitted_rows() {
+        let text = format!(
+            "{}keep waiting: provenant lanes --id 11111111 --wait 4m\nmore: provenant output 11111111\n",
+            "detail\n".repeat(100)
+        );
+        let compact = compact_text("run", &text);
+        assert!(
+            compact.ends_with("next: provenant lanes --id 11111111 --wait 4m\n"),
+            "{compact}"
+        );
+        assert!(compact.len() <= 2048);
+    }
     #[test]
     fn compact_results_are_bounded_and_always_give_a_next_command()
     -> Result<(), Box<dyn std::error::Error>> {
