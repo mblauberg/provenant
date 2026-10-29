@@ -226,7 +226,6 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
             } => {
                 args.extend([
                     "search".into(),
-                    query,
                     "--part".into(),
                     part,
                     "--limit".into(),
@@ -238,6 +237,7 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                 if let Some(cursor) = cursor {
                     args.extend(["--cursor".into(), cursor]);
                 }
+                args.extend(["--".into(), query]);
             }
             ConsoleInput::Tree {
                 max_depth,

@@ -103,7 +103,7 @@ pub(super) fn read(
                 }
                 scan_bytes += expected_bytes;
                 let bytes = match store.console_text_artifact(
-                    attempt.attempt_id,
+                    attempt,
                     artifact_part,
                     ARTIFACT_BYTES,
                     &call,
@@ -182,7 +182,7 @@ pub(super) fn read(
         None
     };
     Ok(
-        json!({"schema_version":1,"snapshot":snapshot,"query":query,"part":part,"matches":&matches[offset..end],"next_cursor":next_cursor,"truncated":truncated || end < matches.len(),"coverage":{"scope":"local","files_scanned":scanned,"bytes_scanned":scan_bytes,"file_limit":FILE_LIMIT,"per_artifact_bytes":ARTIFACT_BYTES,"total_bytes":TOTAL_BYTES,"artifact_errors":artifact_errors,"restart":"If the cursor is invalid or stale, restart with the same query and filters without --cursor."}}),
+        json!({"schema_version":1,"snapshot":snapshot,"query":query,"part":part,"matches":&matches[offset..end],"next_cursor":next_cursor,"truncated":truncated || end < matches.len(),"coverage":{"scope":"local","peers":"not_searched","files_scanned":scanned,"bytes_scanned":scan_bytes,"file_limit":FILE_LIMIT,"per_artifact_bytes":ARTIFACT_BYTES,"total_bytes":TOTAL_BYTES,"artifact_errors":artifact_errors,"restart":"If the cursor is invalid or stale, restart with the same query and filters without --cursor."}}),
     )
 }
 
@@ -272,6 +272,7 @@ mod tests {
         let page = read(&roots, "searchable", "prompt", None, 100, None)?;
         assert_eq!(page["matches"].as_array().ok_or("matches")?.len(), 100);
         assert_eq!(page["coverage"]["files_scanned"], 1000);
+        assert_eq!(page["coverage"]["peers"], "not_searched");
         assert_eq!(page["truncated"], true);
         let cursor = page["next_cursor"].as_str().ok_or("cursor")?;
         assert!(read(&roots, "different", "prompt", None, 100, Some(cursor)).is_err());
@@ -304,6 +305,16 @@ mod tests {
             "100-detail p95: {:?}; 1000-attempt search p95: {:?}",
             details[18], searches[18]
         );
+        assert!(
+            details[18] <= std::time::Duration::from_secs(2),
+            "100-detail p95: {:?}",
+            details[18]
+        );
+        assert!(
+            searches[18] <= std::time::Duration::from_millis(6500),
+            "1000-attempt search p95: {:?}",
+            searches[18]
+        );
         let credential = base.join("credential");
         std::fs::write(&credential, "searchable fixture")?;
         let prompt = state
@@ -313,6 +324,8 @@ mod tests {
             .join(ids[1000].to_string())
             .join("prompt.txt");
         std::fs::remove_file(&prompt)?;
+        let absent = super::super::detail::read(&roots, &ids[1000].to_string())?;
+        assert_eq!(absent["artifacts"][0]["present"], false);
         std::os::unix::fs::symlink(&credential, &prompt)?;
         let guarded = read(&roots, "searchable", "prompt", None, 100, None)?;
         assert!(

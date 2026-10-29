@@ -266,12 +266,12 @@ impl RunStore {
     /// deliberately outside this API.
     pub fn console_text_artifact(
         &self,
-        id: AttemptId,
+        record: &AttemptRecord,
         part: ArtifactPart,
         limit: u64,
         call: &Request<'_>,
     ) -> Result<Option<Vec<u8>>> {
-        let record = self.record(id, call)?;
+        call.check()?;
         let artifact = match part {
             ArtifactPart::Prompt => Some(&record.prompt),
             ArtifactPart::Result => record.result.as_ref(),

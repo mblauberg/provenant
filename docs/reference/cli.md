@@ -2895,6 +2895,8 @@ Accepted by every command, before or after the subcommand.
 
 ## `provenant console search`
 
+Search is local only; peers are not searched. Only the first match per artifact is returned, and each cursor page rescans.
+
 | Argument | Contract |
 |---|---|
 | `query` | `{"name": "query", "positional": true, "required": true}` |

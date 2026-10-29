@@ -20,7 +20,7 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
     };
     if host.is_some_and(|host| Some(host) != local_host.map(|h| h.to_string()).as_deref()) {
         return Ok(
-            json!({"lane_id":{"host":host,"attempt_id":attempt_id},"status":"unavailable","reason":"remote_detail_requires_host_read"}),
+            json!({"schema_version":1,"lane_id":{"host":host,"attempt_id":attempt_id},"status":"unavailable","reason":"remote_detail_requires_host_read"}),
         );
     }
     let clock = SystemClock::new();
@@ -31,6 +31,8 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
     };
     let projects = provenant_config::registered_projects(roots)?;
     let mut found = None;
+    let mut state_path = roots.state.as_path().to_path_buf();
+    let mut nested_coverage = "not_searched";
     for project in projects {
         let context = ExecutionContext {
             state_root: roots.state.clone(),
@@ -49,17 +51,18 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
             Err(provenant_run::RunError::NotFound) => continue,
             Err(error) => {
                 return Ok(
-                    json!({"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"unavailable","reason":error.to_string()}),
+                    json!({"schema_version":1,"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"unavailable","reason":error.to_string()}),
                 );
             }
         }
     }
     if found.is_none() {
-        let tree = match super::tree::read(roots, None, 16, 100, true) {
+        nested_coverage = "bounded_tree_search";
+        let tree = match super::tree::read_inner(roots, None, 16, 100, true, true) {
             Ok(tree) => tree,
             Err(error) => {
                 return Ok(
-                    json!({"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"unavailable","reason":error.to_string(),"coverage":{"nested":"unavailable","peer":"unknown"}}),
+                    json!({"schema_version":1,"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"unavailable","reason":error.to_string(),"coverage":{"nested":"unavailable","peer":"not_searched"}}),
                 );
             }
         };
@@ -69,13 +72,18 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
             .flatten()
             .find_map(|node| {
                 (node["lane_id"]["attempt_id"] == json!(attempt_id))
-                    .then(|| serde_json::from_value(node["metadata"]["attempt"].clone()).ok())
+                    .then(|| {
+                        if let Some(path) = node["store_path"].as_str() {
+                            state_path = path.into();
+                        }
+                        serde_json::from_value(node["metadata"]["attempt"].clone()).ok()
+                    })
                     .flatten()
             });
     }
     let Some(record) = found else {
         return Ok(
-            json!({"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"missing","coverage":{"nested":"bounded_tree_search","peer":"unavailable"}}),
+            json!({"schema_version":1,"lane_id":{"host":local_host,"attempt_id":attempt_id},"status":"missing","coverage":{"nested":"bounded_tree_search","peer":"not_searched"}}),
         );
     };
     let usage = serde_json::to_value(&record.usage).map_err(|_| Error::Encode)?;
@@ -95,7 +103,13 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
         .filter(|name| usage[**name].is_null())
         .collect();
     let artifact = |name: &str, item: Option<&provenant_run::ArtifactRecord>| {
-        item.map(|item| json!({"name":name,"bytes":item.bytes,"digest":item.digest,"complete":item.complete,"redacted":item.redacted}))
+        item.map(|item| {
+            let present = item.path.to_relative_path().ok().is_some_and(|path| {
+                std::fs::symlink_metadata(state_path.join("runs").join(record.run_id.to_string()).join(path.as_path()))
+                    .is_ok_and(|metadata| metadata.is_file())
+            });
+            json!({"name":name,"bytes":item.bytes,"digest":item.digest,"complete":item.complete,"redacted":item.redacted,"present":present})
+        })
     };
     let mut artifacts: Vec<Value> = artifact("prompt", Some(&record.prompt))
         .into_iter()
@@ -111,6 +125,6 @@ pub(super) fn read(roots: &Roots, id: &str) -> Result<Value, Error> {
     let (linked_inbox_requests, inbox_coverage) = super::detail_inbox::read(roots, &record);
     let timing = json!({"queued_at":record.queued_at,"started_at":record.started_at,"provider_ms":record.provider_ms,"finished_at":match &record.state { provenant_run::AttemptState::Terminal { finished_at, .. } => Some(finished_at), _ => None }});
     Ok(
-        json!({"schema_version":1,"lane_id":{"host":local_host,"project_id":record.project_id,"run_id":record.run_id,"task_id":record.task_id,"attempt_id":record.attempt_id},"status":"found","requested_route":record.requested_route,"resolved_route":record.resolved_route,"applied_route":record.applied_route,"observed_route":record.observed_route,"usage":usage,"usage_coverage":{"known":known,"missing":missing},"trace":record.trace,"timings":timing,"artifacts":artifacts,"delivery":record.delivery,"linked_inbox_requests":linked_inbox_requests,"coverage":{"nested":"unknown","peer":"unknown","linked_inbox_requests":inbox_coverage}}),
+        json!({"schema_version":1,"lane_id":{"host":local_host,"project_id":record.project_id,"run_id":record.run_id,"task_id":record.task_id,"attempt_id":record.attempt_id},"status":"found","requested_route":record.requested_route,"resolved_route":record.resolved_route,"applied_route":record.applied_route,"observed_route":record.observed_route,"usage":usage,"usage_coverage":{"known":known,"missing":missing},"trace":record.trace,"timings":timing,"artifacts":artifacts,"delivery":record.delivery,"linked_inbox_requests":linked_inbox_requests,"coverage":{"nested":nested_coverage,"peer":"not_searched","linked_inbox_requests":inbox_coverage}}),
     )
 }

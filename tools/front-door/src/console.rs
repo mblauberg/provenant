@@ -202,7 +202,12 @@ fn compose_detail(
     use provenant_fabric_runtime::hosts::PeerResult;
     match result {
         Some(Ok(PeerResult::Console { mut data, .. }))
-            if data["lane_id"]["attempt_id"] == attempt =>
+            if data["schema_version"] == 1
+                && matches!(
+                    data["status"].as_str(),
+                    Some("found" | "missing" | "unavailable")
+                )
+                && data["lane_id"]["attempt_id"] == attempt =>
         {
             if let Some(lane) = data
                 .get_mut("lane_id")
@@ -213,7 +218,7 @@ fn compose_detail(
             data
         }
         _ => {
-            serde_json::json!({"lane_id":{"host":host,"attempt_id":attempt},"status":"unavailable","reason":"peer_unavailable"})
+            serde_json::json!({"schema_version":1,"lane_id":{"host":host,"attempt_id":attempt},"status":"unavailable","reason":"peer_unavailable"})
         }
     }
 }
@@ -438,7 +443,7 @@ mod tests {
         use provenant_fabric_runtime::hosts::PeerResult;
         let host = provenant_core::HostId::from_bytes([2; 16]);
         let response = PeerResult::Console {
-            data: serde_json::json!({"lane_id":{"host":null,"attempt_id":"a"},"status":"found","trace":[1]}),
+            data: serde_json::json!({"schema_version":1,"lane_id":{"host":null,"attempt_id":"a"},"status":"found","trace":[1]}),
             extra: Default::default(),
         };
         let detail = super::compose_detail(host, "a", Some(Ok(response)));
@@ -448,6 +453,20 @@ mod tests {
         let missing = super::compose_detail(host, "a", None);
         assert_eq!(missing["status"], "unavailable");
         assert_eq!(missing["lane_id"]["host"], serde_json::json!(host));
+        for data in [
+            serde_json::json!({"lane_id":{"attempt_id":"a"},"status":"found"}),
+            serde_json::json!({"schema_version":2,"lane_id":{"attempt_id":"a"},"status":"found"}),
+            serde_json::json!({"schema_version":1,"lane_id":{"attempt_id":"a"},"status":"invalid"}),
+        ] {
+            let response = PeerResult::Console {
+                data,
+                extra: Default::default(),
+            };
+            assert_eq!(
+                super::compose_detail(host, "a", Some(Ok(response)))["reason"],
+                "peer_unavailable"
+            );
+        }
     }
 
     #[test]

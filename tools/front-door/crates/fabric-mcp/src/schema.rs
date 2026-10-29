@@ -268,7 +268,7 @@ fn build_strict() -> Vec<Value> {
             }),
         ),
         (
-            "Read projects, sessions, board, tree, overview, attempt detail and bounded prompt or result search; board and tree can include peers.",
+            "Read projects, sessions, board, tree, overview and attempt detail. Search is local only, returns the first match per artifact and rescans on each cursor page; board and tree can include peers.",
             json!({
                 "projects":{}, "overview":{},
                 "sessions":{"session?":nullable(inbox_session.clone()),"limit?":integer(1,100),"cursor?":nullable(pattern(r"^sha256:[0-9a-f]{64}:[0-9]{1,20}$"))},

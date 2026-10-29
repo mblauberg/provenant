@@ -2415,7 +2415,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Read projects, sessions, board, tree, overview, attempt detail and bounded prompt or result search; board and tree can include peers.",
+  "description": "Read projects, sessions, board, tree, overview and attempt detail. Search is local only, returns the first match per artifact and rescans on each cursor page; board and tree can include peers.",
   "inputSchema": {
     "oneOf": [
       {

@@ -52,7 +52,8 @@ pub enum Console {
     },
     /// Read one attempt's bounded metadata and artifact inventory
     Detail { id: String },
-    /// Search bounded prompt or result content
+    /// Search local prompt or result content; returns the first match per artifact.
+    /// Each cursor page rescans the bounded local content; peers are not searched.
     Search {
         query: String,
         #[arg(long, value_parser = ["prompt", "result"])]
