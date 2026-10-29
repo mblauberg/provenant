@@ -160,20 +160,32 @@ top-level `integration_branch: "integration"` and `delivery: "pr"` for one
 final PR. Delivery failures block dependants or retain the graph advance error;
 `fabric graph resume --document PATH` retries final delivery.
 
-Writer lanes keep the confinement policy compiled at launch. A diagnostic naming
-a policy before v11, with its run and attempt IDs, at settlement or delivery means that lane retained the old
-shared-object write grants; the host runs a full strict check of the shared
-store before consuming its head. Allow these writers to settle before upgrading
-to the release that introduces private writer object stores, as described in
-the [upgrade procedure](install.md#bootstrap-and-upgrade). Upgrading does not
-force-cancel running lanes.
+Drain writer lanes before upgrading, as described in the
+[upgrade procedure](install.md#bootstrap-and-upgrade). Upgrading does not
+force-cancel running lanes. An older interrupted settlement with its private
+objects can resume through the new Git receive import. Without those objects,
+recover its commits on the host and start a fresh run; the refusal names this
+recovery path.
 
-Object-store lock-wait timeouts leave settlement non-terminal and retain custody
-and private objects. Retry settlement with `provenant reconcile --id RUN` once
-the competing host verification finishes. Copying and indexing have a separate
-120-second budget; pack-count or import-budget refusals are terminal and keep
-the private evidence for recovery. See the
-[verification deadlines](../specs/run.md#writer-object-isolation).
+`provenant reconcile --id RUN` queues settlement in the background and returns
+without waiting for Git import. The supervisor resumes its durable phase after
+a crash, with at most three attempts that reach import and backoff between
+claims. Concurrent reconcile requests share one settlement worker;
+queued or terminal-only runs do not spawn one. `provenant cancel ATTEMPT` records
+a durable request that can stop an active import. Provider exit releases host
+build capacity and live custody before settlement completes; a settling
+reservation still prevents another writer from editing that worktree. A terminal
+import refusal releases the reservation and retains private Git for host
+recovery. A lane wait returns a terminal outcome only after custody is released,
+so host pickup does not need a second reconcile after a successful wait.
+See [publication order](../specs/run.md#publication-order) and
+[lane Git and import](../specs/run.md#lane-git-and-import).
+
+Writer rebases use the lane's private Git directory and pass through host object
+import, ancestry checks and instruction quarantine at settlement. If Git cannot
+write rebase state, stop with `needs_host_rebase`; do not create a clone or
+second checkout to bypass the permission failure. A host-authorised merge of
+`origin/main` is an alternative when rebasing is blocked.
 
 On macOS, existing hard-linked files in the writable worktree no longer refuse
 a launch or become write-denied; only Git control files with another name do.

@@ -72,7 +72,7 @@ until later cleanup.
 On macOS, lanes cannot create hard links (`deny file-link`), and launch does
 not walk the worktree for existing ones: hard-linked files in `target/`,
 `node_modules/` or `.pnpm` neither refuse a launch nor become read-only. Launch
-checks that Git `config`, `hooks/*` and `info/*` have a single name and refuses,
+checks that the host Git `config`, `index`, `hooks/*` and `info/*` have a single name and refuses,
 naming the file, if one has another; remove the other name and retry. A lane's
 Cargo and pnpm caches are private to it, so a link inside them cannot reach a
 shared store.

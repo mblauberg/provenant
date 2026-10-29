@@ -396,7 +396,9 @@ already settled, the wait returns their terminal rows immediately, including
 rows older than `--since`. Mixed pending and settled selections keep the
 pending-only rule. Session selection narrows
 listings and waits consistently, including on peers. An unqualified wait
-resumes after the calling session's last acknowledged settlements.
+resumes after the calling session's last acknowledged settlements. A committed
+terminal attempt remains `settling` in local and peer wait views until its
+custody release is durable; a terminal wait result therefore permits host pickup.
 
 Each poll shares one deadline across all peer reads, including lookups of
 previously observed running lanes that have moved off the page. Reads consume

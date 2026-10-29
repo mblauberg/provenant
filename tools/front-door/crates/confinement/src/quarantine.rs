@@ -549,7 +549,8 @@ fn validate_archive(device: u64, metadata: &Metadata) -> Result<(), QuarantineEr
 
 /// Archive status, pinned HEAD/index/worktree patches and tracked blobs before
 /// restoring any attributable ordinary instruction file. The opaque Recovery
-/// borrow holds supervisor's writer exclusion for the whole operation.
+/// borrow proves absent provider custody; its durable settling reservation
+/// excludes another managed writer while host commands run without flock.
 fn quarantine_instruction_changes(
     git: &Git<'_>,
     recovery: &Recovery,
