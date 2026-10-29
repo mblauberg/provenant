@@ -160,7 +160,7 @@ fn definitions() -> Value {
         "Artifact":object(json!({"path":object(json!({"encoding":choices(&["utf8","native_bytes"]),"path":text(MAX_ARTIFACT_PATH_BYTES)})),"digest":nullable(pattern("^sha256:[0-9a-f]{64}$"))})),
         "ContextLabel":nullable(text(256)),
         "WorkContext":object(json!({"work_item?":reference("ContextLabel"),"graph_id?":reference("ContextLabel"),"node_id?":reference("ContextLabel"),"preset?":reference("ContextLabel"),"pattern?":reference("ContextLabel"),"role?":reference("ContextLabel"),"role_digest?":reference("ContextLabel"),"experiment_arm?":reference("ContextLabel"),"selection_source?":reference("ContextLabel")})),
-        "Route":tagged("kind",json!({"model":{"provider":text(MAX_ROUTE_BYTES),"model":text(MAX_ROUTE_BYTES),"effort?":nullable(text(MAX_ROUTE_BYTES))},"named":{"name":text(MAX_ROUTE_BYTES),"effort?":nullable(text(MAX_ROUTE_BYTES))}})),
+        "Route":tagged("kind",json!({"adapter":{"provider":text(MAX_ROUTE_BYTES),"name":text(MAX_ROUTE_BYTES)},"model":{"provider":text(MAX_ROUTE_BYTES),"model":text(MAX_ROUTE_BYTES),"effort?":nullable(text(MAX_ROUTE_BYTES))},"named":{"name":text(MAX_ROUTE_BYTES),"effort?":nullable(text(MAX_ROUTE_BYTES))}})),
         "Scope":tagged("kind",json!({"issue":{"key":text(MAX_REFERENCE_BYTES)},"paths":{"paths":array(text(MAX_ARTIFACT_PATH_BYTES),1,100)},"worktree":{"path":text(MAX_ARTIFACT_PATH_BYTES)}}))
     })
 }

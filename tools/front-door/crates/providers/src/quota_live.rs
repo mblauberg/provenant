@@ -318,6 +318,7 @@ impl QuotaEffects for LiveQuota {
                 details.note = Some("Local estimate, this machine only; calibrated Go caps, other hosts not counted".into());
                 opencode::capture(&account.identity_dir, &account.options, now(), deadline)?
             }
+            "command" => return Err(ProbeFailure::Disabled),
             _ => return Err(ProbeFailure::Disabled),
         };
         check_identity()?;

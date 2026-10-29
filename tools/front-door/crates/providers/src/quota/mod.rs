@@ -15,6 +15,7 @@ fn effect_kind(adapter: &str) -> Result<QuotaEffectKind, QuotaError> {
             .ok_or(QuotaError::Disabled)?
             .quota_probe
         {
+            QuotaProbeKind::None => return Err(QuotaError::Disabled),
             QuotaProbeKind::HttpGet => QuotaEffectKind::HttpGet,
             QuotaProbeKind::Command => QuotaEffectKind::Command,
             QuotaProbeKind::LocalLedger => QuotaEffectKind::LocalLedger,
@@ -86,6 +87,7 @@ pub fn decode(
                 );
             }
         }
+        "command" => return Err(QuotaError::Disabled),
         _ => return Err(QuotaError::Disabled),
     }
 

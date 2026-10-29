@@ -157,6 +157,7 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
             task_id: TaskId::from_bytes([3; 16]),
             prompt: prompt.into(),
             base: None,
+            pinned_base: None,
             head: None,
             route: RequestedRoute::Named {
                 extra: Default::default(),
@@ -411,6 +412,57 @@ fn secret_input_is_refused_before_publication() -> TestResult {
             kind: ErrorKind::SecretInput,
             ..
         }
+    ));
+    assert!(store.operation(&operation, &call)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn named_adapter_routes_preserve_configuration_name_without_a_model() -> TestResult {
+    let route: RequestedRoute = serde_json::from_value(serde_json::json!({
+        "kind": "adapter", "provider": "command", "name": "fmt-check",
+        "future_context": {"source": "project"}
+    }))?;
+    let normalised = Service::route(route.clone())?;
+    assert_eq!(normalised, route);
+    let projection = normalised.projection();
+    assert_eq!(projection.provider.as_deref(), Some("command"));
+    assert!(projection.model.is_none());
+    assert!(projection.effort.is_none());
+    for field in ["model", "effort"] {
+        let mut value = serde_json::to_value(&route)?;
+        value[field] = "unavailable".into();
+        assert!(matches!(
+            Service::route(serde_json::from_value(value)?),
+            Err(RunError::Input {
+                kind: ErrorKind::Invalid,
+                ..
+            })
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn command_write_is_refused_before_preparing_a_worktree() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = submission("run the configured command");
+    let operation = input.operation_id.clone();
+    input.tasks[0].route = RequestedRoute::Adapter {
+        extra: Default::default(),
+        provider: "command".into(),
+        name: "fmt-check".into(),
+    };
+    input.tasks[0].worktree = Some(temp.path().join("not-a-worktree"));
+    assert!(matches!(
+        Service::new(&store).dispatch(input, temp.path(), &call),
+        Err(RunError::Input {
+            kind: ErrorKind::Unsupported,
+            ..
+        })
     ));
     assert!(store.operation(&operation, &call)?.is_none());
     Ok(())

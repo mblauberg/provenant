@@ -24,10 +24,16 @@ pub struct Request<'a> {
     pub cancel: &'a CancelToken,
 }
 impl Request<'_> {
+    /// The contention budget for one transaction or lock that starts now. A
+    /// per-transaction allowance restarts here, so slow work between store
+    /// calls never spends it; the cancellation token still ends the call.
+    pub fn transaction_budget(&self) -> WaitBudget {
+        self.budget.for_transaction(self.clock.mono_now())
+    }
     pub(crate) fn retry<T>(&self, mut action: impl FnMut() -> Result<T>) -> Result<T> {
         match provenant_sqlite::retry(
             self.clock,
-            self.budget,
+            self.transaction_budget(),
             self.cancel,
             &provenant_sqlite::ThreadWait,
             |error: &RunError| matches!(error, RunError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)),
@@ -43,7 +49,7 @@ impl Request<'_> {
     fn wait<T>(&self, action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
         provenant_sqlite::observe(
             self.clock,
-            self.budget,
+            self.transaction_budget(),
             self.cancel,
             &provenant_sqlite::ThreadWait,
             action,
@@ -388,7 +394,7 @@ pub(crate) fn open_database(
         .lock(
             OsStr::new(&lock_name),
             LockMode::Exclusive,
-            request.budget,
+            request.transaction_budget(),
             request.cancel,
             request.clock,
         )

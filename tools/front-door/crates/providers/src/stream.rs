@@ -126,6 +126,7 @@ pub struct StreamState {
     refusal: bool,
     auth_required: bool,
     malformed: bool,
+    tail_truncated: bool,
 }
 impl StreamState {
     pub(crate) fn new(adapter: &'static str, decoder: Decoder) -> Self {
@@ -145,6 +146,7 @@ impl StreamState {
             refusal: false,
             auth_required: false,
             malformed: false,
+            tail_truncated: false,
         }
     }
     pub(crate) fn bind_identity(&mut self, session: &str, model: &str) {
@@ -162,6 +164,21 @@ impl StreamState {
         self.auth_required
     }
     pub(crate) fn observe(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
+        if self.adapter == "command" {
+            const TAIL_BYTES: usize = provenant_records::COMMAND_OUTPUT_TAIL_BYTES;
+            let total = self.pending.len().saturating_add(bytes.len());
+            self.tail_truncated |= total > TAIL_BYTES;
+            if bytes.len() >= TAIL_BYTES {
+                self.pending.clear();
+                self.pending
+                    .extend_from_slice(&bytes[bytes.len() - TAIL_BYTES..]);
+            } else {
+                let discard = total.saturating_sub(TAIL_BYTES);
+                self.pending.drain(..discard);
+                self.pending.extend_from_slice(bytes);
+            }
+            return Ok(Vec::new());
+        }
         if self.malformed {
             return Err(ProviderError::Malformed);
         }
@@ -252,6 +269,38 @@ impl StreamState {
         exit: ExitObservation,
     ) -> Result<ProviderOutcome, ProviderError> {
         let mut final_events = std::mem::take(&mut self.retained_events);
+        if self.adapter == "command" {
+            let mut text = String::new();
+            if self.tail_truncated {
+                text.push_str("[output truncated; retained tail]\n");
+            }
+            let tail = String::from_utf8_lossy(&self.pending);
+            for line in tail.lines() {
+                text.push_str("| ");
+                // VerdictCapture treats any verdict: substring as a marker,
+                // even inside quotes. Escape log markers before appending the
+                // sole authoritative exit-derived verdict.
+                for (i, ch) in line.char_indices() {
+                    if ch == ':'
+                        && i >= 7
+                        && line.as_bytes()[i - 7..i].eq_ignore_ascii_case(b"verdict")
+                    {
+                        text.push('\\');
+                    }
+                    text.push(ch);
+                }
+                text.push('\n');
+            }
+            let passed = exit.code == Some(0) && !exit.timed_out;
+            text.push_str(if passed {
+                "VERDICT: PASS\n"
+            } else {
+                "VERDICT: FAIL\n"
+            });
+            self.pending.clear();
+            self.terminal = true;
+            final_events.push(ProviderEvent::Text(text));
+        }
         if !self.pending.is_empty() && !self.malformed {
             let line = std::mem::take(&mut self.pending);
             match self.line(&line) {

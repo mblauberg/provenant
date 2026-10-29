@@ -297,6 +297,12 @@ impl Census {
         self.completeness() == CensusCompleteness::Complete
     }
 
+    /// Whether the process list itself was read whole and untruncated. Unlike
+    /// `is_complete`, it ignores listed PIDs that could not be described.
+    pub fn listing_is_complete(&self) -> bool {
+        self.process_list_complete && !self.truncated
+    }
+
     pub fn completeness(&self) -> CensusCompleteness {
         match (
             self.process_list_complete && self.unknown_pids.is_empty(),

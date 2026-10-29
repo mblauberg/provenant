@@ -1945,7 +1945,7 @@ Accepted by every command, before or after the subcommand.
 | `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability", "provider_timeout"], "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability"], "name": "manifest"}` |
 | `--worktree` | `{"name": "worktree"}` |
 | `--wait` | `{"bounds": [1, 14400], "defaults": ["240"], "name": "wait"}` |
 | `--branch` | `{"name": "branch"}` |
@@ -1957,7 +1957,7 @@ Accepted by every command, before or after the subcommand.
   "constraints": [
     "single prompt requires exactly one of model or route, or a named preset",
     "operation-id is generated when omitted; supply it for planned retries",
-    "manifest conflicts with per-task route, access, metadata and provider-timeout",
+    "manifest conflicts with per-task route, access and metadata",
     "concurrency requires manifest or preset",
     "single-task worktree, or a peer writer's branch, requires worktree-write",
     "preset worktree bindings require an existing registered worktree",
@@ -2160,7 +2160,7 @@ Accepted by every command, before or after the subcommand.
 | `--base` | `{"name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability", "provider_timeout"], "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability"], "name": "manifest"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -2169,7 +2169,7 @@ Accepted by every command, before or after the subcommand.
   "constraints": [
     "single prompt requires exactly one of model or route",
     "operation-id is generated when omitted; supply it for planned retries",
-    "manifest conflicts with per-task route, access, metadata and provider-timeout",
+    "manifest conflicts with per-task route, access and metadata",
     "concurrency requires manifest",
     "worktree, or a peer writer's branch, is required with, and only valid for, worktree-write",
     "fallback conflicts with a writer and has at most two distinct models",

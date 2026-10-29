@@ -3,6 +3,7 @@ client_label = "agent"
 ssh_executable = "" # empty selects shared system SSH discovery
 home_hosts = {}
 peers = {}
+commands = {} # named command tables, e.g. fmt-check = { argv = ["cargo", "fmt", "--check"], runtimes = [] }
 [lanes]
 memory_pressure_threshold = "critical"
 # A build throttle for cooperative fair sharing of CPU and memory among lanes, not a hard cap:
