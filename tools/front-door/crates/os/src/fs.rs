@@ -521,6 +521,13 @@ impl Directory {
     pub fn anchored_path(&self) -> PathBuf {
         self.path.components().skip(self.anchor_depth).collect()
     }
+
+    /// Resolve a held directory for a child utility which requires a pathname.
+    /// Callers must keep the handle and exclude concurrent writers while the
+    /// utility uses it. This is not a replacement for descriptor-relative I/O.
+    pub fn current_path(&self) -> Result<PathBuf> {
+        os::current_path(&self.file).map_err(error("resolve held directory", &self.path))
+    }
     /// Establish this held directory as a new filesystem-device boundary.
     /// Call only after the caller has validated the configured root. Unlike
     /// open_anchor, this consumes the existing handle without resolving a path
