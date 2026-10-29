@@ -13,6 +13,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Deserialize)]
+struct MergeCommit {
+    oid: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Status {
@@ -57,6 +62,12 @@ pub(super) struct Pull {
     /// The head branch lives in another repository, such as a fork.
     #[serde(rename = "isCrossRepository")]
     pub(super) cross_repository: bool,
+    #[serde(default)]
+    title: String,
+    #[serde(rename = "mergeCommit", default)]
+    merge_commit: Option<MergeCommit>,
+    #[serde(rename = "mergedAt", default)]
+    merged_at: Option<String>,
 }
 /// The pull request's state after a merge attempt, retrying transient reads.
 // This CLI edge owns the real deadline.
@@ -72,7 +83,7 @@ fn reread(project: &Path, number: &str) -> Result<Pull> {
         "view",
         number,
         "--json",
-        "state,baseRefName,headRefName,isCrossRepository",
+        "state,baseRefName,headRefName,isCrossRepository,title,mergeCommit,mergedAt",
     ])?)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
@@ -85,7 +96,7 @@ pub(super) fn pull(project: &Path, number: &str) -> Result<Pull> {
             "view",
             number,
             "--json",
-            "state,baseRefName,headRefName,isCrossRepository",
+            "state,baseRefName,headRefName,isCrossRepository,title,mergeCommit,mergedAt",
         ],
         false,
     )?)?;
@@ -814,6 +825,7 @@ pub(crate) fn execute(
     let mut state = String::new();
     let mut steps = Vec::new();
     let mut failure_code = "PR_UNAVAILABLE";
+    let mut landed: Option<(String, String, i64)> = None;
     let result = (|| -> Result<()> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let text = number.to_string();
@@ -882,6 +894,18 @@ pub(crate) fn execute(
         };
         state = view.state.clone();
         merged = view.state == "MERGED";
+        if merged {
+            landed = view
+                .merge_commit
+                .as_ref()
+                .zip(view.merged_at.as_deref())
+                .and_then(|(commit, merged_at)| {
+                    merged_at
+                        .parse::<jiff::Timestamp>()
+                        .ok()
+                        .map(|at| (view.title.clone(), commit.oid.clone(), at.as_second()))
+                });
+        }
         if matches!(view.state.as_str(), "CLOSED" | "MERGED") && !view.cross_repository {
             let closed = (|| -> Result<()> {
                 let tracker = attribution
@@ -899,6 +923,11 @@ pub(crate) fn execute(
         }
         Ok(())
     })();
+    if merged && let Some((title, merge_commit, merged_at)) = landed {
+        // The merge is already durable. Progress logging is advisory and must
+        // never change the result of landing a pull request.
+        let _ = append_land_log(globals, number, &title, &merge_commit, merged_at);
+    }
     let expected = captured
         .map(|head| head.to_string())
         .unwrap_or_else(|| "unknown".into());
@@ -1017,6 +1046,166 @@ pub(crate) fn execute(
         text,
         summary,
         globals: output_globals,
+    }
+}
+
+fn append_land_log(
+    globals: &provenant_cli::Globals,
+    number: u64,
+    title: &str,
+    merge_commit: &str,
+    merged_at: i64,
+) -> Result<()> {
+    use provenant_workflow::session::{HostSessionId, chair_session_for};
+    let resolved = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Project,
+        crate::roots::Product::Required,
+    )?;
+    let context = provenant_cli::fabric::Context::open(
+        resolved.roots.clone(),
+        &resolved.home,
+        &resolved.project,
+    )?;
+    let session = provenant_cli::fabric::current_session()
+        .and_then(|session| HostSessionId::parse(&session).ok())
+        .or_else(|| {
+            chair_session_for(
+                &resolved.roots.state,
+                context.identity.project,
+                context.identity.inbox.actor,
+            )
+        });
+    let Some(session) = session else {
+        return Ok(());
+    };
+    let config =
+        provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
+    append_land_entry(
+        &resolved.roots,
+        LandEntry {
+            project: context.identity.project,
+            host: context.identity.host,
+            session,
+            number,
+            title: title.into(),
+            merge_commit: merge_commit.into(),
+            issued_at: merged_at,
+        },
+        &config.retention,
+    )
+}
+
+struct LandEntry {
+    project: provenant_core::ProjectId,
+    host: provenant_core::HostId,
+    session: provenant_workflow::session::HostSessionId,
+    number: u64,
+    title: String,
+    merge_commit: String,
+    issued_at: i64,
+}
+
+fn append_land_entry(
+    roots: &provenant_core::Roots,
+    entry: LandEntry,
+    settings: &provenant_config::RetentionSettings,
+) -> Result<()> {
+    use provenant_workflow::log::{Append, LogStore, Retention};
+    let now = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())?
+        .as_micros()
+        .div_euclid(1_000_000);
+    let retention = Retention {
+        max_age_seconds: settings.chair_log_days * 86400,
+        replay_horizon_seconds: settings.chair_log_replay_seconds(),
+        max_entries: settings.chair_log_entries,
+        max_bytes: settings.chair_log_bytes,
+    };
+    let operation_id = provenant_core::OperationId::parse(&format!(
+        "land-{}-{}",
+        entry.number, entry.merge_commit
+    ))?;
+    LogStore::new(roots.state.clone(), entry.project, entry.session).append(
+        Append {
+            operation_id,
+            issued_at: entry.issued_at,
+            host: entry.host.to_string(),
+            kind: "pull_request_landed".into(),
+            markdown: format!(
+                "Landed PR #{}: {} (merge commit {}).",
+                entry.number, entry.title, entry.merge_commit
+            ),
+            request_ids: Vec::new(),
+            attempt_ids: Vec::new(),
+            issue_ids: Vec::new(),
+            pr_ids: vec![entry.number.to_string()],
+            channel: "provenant".into(),
+            correction_of: None,
+        },
+        retention,
+        now,
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
+mod land_log_tests {
+    use super::{LandEntry, append_land_entry};
+    use provenant_workflow::{log::LogStore, session::HostSessionId};
+
+    #[test]
+    fn a_landed_pull_request_appends_one_readable_entry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        std::fs::create_dir_all(base.join("home"))?;
+        std::fs::create_dir_all(base.join("assets"))?;
+        std::fs::create_dir_all(base.join("state"))?;
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let project = provenant_core::ProjectId::from_bytes([3; 16]);
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        let session = HostSessionId::parse("land-test")?;
+        let issued_at = jiff::Timestamp::now().as_second();
+        let settings = provenant_config::RetentionSettings::default();
+
+        for _ in 0..2 {
+            append_land_entry(
+                &roots,
+                LandEntry {
+                    project,
+                    host,
+                    session: session.clone(),
+                    number: 42,
+                    title: "A readable title".into(),
+                    merge_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                    issued_at,
+                },
+                &settings,
+            )?;
+        }
+
+        let retention = provenant_workflow::log::Retention {
+            max_age_seconds: settings.chair_log_days * 86400,
+            replay_horizon_seconds: settings.chair_log_replay_seconds(),
+            max_entries: settings.chair_log_entries,
+            max_bytes: settings.chair_log_bytes,
+        };
+        let page = LogStore::new(roots.state, project, session).page(
+            None,
+            50,
+            retention,
+            jiff::Timestamp::now().as_second(),
+        )?;
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].update.pr_ids, ["42"]);
+        assert_eq!(
+            page.entries[0].update.markdown,
+            "Landed PR #42: A readable title (merge commit 0123456789abcdef0123456789abcdef01234567)."
+        );
+        Ok(())
     }
 }
 

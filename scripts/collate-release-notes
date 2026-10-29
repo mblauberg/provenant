@@ -159,6 +159,23 @@ case "${1:-}" in
     for f in "$dir"/*.md; do
       [ "$f" = "$dir/_intro.md" ] || rm -- "$f"
     done
+    # A version cut is a chair-log milestone when this shell belongs to a
+    # known session. The release cut is complete even if logging is unavailable.
+    if [ -n "${PROVENANT_SESSION_ID:-}" ] && command -v provenant >/dev/null 2>&1; then
+      if log_file=$(mktemp "${TMPDIR:-/tmp}/provenant-release-log.XXXXXX" 2>/dev/null); then
+        trap 'rm -f "$log_file"' EXIT HUP INT TERM
+        if printf '{"kind":"release_cut","channel":"provenant","markdown":"Cut release %s."}\n' "$1" >"$log_file"; then
+          issued_at=$(date +%s 2>/dev/null) || issued_at=0
+          provenant chair log append \
+            --session "$PROVENANT_SESSION_ID" \
+            --operation-id "release-$1" \
+            --issued-at "$issued_at" \
+            --file "$log_file" >/dev/null 2>&1 || true
+        fi
+        rm -f "$log_file" || true
+        trap - EXIT HUP INT TERM
+      fi
+    fi
     ;;
   *)
     echo "usage: collate-release-notes [--check | vX.Y.Z]" >&2

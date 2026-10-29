@@ -790,7 +790,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         "pr view 1668 --json headRefOid" => {
             io::stdout().write_all(&fs::read(dir.join("head.json"))?)?
         }
-        "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository" => {
+        "pr view 1668 --json state,baseRefName,headRefName,isCrossRepository,title,mergeCommit,mergedAt" => {
             io::stdout().write_all(&fs::read(dir.join("view.json"))?)?;
         }
         value if value.starts_with("pr view ") && value.ends_with(" --json state") => {
@@ -814,7 +814,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         }
         value
             if value.starts_with("pr view ")
-                && value.ends_with(" --json state,baseRefName,headRefName,isCrossRepository") =>
+                && value.ends_with(" --json state,baseRefName,headRefName,isCrossRepository,title,mergeCommit,mergedAt") =>
         {
             let number = args.get(2).ok_or("PR number")?;
             let state =
