@@ -488,6 +488,37 @@ namespace rules.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`,
   `crates/confinement/src/worktrees.rs`
 
+### Writer continuation
+
+A writer may set `continues` to an upstream writer whose `delivery` is `pr`
+or `push`. The continuing writer is a repair: it reuses that writer's
+worktree and delivery branch, so its commits update the same pull request.
+It must declare the same `worktree` explicitly, must have the target as an
+ancestor, takes no `delivery` of its own and cannot itself be continued.
+Writers sharing a worktree already run one at a time. At launch the runtime
+reads the branch the target delivered and hands it to the host with `push`
+delivery. A target that recorded no delivery branch fails the continuing
+node before it launches. The host refuses a worktree whose branch differs
+from the bound branch, then pushes the lane head to that branch without
+force, so the remote refuses a non-fast-forward update and the delivery
+fails at the push stage with the branch unchanged. The lane boundary is
+unchanged: lanes never push, and only the host writes branch configuration.
+
+The repair brief is ordinary `inputs`: the upstream gate's `findings` and the
+writer's `result`, so failed checks reach the repair as generic findings.
+Inside a loop body a continuing writer pushes every round, unlike other body
+writers. In a composite, `continues` follows the same local-name rules as
+`source`.
+
+- Why: a repair must land on the reviewed PR, not open a second branch, and
+  the host must never rewrite a branch someone else moved.
+- Test: `crates/fabric-runtime/src/graph/land_tests.rs::repair_reuses_the_writer_worktree_and_pushes_only_to_its_branch`;
+  `::a_repair_without_a_delivered_branch_fails_before_launch`;
+  `::continuation_and_land_wiring_is_checked_before_launch`;
+  `crates/run/src/delivery_tests.rs::host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch`.
+- Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/fabric.rs`,
+  `crates/run/src/delivery.rs`
+
 ### Synthesise agents
 
 An agent node may set `kind` to `synthesise` and must select one or more direct
@@ -796,6 +827,49 @@ graph advance compares the deadline with the host wall clock itself.
   `::cancel_closes_a_legacy_loop_request_by_its_original_operation`;
   `src/fabric/loop_repair_tests.rs::bound_loop_inbox_keeps_original_actor_under_another_client`.
 - Owner: `crates/fabric-runtime/src/graph/asks.rs`, `src/fabric.rs`
+
+### Land nodes
+
+A node with `kind: "land"` and `access: "read_only"` declares a `land`
+object: `node`, an upstream writer whose `delivery` is `pr`; `tier`, one of
+`routine`, `substantial`, `crucial` or `terminal`; and an optional inbox
+`session` that falls back to the graph's `decision_session`. It takes no
+prompt, route, worktree, inputs, delivery, `required_verdict`, `on_fail` or
+`continues`. Its ancestors must include a verdict gate and a CI gate that
+each follow the writer. Land nodes are refused in loop bodies.
+
+When ready, the node pins the branch and newest commit delivered by the
+writer and the writers that continue it, then resolves the host's tier policy
+and saves both in the node's `land` record with the layer the policy came
+from (`default`, `config` or `project`). With policy `auto` the record says
+the policy authorised the land. With `ask` it raises ask `NODE.ask-N` with
+options `land` and `hold`; an answer of `land` records the ask ID and the
+answering actor, `hold` fails the node, and any other answer asks again as a
+decide node does. A tier that asks with no session fails the node and names
+`provenant land` for a manual land. Once authorised, the host lands through
+the same path as `provenant land N --head HEAD`: it finds the open PR for the
+branch, checks CI once, merges with `--match-head-commit` and runs the usual
+cleanup, so the repository's own merge requirements still apply. A merged PR
+succeeds the node with verdict `LANDED`, the branch and head as outputs and an
+excerpt that names who or what authorised it. Pending checks, an unknown merge
+state or an unavailable PR keep the node running for the next advance; a
+moved head, failed checks, a closed PR or a refused merge fail it. A waiting
+land node does not count toward `concurrency`, and a paused graph does not
+land.
+
+- Why: delivery should finish without a chair for routine work while crucial
+  work still waits for a person, under one policy the host owns.
+- Test: `crates/fabric-runtime/src/graph/land_tests.rs::an_auto_tier_lands_the_newest_delivered_head_through_the_host`;
+  `::a_crucial_tier_raises_a_land_ask_and_lands_on_its_answer`;
+  `::a_hold_answer_fails_the_land_without_merging`;
+  `::a_configured_policy_overrides_the_default_and_records_its_source`;
+  `::an_ask_tier_without_a_session_fails_with_guidance`;
+  `::a_pending_land_is_observed_again_and_a_refusal_fails_the_node`;
+  `::a_loop_body_cannot_land`;
+  `crates/fabric-runtime/src/config.rs::land_policy_layers_project_then_host_then_default`;
+  `src/pr/land.rs::graph_land_tests::a_land_report_maps_to_a_graph_observation`.
+- Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/pr/land.rs`,
+  `src/fabric.rs`
 
 ### Plan expansion and honest-stop continuation
 

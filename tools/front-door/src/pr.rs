@@ -105,6 +105,19 @@ fn head(project: &Path, number: &str) -> Result<GitOid> {
     )?)?;
     Ok(serde_json::from_slice::<PullRequest>(&bytes)?.head)
 }
+/// The pull request whose head is `branch`, as `gh pr view` selects it.
+fn number_for_branch(project: &Path, branch: &str) -> Result<u64> {
+    #[derive(Deserialize)]
+    struct PullRequest {
+        number: u64,
+    }
+    let bytes = successful(execute(
+        project,
+        &["gh", "pr", "view", branch, "--json", "number"],
+        false,
+    )?)?;
+    Ok(serde_json::from_slice::<PullRequest>(&bytes)?.number)
+}
 fn checks(project: &Path, number: &str, head: GitOid, watch: bool) -> Result<()> {
     if watch {
         successful(execute(

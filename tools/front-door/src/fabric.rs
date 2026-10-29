@@ -4388,6 +4388,30 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         self.factory.clock.wall_now().ok()
     }
+    fn land_policy(
+        &self,
+        tier: provenant_records::workflow::RiskTier,
+    ) -> provenant_fabric_runtime::config::LandChoice {
+        let project = self.factory.context.identity.project.to_string();
+        self.factory
+            .context
+            .config
+            .graph
+            .land
+            .choose(Some(&project), tier)
+    }
+    fn land(
+        &mut self,
+        request: provenant_fabric_runtime::graph::LandRequest<'_>,
+    ) -> Result<provenant_fabric_runtime::graph::LandObservation, Self::Error> {
+        Ok(crate::pr::land::graph_land(
+            &self.factory.cwd,
+            self.factory.context.roots.state.as_path(),
+            request.branch,
+            request.head,
+            self.factory.workers,
+        ))
+    }
     fn cost_unknown_reason(&mut self) -> Option<String> {
         let graph_budget = &self.factory.context.config.graph.budget;
         if graph_budget.per_graph.cost_usd.is_none() && graph_budget.per_node.cost_usd.is_none() {
@@ -4603,6 +4627,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 } else {
                     String::new()
                 };
+                // A continuing writer pushes only to the branch it continues.
+                if let Some(bound) = replay.branch
+                    && bound != branch
+                {
+                    return Err(FacadeError::DispatchRefused {
+                        reason: format!(
+                            "graph writer worktree is on {branch}, not the continued branch {bound}"
+                        ),
+                    });
+                }
                 provenant_run::HostDeliveryContext::destination(mode.clone(), &branch)
                     .map_err(run_error)?
             } else {
