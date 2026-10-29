@@ -752,6 +752,14 @@ fn read_section<T: DeserializeOwned + Default>(
     }
     let sites = sites(&root, &text, &origin, "");
     normalise_tables(&mut root);
+    // A malformed ancestor controls every section beneath it, so a boundary
+    // section refuses as the aggregate reader does.
+    if strict_types && let Some(ancestor) = non_table_ancestor(&root, prefix) {
+        return Err(std::io::Error::other(format!(
+            "{}: {ancestor}: expected a table",
+            path.display()
+        )));
+    }
     let mut item = prefix
         .split('.')
         .try_fold(&root, |table, key| table.get(key).and_then(Item::as_table))
@@ -801,6 +809,20 @@ fn read_section<T: DeserializeOwned + Default>(
         warn(&path, &issue_finding(issue).map_err(std::io::Error::other)?);
     }
     Ok(value)
+}
+
+/// The first ancestor of `prefix` that exists but is not a table, if any.
+fn non_table_ancestor(root: &Table, prefix: &str) -> Option<String> {
+    let parts: Vec<&str> = prefix.split('.').collect();
+    let mut table = root;
+    for (index, key) in parts[..parts.len() - 1].iter().enumerate() {
+        match table.get(key) {
+            Some(Item::Table(child)) => table = child,
+            Some(_) => return Some(parts[..=index].join(".")),
+            None => return None,
+        }
+    }
+    None
 }
 
 // Keep schemas closed, repairing only user-owned optional input.

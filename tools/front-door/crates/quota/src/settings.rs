@@ -175,6 +175,10 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::enumeration("display.headline", &["auto", "5h", "weekly"]),
     FieldMetadata::int("polling_intervals.{adapter}.timer_seconds", 1, i64::MAX / 4),
     FieldMetadata::int("polling_intervals.{adapter}.panel_seconds", 1, i64::MAX / 4),
+    FieldMetadata::int("calibration.{account}.five_hour", 0, 100),
+    FieldMetadata::int("calibration.{account}.seven_day", 0, 100),
+    FieldMetadata::int("calibration.{account}.thirty_day", 0, 100),
+    FieldMetadata::new("calibration.{account}.expires", "string"),
 ];
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "quota",

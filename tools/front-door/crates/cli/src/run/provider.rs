@@ -557,16 +557,13 @@ fn prepare_candidates(
     }
     for (candidate, route) in candidates(resolved).into_iter().enumerate() {
         let label = format!("{}/{}", route.adapter, route.model);
-        let model_policy = config
-            .domains
-            .routing
-            .model_policy
-            .effective(
-                &provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?,
-                route.account_key.as_deref(),
-                jiff::Timestamp::now().as_second(),
-            )
-            .policy;
+        let effective = config.domains.routing.model_policy.effective(
+            &provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?,
+            route.account_key.as_deref(),
+            jiff::Timestamp::now().as_second(),
+        );
+        let fallback_dropped = effective.dropped_fallback;
+        let model_policy = effective.policy;
         if !model_policy.permits(request.intent) {
             reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
             continue;
@@ -959,12 +956,12 @@ fn prepare_candidates(
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
-        for warning in config
-            .domains
-            .routing
-            .model_policy_fallback_warnings(&catalogue)
-        {
-            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+        if let Some((fallback, reason)) = &fallback_dropped {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: {label}: model policy fallback {} ({reason}); dropped",
+                fallback.as_str()
+            );
         }
         if writer.is_some()
             && let Some(advisory) = config
