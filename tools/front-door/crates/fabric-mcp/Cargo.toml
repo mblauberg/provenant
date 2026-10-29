@@ -11,12 +11,12 @@ provenant-core = { workspace = true }
 provenant-os = { workspace = true }
 provenant-records = { workspace = true }
 provenant-fabric-runtime = { workspace = true }
-provenant-fabric-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+provenant-fabric-store = { workspace = true }
 regex = { workspace = true }
 tempfile = { workspace = true }
 

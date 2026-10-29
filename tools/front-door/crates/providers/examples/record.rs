@@ -199,7 +199,7 @@ fn exact(path: &Path) -> PathGrant {
 }
 
 fn git(cwd: &Path, home: &Path, args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("git")
+    let status = provenant_os::fixture::git_command()
         .args(args)
         .current_dir(cwd)
         .env_clear()

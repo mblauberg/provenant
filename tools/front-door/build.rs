@@ -10,20 +10,20 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use toml_edit::{DocumentMut, Item};
 
-#[cfg(test)]
-use provenant_os::fixture as fixture_git;
-
-#[cfg(test)]
-fn inventory_git() -> io::Result<Command> {
-    Ok(fixture_git::git_command())
-}
-
 #[cfg(not(test))]
 #[allow(clippy::disallowed_methods)]
 fn inventory_git() -> io::Result<Command> {
     let git = provenant_os::git::git_executable()
         .ok_or_else(|| io::Error::other("Git executable unavailable"))?;
     Ok(Command::new(git))
+}
+
+#[cfg(test)]
+use provenant_os::fixture as fixture_git;
+
+#[cfg(test)]
+fn inventory_git() -> io::Result<Command> {
+    Ok(fixture_git::git_command())
 }
 
 type BuildResult<T> = Result<T, Box<dyn Error>>;

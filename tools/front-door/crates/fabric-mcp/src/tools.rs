@@ -1295,7 +1295,7 @@ impl ServiceError {
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
         if let Self::Coordination(CoordinationError::Store(error)) = self {
-            if let provenant_fabric_store::Error::Invalid(field) = error {
+            if let provenant_fabric_runtime::StoreError::Invalid(field) = error {
                 return serde_json::json!({"code":self.code(),"field":field,"message":error.to_string(),"hint":"Check the field and retry."});
             }
             let facade = FacadeError::from(error);

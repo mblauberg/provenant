@@ -144,7 +144,7 @@ pub fn repository_path_with_cancel(
     ]
     .map(|(k, v)| (k.into(), v.into()))
     .into();
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
+    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(10));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
