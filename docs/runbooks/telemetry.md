@@ -86,6 +86,26 @@ ui.perfetto.dev or chrome://tracing; no collector is needed. Add `--peers` to
 read each configured peer's newest 100 lanes as well, whoever placed them; an
 unreachable peer is reported and skipped.
 
+## Price sheet freshness and refresh
+
+`config/telemetry-prices.toml` records `reviewed_at`, optional per-model
+`effective_from` and `effective_to` dates, and two settings:
+`max_review_age_days` (when set, `telemetry stats` prints a warning and
+`price_freshness.stale` is true once the review is older) and
+`discrepancy_threshold_bps` (default 1000, i.e. 10%).
+
+`provenant telemetry prices refresh [--source openrouter|litellm]` fetches
+OpenRouter `/api/v1/models` and LiteLLM `model_prices_and_context_window.json`,
+converts USD per token to microdollars per million tokens, and writes a proposal
+(default `telemetry-prices.proposed.json`) with each source URL, the fetch time
+and the rate changes. Only models with `openrouter_id` or `litellm_id` in the
+sheet are compared. `--source` picks the primary; the other is a cross-check, and
+a difference above the threshold is listed under `discrepancies`, never
+resolved. `--openrouter-file` and `--litellm-file` read a recorded document
+instead of fetching. The sheet is never edited: exit 0 means nothing to review,
+exit 5 means a proposal awaits review. Vendor pages remain the record for
+subscription-route equivalents.
+
 ## Local usage counters
 
 `provenant telemetry stats --usage --since 2592000` counts CLI verbs and Fabric

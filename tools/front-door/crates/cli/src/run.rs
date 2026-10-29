@@ -2,8 +2,8 @@
 //! `reconcile` and `telemetry stats`, and the provider seam that the
 //! same-binary guardian holder shares.
 use crate::{
-    Cancel, Condition, Dispatch, Lanes, Mode, Output, Part, Reconcile, Resume, Stats, Switch,
-    Target, Trace, limits,
+    Cancel, Condition, Dispatch, Lanes, Mode, Output, Part, PricesRefresh, Reconcile, Resume,
+    Stats, Switch, Target, Trace, limits,
 };
 use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId,
@@ -6646,7 +6646,9 @@ fn stats_inner(
                 billing
             ));
         }
-        return Ok((json!({ "native_claude_subagents": native }), human));
+        let mut data = json!({ "native_claude_subagents": native });
+        attach_freshness(&prices, &mut data, &mut human)?;
+        return Ok((data, human));
     }
     let instant = |time: Option<jiff::Timestamp>| {
         time.map(|t| WallTime::from_micros(t.as_microsecond()))
@@ -6890,6 +6892,7 @@ fn stats_inner(
         ));
     }
     data["partial_signals"] = json!(partial);
+    attach_freshness(&prices, &mut data, &mut human)?;
     if by == Some(crate::StatsBy::Pr) {
         data["pr_attribution"] = json!({
             "merged_prs_read": merged_pr_count,
@@ -6905,6 +6908,29 @@ fn stats_inner(
         data["chair_error"] = Value::String(error);
     }
     Ok((data, human))
+}
+
+/// Report the sheet's review age in JSON and, once stale, in the human text.
+fn attach_freshness(
+    prices: &provenant_telemetry::PriceTable,
+    data: &mut Value,
+    human: &mut String,
+) -> Result<(), Fail> {
+    let today = jiff::Timestamp::from_microsecond(now(&SystemClock::new())?.as_micros())
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date();
+    let freshness = prices.freshness(today);
+    if freshness.stale {
+        human.push_str(&format!(
+            "price sheet reviewed {} days ago ({}), over the {}-day limit\nnext: review and refresh with `provenant telemetry prices refresh`\n",
+            freshness.age_days,
+            freshness.reviewed_at,
+            freshness.max_age_days.unwrap_or(0)
+        ));
+    }
+    data["price_freshness"] = json!(freshness);
+    Ok(())
 }
 
 fn grouped_token_count(
@@ -7209,6 +7235,188 @@ fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
 }
 
 /// Offline lane timeline: terminal attempts as Chrome Trace Event JSON.
+/// Load and validate the bundled price sheet text and table.
+fn load_price_sheet(
+    edge: &Edge<'_>,
+) -> Result<
+    (
+        provenant_telemetry::ConfiguredPrices,
+        provenant_telemetry::PriceTable,
+    ),
+    Fail,
+> {
+    let path = edge.assets.join("config/telemetry-prices.toml");
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        Fail::new(
+            Status::Error,
+            ErrorKind::Prices,
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    let config = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
+    let table = provenant_telemetry::validate_prices(&config)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Prices, error.to_string()))?;
+    Ok((config, table))
+}
+
+/// Read one price document from a file or fetch it over HTTPS.
+fn price_document(
+    source: provenant_telemetry::refresh::Source,
+    file: Option<&Path>,
+    home: &Path,
+) -> Result<(Value, String), Fail> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    const LIMIT: usize = 64 * 1024 * 1024;
+    let io = |message: String| Fail::new(Status::Error, ErrorKind::Io, message);
+    let (bytes, origin) = if let Some(file) = file {
+        let bytes =
+            std::fs::read(file).map_err(|error| io(format!("{}: {error}", file.display())))?;
+        (bytes, format!("file:{}", file.display()))
+    } else {
+        let url = source.url();
+        let argv: Vec<std::ffi::OsString> = [
+            "curl",
+            "--disable",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--location",
+            "--proto",
+            "=https",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "60",
+            url,
+        ]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+        let mut options = ExecOptions::new(&argv, home, Duration::from_secs(65));
+        options.stdin = Some(b"");
+        options.stdout = StreamPolicy::Capture { limit: LIMIT };
+        options.stderr = StreamPolicy::Discard;
+        options.stop_on_output_limit = true;
+        let out = SystemExecutor::new(1)
+            .and_then(|executor| executor.execute(options))
+            .map_err(|error| io(format!("{url}: {error}")))?;
+        if out.timed_out || out.stdout.truncated || out.termination != Termination::Exit(0) {
+            return Err(io(format!("{url}: fetch failed")));
+        }
+        (out.stdout.bytes, url.to_owned())
+    };
+    let document = serde_json::from_slice(&bytes).map_err(|error| {
+        Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            format!("{origin}: {error}"),
+        )
+    })?;
+    Ok((document, origin))
+}
+
+pub fn prices_refresh(command: PricesRefresh, edge: &Edge<'_>) -> Reply {
+    let mut out = reply(
+        "telemetry prices refresh",
+        prices_refresh_inner(command, edge),
+    );
+    // A proposal awaiting review is not a failure, but is not "nothing to do".
+    if out.result.status == Status::Ok && out.result.data["clean"] == false {
+        out.result.status = Status::Pending;
+    }
+    out
+}
+/// True when both paths name one file, through symlinks, `..` or hard links.
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let resolve = |path: &Path| {
+        let name = path.file_name()?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::canonicalize(parent).ok().map(|p| p.join(name))
+    };
+    let resolved = |path: &Path| std::fs::canonicalize(path).ok().or_else(|| resolve(path));
+    if resolved(a).is_some_and(|a| Some(a) == resolved(b)) {
+        return true;
+    }
+    matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(a), Ok(b)) if a.dev() == b.dev() && a.ino() == b.ino())
+}
+fn prices_refresh_inner(command: PricesRefresh, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    use provenant_telemetry::refresh::{Source, propose};
+    let (sheet, _) = load_price_sheet(edge)?;
+    let out_path = edge.cwd.join(&command.out);
+    if same_file(&out_path, &edge.assets.join("config/telemetry-prices.toml")) {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "--out must not be the price sheet; the proposal never replaces it",
+        ));
+    }
+    let (primary, cross) = match command.source {
+        crate::PriceSource::Openrouter => (Source::Openrouter, Source::Litellm),
+        crate::PriceSource::Litellm => (Source::Litellm, Source::Openrouter),
+    };
+    let file = |source| match source {
+        Source::Openrouter => command.openrouter_file.as_deref(),
+        Source::Litellm => command.litellm_file.as_deref(),
+    };
+    let home = edge.home;
+    let (primary_doc, primary_origin) = price_document(primary, file(primary), home)?;
+    let (cross_doc, cross_origin) = price_document(cross, file(cross), home)?;
+    let clock = SystemClock::new();
+    let fetched_at = jiff::Timestamp::from_microsecond(now(&clock)?.as_micros())
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?;
+    let parse = |source: Source, document: &Value, origin: &str| {
+        source.parse(document).map_err(|error| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                format!("{origin}: {error}"),
+            )
+        })
+    };
+    let primary_rates = parse(primary, &primary_doc, &primary_origin)?;
+    let cross_rates = parse(cross, &cross_doc, &cross_origin)?;
+    let proposal = propose(&sheet, (primary, &primary_rates), (cross, &cross_rates));
+    let data = json!({
+        "primary": {"source": primary, "url": primary_origin},
+        "cross_check": {"source": cross, "url": cross_origin},
+        "fetched_at": fetched_at.to_string(),
+        "effective_from": fetched_at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string(),
+        "proposal": proposal,
+        "applied": false,
+        "proposal_file": command.out,
+    });
+    let text = serde_json::to_string_pretty(&data)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    std::fs::write(&out_path, format!("{text}\n")).map_err(|error| {
+        Fail::new(
+            Status::Error,
+            ErrorKind::Io,
+            format!("{}: {error}", out_path.display()),
+        )
+    })?;
+    let mut human = format!(
+        "{} proposed rate changes, {} discrepancies above threshold, {} models missing from {}\nproposal written to {} (price sheet not edited)\n",
+        proposal.changes.len(),
+        proposal.discrepancies.len(),
+        proposal.missing.len(),
+        plain_text(&primary_origin, 256),
+        command.out.display()
+    );
+    if proposal.is_clean() {
+        human.push_str("next: nothing to review\n");
+    } else {
+        human.push_str("next: review the proposal, then edit config/telemetry-prices.toml\n");
+    }
+    let mut data = data;
+    data["clean"] = json!(proposal.is_clean());
+    Ok((data, human))
+}
+
 pub fn trace(command: Trace, edge: &Edge<'_>) -> Reply {
     reply("telemetry trace", trace_inner(command, edge))
 }
@@ -8095,6 +8303,8 @@ mod tests {
             id: "empty".into(),
             reviewed_at: "2026-10-29".into(), // timebomb: allow fixed price-table review date, never compared with the clock
             units: "usd_microdollars_per_million_tokens".into(),
+            max_review_age_days: None,
+            discrepancy_threshold_bps: None,
             models: Vec::new(),
         })
         .unwrap();

@@ -2598,6 +2598,55 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant telemetry prices`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "Prices",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant telemetry prices refresh`
+
+| Argument | Contract |
+|---|---|
+| `--source` | `{"defaults": ["openrouter"], "name": "source", "values": ["openrouter", "litellm"]}` |
+| `--openrouter-file` | `{"name": "openrouter_file"}` |
+| `--litellm-file` | `{"name": "litellm_file"}` |
+| `--out` | `{"defaults": ["telemetry-prices.proposed.json"], "name": "out"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "source",
+        "openrouter_file",
+        "litellm_file",
+        "out"
+      ],
+      "multiple": true,
+      "name": "PricesRefresh",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant quota`
 
 | Argument | Contract |

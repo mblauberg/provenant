@@ -6718,12 +6718,18 @@ mod result_tests {
                 id: "test".into(),
                 reviewed_at: "2026-10-22".into(),
                 units: "usd_microdollars_per_million_tokens".into(),
+                max_review_age_days: None,
+                discrepancy_threshold_bps: None,
                 models: vec![provenant_telemetry::ConfiguredModel {
                     provider: "p".into(),
                     model: "priced".into(),
                     sources: vec!["test".into()],
                     billing: provenant_telemetry::BillingKind::Api,
                     zero_rate_verified: false,
+                    effective_from: None,
+                    effective_to: None,
+                    openrouter_id: None,
+                    litellm_id: None,
                     rates: provenant_telemetry::Rates {
                         uncached_input: Some(1_000_000),
                         cache_read: Some(2_000_000),

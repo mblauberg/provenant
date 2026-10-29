@@ -7,13 +7,14 @@ mod chair;
 mod native;
 mod prices;
 mod reducer;
+pub mod refresh;
 mod trace;
 pub mod usage;
 pub use chair::{ChairModelUsage, Unread, attach_usage as attach_chair_usage};
 pub use native::{NativeError, NativeModel, NativeReport, claude_subagents};
 pub use prices::{
-    BillingKind, Categories, ConfiguredModel, ConfiguredPrices, PriceError, PriceIdentity,
-    PriceTable, Rates, validate_prices,
+    BillingKind, Categories, ConfiguredModel, ConfiguredPrices, Freshness, PriceError,
+    PriceIdentity, PriceTable, Rates, validate_prices,
 };
 pub use reducer::*;
 pub use trace::{Hosts, trace};

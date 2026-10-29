@@ -1001,6 +1001,11 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 provenant_cli::run::trace(cmd, edge)
             })
         }
+        Command::Telemetry(provenant_cli::Telemetry::Prices {
+            command: provenant_cli::Prices::Refresh(cmd),
+        }) => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::prices_refresh(cmd, edge)
+        }),
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Console(cmd) => console::run(cmd, globals),
         Command::Quota { command } => {
