@@ -27,8 +27,8 @@ does not define another queue or scheduler.
 8. Save a host-keyed session checkpoint before compaction or substantial
    handoff when continuity would help:
    `provenant workflow session save <session-id> --file <checkpoint.md>`.
-   Keep authority/evidence references, progress, next actions, blockers, and a
-   resume trigger within the 32 KiB limit.
+   Keep goal, direction, process, and plan with a resume trigger, near 2 KiB.
+   Record milestones in the chair log with `provenant chair log append`.
 9. Check `STATUS` again before ending. If the run has no eligible or active
    work, follow run admission and pause behaviour, state what would resume it,
    and end this invocation. Idle is a waiting condition, never mission

@@ -1144,6 +1144,7 @@ pub(super) fn writer_run(
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![provenant_run::TaskRequest {
+                context: None,
                 extra: Default::default(),
                 build_heavy: false,
                 title: None,

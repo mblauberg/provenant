@@ -88,6 +88,8 @@ pub struct TranscriptRef {
 /// implementation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AttemptFact {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::run::WorkContext>,
     pub attempt_id: AttemptId,
     pub task_id: TaskId,
     pub attempt_number: u64,
