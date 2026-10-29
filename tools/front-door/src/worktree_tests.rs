@@ -769,6 +769,21 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     )?;
     let path_text = path.to_str().ok_or("fixture worktree encoding")?;
     git(&rig, &["-C", path_text, "reset", "--hard", "HEAD"])?;
+    // The rewind target is the trusted origin default, as required by the
+    // publication ancestry guard, rather than an arbitrary older lane tip.
+    let origin_default = git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?;
+    git(
+        &rig,
+        &["update-ref", "refs/remotes/origin/main", &origin_default],
+    )?;
+    git(
+        &rig,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    )?;
     fs::write(path.join("source-base"), b"new base")?;
     git(&rig, &["-C", path_text, "add", "source-base"])?;
     git(&rig, &["-C", path_text, "commit", "-qm", "Writer base"])?;
@@ -1327,7 +1342,13 @@ fn await_terminal(
     let mut result = None;
     // A third import is eligible after the five- and thirty-second backoffs.
     if !eventually(Duration::from_secs(60), || {
-        match store.record(attempt, call) {
+        let poll = provenant_run::Request {
+            clock: call.clock,
+            cancel: call.cancel,
+            budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 30)
+                .expect("valid terminal poll budget"),
+        };
+        match store.record(attempt, &poll) {
             Ok(record) if matches!(record.state, provenant_run::AttemptState::Terminal { .. }) => {
                 result = Some(Ok(record));
                 true
@@ -1339,13 +1360,18 @@ fn await_terminal(
             }
         }
     }) {
-        let temporary = store.temporary_path(attempt, call)?;
+        let poll = provenant_run::Request {
+            clock: call.clock,
+            cancel: call.cancel,
+            budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 30)?,
+        };
+        let temporary = store.temporary_path(attempt, &poll)?;
         let directory = temporary.parent().ok_or("attempt directory")?;
         let progress = fs::read_to_string(directory.join("settlement-progress.json"))
             .unwrap_or_else(|error| error.to_string());
         return Err(format!(
             "writer attempt did not reach terminal state: {:?}; settlement: {progress}",
-            store.record(attempt, call)?.state
+            store.record(attempt, &poll)?.state
         )
         .into());
     }

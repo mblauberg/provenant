@@ -15,6 +15,41 @@ pub(super) struct PrepareFixture {
 }
 
 #[test]
+fn terminal_archives_an_unfinished_host_sequencer_before_refusal()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    std::fs::write(
+        fixture.writer.worktree.join("AGENTS.md"),
+        b"base instructions\n",
+    )?;
+    fixture.lane_git(&["add", "AGENTS.md"])?;
+    fixture.commit(&fixture.writer.worktree, "instruction baseline")?;
+    let result = fixture.terminal(|| {
+        std::fs::write(
+            fixture.writer.worktree.join("AGENTS.md"),
+            b"changed instructions\n",
+        )?;
+        std::fs::write(
+            fixture
+                .writer
+                .project
+                .join(".git/worktrees/lane/CHERRY_PICK_HEAD"),
+            b"fixture sequencer state",
+        )?;
+        Ok(())
+    });
+    assert!(
+        matches!(&result, Err(error) if matches!(error.downcast_ref::<RunError>(), Some(RunError::Writer(provenant_confinement::worktrees::WorktreeError::GitOperationInProgress)))),
+        "{result:?}"
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        fixture.root.join("attempt/quarantine/manifest.json"),
+    )?)?;
+    assert_eq!(manifest["review_required"], true);
+    Ok(())
+}
+
+#[test]
 fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     for outcome in [Outcome::Succeeded, Outcome::Cancelled, Outcome::Failed] {
