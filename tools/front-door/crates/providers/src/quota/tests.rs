@@ -199,6 +199,16 @@ fn cursor_uses_usage_summary_and_fills_missing_plan_from_membership() {
 }
 
 #[test]
+fn opencode_infers_compound_and_second_pool_windows() {
+    let snapshot = decode_fixture(
+        "opencode",
+        r#"{"payload":{"windows":[{"pool":"1h30m","used_percent":10},{"pool":"30s","used_percent":10}]}}"#,
+    );
+    assert_eq!(window(&snapshot, "1h30m").window_seconds, Some(5_400));
+    assert_eq!(window(&snapshot, "30s").window_seconds, Some(30));
+}
+
+#[test]
 fn opencode_decodes_live_partial_local_ledger_and_reports_exhausted_weekly_pool() {
     let snapshot = decode_fixture("opencode", include_str!("fixtures/opencode.json"));
     let details = snapshot.details.as_ref().unwrap();

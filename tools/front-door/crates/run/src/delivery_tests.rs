@@ -7,6 +7,28 @@ use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
 
 #[test]
+fn prepare_reports_common_git_dir_discovery_failure()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let git = fixture.root.join("failing-git");
+    fixture.executable(
+        &git,
+        "#!/bin/sh\nprintf '%s\\n' 'fatal: https://user:secret@example.com/repo' >&2\nexit 1\n",
+    )?;
+    let mut environment = fixture.environment.clone();
+    environment.push(("PROVENANT_GIT".into(), git.into_os_string()));
+    match HostDeliveryContext::new(environment).prepare(&fixture.writer, &fixture.request) {
+        Err(RunError::DeliveryPrepare { step, reason }) => {
+            assert_eq!(step, "HEAD");
+            assert!(reason.contains("example.com"), "{reason}");
+            assert!(!reason.contains("secret"), "{reason}");
+        }
+        other => panic!("expected a prepare failure, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
 fn reconcile_settles_exhausted_writer_import_after_durable_exit()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use provenant_supervisor::custody::WriterBinding;
@@ -175,8 +197,8 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         );
         // A cancelled import may have pinned its head without publishing the
         // writer-terminal record. Terminal cleanup must consult the journal.
-        let mut driver =
-            crate::settlement::Guard::claim(&attempt, exit.scope)?.ok_or("settlement owner")?;
+        let mut driver = crate::settlement::Guard::claim(&attempt, exit.scope, &clock)?
+            .ok_or("settlement owner")?;
         driver.set_head(launch.base)?;
         drop(driver);
         let stage = format!("refs/provenant/import/{}", launch.base);
@@ -498,7 +520,6 @@ fn integration_refreshes_forged_tracking_ref_and_fails_closed()
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
 fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -650,7 +671,6 @@ struct OriginFixture {
 }
 
 impl OriginFixture {
-    #[allow(clippy::disallowed_methods)]
     fn run_in(
         &self,
         directory: &Path,
@@ -955,7 +975,6 @@ fn origin_refresh_refuses_names_that_differ_only_in_unicode_normalisation()
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
 fn origin_refresh_routes_advertisement_and_fetch_through_one_hardened_transport()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
@@ -1274,13 +1293,8 @@ fn graph_publication_recovers_deleted_marked_ref_and_refuses_conflicts()
         other.to_string()
     );
 
-    let common = host.command(
-        &fixture.writer.project,
-        "git",
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        WriterDeliveryStage::Push,
-    )?;
-    let directory = provenant_os::fs::Directory::open_anchor(Path::new(&common))?;
+    let common = host.common_git_dir(&fixture.writer.project, WriterDeliveryStage::Push)?;
+    let directory = provenant_os::fs::Directory::open_anchor(&common)?;
     artifacts::seal(
         &directory,
         &format!("provenant-graph-publication-{other}.json"),
@@ -1313,13 +1327,8 @@ fn graph_publication_recovers_a_ref_created_before_its_marker()
     let publication = format!("provenant/graph/{head}");
     // Simulate a crash after update-ref but before the ownership marker.
     fixture.git(&["branch", &publication, &head.to_string()])?;
-    let common = host.command(
-        &fixture.writer.project,
-        "git",
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        WriterDeliveryStage::Push,
-    )?;
-    let directory = provenant_os::fs::Directory::open_anchor(Path::new(&common))?;
+    let common = host.common_git_dir(&fixture.writer.project, WriterDeliveryStage::Push)?;
+    let directory = provenant_os::fs::Directory::open_anchor(&common)?;
     let marker = format!("provenant-graph-publication-{head}.json");
     assert!(artifacts::read_sealed(&directory, &marker, RECORD_LIMIT)?.is_none());
     assert_eq!(
@@ -2354,7 +2363,10 @@ impl PrepareFixture {
             launch.branch.as_str(),
             base,
         )?;
-        let clock = provenant_os::clock::SystemClock::new();
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0)?,
+            provenant_core::MonoTime::from_micros(0),
+        );
         let mut recovery = provenant_supervisor::fixture::acquire_writer_with_binding(
             Directory::open_anchor(&state)?,
             scope,
@@ -2390,7 +2402,7 @@ impl PrepareFixture {
         }
         recovery.prepare_settlement()?;
         let mut settlement =
-            crate::settlement::Guard::claim(&attempt, scope)?.ok_or("settlement owner")?;
+            crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("settlement owner")?;
         if resume_after_publish {
             let source = crate::objects::bound_source(&attempt)?.ok_or("private Git source")?;
             let tip = crate::objects::private_tip(&source, launch.branch.as_str())?;
@@ -2413,9 +2425,11 @@ impl PrepareFixture {
             // Drop the process owner at the crash boundary before the phase
             // checkpoint. A fresh driver must safely replay publication.
             drop(settlement);
-            let after_backoff = u64::try_from(clock.wall_now()?.as_micros() / 1000)? + 120_000;
-            settlement = crate::settlement::Guard::claim_at(&attempt, scope, after_backoff)?
-                .ok_or("resumed owner")?;
+            clock.wait_until(provenant_core::MonoTime::from_micros(
+                clock.mono_now().as_micros() + 120_000_000,
+            ))?;
+            settlement =
+                crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("resumed owner")?;
         }
         let review = launch.terminal(
             &state,

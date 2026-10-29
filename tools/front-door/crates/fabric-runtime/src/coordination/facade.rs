@@ -173,6 +173,8 @@ pub enum FacadeError {
     NotFound,
     #[error("request conflicts with current state")]
     Conflict,
+    #[error("continuation generation conflict; current generation is {current_generation}")]
+    GenerationConflict { current_generation: u64 },
     #[error("attempt is not terminal")]
     NotTerminal,
     #[error("operation ID was reused with different input")]
@@ -247,7 +249,7 @@ impl FacadeError {
             Self::OwnerUnavailable => "owner_unavailable",
             Self::InvalidInput => "invalid_input",
             Self::NotFound => "not_found",
-            Self::Conflict => "conflict",
+            Self::Conflict | Self::GenerationConflict { .. } => "conflict",
             Self::NotTerminal => "not_terminal",
             Self::OperationConflict => "operation_conflict",
             Self::Busy => "busy",

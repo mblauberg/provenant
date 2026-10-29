@@ -223,7 +223,7 @@ pub(super) fn choose(
             super::Status::Invalid,
             super::ErrorKind::NotFound,
             format!(
-                "no lane matches {selection}; run `provenant status --all` to find its full ID"
+                "no lane matches {selection}; use a unique prefix of 8 or more characters or the full ID, as `provenant lanes --all` lists them"
             ),
         )),
         1 => Ok(selected.remove(0)),
@@ -283,7 +283,7 @@ pub(super) fn resolve(
             .any(|candidate| allow_run || candidate.target.attempt.is_some())
     {
         candidates.extend(peers);
-        return choose(&selection, candidates, allow_run);
+        return choose_for(edge, &selection, candidates, allow_run);
     }
     let mut projects: Vec<_> = provenant_config::registered_projects(edge.roots)
         .map_err(|error| {
@@ -314,7 +314,24 @@ pub(super) fn resolve(
         }
     }
     candidates.extend(peers);
-    choose(&selection, candidates, allow_run)
+    choose_for(edge, &selection, candidates, allow_run)
+}
+/// `choose`, naming `--host` on a miss when a peer could hold the lane.
+fn choose_for(
+    edge: &Edge<'_>,
+    selection: &str,
+    candidates: Vec<Candidate>,
+    allow_run: bool,
+) -> Result<Candidate, Fail> {
+    choose(selection, candidates, allow_run).map_err(|mut fail| {
+        let peers = crate::fabric::Context::open_read_only(edge.roots.clone(), edge.home, edge.cwd)
+            .is_ok_and(|context| !context.config.peers.is_empty());
+        if fail.kind == super::ErrorKind::NotFound && peers {
+            fail.message
+                .push_str("; a configured peer's lane needs `--host HOST`");
+        }
+        fail
+    })
 }
 /// Reopen the selected run's stored project without changing actor identity.
 /// RunStore still checks custody and record identity on every operation.
@@ -428,6 +445,16 @@ mod tests {
         ] {
             assert!(selection.parse::<Target>().is_err(), "{selection}");
         }
+    }
+    #[test]
+    fn a_missed_lane_names_the_prefix_rule() {
+        let error = choose("02020202", Vec::new(), false).expect_err("no lane");
+        assert_eq!(error.kind, super::super::ErrorKind::NotFound);
+        assert!(
+            error.message.contains("unique prefix of 8 or more"),
+            "{}",
+            error.message
+        );
     }
     #[test]
     fn unique_prefix_preserves_the_stored_project_and_full_identity() {

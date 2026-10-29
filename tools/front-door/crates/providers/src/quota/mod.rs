@@ -622,25 +622,14 @@ fn minutes_to_seconds(value: &Value) -> Option<u64> {
 }
 
 fn named_window_seconds(value: &str) -> Option<u64> {
-    match value.to_ascii_lowercase().as_str() {
+    let lower = value.to_ascii_lowercase();
+    match lower.as_str() {
         "5h" | "five_hour" | "session" => Some(18_000),
         "hourly" | "one_hour" => Some(3_600),
         "daily" | "one_day" => Some(86_400),
         "weekly" | "seven_day" => Some(604_800),
         "thirty_day" | "monthly" => Some(2_592_000),
-        _ => {
-            let lower = value.to_ascii_lowercase();
-            let (amount, unit) = lower.split_at(lower.find(|ch: char| !ch.is_ascii_digit())?);
-            let amount = amount.parse::<u64>().ok()?;
-            let multiplier = match unit {
-                "m" => 60,
-                "h" => 3_600,
-                "d" => 86_400,
-                "w" => 604_800,
-                _ => return None,
-            };
-            amount.checked_mul(multiplier)
-        }
+        _ => crate::duration::suffix_seconds(&lower),
     }
 }
 

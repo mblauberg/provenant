@@ -85,6 +85,11 @@ impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
         use provenant_fabric_runtime::coordination::facade::FacadeError;
         let detail = match &error {
+            run::RunError::GenerationConflict { current_generation } => {
+                Some(FacadeError::GenerationConflict {
+                    current_generation: *current_generation,
+                })
+            }
             run::RunError::WorktreeUnregistered(path) => Some(FacadeError::WorktreeUnregistered {
                 path: path.to_string_lossy().into_owned(),
             }),
@@ -286,7 +291,9 @@ impl run::Providers for Registry<'_> {
             }
             None => Default::default(),
         };
-        let now = jiff::Timestamp::now().as_second();
+        let now = SystemClock::new()
+            .wall_now()
+            .map_err(|error| error.to_string())?;
         let policy = routing
             .model_policy
             .effective(&model, route.account_key.as_deref(), now)
@@ -316,7 +323,7 @@ impl run::Providers for Registry<'_> {
                 key,
                 &model,
                 model_pool.as_deref(),
-                now,
+                now.unix_seconds(),
             )
         };
         Ok(assess_settlement_retry(
@@ -326,7 +333,7 @@ impl run::Providers for Registry<'_> {
             record,
             decoded,
             policy_attempt,
-            now,
+            now.unix_seconds(),
         ))
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
@@ -950,7 +957,7 @@ impl Registry<'_> {
             let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
             if !lane && (pool.is_some() || route.account_key.is_some()) {
                 if let Some(state_root) = provider_state.ancestors().nth(5) {
-                    let now = jiff::Timestamp::now().as_second();
+                    let now = SystemClock::new().unix_seconds();
                     let resets = resets_in_seconds
                         .and_then(|seconds| i64::try_from(seconds).ok())
                         .and_then(|seconds| now.checked_add(seconds));
@@ -998,7 +1005,7 @@ impl Registry<'_> {
                             let _ = crate::quota::persist_capacity_cooldown(
                                 self.state_root.unwrap_or_else(|| roots.state.as_path()),
                                 route,
-                                jiff::Timestamp::now().as_second(),
+                                SystemClock::new().unix_seconds(),
                                 duration,
                             );
                         }
@@ -1048,7 +1055,7 @@ impl Registry<'_> {
             let _ = crate::quota::persist_provider_success(
                 state_root,
                 route,
-                jiff::Timestamp::now().as_second(),
+                SystemClock::new().unix_seconds(),
             );
         }
         if decoded.outcome == run::Outcome::ModelUnavailable
@@ -1126,7 +1133,6 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         effort,
         fallback,
         confidential: false,
-        allow_free: false,
     })
 }
 
@@ -2011,6 +2017,8 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                     tail: Some(20),
                     max_bytes: 8192,
                     trace: false,
+                    to: None,
+                    path: false,
                 },
                 edge,
             );
@@ -2081,6 +2089,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 ));
             };
             let session = Session { store, context };
+            let _ = session.store.reap(&call);
             let full = command.all || command.id.is_some();
             let mut query = lane_query(
                 &session,
@@ -2183,6 +2192,8 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                             .and_then(|route| route.model.clone())
                             .unwrap_or_else(|| "unresolved".into()),
                         reason: reason.unwrap_or_default(),
+                        provider_error: None,
+                        result_path: None,
                     }
                 })
                 .collect();
@@ -2208,6 +2219,8 @@ struct LaneLine {
     state: String,
     model: String,
     reason: String,
+    provider_error: Option<String>,
+    result_path: Option<String>,
 }
 /// Needs action (0), still moving (1), or finished well (2).
 fn lane_rank(state: &str) -> u8 {
@@ -2274,7 +2287,26 @@ fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> crate::Summ
             }
         })
     });
-    crate::Summary::new(headline, rows, next)
+    let mut summary = crate::Summary::new(headline, rows, next);
+    for lane in listed.iter().take(crate::limits::SUMMARY_ROWS) {
+        if lane.state == "failed" {
+            if let Some(error) = &lane.provider_error {
+                summary.lines.push(format!(
+                    "  provider error {}: {}",
+                    &lane.id[..lane.id.len().min(8)],
+                    plain_text(error, usize::MAX)
+                ));
+            }
+            if let Some(path) = &lane.result_path {
+                summary.lines.push(format!(
+                    "  result: {} ({})",
+                    plain_text(path, usize::MAX),
+                    &lane.id[..lane.id.len().min(8)]
+                ));
+            }
+        }
+    }
+    summary
 }
 /// The lane rows of a `lanes` or `run` reply, in the shape `lane_summary` reads.
 fn lane_lines(data: &Value) -> Vec<LaneLine> {
@@ -2295,6 +2327,8 @@ fn lane_lines(data: &Value) -> Vec<LaneLine> {
                             .or_else(|| row["waiting_for"].as_str())
                             .unwrap_or_default()
                             .to_owned(),
+                        provider_error: row["provider_error"].as_str().map(str::to_owned),
+                        result_path: row["result_path"].as_str().map(str::to_owned),
                     })
                 })
                 .collect()
@@ -4180,6 +4214,7 @@ fn render_lanes(
     cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
 ) -> (Value, String) {
     let mut human = String::new();
+    let now_wall = SystemClock::new().wall_now().ok();
     let rows: Vec<Value> = lanes
         .iter()
         .map(|lane| {
@@ -4332,6 +4367,25 @@ fn render_lanes(
                         .join(", ")
                 ));
             }
+            if review_required {
+                human.push_str(&format!(
+                    "  next: provenant lane deliver --accept-review {}\n",
+                    lane.attempt_id
+                ));
+            }
+            if matches!(
+                lane.state,
+                run::AttemptState::Terminal {
+                    outcome: run::Outcome::Failed,
+                    ..
+                }
+            ) && let Some(path) = &result
+            {
+                human.push_str(&format!(
+                    "  result: {}\n",
+                    plain_text(&path.display().to_string(), usize::MAX)
+                ));
+            }
             if let Some(delivery) = &lane.delivery {
                 human.push_str(&format!(
                     "  delivery {}:{} {} head={}\n",
@@ -4356,6 +4410,9 @@ fn render_lanes(
                         .map(|path| attempt.join(path));
                     json!({ "adapter": adapter, "session": session, "path": path })
                 });
+            // The settled record's own reason, without a waiting lane's note.
+            let settlement = matches!(lane.state, run::AttemptState::Terminal { .. })
+                .then(|| json!({ "reason": state_and_reason(&lane.state).1 }));
             let mut row = json!({
                 "run_id": lane.run_id,
                 "task_id": lane.task_id,
@@ -4364,6 +4421,7 @@ fn render_lanes(
                 "state": state,
                 "exit_code": exit_code,
                 "reason": reason,
+                "settlement": settlement,
                 "lane_class": wait.map(|w| w.lane_class),
                 "waiting_for": wait.map(|w| &w.waiting_for),
                 "requested_route": lane.requested_route,
@@ -4377,6 +4435,8 @@ fn render_lanes(
                 "finished_at": finished_at,
                 "last_output_at": lane.last_output_at,
                 "runtime_deadline": lane.runtime_deadline,
+                "overdue": now_wall.is_some_and(|now| run::overdue_at(lane, now)),
+                "stale": run::holder_absent(root, lane),
                 "partial_signals": lane.partial_signals,
                 "delivery_id": lane.delivery_id,
                 "write_grants": lane.write_grants,
@@ -4584,6 +4644,7 @@ fn candidates<'a>(
             clock: &clock,
             cancel: &cancel,
         };
+        let _ = session.store.reap(&call);
         let ids = match picks.since {
             Some(since) if picks.targets.is_empty() => {
                 select_since(session, picks.owner, since, &call)?
@@ -4630,13 +4691,64 @@ fn render_settled(
             cancel: &cancel,
         },
     );
-    Ok(render_lanes(
+    let (mut data, mut human) = render_lanes(
         lanes,
         &waits,
         None,
         session.context.state_root.as_path(),
         cooldowns,
-    ))
+    );
+    append_provider_errors(session, lanes, &mut data, &mut human);
+    attach_handoffs(session, lanes, &mut data);
+    Ok((data, human))
+}
+fn append_provider_errors(
+    session: &Session,
+    lanes: &[run::AttemptRecord],
+    data: &mut Value,
+    human: &mut String,
+) {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let Some(rows) = data["lanes"].as_array_mut() else {
+        return;
+    };
+    for (lane, row) in lanes.iter().zip(rows) {
+        if matches!(
+            lane.state,
+            run::AttemptState::Terminal {
+                outcome: run::Outcome::Failed,
+                ..
+            }
+        ) && let Some(error) = provider_error_line(session, lane.attempt_id, &call)
+        {
+            row["provider_error"] = json!(error);
+            human.push_str(&format!(
+                "  provider error {}: {}\n",
+                lane.attempt_id,
+                plain_text(&error, usize::MAX)
+            ));
+        }
+    }
+}
+/// Each row's `handoff`: the settlement snapshot's parsed object, or null when
+/// the attempt recorded none. Rows follow `lanes`, as `render_lanes` makes them.
+fn attach_handoffs(session: &Session, lanes: &[run::AttemptRecord], data: &mut Value) {
+    let Some(rows) = data["lanes"].as_array_mut() else {
+        return;
+    };
+    for (row, lane) in rows.iter_mut().zip(lanes) {
+        row["handoff"] = session
+            .store
+            .handoff(lane)
+            .ok()
+            .flatten()
+            .map_or(Value::Null, |handoff| json!(handoff));
+    }
 }
 fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, String, bool), Fail> {
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
@@ -4982,6 +5094,8 @@ fn lanes_inner(
             .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid cursor"))?,
         None => 0,
     };
+    // A lane whose guardian died is settled by the next read, not left running.
+    let _ = session.store.reap(&call);
     let mut query = lane_query(
         &session,
         &command.id,
@@ -4996,7 +5110,7 @@ fn lanes_inner(
     let by_session =
         |lane: &run::AttemptRecord| command.session.is_none() || lane.verified_owner == Some(owner);
     let filtered = !command.states.is_empty() || command.since.is_some();
-    query.newest_first = filtered;
+    query.newest_first = filtered || command.all;
     let (lanes, next) = if filtered {
         query.limit = 100;
         let mut matches = Vec::new();
@@ -5038,13 +5152,15 @@ fn lanes_inner(
     };
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
-    let (data, human) = render_lanes(
+    let (mut data, mut human) = render_lanes(
         &lanes,
         &waits,
         next,
         session.context.state_root.as_path(),
         lane_cooldown_view(&cooldowns),
     );
+    append_provider_errors(&session, &lanes, &mut data, &mut human);
+    attach_handoffs(&session, &lanes, &mut data);
     Ok((data, human, false))
 }
 
@@ -5206,16 +5322,32 @@ pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
         .then_some(command.tail)
         .flatten();
     let headed = matches!(command.part, Part::Result) && !command.trace;
+    let to = command.to.clone();
     let mut out = reply(
         "output",
-        output_inner(command, edge).map(|(mut data, mut text)| {
+        output_inner(command, edge).and_then(|(mut data, mut text)| {
             if let Some(lines) = receipt_tail {
                 text =
                     text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
                 data["tail"] = json!(lines.min(limits::TAIL_LINES));
                 data["tail_text"] = json!(text);
             }
-            (data, text)
+            if let Some(path) = &to {
+                let bytes = chunk_bytes(&data).ok_or_else(|| {
+                    Fail::new(
+                        Status::Invalid,
+                        ErrorKind::Invalid,
+                        "--to needs a part that has bytes; use --part result, transcript, stderr or prompt",
+                    )
+                })?;
+                std::fs::write(path, &bytes).map_err(|error| {
+                    Fail::new(Status::Error, ErrorKind::Io, error.to_string())
+                })?;
+                data["to"] = json!(path.display().to_string());
+                data["written"] = json!(bytes.len());
+                text = format!("wrote {} bytes to {}\n", bytes.len(), path.display());
+            }
+            Ok((data, text))
         }),
     );
     out.read_only = true;
@@ -5230,6 +5362,14 @@ pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
 /// Missing changed-file evidence stays null; it must never read as an empty diff.
 fn output_summary(data: &Value, text: &str, headed: bool) -> crate::Summary {
     let mut lines = Vec::new();
+    if let Some(selected) = data.get("selected") {
+        lines.push(format!(
+            "attempt {} chosen: {} of {} attempts",
+            data["attempt_id"].as_str().unwrap_or_default(),
+            selected["rule"].as_str().unwrap_or("newest"),
+            selected["attempts"]
+        ));
+    }
     if headed && let Some(state) = data["state"].as_str() {
         let reason = data["reason"].as_str();
         lines.push(match reason {
@@ -5240,6 +5380,17 @@ fn output_summary(data: &Value, text: &str, headed: bool) -> crate::Summary {
             ),
             None => format!("settlement: {}", crate::bounded_text(state, 64)),
         });
+        if state == "failed" {
+            if let Some(error) = data["provider_error"].as_str() {
+                lines.push(format!(
+                    "provider error: {}",
+                    crate::bounded_text(error, 160)
+                ));
+            }
+            if let Some(path) = data["result_path"].as_str() {
+                lines.push(format!("result: {}", crate::bounded_text(path, 512)));
+            }
+        }
     }
     if headed && let Some(files) = data.get("changed_files") {
         lines.push(match files.as_array() {
@@ -5469,7 +5620,8 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
     let receipt = matches!(command.part, Part::Receipt);
-    let candidate = targets::resolve(edge, &command.attempt.0, receipt)?;
+    // A RUN or RUN/TASK names attempts, so every part resolves runs as receipts do.
+    let candidate = targets::resolve(edge, &command.attempt.0, true)?;
     command.attempt.0 = candidate.target.clone();
     if site.is_none()
         && let Some(placement) = targets::placement(edge, &candidate.target, false)?
@@ -5477,6 +5629,7 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         return remote::output(&command, &placement, edge);
     }
     let (session, target) = targets::read_resolved(edge, candidate, &call)?;
+    let mut selected = None;
     let id = match target.attempt {
         Some(id) => id,
         None if receipt => {
@@ -5494,11 +5647,9 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
             page.lanes[0].attempt_id
         }
         None => {
-            return Err(Fail::new(
-                Status::Invalid,
-                ErrorKind::Invalid,
-                "attempt required",
-            ));
+            let (id, attempts, rule) = newest_attempt(&session, &target, &call)?;
+            selected = Some(json!({ "attempts": attempts, "rule": rule }));
+            id
         }
     };
     let record = session.service().status(id, &call)?;
@@ -5527,6 +5678,32 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         return Ok((
             json!({ "attempt_id": id, "trace": trace, "grants": grants }),
             human,
+        ));
+    }
+    if command.path {
+        let file = match command.part {
+            Part::Result if record.result.is_none() => {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::NotFound,
+                    "attempt has no result to point at",
+                ));
+            }
+            Part::Result => provenant_records::AttemptFile::Result,
+            Part::Prompt => provenant_records::AttemptFile::Prompt,
+            Part::Stderr => provenant_records::AttemptFile::Stderr,
+            _ => {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "--path needs --part result, prompt or stderr",
+                ));
+            }
+        };
+        let path = artifact(session.context.state_root.as_path(), &record, file.name());
+        return Ok((
+            json!({ "attempt_id": id, "part": format!("{:?}", command.part).to_lowercase(), "path": path.display().to_string() }),
+            format!("{}\n", path.display()),
         ));
     }
     let part = match command.part {
@@ -5634,7 +5811,124 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         data["changed_files"] = paths;
         data["changed_files_total"] = total;
     }
+    if matches!(command.part, Part::Result)
+        && matches!(
+            record.state,
+            run::AttemptState::Terminal {
+                outcome: run::Outcome::Failed,
+                ..
+            }
+        )
+    {
+        data["provider_error"] = json!(provider_error_line(&session, id, &call));
+        data["result_path"] = json!(record.result.as_ref().map(|_| {
+            artifact(session.context.state_root.as_path(), &record, "result.md")
+                .display()
+                .to_string()
+        }));
+    }
+    if let Some(selected) = selected {
+        data["selected"] = selected;
+    }
     Ok((data, text))
+}
+
+/// The attempt `output` reads for a RUN or RUN/TASK: the newest settled one,
+/// else the newest. Several tasks in one run are ambiguous, so they are refused.
+fn newest_attempt(
+    session: &Session,
+    target: &Target,
+    call: &run::Request<'_>,
+) -> Result<(AttemptId, usize, &'static str), Fail> {
+    let mut query = lane_query(session, std::slice::from_ref(target), true, 100, 0, call)?;
+    query.newest_first = true;
+    let page = session.service().lanes(&query, call)?;
+    newest_settled_of(&page.lanes)
+}
+
+/// Choose from a page of attempts, newest first. Several tasks are ambiguous.
+fn newest_settled_of(
+    lanes: &[run::AttemptRecord],
+) -> Result<(AttemptId, usize, &'static str), Fail> {
+    let mut tasks: Vec<_> = lanes.iter().map(|lane| lane.task_id).collect();
+    tasks.sort();
+    tasks.dedup();
+    match tasks.len() {
+        0 => {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::NotFound,
+                "no attempt in that run",
+            ));
+        }
+        1 => {}
+        count => {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Conflict,
+                format!("run has {count} tasks; name one as RUN/TASK"),
+            ));
+        }
+    }
+    let settled = lanes
+        .iter()
+        .find(|lane| matches!(lane.state, run::AttemptState::Terminal { .. }));
+    Ok(match settled {
+        Some(lane) => (lane.attempt_id, lanes.len(), "newest settled"),
+        None => (lanes[0].attempt_id, lanes.len(), "newest"),
+    })
+}
+
+/// The last non-empty stderr line of a failed attempt, redacted as reasons are.
+/// The tail is read so a long capture still shows its final error.
+fn provider_error_line(
+    session: &Session,
+    id: AttemptId,
+    call: &run::Request<'_>,
+) -> Option<String> {
+    const TAIL_BYTES: u64 = 8192;
+    let length = session
+        .service()
+        .output(
+            id,
+            run::ArtifactPart::Stderr,
+            run::ByteRange {
+                offset: 0,
+                max_bytes: 1,
+            },
+            call,
+        )
+        .ok()?
+        .len;
+    let tail = session
+        .service()
+        .output(
+            id,
+            run::ArtifactPart::Stderr,
+            run::ByteRange {
+                offset: length.saturating_sub(TAIL_BYTES),
+                max_bytes: TAIL_BYTES,
+            },
+            call,
+        )
+        .ok()?;
+    let text = String::from_utf8_lossy(&tail.bytes);
+    let line = text.lines().rev().find(|line| !line.trim().is_empty())?;
+    let redacted = provenant_confinement::redact::known_shapes(line.as_bytes())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())?;
+    Some(crate::bounded_text(&redacted, 160))
+}
+
+/// The exact bytes of a read, from the lossless encoding `output` reports.
+fn chunk_bytes(data: &Value) -> Option<Vec<u8>> {
+    let bytes = &data["bytes"];
+    let text = bytes["data"].as_str()?;
+    match bytes["encoding"].as_str()? {
+        "utf8" => Some(text.as_bytes().to_vec()),
+        "base64" => provenant_fabric_runtime::handoff::decode_base64(text),
+        _ => None,
+    }
 }
 
 /// Use the recorded base and final head, never the caller's current checkout
@@ -6751,7 +7045,7 @@ pub fn stats_by_pr(
 fn cache_kpi_rows(
     facts: &[&provenant_records::AttemptFact],
     domains: &crate::domains::Domains,
-    now: i64,
+    now: provenant_core::WallTime,
 ) -> Value {
     let mut grouped: BTreeMap<(Option<String>, Option<String>), Vec<&provenant_records::Usage>> =
         BTreeMap::new();
@@ -6779,6 +7073,71 @@ fn cache_kpi_rows(
     }).collect();
     json!({"scope": "project terminal attempts", "routes": routes, "lanes": lanes})
 }
+
+/// Attempts still queued or running in the project, or in one run. The window
+/// cannot count them: they have no finish time yet.
+fn unfinished_attempts(
+    store: Option<&run::RunStore>,
+    run_id: Option<RunId>,
+    call: &run::Request<'_>,
+) -> Result<u64, Fail> {
+    let Some(store) = store else {
+        return Ok(0);
+    };
+    let mut count = 0;
+    let mut after = 0;
+    loop {
+        let page = store.lanes(
+            &run::LaneQuery {
+                targets: run_id
+                    .map(|run| {
+                        vec![run::LaneTarget {
+                            run,
+                            task: None,
+                            attempt: None,
+                        }]
+                    })
+                    .unwrap_or_default(),
+                all: false,
+                limit: 100,
+                after,
+                newest_first: false,
+                owner: None,
+                unseen_after: None,
+            },
+            call,
+        )?;
+        // A run selection also returns its terminal lanes, so filter on state.
+        count += page
+            .lanes
+            .iter()
+            .filter(|lane| !matches!(lane.state, run::AttemptState::Terminal { .. }))
+            .count() as u64;
+        match page.next {
+            Some(next) => after = next,
+            None => return Ok(count),
+        }
+    }
+}
+
+/// Names the project the figures cover, and what the window leaves out.
+fn stats_scope_line(project: provenant_core::ProjectId, unfinished: u64) -> String {
+    format!(
+        "scope: project {project}, finished attempts only ({unfinished} queued or running not counted); other projects are excluded, so run stats from their checkout\n"
+    )
+}
+
+/// Reasoning tokens get a line only where a provider reported them.
+fn reasoning_line(totals: &provenant_telemetry::Totals) -> Option<String> {
+    let zero = provenant_telemetry::TokenTotal::default();
+    (totals.usage.reasoning.known > 0).then(|| {
+        format!(
+            "reasoning tokens: {}\n",
+            grouped_token_count(&totals.usage.reasoning, &zero, &zero)
+        )
+    })
+}
+
 fn stats_inner(
     command: Stats,
     edge: &Edge<'_>,
@@ -6875,6 +7234,7 @@ fn stats_inner(
         })
         .transpose()?
         .unwrap_or_default();
+    let unfinished = unfinished_attempts(store.as_ref(), selected_run, &call)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
     let selected: Vec<_> = facts
@@ -6895,7 +7255,9 @@ fn stats_inner(
     let cache_kpis = cache_kpi_rows(
         &selected,
         &config.domains,
-        jiff::Timestamp::now().as_second(),
+        call.clock.wall_now().map_err(|_| {
+            provenant_run::RunError::Admission(provenant_run::AdmissionError::Clock)
+        })?,
     );
     let pipeline = if command.outcomes || command.suggest {
         Some(pipeline_report(
@@ -7005,11 +7367,15 @@ fn stats_inner(
         provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
     }
     .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let mut human = stats_summary(&report);
+    let mut human = stats_scope_line(context.project_id, unfinished);
+    human.push_str(&stats_summary(&report));
+    if let Some(line) = reasoning_line(&report.totals) {
+        human.push_str(&line);
+    }
     if let Some(groups) = &report.context_groups {
         human.push_str(&format!("by {by_name}: {} groups\n", groups.len()));
         for group in groups {
-            let label = group.value.as_deref().unwrap_or("unknown");
+            let label = group.value.as_deref().unwrap_or("unattributed");
             let input = grouped_token_count(
                 &group.totals.usage.uncached_input,
                 &group.totals.usage.cache_read,
@@ -7093,6 +7459,7 @@ fn stats_inner(
         ));
     }
     data["partial_signals"] = json!(partial);
+    data["unfinished_attempts_excluded"] = json!(unfinished);
     if let Some(pipeline) = pipeline {
         human.push_str(&format!(
             "post-merge outcomes: CI {}; {} unattributed rows; {} suggestions\n",
@@ -7230,7 +7597,10 @@ fn pipeline_report(
             serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))
         })
         .transpose()?;
-    let now = jiff::Timestamp::now();
+    let now = SystemClock::new()
+        .wall_now()
+        .map_err(|e| invalid(e.to_string()))?
+        .as_timestamp();
     let mut outcomes = provenant_telemetry::outcome::attribute(
         edge.cwd,
         &options.main_ref,
@@ -8613,7 +8983,11 @@ mod tests {
             partial_signals: Vec::new(),
         };
         let gemini = policies
-            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, 0)
+            .effective(
+                &ModelId::parse("agy/gemini-3.8-flash")?,
+                None,
+                provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
+            )
             .policy;
         let decision = model_assessment(&gemini, task, &record, &decoded, record.attempt_number)?;
         assert!(decision.refusal.is_some());
@@ -8645,7 +9019,11 @@ mod tests {
         }
         decoded.outcome = run::Outcome::Succeeded;
         let terra = policies
-            .effective(&ModelId::parse("codex/gpt-6.1-terra")?, None, 0)
+            .effective(
+                &ModelId::parse("codex/gpt-6.1-terra")?,
+                None,
+                provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
+            )
             .policy;
         record.applied_route = Some(run::RouteRecord {
             provider: Some("codex".into()),
@@ -9187,6 +9565,44 @@ mod tests {
         );
         let text = report(usage(None));
         assert!(!text.contains("cache read"), "{text}");
+    }
+
+    #[test]
+    fn stats_text_names_its_scope_and_reports_reasoning_only_when_present() {
+        let project = provenant_core::ProjectId::from_bytes([1; 16]);
+        let scope = stats_scope_line(project, 2);
+        assert!(
+            scope.starts_with(&format!(
+                "scope: project {project}, finished attempts only (2 queued or running not counted)"
+            )),
+            "{scope}"
+        );
+        assert!(scope.contains("other projects are excluded"), "{scope}");
+        let mut totals = provenant_telemetry::Totals {
+            attempts: 1,
+            usage: Default::default(),
+            cache: Default::default(),
+            cost: provenant_telemetry::CostTotal {
+                cost_basis: "api_equivalent_estimate",
+                subscription_attempts: 0,
+                complete: None,
+                known_lower_bound: None,
+                priced_attempts: 0,
+                missing_attempts: 1,
+            },
+            outcomes: Default::default(),
+        };
+        assert_eq!(reasoning_line(&totals), None);
+        totals.usage.reasoning.known = 42;
+        assert_eq!(
+            reasoning_line(&totals).as_deref(),
+            Some("reasoning tokens: 42\n")
+        );
+        totals.usage.reasoning.missing = 3;
+        assert_eq!(
+            reasoning_line(&totals).as_deref(),
+            Some("reasoning tokens: >=42 (3 unknown)\n")
+        );
     }
 
     #[test]
@@ -10849,8 +11265,120 @@ mod tests {
             reason: None,
         };
         lane.protected_paths = vec![];
-        let (_, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
+        let (_, human) = render_lanes_without_cooldowns(
+            std::slice::from_ref(&lane),
+            &[],
+            None,
+            Path::new("/state"),
+        );
         assert!(human.contains("  review head=unknown paths=\n"));
+        assert!(human.contains(&format!(
+            "  next: provenant lane deliver --accept-review {}\n",
+            lane.attempt_id
+        )));
+        Ok(())
+    }
+
+    /// A lane for the lane-view tests: queued until a test sets its state.
+    fn lane_fixture(
+        attempt: u8,
+        task: u8,
+        state: run::AttemptState,
+    ) -> Result<run::AttemptRecord, Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let mut lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([attempt; 16]),
+            "run_id": RunId::from_bytes([9; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([task; 16]),
+            "operation_id": format!("lane-{attempt}"),
+            "attempt_number": attempt,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state":"queued"},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        lane.state = state;
+        Ok(lane)
+    }
+
+    #[test]
+    fn lanes_give_a_settled_lane_its_settlement_reason() -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let failed = lane_fixture(
+            1,
+            4,
+            run::AttemptState::Terminal {
+                extra: Default::default(),
+                outcome: run::Outcome::Failed,
+                exit_code: Some(1),
+                finished_at: now,
+                reason: Some("provider failed".into()),
+            },
+        )?;
+        let queued = lane_fixture(
+            2,
+            4,
+            run::AttemptState::Queued {
+                extra: Default::default(),
+            },
+        )?;
+        let (data, _) =
+            render_lanes_without_cooldowns(&[failed, queued], &[], None, Path::new("/state"));
+        assert_eq!(data["lanes"][0]["settlement"]["reason"], "provider failed");
+        assert_eq!(data["lanes"][1]["settlement"], Value::Null);
+        assert_eq!(data["lanes"][1]["reason"], Value::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn newest_settled_of_names_the_settled_attempt_of_one_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let settled = || run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: run::Outcome::Failed,
+            exit_code: Some(1),
+            finished_at: now,
+            reason: None,
+        };
+        let running = || run::AttemptState::Running {
+            extra: Default::default(),
+        };
+        // Newest first: a retry still running, then the attempt it replaced.
+        let (retry, first) = (
+            lane_fixture(2, 4, running())?,
+            lane_fixture(1, 4, settled())?,
+        );
+        let (id, count, rule) =
+            newest_settled_of(&[retry, first.clone()]).map_err(|fail| fail.message)?;
+        assert_eq!((id, count, rule), (first.attempt_id, 2, "newest settled"));
+        // Nothing has settled, so the newest attempt is the one named.
+        let (newest, older) = (
+            lane_fixture(3, 4, running())?,
+            lane_fixture(2, 4, running())?,
+        );
+        let (id, _, rule) =
+            newest_settled_of(&[newest.clone(), older]).map_err(|fail| fail.message)?;
+        assert_eq!((id, rule), (newest.attempt_id, "newest"));
+        // Attempts of two tasks are ambiguous, so RUN/TASK is asked for.
+        let other = lane_fixture(4, 5, running())?;
+        let error = newest_settled_of(&[newest, other])
+            .err()
+            .ok_or("two tasks were accepted")?;
+        assert!(error.message.contains("2 tasks"), "{}", error.message);
         Ok(())
     }
 

@@ -48,11 +48,10 @@ selected; otherwise a recoverable unavailable member is preferred, and
 disabled members are excluded. If only disabled members remain, resolution
 returns their exclusions. The receipt records candidate readiness and
 exclusions. Operation ID and task index seed selection so retries repeat the
-same choice. Only OpenCode `*-free` entries are marked free and they require
-`--allow-free` (default false). Agy Gemini Flash is a paid subscription model.
+same choice. Only OpenCode `*-free` entries are marked free. Agy Gemini Flash is a paid subscription model.
 Omit `--effort` on OpenCode free routes: their recorded model controls do not
 support effort, so an explicit value is refused before launch.
-`--confidential` excludes training or unclassified members and fallbacks.
+`--confidential` excludes members and fallbacks that train on or retain prompts, or are unclassified.
 There is no classifier or route-synonym inference. Effort is set only when the
 catalogue contains an exact recorded control; unsupported effort is refused.
 `route resolve MODEL` reports the recorded supported efforts, including when a

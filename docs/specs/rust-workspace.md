@@ -84,7 +84,10 @@ bytes, and never carry prompt or credential contents.
 
 Every test points `HOME`, the state root, XDG and Git config and harness
 config paths at temporary directories, so no test touches a real install.
-Tests use explicit clocks and handshakes, never sleeps.
+Tests use explicit clocks and handshakes, never sleeps. Code samples wall
+time through an injected `provenant_core::Clock`, with
+`provenant_os::clock::SystemClock` at the process edge; clippy disallows
+`SystemTime::now`, `jiff::Timestamp::now` and `jiff::Zoned::now` elsewhere.
 - Why: a test that touches the real install can destroy user state.
 - Test: `crates/cli/src/check/dates.rs::workspace_rust_test_dates_use_injected_clocks`;
   clippy `disallowed_methods`. Home isolation has no guard test (gap).

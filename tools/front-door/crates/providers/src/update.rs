@@ -1,5 +1,6 @@
 //! Idle-event provider updates. Shared lane leases exclude the native updater.
 use provenant_config::{ProviderSettings, ProviderUpdate};
+use provenant_core::retry::Backoff;
 use provenant_os::{
     exec::{ExecOptions, Executor, StreamPolicy, Termination},
     fs::{Directory, LockMode, PublishMode},
@@ -47,6 +48,11 @@ fn attempt_name(provider: &str) -> OsString {
 /// that fails before it reaches a provider writes no per-provider record, so
 /// without this every quota event would launch it again.
 pub const WORKER_BACKOFF_SECONDS: i64 = 900;
+const WORKER_BACKOFF: Backoff = Backoff::new(
+    Duration::from_secs(WORKER_BACKOFF_SECONDS as u64),
+    1,
+    Duration::from_secs(WORKER_BACKOFF_SECONDS as u64),
+);
 const WORKER_RECORD: &str = "worker.json";
 
 /// The last detached worker launch and, if it failed, its one cause.
@@ -80,7 +86,7 @@ pub fn worker(state: &Path) -> Option<WorkerRecord> {
 /// when the claim cannot be stored, since an unrecorded launch cannot back off.
 pub fn reserve_worker(state: &Path, now: i64) -> bool {
     if worker(state).is_some_and(|record| {
-        now.saturating_sub(record.started_unix_seconds) < WORKER_BACKOFF_SECONDS
+        now.saturating_sub(record.started_unix_seconds) < WORKER_BACKOFF.delay(0).as_secs() as i64
     }) {
         return false;
     }

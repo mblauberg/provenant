@@ -43,7 +43,12 @@ done
 cd "$ws"
 common="--in-place --workspace --in-diff $tmp/in.diff --test-tool nextest --test-workspace=true --timeout 120 --annotations none --cargo-arg=--locked"
 # shellcheck disable=SC2086
-total=$(cargo mutants $common "$@" --list | grep -c . || true)
+if ! cargo mutants $common "$@" --list > "$tmp/list"; then
+  echo "::warning title=Mutation run incomplete::cargo-mutants could not list mutants."
+  note "Mutation run incomplete: cargo-mutants could not list mutants."
+  exit 0
+fi
+total=$(grep -c . "$tmp/list" || true)
 if [ "$total" -eq 0 ]; then
   note "No mutants in the changed source lines. Test-only diffs produce none."
   exit 0

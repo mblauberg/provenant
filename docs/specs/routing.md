@@ -129,7 +129,10 @@ capture. Tests live in `crates/routing/src/policy.rs::tests`,
 `tests/dispatch_provider.rs::policy_empty_result_falls_back_without_a_chair_turn`.
 
 Policy rules and pacing overrides use the same `Schedule` shape:
-`starts`, `expires`, an optional IANA `tz` (UTC by default) and zero or more hour windows. Windows may list
+`starts` and `expires` (each a `WallTime`, read as an RFC 3339 timestamp in any
+offset with fractional seconds truncated towards zero to microseconds, and
+stored canonically), an optional IANA `tz` (UTC by default) and zero or more
+hour windows. Windows may list
 Monday-based weekday indexes (Monday `0` through Sunday `6`); an empty list matches every day.
 Start is inclusive, expiry and window end are exclusive, and overnight windows
 wrap midnight. `Schedule::valid` is the single load-time check for both: it
@@ -182,10 +185,9 @@ in the [calibration runbook](../runbooks/configuration.md#opencode-go-quota-cali
 ### Confidentiality
 
 A confidential request admits only models whose catalogue row says they do
-not train on prompts; the test is training, not price. Free-tier models need
-`--allow-free`. Fast or priority service is never enabled.
+neither train on nor retain prompts; price does not affect eligibility. Fast or priority service is never enabled.
 - Why: prompts carry private code; cost is not a privacy signal.
-- Test: `crates/routing/src/tests.rs::free_pool_members_require_opt_in_and_confidential_models_are_excluded`
+- Test: `crates/routing/src/tests.rs::confidential_pool_excludes_training_models`
 - Owner: `crates/routing/src/`
 
 ### Families come from evidence

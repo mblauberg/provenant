@@ -73,6 +73,11 @@ public final class CLIClient: @unchecked Sendable {
 
     func callSync<Payload: Decodable & Sendable>(_ arguments: [String], as _: Payload.Type) throws -> Payload {
         let run = try execute(arguments + ["--json"])
+        return try Self.decode(run, command: nil, as: Payload.self)
+    }
+
+    /// Decode an already scheduled CLI call, including structured errors on nonzero exits.
+    public static func decode<Payload: Decodable & Sendable>(_ run: CLI.Output, command: String?, as _: Payload.Type) throws -> Payload {
         if run.truncated { throw ClientError.outputTooLarge }
         if run.timedOut { throw ClientError.timedOut }
         if run.signalled { throw ClientError.signalled(run.status) }
@@ -83,7 +88,13 @@ public final class CLIClient: @unchecked Sendable {
             }
             throw ClientError.malformed(Self.describe(error))
         }
+        if let command, (envelope.schemaVersion != 1 || envelope.command != command) {
+            throw ClientError.malformed("unexpected command envelope")
+        }
         if let error = envelope.error { throw ClientError.command(error) }
+        if run.status != 0 {
+            throw ClientError.exited(status: run.status, detail: run.err.split(separator: "\n").last.map(String.init) ?? "no error output")
+        }
         guard envelope.status == "ok", let data = envelope.data else {
             throw ClientError.malformed("status \(envelope.status) without data")
         }

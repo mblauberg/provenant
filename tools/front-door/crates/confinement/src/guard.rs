@@ -187,44 +187,31 @@ fn normal(path: &Path) -> PathBuf {
 /// name its branch and its default branch.
 struct Repo {
     root: PathBuf,
-    git_dir: PathBuf,
-    common_dir: PathBuf,
+    git_dir: Option<PathBuf>,
+    common_dir: Option<PathBuf>,
 }
 impl Repo {
     /// No repository, or any read failure, answers `None`.
     fn at(dir: &Path) -> Option<Self> {
         let dir = std::fs::canonicalize(dir).ok()?;
-        let (root, dot) = dir.ancestors().find_map(|root| {
-            let dot = root.join(".git");
-            std::fs::symlink_metadata(&dot)
-                .ok()
-                .map(|meta| (root, (dot, meta)))
+        let (root, marker) = dir.ancestors().find_map(|root| {
+            provenant_os::git::repository_marker(root).map(|marker| (root, marker))
         })?;
-        let (dot, meta) = dot;
-        let (git_dir, common_dir) = if meta.is_dir() {
-            (dot.clone(), dot)
-        } else {
-            // A linked worktree's `.git` is a file naming its own Git directory.
-            let text = std::fs::read_to_string(&dot).ok()?;
-            let git_dir = root.join(text.strip_prefix("gitdir:")?.trim());
-            let common = std::fs::read_to_string(git_dir.join("commondir"))
-                .map_or_else(|_| git_dir.clone(), |name| git_dir.join(name.trim()));
-            (git_dir, common)
-        };
         Some(Self {
             root: root.to_owned(),
-            git_dir,
-            common_dir,
+            git_dir: marker.git_dir,
+            common_dir: marker.common_dir,
         })
     }
     fn current_branch(&self) -> Option<String> {
-        let head = std::fs::read_to_string(self.git_dir.join("HEAD")).ok()?;
+        let head = std::fs::read_to_string(self.git_dir.as_ref()?.join("HEAD")).ok()?;
         Some(head.trim().strip_prefix("ref: refs/heads/")?.to_owned())
     }
     /// The branch `origin/HEAD` names, when the clone recorded one.
     fn default_branch(&self) -> Option<String> {
         let head =
-            std::fs::read_to_string(self.common_dir.join("refs/remotes/origin/HEAD")).ok()?;
+            std::fs::read_to_string(self.common_dir.as_ref()?.join("refs/remotes/origin/HEAD"))
+                .ok()?;
         Some(
             head.trim()
                 .strip_prefix("ref: refs/remotes/origin/")?
@@ -508,6 +495,20 @@ mod tests {
         std::fs::create_dir_all(&origin).unwrap();
         std::fs::write(origin.join("HEAD"), "ref: refs/remotes/origin/trunk\n").unwrap();
         assert!(denies_in("git push -f", &root, "home/lane", &config));
+    }
+
+    #[test]
+    fn malformed_git_marker_still_protects_repository_root() {
+        let (_dir, root) = tree();
+        let lane = root.join("home/lane");
+        std::fs::create_dir(&lane).unwrap();
+        std::fs::write(lane.join(".git"), b"invalid marker\n").unwrap();
+        assert!(denies_in(
+            "rm -rf .",
+            &root,
+            "home/lane",
+            &GuardConfig::default()
+        ));
     }
 
     #[test]

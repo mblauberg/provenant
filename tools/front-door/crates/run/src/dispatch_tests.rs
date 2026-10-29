@@ -2475,7 +2475,7 @@ fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
             );
         } else {
             assert!(
-                matches!(result, Err(RunError::MemoryPressure { level: actual }) if actual == format!("{level:?}"))
+                matches!(result, Err(RunError::Admission(AdmissionError::MemoryPressure { level: actual })) if actual == format!("{level:?}"))
             );
         }
     }
@@ -2627,7 +2627,10 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
                 }
             );
         } else {
-            assert!(matches!(result, Err(RunError::GuardianIdentityUnavailable)));
+            assert!(matches!(
+                result,
+                Err(RunError::Admission(AdmissionError::GuardianIdentity))
+            ));
         }
     }
     Ok(())
@@ -2742,11 +2745,11 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
         }
         match last.ok_or("a fourth writer")? {
             Err(
-                error @ RunError::LaneCap {
+                error @ RunError::Admission(AdmissionError::LaneCap {
                     limit: 3,
                     scope: refused,
                     ..
-                },
+                }),
             ) => {
                 assert_eq!(error.code(), "LANE_CAP");
                 assert_eq!(refused, scope);
@@ -3839,7 +3842,10 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
     ] {
         readable.set(false);
         assert!(
-            matches!(store.claim(lane_id, &host, &call), Err(RunError::HostClock)),
+            matches!(
+                store.claim(lane_id, &host, &call),
+                Err(RunError::Admission(AdmissionError::Clock))
+            ),
             "an unreadable {name} refuses, with no wall-clock fallback"
         );
         let admitted = store.admit(lane_id, &attempt, &Host { available: 100 }, &host, &cancel);
@@ -4102,7 +4108,7 @@ fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResul
     host.boot_readable.set(false);
     assert!(matches!(
         store.claim(writer, &host, &call),
-        Err(RunError::HostClock)
+        Err(RunError::Admission(AdmissionError::Clock))
     ));
     let raw = rusqlite::Connection::open(store.writer_registry.join("admission.sqlite3"))?;
     let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -5323,12 +5329,16 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
         store.resume(&changed, &call),
         Err(RunError::OperationConflict)
     ));
-    for expected in [0, 1] {
-        assert!(matches!(
-            store.resume(&resume("r2", expected, 30)?, &call),
-            Err(RunError::Conflict)
-        ));
-    }
+    assert!(matches!(
+        store.resume(&resume("r2", 0, 30)?, &call),
+        Err(RunError::GenerationConflict {
+            current_generation: 1
+        })
+    ));
+    assert!(matches!(
+        store.resume(&resume("r2", 1, 30)?, &call),
+        Err(RunError::Conflict)
+    ));
     let next = store.pending_attempts(continued.run_id, &call)?[0].attempt_id;
     let record = store.record(next, &call)?;
     assert_eq!(record.retry_of, Some(prior));
@@ -5544,12 +5554,16 @@ fn resume_replay_finishes_a_prepared_continuation() -> TestResult {
         store.resume(&changed, &call),
         Err(RunError::OperationConflict)
     ));
-    for expected in [0, 1] {
-        assert!(matches!(
-            store.resume(&resume("r2", expected, 30)?, &call),
-            Err(RunError::Conflict)
-        ));
-    }
+    assert!(matches!(
+        store.resume(&resume("r2", 0, 30)?, &call),
+        Err(RunError::GenerationConflict {
+            current_generation: 1
+        })
+    ));
+    assert!(matches!(
+        store.resume(&resume("r2", 1, 30)?, &call),
+        Err(RunError::Conflict)
+    ));
     Ok(())
 }
 
@@ -7008,6 +7022,7 @@ fn recover_rebooted_writer_inner(
             return Ok(());
         }
         // Free exclusion and an absent guardian and provider leave no holder.
+        assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
         if cancel_run {
             assert_eq!(
                 store.cancel_with_observer(id, "stop", &call, &observer)?,
@@ -7745,10 +7760,10 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             let error = result.err().ok_or("admitted below floor")?;
             assert!(matches!(
                 error,
-                RunError::DiskFloor {
+                RunError::Admission(AdmissionError::Disk {
                     free: 99,
                     floor: 100
-                }
+                })
             ));
             assert_eq!(error.code(), "DISK_FLOOR");
             // The message names the floor's key and the repair command.
@@ -7821,10 +7836,10 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
         } else {
             assert!(matches!(
                 result,
-                Err(RunError::DiskFloor {
+                Err(RunError::Admission(AdmissionError::Disk {
                     free: 40,
                     floor: 100
-                })
+                }))
             ));
         }
     }
@@ -7867,7 +7882,7 @@ fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
         let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
         if below {
             assert!(
-                matches!(result, Err(RunError::DiskFloor { free: f, floor: p }) if f == free && p == floor)
+                matches!(result, Err(RunError::Admission(AdmissionError::Disk { free: f, floor: p })) if f == free && p == floor)
             );
         } else {
             assert_eq!(
@@ -7986,7 +8001,6 @@ fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
 fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResult {
     use std::ffi::OsStr;
     let temp = tempfile::tempdir()?;
@@ -8024,9 +8038,12 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         })?;
         drop(held);
     }
-    let driver =
-        crate::settlement::Guard::claim(&attempt, RunStore::scope(&store.record(id, &call)?))?
-            .ok_or("settlement owner")?;
+    let driver = crate::settlement::Guard::claim(
+        &attempt,
+        RunStore::scope(&store.record(id, &call)?),
+        call.clock,
+    )?
+    .ok_or("settlement owner")?;
     store.queue_reconcile_with(run.run_id, &call, |_, _| {
         panic!("a live settlement owner needs no detached worker");
     })?;
@@ -8046,6 +8063,43 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
     store.queue_reconcile_with(run.run_id, &call, |_, _| {
         panic!("an already queued settlement must not spawn another worker");
     })?;
+    let marker: serde_json::Value = serde_json::from_slice(
+        &run_directory.read_stable(OsStr::new("settlement-queued.json"), RECORD_LIMIT)?,
+    )?;
+    let expiry: WallTime = serde_json::from_value(marker["expires"].clone())?;
+    let remaining = expiry.as_micros() - clock.wall_now()?.as_micros();
+    clock.wait_until(provenant_core::MonoTime::from_micros(
+        clock.mono_now().as_micros() + u64::try_from(remaining)?,
+    ))?;
+    let mut requeued = false;
+    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        requeued = true;
+        Ok(())
+    })?;
+    assert!(requeued, "expiry permits a fresh worker at the boundary");
+    // Invalid or obsolete markers must fail visibly instead of permitting a spawn.
+    for marker in [
+        serde_json::json!({"schema_version":1,"run":run.run_id,"expires_ms":0}),
+        serde_json::json!({"schema_version":3,"run":run.run_id,"expires":"1970-01-01T00:00:00.000000Z"}),
+        serde_json::json!({"schema_version":2,"run":RunId::from_bytes([99;16]),"expires":"1970-01-01T00:00:00.000000Z"}),
+        serde_json::json!({"schema_version":2,"run":run.run_id,"expires":"broken"}),
+    ] {
+        run_directory
+            .atomic_write(
+                OsStr::new("settlement-queued.json"),
+                ".settlement-test-",
+                &serde_json::to_vec(&marker)?,
+                provenant_os::fs::PublishMode::Replace,
+            )?
+            .require_durable()?;
+        assert!(
+            store
+                .queue_reconcile_with(run.run_id, &call, |_, _| {
+                    panic!("invalid queue marker must not spawn a worker");
+                })
+                .is_err()
+        );
+    }
     assert!(matches!(queued.as_slice(), [(found, Reconciled::Settling { .. })] if *found == id));
     assert!(
         attempt

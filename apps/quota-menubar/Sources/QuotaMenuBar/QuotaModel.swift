@@ -26,8 +26,6 @@ final class QuotaModel {
     private(set) var error: String?
     private(set) var updatedAt: Date?
     private(set) var isRefreshing = false
-    /// Fixture lanes retained for the render preview.
-    private(set) var lanes: [Lane] = []
     private(set) var overview: ConsoleOverview?
     private(set) var overviewError: String?
     private(set) var overviewObservationError: String?
@@ -68,8 +66,8 @@ final class QuotaModel {
     @ObservationIgnored private var fixture = false   // a saved report to draw; never runs the CLI
 
     /// A saved report, for `--render`: no timers, watchers or CLI runs.
-    init(fixture report: QuotaReport, updatedAt: Date, lanes: [Lane] = []) {
-        (self.report, self.updatedAt, self.lanes, fixture) = (report, updatedAt, lanes, true)
+    init(fixture report: QuotaReport, updatedAt: Date) {
+        (self.report, self.updatedAt, fixture) = (report, updatedAt, true)
         label = MenuLabel(report: report, failed: false, now: updatedAt)
     }
 

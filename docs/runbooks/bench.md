@@ -27,16 +27,20 @@ default split is `acceptance`; `held-out` tasks are excluded unless that split
 is named explicitly. Each task starts from its parent in a disposable Git
 worktree, receives the prompt through the existing worktree-write dispatch,
 then gets its hidden tests copied in and run. Results append to
-`<state-root>/bench.jsonl` with task, route, model, pass, token count, cost,
-turn count and elapsed seconds. Turns count recorded provider attempts.
-Unknown usage, cost or turns are recorded as `null`.
+`<state-root>/bench.jsonl` with task, route, model, pass, reason, token count,
+cost, turn count and elapsed seconds. A completed replay records `pass` as
+`true` or `false` and a `null` reason. When dispatch fails or the hidden patch
+does not apply, `pass` is `null` and `reason` says why the hidden test never
+ran. Turns count recorded provider attempts. Unknown usage, cost or turns are
+recorded as `null`.
 
 ## Acceptance rule
 
 Only verified tasks enter a run. Use acceptance tasks to select and compare a
 route. Keep held-out tasks frozen and do not run them during route selection;
 use them once to report the final replay score. A pass is the hidden test
-command succeeding after the task prompt is dispatched.
+command succeeding after the task prompt is dispatched. A row with a `null`
+pass is incomplete and does not count as a pass or a failure.
 
 ## Splits, leakage and isolation
 

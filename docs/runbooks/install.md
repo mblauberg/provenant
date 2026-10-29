@@ -328,6 +328,16 @@ Drift appears in three places, each per account:
 - `provenant hosts doctor` reports the same `managed` rows beside the sign-in
   rows, locally and for a peer; with no install receipt it lists none.
 
+The shared global instructions file `~/.agents/AGENTS.md` belongs to the
+installed release like the harness instruction links: install creates or
+refreshes its link into the release's `instructions` assets. A plain file in
+the way is user content, so install refuses it before writing anything;
+rerun with `--adopt-existing` to replace it, or move it aside yourself.
+`check install` reports `stale_shared_instructions` (a link into another
+release; run `provenant install`) and `unmanaged_shared_instructions`
+(anything else; run `provenant install --adopt-existing` or move the file
+aside), each naming the repair.
+
 An account whose directory is gone is skipped and reported (also by
 `accounts register`), never recreated.
 

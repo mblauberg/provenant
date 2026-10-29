@@ -1255,6 +1255,9 @@ fn read_output(
     attempt: AttemptId,
     peer: Peer,
 ) -> Result<(Value, String), Fail> {
+    if command.path {
+        return Err(unsupported("--path"));
+    }
     let part = match command.part {
         Part::Result => OutputPart::Result,
         Part::Stderr => OutputPart::Stderr,
