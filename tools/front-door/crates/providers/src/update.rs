@@ -43,6 +43,73 @@ fn attempt_name(provider: &str) -> OsString {
     format!("{provider}.attempt.json").into()
 }
 
+/// Minimum gap between detached worker launches, whatever the outcome. A worker
+/// that fails before it reaches a provider writes no per-provider record, so
+/// without this every quota event would launch it again.
+pub const WORKER_BACKOFF_SECONDS: i64 = 900;
+const WORKER_RECORD: &str = "worker.json";
+
+/// The last detached worker launch and, if it failed, its one cause.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerRecord {
+    pub started_unix_seconds: i64,
+    pub failure: Option<String>,
+}
+
+fn worker_directory(state: &Path) -> Result<Directory, String> {
+    let root = Directory::open_anchor(state).map_err(|e| e.to_string())?;
+    match root.mkdir(std::ffi::OsStr::new("provider-updates"), 0o700) {
+        Ok(()) => root.sync().map_err(|e| e.to_string())?,
+        Err(error) if error.is_exists() => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    root.open_verified_directory(std::ffi::OsStr::new("provider-updates"))
+        .map_err(|e| e.to_string())
+}
+
+pub fn worker(state: &Path) -> Option<WorkerRecord> {
+    let dir = Directory::open_anchor(&state.join("provider-updates")).ok()?;
+    serde_json::from_slice(&dir.read_stable(std::ffi::OsStr::new(WORKER_RECORD), 4096).ok()?).ok()
+}
+
+/// Claim the right to launch the detached worker. False inside the backoff, or
+/// when the claim cannot be stored, since an unrecorded launch cannot back off.
+pub fn reserve_worker(state: &Path, now: i64) -> bool {
+    if worker(state).is_some_and(|record| {
+        now.saturating_sub(record.started_unix_seconds) < WORKER_BACKOFF_SECONDS
+    }) {
+        return false;
+    }
+    worker_directory(state)
+        .and_then(|dir| {
+            save(
+                &dir,
+                std::ffi::OsStr::new(WORKER_RECORD),
+                &WorkerRecord {
+                    started_unix_seconds: now,
+                    failure: None,
+                },
+            )
+        })
+        .is_ok()
+}
+
+/// Keep the worker's cause where a later reader can find it; its own stderr is
+/// detached. Best effort: the launch claim already holds the backoff.
+pub fn finish_worker(state: &Path, now: i64, failure: Option<&str>) {
+    let started = worker(state).map_or(now, |record| record.started_unix_seconds);
+    let _ = worker_directory(state).and_then(|dir| {
+        save(
+            &dir,
+            std::ffi::OsStr::new(WORKER_RECORD),
+            &WorkerRecord {
+                started_unix_seconds: started,
+                failure: failure.map(|reason| reason.chars().take(512).collect()),
+            },
+        )
+    });
+}
+
 /// A read-only hint for quota events. The worker rechecks under the lease.
 pub fn due(state: &Path, provider: &str, settings: &ProviderSettings, now: i64) -> bool {
     !matches!(settings.update, ProviderUpdate::Enabled(false))
@@ -292,6 +359,24 @@ mod tests {
                 elapsed_micros: 1,
             })
         }
+    }
+
+    #[test]
+    fn worker_launches_back_off_after_any_outcome() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        assert!(reserve_worker(temp.path(), 1000));
+        assert!(!reserve_worker(temp.path(), 1000 + WORKER_BACKOFF_SECONDS - 1));
+        finish_worker(temp.path(), 1005, Some("project must be a Git checkout"));
+        let record = worker(temp.path()).ok_or("missing worker record")?;
+        assert_eq!(record.started_unix_seconds, 1000);
+        assert_eq!(
+            record.failure.as_deref(),
+            Some("project must be a Git checkout")
+        );
+        assert!(!reserve_worker(temp.path(), 1000 + WORKER_BACKOFF_SECONDS - 1));
+        assert!(reserve_worker(temp.path(), 1000 + WORKER_BACKOFF_SECONDS));
+        assert_eq!(worker(temp.path()).ok_or("missing")?.failure, None);
+        Ok(())
     }
 
     #[test]
