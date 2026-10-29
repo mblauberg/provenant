@@ -1335,6 +1335,38 @@ fn claude_usage_comes_from_the_result_event() -> Result<(), ProviderError> {
     Ok(())
 }
 
+#[test]
+fn claude_success_that_stopped_for_another_reason_is_an_early_stop() -> Result<(), ProviderError> {
+    let result = |extra: &str| {
+        format!(
+            "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\"{extra}}}\n"
+        )
+    };
+    let early = |extra: &str| -> Result<Vec<ProviderEvent>, ProviderError> {
+        Ok(replay(&claude::Claude, &result(extra), EXIT)?
+            .0
+            .into_iter()
+            .filter(|event| matches!(event, ProviderEvent::EarlyStop { .. }))
+            .collect())
+    };
+    assert!(early(r#","stop_reason":"end_turn","terminal_reason":"completed""#)?.is_empty());
+    assert!(early("")?.is_empty());
+    assert!(early(r#","stop_reason":null"#)?.is_empty());
+    assert_eq!(
+        early(r#","stop_reason":"max_tokens","terminal_reason":"completed""#)?,
+        [ProviderEvent::EarlyStop {
+            reason: "stop_reason max_tokens".into()
+        }]
+    );
+    assert_eq!(
+        early(r#","stop_reason":"end_turn","terminal_reason":"max_turns""#)?,
+        [ProviderEvent::EarlyStop {
+            reason: "terminal_reason max_turns".into()
+        }]
+    );
+    Ok(())
+}
+
 fn usage_events(events: &[ProviderEvent]) -> Vec<&ProviderEvent> {
     events
         .iter()

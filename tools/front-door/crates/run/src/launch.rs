@@ -145,6 +145,8 @@ pub struct Decoded {
     /// Provider session handle decoded from the stream, if any.
     pub session: Option<String>,
     pub reason: Option<String>,
+    /// Partial-finish signals the provider decode found; run adds its own.
+    pub partial_signals: Vec<PartialSignal>,
 }
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {

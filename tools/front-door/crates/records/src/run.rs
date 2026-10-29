@@ -619,6 +619,10 @@ pub struct AttemptRecord {
     pub provider_ms: Option<u64>,
     pub admission_deadline: Option<WallTime>,
     pub runtime_deadline: Option<WallTime>,
+    /// Signals that the lane finished only part of its brief. Empty for a lane
+    /// with none, which is not proof that it finished everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partial_signals: Vec<PartialSignal>,
     pub state: AttemptState,
     pub usage: UsageRecord,
     pub prompt: ArtifactRecord,
@@ -633,6 +637,29 @@ pub struct AttemptRecord {
     #[serde(default)]
     pub trace: crate::Trace,
 }
+/// Why a settled attempt is flagged as a partial finish. A flag is advice for
+/// the chair, who decides whether to resume; it never changes the outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartialSignal {
+    /// The final answer ends with a valid `handoff` block whose status is
+    /// `stopped_early`: the lane's own statement that work remains.
+    DeclaredStop,
+    /// The provider reported a stop reason other than a finished turn.
+    ProviderStop,
+    /// A writer left edits it did not commit.
+    UncommittedWork,
+}
+impl PartialSignal {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclaredStop => "declared_stop",
+            Self::ProviderStop => "provider_stop",
+            Self::UncommittedWork => "uncommitted_work",
+        }
+    }
+}
+
 /// The admission class of a lane: it picks the startup spacing a lane waits
 /// out and which earlier starts it is measured against.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

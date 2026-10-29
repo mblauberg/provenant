@@ -1656,6 +1656,7 @@ fn persisted_attempt_with(
                 observed_route: Some(applied),
                 usage: Default::default(),
                 session: None,
+                partial_signals: Vec::new(),
             },
             &exit,
             &call,

@@ -5507,6 +5507,7 @@ mod peer_tests {
                 observed_route: Some(route),
                 usage: Default::default(),
                 session: None,
+                partial_signals: Vec::new(),
             },
             &exit,
             call,

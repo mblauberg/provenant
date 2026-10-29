@@ -342,6 +342,7 @@ impl Registry<'_> {
             },
             session: None,
             reason: Some(reason.into()),
+            partial_signals: Vec::new(),
         };
         let Some(adapter) = REGISTRY
             .iter()
@@ -439,11 +440,17 @@ impl Registry<'_> {
             usage: run::UsageRecord::default(),
             session: outcome.session().map(str::to_owned),
             reason: None,
+            partial_signals: Vec::new(),
         };
         let mut has_usage = false;
+        let mut early_stop = None;
         for event in &events {
             match event {
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
+                ProviderEvent::EarlyStop { reason } => {
+                    decoded.partial_signals.push(run::PartialSignal::ProviderStop);
+                    early_stop = Some(reason.clone());
+                }
                 ProviderEvent::Usage {
                     input,
                     output,
@@ -496,6 +503,17 @@ impl Registry<'_> {
         };
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
+        }
+        if decoded.outcome == run::Outcome::Succeeded
+            && let Some(reason) = early_stop
+        {
+            decoded.reason = Some(format!(
+                "provider stopped early: {}",
+                provenant_confinement::redact::known_shapes(reason.as_bytes())
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .unwrap_or_default()
+            ));
         }
         if let Some(ProviderEvent::Denied { action }) = events
             .iter()
@@ -3025,11 +3043,38 @@ fn render_lanes(
                 .as_deref()
                 .map(|title| format!(" {}", plain_text(title, usize::MAX)))
                 .unwrap_or_default();
+            // A partial finish keeps its outcome; the header says so beside it.
+            let state_text = if lane.partial_signals.is_empty() {
+                state.clone()
+            } else {
+                format!("{state} (partial)")
+            };
             // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
-                "{}/{}/{}{title_text} {state} {route_text}{account_field}{reason_text}\n",
+                "{}/{}/{}{title_text} {state_text} {route_text}{account_field}{reason_text}\n",
                 lane.run_id, lane.task_id, lane.attempt_id,
             ));
+            if !lane.partial_signals.is_empty() {
+                // The outcome is untouched; the chair decides whether to resume.
+                human.push_str(&format!(
+                    "  partial finish: {}; the chair decides whether to resume\n",
+                    lane.partial_signals
+                        .iter()
+                        .map(|signal| signal.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                if lane
+                    .session
+                    .as_deref()
+                    .is_some_and(|session| !session.is_empty())
+                {
+                    human.push_str(&format!(
+                        "  continue: provenant resume {} --prompt-file PROMPT\n",
+                        lane.attempt_id
+                    ));
+                }
+            }
             if lane.state == run::AttemptState::Running
                 && let Some(deadline) = lane.runtime_deadline
             {
@@ -3152,6 +3197,7 @@ fn render_lanes(
                 "finished_at": finished_at,
                 "last_output_at": lane.last_output_at,
                 "runtime_deadline": lane.runtime_deadline,
+                "partial_signals": lane.partial_signals,
                 "delivery_id": lane.delivery_id,
                 "write_grants": lane.write_grants,
                 "read_only_writable": lane.read_only_writable,
@@ -5392,8 +5438,7 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     Ok((data, human))
 }
 
-fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
-    let totals = &report.totals;
+fn cost_summary(totals: &provenant_telemetry::Totals) -> String {
     let cost = &totals.cost;
     let human = if let Some(money) = &cost.complete {
         format!("est. API-equivalent ${}", money.usd)
@@ -5408,7 +5453,12 @@ fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
             cost.missing_attempts
         )
     };
-    let mut text = format!("{} attempts, {human}\n", totals.attempts);
+    format!("{} attempts, {human}\n", totals.attempts)
+}
+
+fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
+    let totals = &report.totals;
+    let mut text = cost_summary(totals);
     if totals.attempts == 0
         && let Some(project) = report.window.project
     {
@@ -5816,6 +5866,7 @@ mod tests {
         let mut totals = Totals {
             attempts: 3,
             usage: Default::default(),
+            cache: Default::default(),
             cost: CostTotal {
                 cost_basis: "api_equivalent_estimate",
                 subscription_attempts: 0,
@@ -5827,7 +5878,7 @@ mod tests {
             outcomes: Default::default(),
         };
         assert_eq!(
-            stats_summary(&totals),
+            cost_summary(&totals),
             "3 attempts, cost unknown (3 attempts missing cost data)\n"
         );
         totals.cost.known_lower_bound = Some(Money {
@@ -5837,12 +5888,12 @@ mod tests {
         totals.cost.priced_attempts = 1;
         totals.cost.missing_attempts = 2;
         assert_eq!(
-            stats_summary(&totals),
+            cost_summary(&totals),
             "3 attempts, est. API-equivalent at least $2.000000 (1 of 3 attempts priced)\n"
         );
         totals.cost.complete = totals.cost.known_lower_bound.clone();
         assert_eq!(
-            stats_summary(&totals),
+            cost_summary(&totals),
             "3 attempts, est. API-equivalent $2.000000\n"
         );
     }
@@ -8397,6 +8448,33 @@ mod tests {
         assert_eq!(decoded.usage.cache_write, Some(40));
         assert_eq!(decoded.usage.cache_write_1h, Some(25));
         assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
+    }
+
+    #[test]
+    fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
+        let route = run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/claude-sonnet-5".into()),
+            ..Default::default()
+        };
+        let stream = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"half\",\"stop_reason\":\"max_tokens\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n",
+        );
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.partial_signals, [run::PartialSignal::ProviderStop]);
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider stopped early: stop_reason max_tokens")
+        );
+        assert_ne!(decoded.outcome, run::Outcome::Failed);
     }
 
     #[test]

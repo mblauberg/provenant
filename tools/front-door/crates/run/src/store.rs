@@ -41,6 +41,8 @@ pub struct TerminalPublication<'a> {
     pub usage: UsageRecord,
     /// Provider session handle, kept so the attempt can be continued.
     pub session: Option<String>,
+    /// Why the attempt is flagged as a partial finish, if it is.
+    pub partial_signals: Vec<PartialSignal>,
 }
 impl RunStore {
     /// A result-only orphan predates durable terminal intent. The trusted
@@ -122,6 +124,7 @@ impl RunStore {
             observed_route: pending.observed_route.clone(),
             usage: pending.usage.clone(),
             session: pending.session.clone(),
+            partial_signals: pending.partial_signals.clone(),
         };
         self.publish_terminal(
             id,
@@ -281,7 +284,7 @@ impl RunStore {
                     profile: task.profile.clone(),
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
-                    queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, state: AttemptState::Queued, usage: UsageRecord::default(),
+                    queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued, usage: UsageRecord::default(),
                     prompt: ArtifactRecord { path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                     trace: provenant_records::Trace {
                         host: self.host,
@@ -473,6 +476,7 @@ impl RunStore {
             observed_route: None,
             usage: UsageRecord::default(),
             session: None,
+            partial_signals: Vec::new(),
         };
         let result = self
             .commit_terminal(old, revision, &publication, None, None, false, call)
@@ -555,6 +559,7 @@ impl RunStore {
         next.applied_route = publication.applied_route.clone();
         next.observed_route = publication.observed_route.clone();
         next.usage = publication.usage.clone();
+        next.partial_signals.clone_from(&publication.partial_signals);
         next.session = publication.session.clone();
         next.result = Some(ArtifactRecord {
             path: artifact_path(id, AttemptFile::Result.name())?,

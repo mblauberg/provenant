@@ -17,6 +17,11 @@ pub enum ProviderEvent {
         cache_write_1h: Option<u64>,
     },
     Refusal,
+    /// A completed turn that the provider says ended for another reason than
+    /// finishing: a token limit, a turn limit or a pause.
+    EarlyStop {
+        reason: String,
+    },
     QuotaLimited {
         message: String,
         pool: Option<String>,

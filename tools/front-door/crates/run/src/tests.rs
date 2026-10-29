@@ -162,6 +162,7 @@ pub(super) fn publication() -> TerminalPublication<'static> {
         observed_route: Some(route()),
         usage: UsageRecord::default(),
         session: None,
+        partial_signals: Vec::new(),
     }
 }
 pub(super) fn exit() -> ExitObservation {

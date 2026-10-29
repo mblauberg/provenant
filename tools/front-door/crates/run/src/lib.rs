@@ -3,6 +3,7 @@
 mod admission;
 mod artifacts;
 mod board;
+mod completion;
 pub use board::{BoardLane, BoardPage};
 mod controls;
 mod correlation;
