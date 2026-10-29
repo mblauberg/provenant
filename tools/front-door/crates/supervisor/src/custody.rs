@@ -56,6 +56,15 @@ pub enum CustodyError {
     AdmissionDisk { free: u64, floor: u64 },
     #[error("memory pressure is {level}; wait for host memory pressure to fall")]
     AdmissionMemoryPressure { level: String },
+    #[error(
+        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
+        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
+    )]
+    AdmissionLaneCap {
+        active: u64,
+        limit: u64,
+        scope: &'static str,
+    },
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -69,6 +78,7 @@ pub(crate) enum LaunchState {
     HandingOff,
     NeverSpawned,
     Spawned,
+    Settling,
 }
 /// Confinement supplies verified worktree and Git directory handles, never a
 /// caller-selected PID or a path that supervisor resolves again. A read-only
@@ -231,6 +241,12 @@ impl Reservation {
                     && self.unresolved_cleanup
                     && self.census_incomplete
             }
+            LaunchState::Settling => {
+                self.guardian.is_some()
+                    && self.attempt_device.is_some()
+                    && !self.unresolved_cleanup
+                    && !self.census_incomplete
+            }
             LaunchState::Spawned => {
                 self.guardian.is_some()
                     && self.attempt_device.is_some()
@@ -311,7 +327,7 @@ impl CustodyLease {
         validate_anchor(&self.directory, &reservation)?;
         Ok(Recovery {
             directory: self.directory,
-            lease: self.lease.ok_or(CustodyError::Fenced)?,
+            lease: Some(self.lease.ok_or(CustodyError::Fenced)?),
             reservation,
             guardian_quiescent: false,
         })
@@ -832,6 +848,25 @@ pub enum StopReceipt {
     Requested,
     AlreadyRequested,
 }
+/// Record a stop during the handoff window without waiting for launch.json.
+/// The host supplies the already authorised scope and requester, never a PID.
+pub fn request_stop(
+    directory: Directory,
+    scope: Scope,
+    requester: ActorId,
+    reason: StopReason,
+) -> Result<StopReceipt> {
+    stop(
+        &CustodyHandle {
+            directory,
+            scope,
+            requester,
+            held: false,
+        },
+        reason,
+    )
+}
+
 pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
     let request = CancelRequest {
         schema_version: 1,
@@ -1234,11 +1269,13 @@ fn observe_checkpoint(
     })
 }
 
-/// Recovery holds the same writer exclusion; no decision relies on free flock.
+/// Recovery carries a verified reservation and optional writer exclusion.
+/// Settlement drops the kernel lock while the durable reservation keeps the
+/// worktree fenced against another writer.
 #[derive(Debug)]
 pub struct Recovery {
     pub(crate) directory: Directory,
-    pub(crate) lease: LockGuard,
+    pub(crate) lease: Option<LockGuard>,
     pub(crate) reservation: Reservation,
     // The guardian's durable cleanup or native reboot proof establishes this.
     pub(crate) guardian_quiescent: bool,
@@ -1284,7 +1321,7 @@ pub fn acquire_recovery(
     validate_anchor(&directory, &reservation)?;
     Ok(Recovery {
         directory,
-        lease,
+        lease: Some(lease),
         reservation,
         guardian_quiescent: false,
     })
@@ -1356,7 +1393,7 @@ pub(crate) fn acquire_reboot_recovery_with(
     }
     Ok(Recovery {
         directory,
-        lease,
+        lease: Some(lease),
         reservation,
         guardian_quiescent: false,
     })
@@ -1468,6 +1505,42 @@ impl Recovery {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
+    /// End live writer exclusion before host settlement runs external commands.
+    /// The durable reservation remains, so a new writer cannot enter while this
+    /// attempt imports objects, publishes its branch or records its result.
+    pub fn release_writer_lock(&mut self) -> Result<()> {
+        if self.observe() != RecoveryState::Absent {
+            return Err(CustodyError::Fenced);
+        }
+        drop(self.lease.take());
+        Ok(())
+    }
+    /// Reacquire only for a short final storage transaction. Re-read the scope
+    /// under the lock rather than trusting a detached recovery's snapshot.
+    fn ensure_writer_lock(&mut self) -> Result<()> {
+        if self.lease.is_none() {
+            let lease = self
+                .directory
+                .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+            let current: Reservation =
+                read_record(&self.directory, "reservation.json", RECORD_LIMIT)?;
+            validate_anchor(&self.directory, &current)?;
+            if current.scope != self.scope()
+                || current.attempt_device != self.reservation.attempt_device
+                || current.attempt_inode != self.reservation.attempt_inode
+                || !current.binding.same_custody(&self.reservation.binding)
+            {
+                return Err(CustodyError::Fenced);
+            }
+            self.lease = Some(lease);
+        }
+        Ok(())
+    }
+    /// Clear an already verified release without keeping a lock over host work.
+    pub(crate) fn clear_settled_reservation(&mut self) -> Result<()> {
+        self.ensure_writer_lock()?;
+        clear_reservation(&self.directory, self.scope())
+    }
     pub fn observe(&self) -> RecoveryState {
         self.observe_with(&SystemProcessObserver)
     }
@@ -1565,6 +1638,9 @@ fn classify_reservation(
 ) -> RecoveryState {
     if reservation.validate().is_err() {
         return RecoveryState::Unknown;
+    }
+    if reservation.launch_state == LaunchState::Settling {
+        return RecoveryState::Absent;
     }
     if matches!(
         reservation.launch_state,
@@ -1819,7 +1895,7 @@ impl Recovery {
         if self.observe() != RecoveryState::Absent {
             return Err(CustodyError::Fenced);
         }
-        // The same writer lease spans scratch settlement and fence clearing.
+        // Only final scratch settlement and fence clearing need writer exclusion.
         self.finish_settlement(scratch)
     }
 }
@@ -1985,7 +2061,16 @@ impl Recovery {
         }
         self.finish_settlement(scratch)
     }
-    fn finish_settlement(self, scratch: &mut provenant_os::scratch::Scratch) -> Result<()> {
+    /// Release a refused import's reservation after canonical terminal
+    /// evidence, retaining its private Git directory for explicit host recovery.
+    pub fn release_preserving_private(mut self, commit: SettlementCommit) -> Result<()> {
+        if commit.scope != self.scope() {
+            return Err(CustodyError::Fenced);
+        }
+        self.clear_settled_reservation()
+    }
+    fn finish_settlement(mut self, scratch: &mut provenant_os::scratch::Scratch) -> Result<()> {
+        self.ensure_writer_lock()?;
         scratch.settle()?;
         clear_reservation(&self.directory, self.scope())?;
         drop(self.lease);

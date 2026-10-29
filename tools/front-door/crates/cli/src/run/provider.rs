@@ -651,26 +651,39 @@ fn prepare_with(
         let build_settings = provenant_config::LaneBuildSettings {
             max_concurrent_builds: config.domains.fabric.lanes.max_concurrent_builds,
             cargo_build_jobs: config.domains.fabric.lanes.cargo_build_jobs,
+            max_writer_lanes: config.domains.fabric.lanes.max_writer_lanes,
+            max_project_writer_lanes: config.domains.fabric.lanes.max_project_writer_lanes,
+            build_wait_minutes: config.domains.fabric.lanes.build_wait_minutes,
         };
         // Builds, not lanes, share the host's build slots: a `cargo` shim takes
-        // one around each compiling command. Memory is unreadable only on a
-        // host that cannot run lanes; assume the smaller default there.
+        // one around each compiling command. The host (this process, outside
+        // the sandbox) creates the slot files; the lane may only read and lock
+        // them. Memory is unreadable only on a host that cannot run lanes.
         let cargo = home.join(".cargo/bin/cargo");
         if spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") && cargo.is_file() {
             let total =
                 provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
-            let attempt = paths.attempt_id.to_string();
-            spec.configure_build_slots(
-                scratch,
-                &provenant_providers::BuildSlotGate {
-                    provenant: &provenant_executable,
-                    state: roots.state.as_path(),
-                    slots: build_settings.build_limit(total),
-                    attempt: &attempt,
-                    cargo: &cargo,
-                },
-            )
-            .map_err(|error| error.to_string())?;
+            let slots = build_settings.build_limit(total);
+            match provenant_os::build_slots::BuildSlots::provision(roots.state.as_path(), slots) {
+                Ok(()) => spec
+                    .configure_build_slots(
+                        scratch,
+                        &provenant_providers::BuildSlotGate {
+                            provenant: &provenant_executable,
+                            state: roots.state.as_path(),
+                            slots,
+                            wait_seconds: build_settings.build_wait().as_secs(),
+                            cargo: &cargo,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?,
+                // Build slots are fair sharing, not a boundary: without them
+                // the lane still runs, ungated.
+                #[allow(clippy::print_stderr)]
+                Err(error) => eprintln!(
+                    "provenant: build slots unavailable for this lane, building without them: {error}"
+                ),
+            }
         }
         if !host_indexes_protected(
             roots.state.as_path(),
@@ -3086,6 +3099,16 @@ mod tests {
         std::fs::create_dir_all(private_common.join("refs"))?;
         std::fs::write(private_common.join("HEAD"), b"ref: refs/heads/writer\n")?;
         std::fs::copy(project.join(".git/config"), private_common.join("config"))?;
+        let private_objects = publishing_paths.temporary.join("candidate-0/git-objects");
+        std::fs::create_dir_all(private_objects.join("info"))?;
+        std::fs::write(
+            private_objects.join("info/alternates"),
+            format!("{}\n", project.join(".git/objects").display()),
+        )?;
+        let shared_config = std::fs::read(project.join(".git/config"))?;
+        let shared_index = std::fs::read(project.join(".git/index"))?;
+        let shared_refs = std::fs::read_dir(project.join(".git/refs/heads"))?.count();
+
         std::fs::write(
             worktree.join("private-blob-fixture"),
             b"publishing private object fixture\n",
@@ -3117,6 +3140,16 @@ mod tests {
                 .is_file()
         );
         assert!(!project.join(".git/objects").join(&object).exists());
+        assert_eq!(std::fs::read(project.join(".git/config"))?, shared_config);
+        assert_eq!(std::fs::read(project.join(".git/index"))?, shared_index);
+        assert_eq!(
+            std::fs::read_dir(project.join(".git/refs/heads"))?.count(),
+            shared_refs
+        );
+        let credential = run_git(&["config", "--get", "credential.helper"])?;
+        assert_eq!(credential.termination, Termination::Exit(0));
+        assert!(String::from_utf8_lossy(&credential.stdout.bytes).contains("auth git-credential"));
+
         let shim = publishing_paths.temporary.join("candidate-0/bin/gh");
         let run_shim = |label: &str| {
             use provenant_os::exec::{ExecOptions, Executor};

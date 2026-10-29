@@ -1060,15 +1060,13 @@ pub enum GitHook {
 }
 #[derive(Debug, Subcommand)]
 pub enum Internal {
+    Settle {
+        /// Private durable-settlement resume request from the host.
+        request: String,
+    },
     ProviderUpdates,
-    /// Take a host build slot under `--state-dir`, then run the given cargo command (the lane's cargo shim).
+    /// Take a host build slot, then run the given cargo command (the lane's cargo shim). The slot directory, count and wait come from the host's environment (`PROVENANT_BUILD_SLOT_STATE`, `PROVENANT_BUILD_SLOTS`, `PROVENANT_BUILD_WAIT_SECS`), never from arguments.
     BuildSlot {
-        /// How many builds the host runs at once.
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=64))]
-        slots: u64,
-        /// Lane attempt to name while waiting.
-        #[arg(long)]
-        attempt: Option<String>,
         /// The real cargo, then its arguments.
         #[arg(last = true, required = true, allow_hyphen_values = true)]
         command: Vec<OsString>,

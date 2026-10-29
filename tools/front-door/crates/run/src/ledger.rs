@@ -141,6 +141,7 @@ pub(crate) fn lease(
     db: &Connection,
     store: &Path,
     ticket: &AdmissionTicket,
+    caps: LaneCaps,
     time: &dyn Clock,
     request: &Request<'_>,
     observe: &dyn Fn() -> Option<ProcessIdentity>,
@@ -170,9 +171,9 @@ pub(crate) fn lease(
                 return Ok(Some(now));
             }
         }
-        if full(tx, project)? {
+        if cap_hit(tx, project, class, caps)?.is_some() {
             prune(tx, time)?;
-            if full(tx, project)? {
+            if cap_hit(tx, project, class, caps)?.is_some() {
                 return Ok(None);
             }
         }
@@ -267,13 +268,57 @@ fn spacing_wait(last: Option<&HostInstant>, now: &HostInstant, spacing: u64) -> 
         _ => 0,
     }
 }
-fn full(tx: &Connection, project: ProjectId) -> Result<bool> {
-    let (host, project): (i64, i64) = tx.query_row(
-        "SELECT COUNT(*), COUNT(*) FILTER (WHERE project=?1) FROM leases",
+/// The configured writer-lane caps (`domains.fabric.lanes.max_writer_lanes`
+/// and `max_project_writer_lanes`), applied to writer leases.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LaneCaps {
+    pub host_writers: u64,
+    pub project_writers: u64,
+}
+impl LaneCaps {
+    pub(crate) fn of(settings: &provenant_config::LaneBuildSettings) -> Self {
+        Self {
+            host_writers: settings.writer_lanes(),
+            project_writers: settings.project_writer_lanes(),
+        }
+    }
+}
+/// The limit a new lease would exceed, with its scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CapHit {
+    pub active: u64,
+    pub limit: u64,
+    pub scope: &'static str,
+}
+/// Whether a lease of `class` for `project` would exceed a limit. Every lane
+/// counts against the fixed host and project ceilings; writers also count
+/// against the configured writer caps.
+pub(crate) fn cap_hit(
+    tx: &Connection,
+    project: ProjectId,
+    class: LaneClass,
+    caps: LaneCaps,
+) -> Result<Option<CapHit>> {
+    let (host, in_project, host_writers, project_writers): (i64, i64, i64, i64) = tx.query_row(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE project=?1), COUNT(*) FILTER (WHERE class='writer'), COUNT(*) FILTER (WHERE class='writer' AND project=?1) FROM leases",
         [project.to_string()],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
-    Ok(host >= sql_int(HOST_ACTIVE)? || project >= sql_int(PROJECT_ACTIVE)?)
+    let hit = |active: i64, limit: u64, scope| {
+        let active = u64::try_from(active).unwrap_or(u64::MAX);
+        (active >= limit).then_some(CapHit {
+            active,
+            limit,
+            scope,
+        })
+    };
+    if class == LaneClass::Writer
+        && let Some(found) = hit(host_writers, caps.host_writers, "host")
+            .or_else(|| hit(project_writers, caps.project_writers, "project"))
+    {
+        return Ok(Some(found));
+    }
+    Ok(hit(host, HOST_ACTIVE, "host").or_else(|| hit(in_project, PROJECT_ACTIVE, "project")))
 }
 /// Inspect at most 256 of the oldest existing leases. Normal admission caps
 /// the ledger at 64, so every lease is covered without an unbounded scan.

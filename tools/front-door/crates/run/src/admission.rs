@@ -23,7 +23,10 @@ pub(crate) struct AppliedWriteGrants {
     pub git_grants_digest: Option<provenant_core::Digest>,
 }
 
-/// Hard host limits, independent of batch concurrency.
+/// Fixed ceilings on live lanes of any class, independent of batch
+/// concurrency. The writer caps are configurable below these
+/// (`domains.fabric.lanes.max_writer_lanes`, default 40, and
+/// `max_project_writer_lanes`, default 30).
 pub const HOST_ACTIVE: u64 = 64;
 pub const PROJECT_ACTIVE: u64 = 32;
 pub const HOST_QUEUED: u64 = 256;
@@ -176,8 +179,7 @@ impl RunStore {
                 let ticket = call.retry(|| self.ticket(&self.db, lane.attempt_id)).ok()?;
                 let class = ticket.lane_class;
                 let waiting_for = if lane.state == AttemptState::Running {
-                    self.disk_pause_wait(lane)
-                        .or_else(|| self.build_slot_wait(lane, resources))?
+                    self.disk_pause_wait(lane)?
                 } else if lane.state == AttemptState::Queued {
                     "launch: not yet handed to a guardian".to_owned()
                 } else {
@@ -225,23 +227,6 @@ impl RunStore {
                 })
             })
             .collect()
-    }
-    /// A running lane waits for a build slot while one of its cargo commands
-    /// is queued behind the host's `max_concurrent_builds`. The waiting
-    /// command holds a lock on its registration, so a leftover from a crashed
-    /// command is not reported.
-    fn build_slot_wait(&self, lane: &AttemptRecord, resources: &dyn Resources) -> Option<String> {
-        let slots = provenant_os::build_slots::BuildSlots::observe(&self.writer_registry).ok()?;
-        if !slots.waiting(&lane.attempt_id.to_string()) {
-            return None;
-        }
-        let limit = provenant_config::LaneBuildSettings::read(&self.writer_registry)
-            .ok()?
-            .build_limit(resources.memory().ok()?.total_bytes);
-        Some(format!(
-            "waiting for build slot: {} of {limit} in use",
-            slots.held(limit)
-        ))
     }
     /// The running guardian publishes this lane's pause in its checkpoint.
     fn disk_pause_wait(&self, lane: &AttemptRecord) -> Option<String> {
@@ -425,8 +410,9 @@ impl RunStore {
                 eprintln!("admission: memory pressure probe failed: {error}");
                 None
             });
-            // Build limits gate builds inside lanes, not admission; an invalid
-            // setting still refuses here so it is fixed before any build runs.
+            // Build slots gate builds inside lanes, not admission, and range
+            // errors are reported when configuration loads. Only a file that
+            // cannot be read as settings refuses here.
             let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry);
             if settings
                 .as_ref()
@@ -476,7 +462,18 @@ impl RunStore {
                 match self.claim_observed(id, clock, &call, &|| resources.guardian_identity()) {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
-                    Ok(None) => {}
+                    Ok(None) => {
+                        // Name the writer cap when it is what holds this lane.
+                        if ticket.lane_class == LaneClass::Writer
+                            && let Some(hit) = self.writer_cap_hit(&ticket, &call)
+                        {
+                            refusal = Some(RunError::LaneCap {
+                                active: hit.active,
+                                limit: hit.limit,
+                                scope: hit.scope,
+                            });
+                        }
+                    }
                     Err(RunError::GuardianIdentityUnavailable) => {
                         refusal = Some(RunError::GuardianIdentityUnavailable);
                     }
@@ -516,6 +513,25 @@ impl RunStore {
     ) -> Result<Option<AttemptRecord>> {
         self.claim_observed(id, clock, call, &|| SystemResources.guardian_identity())
     }
+    fn lane_caps(&self) -> crate::ledger::LaneCaps {
+        crate::ledger::LaneCaps::of(
+            &provenant_config::LaneBuildSettings::read(&self.writer_registry).unwrap_or_default(),
+        )
+    }
+    fn writer_cap_hit(
+        &self,
+        ticket: &AdmissionTicket,
+        call: &Request<'_>,
+    ) -> Option<crate::ledger::CapHit> {
+        let ledger = crate::ledger::open(&self.writer_registry, call).ok()?;
+        crate::ledger::cap_hit(
+            &ledger,
+            ticket.project_id,
+            ticket.lane_class,
+            self.lane_caps(),
+        )
+        .ok()?
+    }
     fn claim_observed(
         &self,
         id: AttemptId,
@@ -537,6 +553,7 @@ impl RunStore {
             return Ok(None);
         }
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
+        let caps = self.lane_caps();
         self.write(call, |tx| {
             let old = self.record(id, call)?;
             if old.state != AttemptState::Starting {
@@ -559,6 +576,7 @@ impl RunStore {
                 &ledger,
                 self.context.state_root.as_path(),
                 &ticket,
+                caps,
                 clock,
                 call,
                 observe,

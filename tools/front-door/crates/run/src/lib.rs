@@ -24,6 +24,7 @@ mod retention;
 mod service;
 #[cfg(test)]
 mod service_tests;
+pub mod settlement;
 mod store;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
@@ -184,12 +185,6 @@ pub enum RunError {
     Validation(&'static str),
     #[error("lane object import refused: {0}")]
     ObjectImportLimit(&'static str),
-    #[error(
-        "object-store lock wait timed out; retry settlement (custody and private objects retained)"
-    )]
-    ObjectStoreBusy,
-    #[error("object verification deferred: {0}")]
-    ObjectVerificationRetry(&'static str),
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
     InvalidBase(String),
     #[error("run-store schema version {0} is unsupported")]
@@ -223,6 +218,15 @@ pub enum RunError {
     DiskFloor { free: u64, floor: u64 },
     #[error("memory pressure is {level}; wait for host memory pressure to fall")]
     MemoryPressure { level: String },
+    #[error(
+        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
+        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
+    )]
+    LaneCap {
+        active: u64,
+        limit: u64,
+        scope: &'static str,
+    },
     #[error(
         "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds and domains.fabric.lanes.cargo_build_jobs"
     )]

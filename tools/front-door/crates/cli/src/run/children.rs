@@ -150,7 +150,8 @@ impl Holder for HostHolder<'_> {
         });
         Ok(())
     }
-    fn provider_exited(&self, _context: &[u8], reason: Option<StopReason>) -> custody::Result<()> {
+    fn provider_exited(&self, context: &[u8], reason: Option<StopReason>) -> custody::Result<()> {
+        self.inner.provider_exited(context, reason)?;
         self.stop(reason)
     }
     fn terminal(
@@ -310,7 +311,13 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             let stop_reason = *reason
                 .lock()
                 .map_err(|_| "child launcher stop state poisoned")?;
-            for error in finish_children(&session.store, accepted, stop_reason, &call) {
+            for error in finish_children(
+                &session.store,
+                &session.context,
+                accepted,
+                stop_reason,
+                &call,
+            ) {
                 launch_error = Some(error);
             }
             return match launch_error {
@@ -446,6 +453,7 @@ fn scan_queued(
 /// has stopped. Normal completion preserves children already in custody.
 fn finish_children(
     store: &run::RunStore,
+    context: &run::ExecutionContext,
     accepted: std::collections::BTreeSet<(AttemptId, u64)>,
     reason: Option<StopReason>,
     call: &run::Request<'_>,
@@ -459,7 +467,43 @@ fn finish_children(
                 | StopReason::SupervisorSignal
         )
     ) {
-        errors.extend(store.stop_children(accepted, "host parent stopped", call));
+        errors.extend(store.stop_children(accepted.clone(), "host parent stopped", call));
+        for (id, generation) in accepted {
+            let observation = (|| -> Result<bool, Box<dyn std::error::Error>> {
+                let record = store.record(id, call)?;
+                if matches!(record.state, run::AttemptState::Terminal { .. }) {
+                    return Ok(true);
+                }
+                let attempt = Directory::open_anchor(
+                    &context
+                        .state_root
+                        .as_path()
+                        .join(format!("runs/{}/attempts/{id}", record.run_id)),
+                )?;
+                let handle = custody::reattach(
+                    attempt,
+                    custody::Scope {
+                        run: record.run_id,
+                        attempt: id,
+                        generation,
+                    },
+                )?;
+                Ok(matches!(
+                    custody::observe(
+                        &handle,
+                        provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                        call.cancel,
+                        call.clock,
+                    )?,
+                    custody::Observation::Live | custody::Observation::Exited(_)
+                ))
+            })();
+            if !matches!(observation, Ok(true)) {
+                errors.push(format!(
+                    "child {id}: stop requested but guardian is not observable"
+                ));
+            }
+        }
         "parent stopped before child launch"
     } else {
         "parent finished before child launch"
@@ -1519,12 +1563,34 @@ mod tests {
         let stopped = reason.is_some().then(|| deferred.remove(0));
         let mut accepted = std::collections::BTreeSet::from([(stopped.unwrap_or(running), 1)]);
         if unobservable_child {
-            // Running without a guardian cannot be stopped. Its error must
-            // survive the drain without hiding proposals beyond the window.
+            // A durable stop request cannot prove a guardian observed it. Its
+            // diagnostic must survive the drain without hiding later proposals.
             accepted.insert((running, 1));
         }
-        let errors = finish_children(&store, accepted, reason, &call);
+        let errors = finish_children(&store, &context, accepted, reason, &call);
         assert_eq!(errors.len(), usize::from(unobservable_child), "{errors:?}");
+        if unobservable_child {
+            assert_eq!(
+                errors,
+                vec![format!(
+                    "child {running}: stop requested but guardian is not observable"
+                )]
+            );
+            let cancellation: serde_json::Value = serde_json::from_slice(&std::fs::read(
+                context.state_root.as_path().join(format!(
+                    "runs/{}/attempts/{running}/cancel.json",
+                    RunId::from_bytes([4; 16])
+                )),
+            )?)?;
+            assert_eq!(
+                cancellation["scope"],
+                serde_json::to_value(custody::Scope {
+                    run: RunId::from_bytes([4; 16]),
+                    attempt: running,
+                    generation: 1,
+                })?
+            );
+        }
         if let Some(id) = stopped {
             assert!(matches!(
                 store.record(id, &call)?.state,

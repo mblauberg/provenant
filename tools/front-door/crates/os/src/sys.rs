@@ -359,6 +359,27 @@ pub fn replace_process(
     child::replace_process(&command, env)
 }
 
+/// Run `program` with exactly `env` and the caller's standard streams, wait
+/// for it and return its exit code (128 plus the signal when it was killed).
+/// The caller stays alive meanwhile, so anything it holds, such as a build
+/// slot, lasts until the program exits.
+#[allow(clippy::disallowed_methods)]
+pub fn run_wait(
+    program: &Path,
+    args: &[OsString],
+    env: &[(OsString, OsString)],
+) -> io::Result<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    let status = std::process::Command::new(program)
+        .args(args)
+        .env_clear()
+        .envs(env.iter().map(|(key, value)| (key, value)))
+        .status()?;
+    Ok(status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+}
+
 /// Read a fixture's inherited secret directly, without opening `/dev/fd/N`
 /// through a filesystem policy. Duplicate it so the caller keeps its reader.
 #[cfg(any(test, feature = "fixture"))]

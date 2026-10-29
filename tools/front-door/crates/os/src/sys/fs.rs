@@ -572,13 +572,11 @@ pub fn try_flock(file: &File, mode: crate::fs::LockMode) -> io::Result<()> {
     // safe owner can retry within its WaitBudget.
     status(unsafe { libc::flock(file.as_raw_fd(), op) })
 }
-/// Let the descriptor survive exec so the lock it holds follows the process image.
-pub fn inherit_on_exec(file: &File) -> io::Result<()> {
+/// Whether the descriptor closes on exec, so no child can inherit it.
+pub fn is_cloexec(file: &File) -> bool {
     // SAFETY: borrowed live fd; F_GETFD reads its descriptor flags only.
-    let flags = retry(|| unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) })?;
-    // SAFETY: same live fd; F_SETFD updates only its close-on-exec flag.
-    retry(|| unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, flags & !libc::FD_CLOEXEC) })
-        .map(|_| ())
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+    flags >= 0 && flags & libc::FD_CLOEXEC != 0
 }
 pub fn effective_uid() -> u32 {
     // SAFETY: geteuid reads only the calling process's effective UID and has no
@@ -690,5 +688,28 @@ pub mod tests {
             assert!(flags >= 0);
             assert_ne!(flags & libc::FD_CLOEXEC, 0);
         }
+    }
+}
+
+pub fn current_path(file: &File) -> io::Result<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+    #[cfg(target_os = "macos")]
+    {
+        let mut bytes = [0_u8; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes at most PATH_MAX bytes to this buffer.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, bytes.as_mut_ptr()) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let length = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        Ok(std::path::PathBuf::from(OsStr::from_bytes(
+            &bytes[..length],
+        )))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
     }
 }

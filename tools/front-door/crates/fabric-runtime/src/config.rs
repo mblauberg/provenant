@@ -121,6 +121,12 @@ pub struct Lanes {
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub max_writer_lanes: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub max_project_writer_lanes: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub build_wait_minutes: Option<u64>,
 }
 
 /// Optional host Cargo seeds for writer lanes.
@@ -393,6 +399,9 @@ impl DomainConfig for FabricConfig {
         for key in (provenant_config::LaneBuildSettings {
             max_concurrent_builds: self.lanes.max_concurrent_builds,
             cargo_build_jobs: self.lanes.cargo_build_jobs,
+            max_writer_lanes: self.lanes.max_writer_lanes,
+            max_project_writer_lanes: self.lanes.max_project_writer_lanes,
+            build_wait_minutes: self.lanes.build_wait_minutes,
         })
         .invalid_keys()
         {
@@ -430,6 +439,9 @@ mod tests {
         let mut config = config();
         config.lanes.max_concurrent_builds = Some(0);
         config.lanes.cargo_build_jobs = Some(1025);
+        config.lanes.max_writer_lanes = Some(65);
+        config.lanes.max_project_writer_lanes = Some(0);
+        config.lanes.build_wait_minutes = Some(0);
         let errors = config.validate();
         assert!(
             errors
@@ -437,6 +449,13 @@ mod tests {
                 .any(|e| e.field == "lanes.max_concurrent_builds")
         );
         assert!(errors.iter().any(|e| e.field == "lanes.cargo_build_jobs"));
+        for key in [
+            "max_writer_lanes",
+            "max_project_writer_lanes",
+            "build_wait_minutes",
+        ] {
+            assert!(errors.iter().any(|e| e.field == format!("lanes.{key}")));
+        }
     }
 
     #[test]

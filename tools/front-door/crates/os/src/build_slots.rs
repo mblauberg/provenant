@@ -1,16 +1,17 @@
-//! Host-wide build semaphore. Each slot is a file lock under the host state
-//! root, so every project and lane that shares the state directory contends
-//! for the same slots. The kernel drops a flock when its last descriptor
-//! closes, even after SIGKILL, so a crashed build never strands a slot.
+//! Host-wide build slots: cooperative fair sharing of CPU and memory among
+//! the lanes that share one state directory. This is a build throttle, not a
+//! security boundary and not a hard cap.
 //!
-//! A holder keeps its slot for as long as any process holds the descriptor.
-//! Handing it across exec (`SlotGuard::inherit`) lets the build replace the
-//! process that took the slot while the slot stays held until the build and
-//! its children exit.
+//! Each slot is a file the host (Provenant, outside any sandbox) pre-creates
+//! with `provision`. A lane is granted read access to the directory and its
+//! files only, so it can neither create, unlink nor replace a slot file. The
+//! shim opens a slot file read-only and takes `flock` on it; flock works on a
+//! read-only descriptor. The descriptor is close-on-exec, so only the shim
+//! holds the slot and a daemon or orphaned grandchild never keeps it. The
+//! kernel drops the lock when the shim exits, even after SIGKILL.
 //!
-//! A process that has to wait registers a `wait-<attempt>-<pid>.lock` file and
-//! locks it for the duration of the wait. Observers read a held waiter lock as
-//! a live waiter and a free one as a leftover from a crashed process.
+//! A lane can still hold a slot by locking the file on purpose. That is
+//! accepted: the aim is fair sharing among our own lanes.
 use crate::fs::{Directory, FsError, LockGuard, LockMode, Result};
 use crate::sys::fs as os;
 use provenant_core::CancelToken;
@@ -19,12 +20,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Slot directory below the host state root. `fabric/locks` is already the
-/// one writable lock area every lane is granted, so no wider grant is needed.
+/// Slot directory below the host state root.
 pub const DIRECTORY: [&str; 3] = ["fabric", "locks", "build-slots"];
-const WAIT_PREFIX: &str = "wait-";
-const CREATE_TRIES: usize = 4;
 const POLL: Duration = Duration::from_millis(100);
+/// Default time a build waits for a slot before giving up.
+pub const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
+/// How often a waiting build repeats its progress message.
+pub const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 
 fn directory(state: &Path) -> PathBuf {
     DIRECTORY.iter().fold(state.to_owned(), |p, n| p.join(n))
@@ -34,102 +36,160 @@ fn slot_name(index: u64) -> OsString {
     format!("slot-{index}.lock").into()
 }
 
-/// Whether `attempt` is safe inside a waiter file name.
-fn attempt_name(attempt: &str) -> bool {
-    !attempt.is_empty()
-        && attempt.len() <= 64
-        && attempt
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+/// How long `acquire` waits and how often it reports.
+#[derive(Clone, Copy, Debug)]
+pub struct Wait {
+    pub timeout: Duration,
+    pub progress_every: Duration,
+}
+impl Wait {
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            progress_every: PROGRESS_EVERY,
+        }
+    }
 }
 
-/// An open slot directory.
+/// Why `acquire` did not produce a slot.
+#[derive(Debug)]
+pub enum SlotError {
+    /// Every slot stayed held for the whole wait.
+    Timeout {
+        limit: u64,
+        held: u64,
+        waited: Duration,
+    },
+    Cancelled,
+    Fs(FsError),
+}
+impl std::fmt::Display for SlotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout {
+                limit: 0, waited, ..
+            } => write!(
+                f,
+                "a Cargo build lock stayed held for {} s",
+                waited.as_secs()
+            ),
+            Self::Timeout {
+                limit,
+                held,
+                waited,
+            } => write!(
+                f,
+                "all {limit} build slots stayed busy ({held} held) for {} s",
+                waited.as_secs()
+            ),
+            Self::Cancelled => f.write_str("the wait for a build slot was cancelled"),
+            Self::Fs(error) => write!(f, "{error}"),
+        }
+    }
+}
+impl std::error::Error for SlotError {}
+impl From<FsError> for SlotError {
+    fn from(error: FsError) -> Self {
+        Self::Fs(error)
+    }
+}
+
+/// An open slot directory, read-only for the lane.
 pub struct BuildSlots {
     dir: Directory,
-    path: PathBuf,
 }
 
 impl BuildSlots {
-    /// Open the slot directory under `state`, creating it (mode 0700) when
-    /// missing. Lanes use this; `state` is the host state root. The slot
-    /// directory is opened by its own path, so a lane needs access to nothing
-    /// above it.
-    pub fn open(state: &Path) -> Result<Self> {
+    /// Host side: create the slot directory (mode 0700) and `slot-0..limit`
+    /// lock files (mode 0600) when missing. Never called from a lane.
+    pub fn provision(state: &Path, limit: u64) -> std::io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let path = directory(state);
-        match Directory::open_anchor(&path) {
-            Ok(dir) => return Ok(Self { dir, path }),
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error),
-        }
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&path)
-                .map_err(|source| FsError::Io {
-                    operation: "create build slot directory",
-                    path: path.clone(),
-                    source,
-                })?;
-        }
-        Ok(Self {
-            dir: Directory::open_anchor(&path)?,
-            path,
-        })
-    }
-
-    /// Open the slot directory only when it exists, never creating it.
-    pub fn observe(state: &Path) -> Result<Self> {
-        let path = directory(state);
-        Ok(Self {
-            dir: Directory::open_anchor(&path)?,
-            path,
-        })
-    }
-
-    /// Take the first free slot below `limit`, or none when all are held.
-    pub fn try_acquire(&self, limit: u64) -> Result<Option<SlotGuard>> {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&path)?;
         for index in 0..limit {
-            // Two processes creating the same slot file can make one create
-            // report ENOENT on macOS. The file exists by the next try.
-            for attempt in 0..CREATE_TRIES {
-                match self.dir.try_lock(&slot_name(index), LockMode::Exclusive) {
-                    Ok(guard) => return Ok(Some(SlotGuard { guard, index })),
-                    Err(FsError::LockTimeout { .. }) => break,
-                    Err(error) if error.is_not_found() && attempt + 1 < CREATE_TRIES => {}
-                    Err(error) => return Err(error),
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path.join(slot_name(index)))?;
+        }
+        Ok(())
+    }
+
+    /// Open the slot directory without creating anything.
+    pub fn open(state: &Path) -> Result<Self> {
+        Ok(Self {
+            dir: Directory::open_anchor(&directory(state))?,
+        })
+    }
+
+    /// Take the first free slot below `limit`, or none when all are held. A
+    /// missing slot file is skipped; when every file is missing that is an
+    /// error, since no slot can ever be taken.
+    pub fn try_acquire(&self, limit: u64) -> Result<Option<SlotGuard>> {
+        let mut missing = None;
+        let mut absent = 0;
+        for index in 0..limit {
+            match self
+                .dir
+                .try_lock_existing(&slot_name(index), LockMode::Exclusive)
+            {
+                Ok(guard) => return Ok(Some(SlotGuard { guard, index })),
+                Err(FsError::LockTimeout { .. }) => {}
+                Err(error) if error.is_not_found() => {
+                    absent += 1;
+                    missing = Some(error);
                 }
+                Err(error) => return Err(error),
             }
         }
-        Ok(None)
+        match missing {
+            Some(error) if absent == limit => Err(error),
+            _ => Ok(None),
+        }
     }
 
-    /// Wait for a slot below `limit`. While waiting, `waiter` (the lane's
-    /// attempt id) is registered so observers can report the wait; `blocked`
-    /// runs once, with the number of slots then held, when the first try fails.
+    /// Wait for a slot below `limit` for at most `wait.timeout`. `progress`
+    /// runs with the number of slots held and the time waited when the first
+    /// try fails, then every `wait.progress_every`.
+    #[allow(clippy::disallowed_methods)]
     pub fn acquire(
         &self,
         limit: u64,
-        waiter: Option<&str>,
+        wait: Wait,
         cancel: &CancelToken,
-        blocked: &mut dyn FnMut(u64),
-    ) -> Result<SlotGuard> {
+        progress: &mut dyn FnMut(u64, Duration),
+    ) -> std::result::Result<SlotGuard, SlotError> {
         if let Some(guard) = self.try_acquire(limit)? {
             return Ok(guard);
         }
-        blocked(self.held(limit));
-        self.sweep_waiters();
-        let _registration = waiter.and_then(|attempt| self.register(attempt));
+        let start = std::time::Instant::now();
+        let mut reported = Duration::ZERO;
+        progress(self.held(limit), Duration::ZERO);
         loop {
             if cancel.is_cancelled() {
-                return Err(FsError::Cancelled {
-                    path: self.path.clone(),
-                });
+                return Err(SlotError::Cancelled);
             }
             os::wait(POLL);
             if let Some(guard) = self.try_acquire(limit)? {
                 return Ok(guard);
+            }
+            let waited = start.elapsed();
+            if waited >= wait.timeout {
+                return Err(SlotError::Timeout {
+                    limit,
+                    held: self.held(limit),
+                    waited,
+                });
+            }
+            if waited - reported >= wait.progress_every {
+                reported = waited;
+                progress(self.held(limit), waited);
             }
         }
     }
@@ -137,67 +197,14 @@ impl BuildSlots {
     /// How many of the first `limit` slots are held now.
     pub fn held(&self, limit: u64) -> u64 {
         (0..limit)
-            .filter(|index| self.slot_held(&slot_name(*index)))
+            .filter(|index| {
+                matches!(
+                    self.dir
+                        .try_lock_existing(&slot_name(*index), LockMode::Shared),
+                    Err(FsError::LockTimeout { .. })
+                )
+            })
             .count() as u64
-    }
-
-    /// Whether a live process is waiting for a slot on behalf of `attempt`.
-    pub fn waiting(&self, attempt: &str) -> bool {
-        if !attempt_name(attempt) {
-            return false;
-        }
-        let prefix = format!("{WAIT_PREFIX}{attempt}-");
-        let Ok(entries) = self.dir.entries() else {
-            return false;
-        };
-        entries.flatten().any(|name| {
-            name.to_str()
-                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".lock"))
-                && self.slot_held(&name)
-        })
-    }
-
-    /// A shared probe fails exactly while another descriptor holds the lock
-    /// exclusively. A missing file is a free slot.
-    fn slot_held(&self, name: &OsString) -> bool {
-        matches!(
-            self.dir.try_lock_existing(name, LockMode::Shared),
-            Err(FsError::LockTimeout { .. })
-        )
-    }
-
-    fn register(&self, attempt: &str) -> Option<Registration> {
-        if !attempt_name(attempt) {
-            return None;
-        }
-        let name: OsString = format!("{WAIT_PREFIX}{attempt}-{}.lock", std::process::id()).into();
-        let guard = self.dir.try_lock(&name, LockMode::Exclusive).ok()?;
-        Some(Registration {
-            path: self.path.join(&name),
-            _guard: guard,
-        })
-    }
-
-    /// Remove waiter files whose owner died. Holding the lock proves the
-    /// owner is gone; the file is removed while it is held.
-    fn sweep_waiters(&self) {
-        let Ok(entries) = self.dir.entries() else {
-            return;
-        };
-        for name in entries.flatten() {
-            if !name
-                .to_str()
-                .is_some_and(|name| name.starts_with(WAIT_PREFIX) && name.ends_with(".lock"))
-            {
-                continue;
-            }
-            if let Ok(guard) = self.dir.try_lock_existing(&name, LockMode::Exclusive) {
-                // The directory API reserves `.lock` names, so unlink by path.
-                // The root is host-trusted and this sweeper holds the lock.
-                let _ = std::fs::remove_file(self.path.join(&name));
-                drop(guard);
-            }
-        }
     }
 }
 
@@ -230,9 +237,45 @@ pub fn cargo_lock_held(target: &Path) -> bool {
     })
 }
 
-/// One held slot. Dropping it, or the process exiting, releases the slot.
+/// Wait until no process holds a Cargo build lock below `target`, for at most
+/// `wait.timeout`. `progress` runs with the time waited when the first probe
+/// finds a lock held, then every `wait.progress_every`. A timeout reports
+/// `limit` and `held` as 0: it is not a slot wait.
+#[allow(clippy::disallowed_methods)]
+pub fn wait_for_cargo_lock(
+    target: &Path,
+    wait: Wait,
+    progress: &mut dyn FnMut(Duration),
+) -> std::result::Result<(), SlotError> {
+    if !cargo_lock_held(target) {
+        return Ok(());
+    }
+    let start = std::time::Instant::now();
+    let mut reported = Duration::ZERO;
+    progress(Duration::ZERO);
+    while cargo_lock_held(target) {
+        os::wait(POLL);
+        let waited = start.elapsed();
+        if waited >= wait.timeout {
+            return Err(SlotError::Timeout {
+                limit: 0,
+                held: 0,
+                waited,
+            });
+        }
+        if waited - reported >= wait.progress_every {
+            reported = waited;
+            progress(waited);
+        }
+    }
+    Ok(())
+}
+
+/// One held slot. Dropping it, or the process exiting, releases the slot. The
+/// descriptor is close-on-exec, so a child never inherits it.
 #[derive(Debug)]
 pub struct SlotGuard {
+    #[allow(dead_code, reason = "the open descriptor is the held lock")]
     guard: LockGuard,
     index: u64,
 }
@@ -241,29 +284,16 @@ impl SlotGuard {
         self.index
     }
 
-    /// Keep the slot across exec: the descriptor stays open in the new
-    /// process image and in its children, and the slot is held until the
-    /// last of them exits.
-    pub fn inherit(&self) -> io::Result<()> {
-        os::inherit_on_exec(self.guard.handoff_file())
-    }
-}
-
-/// A waiter's registration, removed when the wait ends.
-struct Registration {
-    path: PathBuf,
-    _guard: LockGuard,
-}
-impl Drop for Registration {
-    fn drop(&mut self) {
-        // This registration still holds the lock, so the name is ours.
-        let _ = std::fs::remove_file(&self.path);
+    /// Whether the slot descriptor is close-on-exec.
+    pub fn close_on_exec(&self) -> bool {
+        os::is_cloexec(self.guard.handoff_file())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Forking while another test holds a lock lets the child keep a copy of
@@ -279,19 +309,21 @@ mod tests {
     fn state() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         // A lock directory must be private to its owner.
-        std::fs::set_permissions(dir.path(), {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::Permissions::from_mode(0o700)
-        })
-        .unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         dir
+    }
+
+    fn provisioned(limit: u64) -> (tempfile::TempDir, BuildSlots) {
+        let state = state();
+        BuildSlots::provision(state.path(), limit).unwrap();
+        let slots = BuildSlots::open(state.path()).unwrap();
+        (state, slots)
     }
 
     #[test]
     fn slots_are_bounded_and_reusable() {
         let _serial = serial();
-        let state = state();
-        let slots = BuildSlots::open(state.path()).unwrap();
+        let (_state, slots) = provisioned(2);
         let first = slots.try_acquire(2).unwrap().unwrap();
         let second = slots.try_acquire(2).unwrap().unwrap();
         assert_ne!(first.index(), second.index());
@@ -305,7 +337,7 @@ mod tests {
     #[test]
     fn contention_never_exceeds_the_limit() {
         let _serial = serial();
-        let state = state();
+        let (state, _slots) = provisioned(2);
         let running = AtomicU64::new(0);
         let peak = AtomicU64::new(0);
         std::thread::scope(|scope| {
@@ -313,7 +345,12 @@ mod tests {
                 scope.spawn(|| {
                     let slots = BuildSlots::open(state.path()).unwrap();
                     let _slot = slots
-                        .acquire(2, None, &CancelToken::new(), &mut |_| {})
+                        .acquire(
+                            2,
+                            Wait::new(Duration::from_secs(60)),
+                            &CancelToken::new(),
+                            &mut |_, _| {},
+                        )
                         .unwrap();
                     let now = running.fetch_add(1, Ordering::SeqCst) + 1;
                     peak.fetch_max(now, Ordering::SeqCst);
@@ -326,84 +363,130 @@ mod tests {
     }
 
     #[test]
-    fn a_crashed_holder_releases_its_slot() {
+    fn read_only_slot_files_cannot_be_created_unlinked_or_replaced_yet_still_lock() {
         let _serial = serial();
-        let state = state();
-        let slots = BuildSlots::open(state.path()).unwrap();
+        let (state, slots) = provisioned(2);
+        let dir = directory(state.path());
+        // The access a lane has: read the directory and its files, write
+        // neither. A same-user process stands in for the sandbox.
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o400)).unwrap();
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let slot = dir.join("slot-0.lock");
+        assert!(std::fs::File::create(dir.join("slot-9.lock")).is_err());
+        assert!(std::fs::remove_file(&slot).is_err());
+        assert!(std::fs::rename(&slot, dir.join("moved.lock")).is_err());
+        assert!(
+            std::fs::OpenOptions::new().write(true).open(&slot).is_err(),
+            "the slot file is not writable"
+        );
+        // The read-only descriptor still takes the exclusive lock.
+        let first = slots.try_acquire(2).unwrap().unwrap();
+        let second = slots.try_acquire(2).unwrap().unwrap();
+        assert_ne!(first.index(), second.index());
+        assert!(slots.try_acquire(2).unwrap().is_none());
+        drop((first, second));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn the_slot_descriptor_is_close_on_exec() {
+        let _serial = serial();
+        let (_state, slots) = provisioned(1);
+        assert!(slots.try_acquire(1).unwrap().unwrap().close_on_exec());
+    }
+
+    #[test]
+    fn a_process_that_outlives_the_holder_does_not_keep_the_slot() {
+        let _serial = serial();
+        let (_state, slots) = provisioned(1);
         let slot = slots.try_acquire(1).unwrap().unwrap();
-        slot.inherit().unwrap();
-        // The child inherits the descriptor; the parent's copy then closes, so
-        // only the child keeps the slot, as a build that replaced the shim.
+        // A backgrounded grandchild, as a daemon or orphaned test process.
         #[allow(clippy::disallowed_methods)]
         let mut child = std::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
             .unwrap();
-        drop(slot);
         assert!(slots.try_acquire(1).unwrap().is_none());
+        drop(slot);
+        assert!(
+            slots.try_acquire(1).unwrap().is_some(),
+            "the running child holds no copy of the slot"
+        );
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_crashed_holder_releases_its_slot() {
+        let _serial = serial();
+        let (_state, slots) = provisioned(1);
+        drop(slots.try_acquire(1).unwrap().unwrap());
         assert!(slots.try_acquire(1).unwrap().is_some());
     }
 
     #[test]
-    fn a_waiter_is_visible_only_while_it_waits() {
+    fn a_wait_reports_progress_then_times_out_naming_the_slots() {
         let _serial = serial();
-        let state = state();
-        let slots = BuildSlots::open(state.path()).unwrap();
-        let held = slots.try_acquire(1).unwrap().unwrap();
-        let attempt = "0b0e1d54-3c1e-4a53-8f0b-1d7c2a9a4f10";
-        assert!(!slots.waiting(attempt));
-        let cancel = CancelToken::new();
-        std::thread::scope(|scope| {
-            let waiter = scope.spawn(|| {
-                let slots = BuildSlots::open(state.path()).unwrap();
-                let mut blocked = None;
-                let slot =
-                    slots.acquire(1, Some(attempt), &cancel, &mut |held| blocked = Some(held));
-                (slot.map(|_| ()), blocked)
-            });
-            let mut seen = false;
-            for _ in 0..100 {
-                if slots.waiting(attempt) {
-                    seen = true;
-                    break;
+        let (_state, slots) = provisioned(1);
+        let _held = slots.try_acquire(1).unwrap().unwrap();
+        let mut reports = Vec::new();
+        let error = slots
+            .acquire(
+                1,
+                Wait {
+                    timeout: Duration::from_millis(700),
+                    progress_every: Duration::from_millis(200),
+                },
+                &CancelToken::new(),
+                &mut |held, waited| reports.push((held, waited)),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SlotError::Timeout {
+                    limit: 1,
+                    held: 1,
+                    ..
                 }
-                os::wait(Duration::from_millis(20));
-            }
-            assert!(seen, "waiter registers while blocked");
-            assert!(!slots.waiting("someone-else"));
-            drop(held);
-            let (slot, blocked) = waiter.join().unwrap();
-            slot.unwrap();
-            assert_eq!(blocked, Some(1));
-        });
-        assert!(!slots.waiting(attempt));
-    }
-
-    #[test]
-    fn a_leftover_waiter_file_is_not_a_waiter_and_is_swept() {
-        let _serial = serial();
-        let state = state();
-        let slots = BuildSlots::open(state.path()).unwrap();
-        let attempt = "dead-attempt";
-        let stale = slots.path.join(format!("{WAIT_PREFIX}{attempt}-1.lock"));
-        std::fs::write(&stale, b"").unwrap();
-        assert!(!slots.waiting(attempt));
-        slots.sweep_waiters();
-        assert!(!stale.exists());
+            ),
+            "{error}"
+        );
+        assert!(error.to_string().contains("all 1 build slots"), "{error}");
+        assert!(reports.len() >= 3, "{reports:?}");
+        assert_eq!(reports[0], (1, Duration::ZERO));
     }
 
     #[test]
     fn cancel_ends_a_wait() {
         let _serial = serial();
-        let state = state();
-        let slots = BuildSlots::open(state.path()).unwrap();
+        let (_state, slots) = provisioned(1);
         let _held = slots.try_acquire(1).unwrap().unwrap();
         let cancel = CancelToken::new();
         cancel.cancel();
-        let error = slots.acquire(1, None, &cancel, &mut |_| {}).unwrap_err();
-        assert!(matches!(error, FsError::Cancelled { .. }));
+        let error = slots
+            .acquire(
+                1,
+                Wait::new(Duration::from_secs(60)),
+                &cancel,
+                &mut |_, _| {},
+            )
+            .unwrap_err();
+        assert!(matches!(error, SlotError::Cancelled));
+    }
+
+    #[test]
+    fn missing_slot_files_are_an_error_not_a_free_slot() {
+        let _serial = serial();
+        let state = state();
+        BuildSlots::provision(state.path(), 1).unwrap();
+        let slots = BuildSlots::open(state.path()).unwrap();
+        // Asking for more slots than were provisioned skips the absent ones.
+        assert!(slots.try_acquire(3).unwrap().is_some());
+        std::fs::remove_file(directory(state.path()).join("slot-0.lock")).unwrap();
+        assert!(slots.try_acquire(3).is_err());
     }
 
     #[test]
@@ -430,10 +513,39 @@ mod tests {
     }
 
     #[test]
-    fn observing_never_creates_the_directory() {
+    fn waiting_for_a_cargo_lock_reports_progress_and_times_out() {
+        let _serial = serial();
+        let target = tempfile::tempdir().unwrap();
+        let profile = target.path().join("debug");
+        std::fs::create_dir_all(&profile).unwrap();
+        let lock = std::fs::File::create(profile.join(".cargo-lock")).unwrap();
+        os::try_flock(&lock, LockMode::Exclusive).unwrap();
+        let mut reports = Vec::new();
+        let error = wait_for_cargo_lock(
+            target.path(),
+            Wait {
+                timeout: Duration::from_millis(600),
+                progress_every: Duration::from_millis(200),
+            },
+            &mut |waited| reports.push(waited),
+        )
+        .unwrap_err();
+        assert!(matches!(error, SlotError::Timeout { .. }));
+        assert!(reports.len() >= 3, "{reports:?}");
+        drop(lock);
+        wait_for_cargo_lock(
+            target.path(),
+            Wait::new(Duration::from_secs(1)),
+            &mut |_| {},
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn opening_never_creates_the_directory() {
         let _serial = serial();
         let state = state();
-        assert!(BuildSlots::observe(state.path()).is_err());
+        assert!(BuildSlots::open(state.path()).is_err());
         assert!(!state.path().join("fabric").exists());
     }
 }

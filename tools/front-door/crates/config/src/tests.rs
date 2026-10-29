@@ -1215,6 +1215,15 @@ fn host_lane_build_settings_read_and_validate() {
         "[domains.fabric.lanes]\nmax_concurrent_builds=0\n",
     )
     .unwrap();
+    // Range errors are reported when configuration loads, not at admission.
+    let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
+    assert_eq!(settings.invalid_keys(), ["max_concurrent_builds"]);
+    assert_eq!(settings.build_limit(0), 1);
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[domains.fabric.lanes]\ncargo_build_jobs=-2\n",
+    )
+    .unwrap();
     assert!(crate::LaneBuildSettings::read(temp.path()).is_err());
 }
 #[test]

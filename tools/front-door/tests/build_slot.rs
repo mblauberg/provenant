@@ -1,6 +1,8 @@
 //! The lane's `cargo` shim end to end: `internal build-slot` takes a host build
-//! slot, becomes the command it was given and keeps the slot until that exits.
-//! A fake cargo stands in for the compiler; nothing here needs a sandbox.
+//! slot, runs the command it was given as its child and keeps the slot until
+//! that exits. A fake cargo stands in for the compiler; nothing here needs a
+//! sandbox. The slot directory, count and wait reach the shim through its
+//! environment, as the host's shim script supplies them.
 #![allow(clippy::disallowed_methods)]
 use provenant_os::build_slots::BuildSlots;
 use std::{
@@ -12,8 +14,6 @@ use std::{
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-const ATTEMPT: &str = "0b0e1d54-3c1e-4a53-8f0b-1d7c2a9a4f10";
 
 struct Rig {
     _temp: tempfile::TempDir,
@@ -31,8 +31,10 @@ impl Rig {
             root.join("fake-cargo"),
         );
         fs::create_dir(&state)?;
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
         fs::write(&log, "")?;
         let binary = env!("CARGO_BIN_EXE_provenant");
+        let slot_dir = state.join("fabric/locks/build-slots");
         fs::write(
             &cargo,
             format!(
@@ -41,10 +43,12 @@ impl Rig {
                  build) echo \"start $$\" >> '{log}'; /bin/sleep 0.3; echo \"end $$\" >> '{log}' ;;\n\
                  fmt) echo \"fmt $$\" >> '{log}' ;;\n\
                  check) echo \"hung $$\" >> '{log}'; exec /bin/sleep 60 ;;\n\
-                 test) echo \"outer $$\" >> '{log}'; '{binary}' internal build-slot --state-dir '{state}' --slots 1 -- \"$0\" build ;;\n\
+                 bg) /bin/sleep 60 >/dev/null 2>&1 </dev/null & echo \"bg $!\" >> '{log}' ;;\n\
+                 tamper) rm -f '{slots}/slot-0.lock' 2>/dev/null; echo \"rm $?\" >> '{log}'; /usr/bin/touch '{slots}/slot-9.lock' 2>/dev/null; echo \"create $?\" >> '{log}'; echo \"start $$\" >> '{log}'; echo \"end $$\" >> '{log}' ;;\n\
+                 test) echo \"outer $$\" >> '{log}'; '{binary}' internal build-slot -- \"$0\" build ;;\n\
                  esac\n",
                 log = log.display(),
-                state = state.display(),
+                slots = slot_dir.display(),
             ),
         )?;
         fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700))?;
@@ -56,19 +60,29 @@ impl Rig {
         })
     }
 
-    fn shim(&self, slots: u64, args: &[&str]) -> Result<Child> {
-        Ok(Command::new(env!("CARGO_BIN_EXE_provenant"))
-            .args(["internal", "build-slot", "--state-dir"])
-            .arg(&self.state)
-            .arg("--slots")
-            .arg(slots.to_string())
-            .args(["--attempt", ATTEMPT, "--"])
+    /// Host side: create the slot files, as `provenant run` does at launch.
+    fn provision(&self, slots: u64) -> Result {
+        BuildSlots::provision(&self.state, slots)?;
+        Ok(())
+    }
+
+    fn command(&self, slots: u64, wait_secs: u64, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
+        command
+            .args(["internal", "build-slot", "--"])
             .arg(&self.cargo)
             .args(args)
+            .env("PROVENANT_BUILD_SLOT_STATE", &self.state)
+            .env("PROVENANT_BUILD_SLOTS", slots.to_string())
+            .env("PROVENANT_BUILD_WAIT_SECS", wait_secs.to_string())
             .env_remove("PROVENANT_BUILD_SLOT")
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?)
+            .stderr(Stdio::piped());
+        command
+    }
+
+    fn shim(&self, slots: u64, args: &[&str]) -> Result<Child> {
+        Ok(self.command(slots, 120, args).spawn()?)
     }
 
     fn log(&self) -> Result<Vec<String>> {
@@ -77,6 +91,17 @@ impl Rig {
             .map(str::to_owned)
             .collect())
     }
+
+    fn started(&self, word: &str) -> bool {
+        self.log()
+            .is_ok_and(|log| log.iter().any(|line| line.starts_with(word)))
+    }
+}
+
+fn stderr_of(child: &mut Child) -> Result<String> {
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().ok_or("stderr")?, &mut text)?;
+    Ok(text)
 }
 
 fn until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
@@ -103,9 +128,18 @@ fn finish(child: &mut Child, timeout: Duration) -> Result<bool> {
     Err("shim did not finish in time".into())
 }
 
+fn alive(pid: &str) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", pid])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 #[test]
 fn more_builds_than_slots_compile_serially() -> Result {
     let rig = Rig::new()?;
+    rig.provision(1)?;
     let mut children = (0..4)
         .map(|_| rig.shim(1, &["build"]))
         .collect::<Result<Vec<_>>>()?;
@@ -125,6 +159,7 @@ fn more_builds_than_slots_compile_serially() -> Result {
 #[test]
 fn two_slots_allow_two_builds_at_once_and_no_more() -> Result {
     let rig = Rig::new()?;
+    rig.provision(2)?;
     let mut children = (0..4)
         .map(|_| rig.shim(2, &["build"]))
         .collect::<Result<Vec<_>>>()?;
@@ -141,31 +176,27 @@ fn two_slots_allow_two_builds_at_once_and_no_more() -> Result {
 }
 
 #[test]
-fn a_killed_build_releases_its_slot_and_a_waiter_is_visible_meanwhile() -> Result {
+fn a_killed_build_releases_its_slot_and_the_wait_is_reported() -> Result {
     let rig = Rig::new()?;
+    rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
-    assert!(until(Duration::from_secs(20), || rig.log().is_ok_and(
-        |log| log.iter().any(|line| line.starts_with("hung"))
-    )));
+    assert!(until(Duration::from_secs(20), || rig.started("hung")));
     let mut waiter = rig.shim(1, &["build"])?;
-    let slots = BuildSlots::observe(&rig.state)?;
+    let slots = BuildSlots::open(&rig.state)?;
+    assert!(until(Duration::from_secs(20), || slots.held(1) == 1));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(
-        until(Duration::from_secs(20), || slots.waiting(ATTEMPT)),
-        "the blocked command registers as waiting"
-    );
-    assert_eq!(slots.held(1), 1);
-    assert!(
-        !rig.log()?.iter().any(|line| line.starts_with("start")),
+        !rig.started("start"),
         "the second build waits while the first holds the slot"
     );
     // SIGKILL leaves no chance to release anything: the kernel does.
     holder.kill()?;
     holder.wait()?;
+    // The orphaned fake cargo (`sleep 60`) does not keep the slot: the
+    // descriptor is close-on-exec, so only the dead shim held it.
     assert!(finish(&mut waiter, Duration::from_secs(30))?);
-    assert!(rig.log()?.iter().any(|line| line.starts_with("end")));
-    assert!(!slots.waiting(ATTEMPT));
-    let mut stderr = String::new();
-    std::io::Read::read_to_string(&mut waiter.stderr.take().ok_or("stderr")?, &mut stderr)?;
+    assert!(rig.started("end"));
+    let stderr = stderr_of(&mut waiter)?;
     assert!(
         stderr.contains("waiting for a build slot (1 of 1 in use)"),
         "{stderr}"
@@ -174,23 +205,160 @@ fn a_killed_build_releases_its_slot_and_a_waiter_is_visible_meanwhile() -> Resul
 }
 
 #[test]
+fn a_backgrounded_grandchild_that_outlives_the_build_does_not_keep_the_slot() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    let mut first = rig.shim(1, &["bg"])?;
+    assert!(finish(&mut first, Duration::from_secs(20))?);
+    let pid = rig
+        .log()?
+        .iter()
+        .find_map(|line| line.strip_prefix("bg ").map(str::to_owned))
+        .ok_or("the grandchild started")?;
+    assert!(alive(&pid), "the grandchild outlives the build");
+    // The slot is free the moment the direct child exits.
+    let slots = BuildSlots::open(&rig.state)?;
+    assert_eq!(slots.held(1), 0);
+    let mut second = rig.shim(1, &["build"])?;
+    assert!(finish(&mut second, Duration::from_secs(10))?);
+    assert!(alive(&pid), "still running after the next build finished");
+    Command::new("/bin/kill").arg(&pid).status()?;
+    Ok(())
+}
+
+#[test]
+fn a_wait_gives_up_after_the_configured_time_naming_the_slots() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    let mut holder = rig.shim(1, &["check"])?;
+    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    let begun = Instant::now();
+    let mut waiter = rig.command(1, 1, &["build"]).spawn()?;
+    assert!(
+        !finish(&mut waiter, Duration::from_secs(20))?,
+        "a build that never got a slot fails"
+    );
+    assert!(begun.elapsed() < Duration::from_secs(15));
+    let stderr = stderr_of(&mut waiter)?;
+    assert!(
+        stderr.contains("gave up waiting for a build slot"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("all 1 are held"), "{stderr}");
+    assert!(stderr.contains("provenant lanes"), "{stderr}");
+    assert!(!rig.started("start"), "the build never ran");
+    holder.kill()?;
+    holder.wait()?;
+    Ok(())
+}
+
+#[test]
+fn a_held_cargo_lock_wait_is_bounded_too() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    let profile = rig.state.join("target/debug");
+    fs::create_dir_all(&profile)?;
+    // Another cargo holds the target directory's build lock.
+    let lock = fs::File::create(profile.join(".cargo-lock"))?;
+    provenant_os::sys::fs::try_flock(&lock, provenant_os::fs::LockMode::Exclusive)?;
+    let mut waiter = rig
+        .command(1, 1, &["build"])
+        .env("CARGO_TARGET_DIR", rig.state.join("target"))
+        .spawn()?;
+    assert!(!finish(&mut waiter, Duration::from_secs(20))?);
+    let stderr = stderr_of(&mut waiter)?;
+    assert!(
+        stderr.contains("waiting for another cargo build"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("gave up"), "{stderr}");
+    assert!(stderr.contains("provenant lanes"), "{stderr}");
+    assert!(!rig.started("start"));
+    // Released, the same command runs.
+    drop(lock);
+    let mut again = rig
+        .command(1, 5, &["build"])
+        .env("CARGO_TARGET_DIR", rig.state.join("target"))
+        .spawn()?;
+    assert!(finish(&mut again, Duration::from_secs(20))?);
+    Ok(())
+}
+
+#[test]
+fn a_spoofed_marker_does_not_skip_the_gate_unless_it_names_a_live_ancestor() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    let mut holder = rig.shim(1, &["check"])?;
+    assert!(until(Duration::from_secs(20), || rig.started("hung")));
+    let holder_pid = holder.id().to_string();
+    // The holder is live but not an ancestor of these shims; nor is init, a
+    // pid that does not exist, or text.
+    for marker in [holder_pid.as_str(), "1", "999999", "not-a-pid", "0", "-1"] {
+        let mut spoof = rig
+            .command(1, 1, &["build"])
+            .env("PROVENANT_BUILD_SLOT", marker)
+            .spawn()?;
+        assert!(
+            !finish(&mut spoof, Duration::from_secs(20))?,
+            "marker {marker} must not skip the gate"
+        );
+        assert!(
+            stderr_of(&mut spoof)?.contains("gave up waiting"),
+            "{marker}"
+        );
+    }
+    assert!(!rig.started("start"));
+    holder.kill()?;
+    holder.wait()?;
+    Ok(())
+}
+
+#[test]
 fn commands_that_do_not_compile_and_nested_cargo_never_queue() -> Result {
     let rig = Rig::new()?;
+    rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
-    assert!(until(Duration::from_secs(20), || rig.log().is_ok_and(
-        |log| log.iter().any(|line| line.starts_with("hung"))
-    )));
+    assert!(until(Duration::from_secs(20), || rig.started("hung")));
     // Not a compiling subcommand: runs at once although the only slot is held.
     let mut format = rig.shim(1, &["fmt"])?;
     assert!(finish(&mut format, Duration::from_secs(10))?);
     holder.kill()?;
     holder.wait()?;
-    // A build that itself runs cargo must not wait for a second slot.
+    // A build that itself runs cargo must not wait for a second slot: the
+    // outer shim is a live ancestor of the inner one.
     let mut outer = rig.shim(1, &["test"])?;
     assert!(finish(&mut outer, Duration::from_secs(10))?);
+    assert!(rig.started("outer"));
+    assert!(rig.started("end"));
+    Ok(())
+}
+
+#[test]
+fn read_only_slot_files_cannot_be_unlinked_or_created_by_the_build() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    // The lane's access: read the directory and its files, write neither.
+    let dir = rig.state.join("fabric/locks/build-slots");
+    fs::set_permissions(dir.join("slot-0.lock"), fs::Permissions::from_mode(0o400))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o500))?;
+    let mut build = rig.shim(1, &["tamper"])?;
+    let finished = finish(&mut build, Duration::from_secs(20));
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    let ok = finished?;
+    assert!(ok, "{}", stderr_of(&mut build)?);
     let log = rig.log()?;
-    assert!(log.iter().any(|line| line.starts_with("outer")));
-    assert!(log.iter().any(|line| line.starts_with("end")));
+    assert!(
+        log.iter()
+            .any(|line| line.starts_with("rm ") && line != "rm 0")
+    );
+    assert!(
+        log.iter()
+            .any(|line| line.starts_with("create ") && line != "create 0")
+    );
+    assert!(dir.join("slot-0.lock").exists());
+    assert!(!dir.join("slot-9.lock").exists());
+    // And the read-only descriptor took the slot: the build ran gated.
+    assert!(rig.started("end"));
     Ok(())
 }
 
@@ -202,9 +370,44 @@ fn an_unusable_slot_directory_does_not_stop_the_build() -> Result {
     fs::write(&fabric, b"not a directory")?;
     let mut child = rig.shim(1, &["build"])?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
-    assert!(rig.log()?.iter().any(|line| line.starts_with("end")));
-    let mut stderr = String::new();
-    std::io::Read::read_to_string(&mut child.stderr.take().ok_or("stderr")?, &mut stderr)?;
+    assert!(rig.started("end"));
+    let stderr = stderr_of(&mut child)?;
     assert!(stderr.contains("build slot unavailable"), "{stderr}");
+    assert_eq!(stderr.matches("build slot unavailable").count(), 1);
+    Ok(())
+}
+
+#[test]
+fn missing_settings_run_the_build_ungated_with_one_warning() -> Result {
+    let rig = Rig::new()?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .args(["internal", "build-slot", "--"])
+        .arg(&rig.cargo)
+        .arg("build")
+        .env_remove("PROVENANT_BUILD_SLOT_STATE")
+        .env_remove("PROVENANT_BUILD_SLOT")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    assert!(finish(&mut child, Duration::from_secs(10))?);
+    assert!(stderr_of(&mut child)?.contains("settings are missing or invalid"));
+    Ok(())
+}
+
+#[test]
+fn the_shims_exit_code_is_the_builds() -> Result {
+    let rig = Rig::new()?;
+    rig.provision(1)?;
+    let status = rig
+        .command(1, 5, &["no-such-subcommand-exits-zero"])
+        .status()?;
+    assert!(status.success());
+    let failing = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .args(["internal", "build-slot", "--", "/bin/sh", "-c", "exit 7"])
+        .env_remove("PROVENANT_BUILD_SLOT_STATE")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    assert_eq!(failing.code(), Some(7));
     Ok(())
 }

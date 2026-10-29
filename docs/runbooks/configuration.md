@@ -50,36 +50,65 @@ wall clock changes; a reboot resets spacing, except that the one-time upgrade
 of a version 1 ledger that recorded a start holds each class for one spacing.
 Spacing is enforced at admission, not at provider spawn, so a guardian
 suspended between the two can spawn alongside a later lane. The host
-allows 64 active lanes and 32 per project. On macOS it defers starts at warning
+caps writer lanes at `max_writer_lanes` (default 40) and at
+`max_project_writer_lanes` per project (default 30), inside fixed ceilings of
+64 active lanes per host and 32 per project. A writer at a cap waits until the
+admission deadline and is then refused with a reason that names the cap, its
+scope and the key to raise. On macOS it defers starts at warning
 or critical kernel memory pressure; on other platforms the 5 % memory floor
 applies. The disk floor applies to both classes. `lanes` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s
 left of 2.0 s`.
 
-Build slots gate builds, not lanes. A writer is admitted on the lane caps and
-the memory and disk floors alone, however many writers are live, so one
-project's idle writers never block another's. `max_concurrent_builds` is the
-number of cargo builds that run at once on the host: the default is one on
-hosts with 16 GiB or less, and two on larger hosts. Every lane that has the
-Rust toolchain gets a `cargo` shim first on its PATH. A cargo command that
-compiles (`build`, `check`, `clippy`, `test`, `bench`, `doc`, `rustc`,
-`rustdoc`, `fix`, `install`, `package`, `publish`, `nextest`, `llvm-cov` and
-`miri`, and their short aliases) takes one slot before the real cargo starts
-and keeps it until cargo and its children exit. Other commands, such as `fmt`,
-`metadata` and `run`, take none, and a cargo started inside a gated build
-shares its parent's slot. A command that finds every slot taken waits, prints
-`provenant: waiting for a build slot (n of m in use)`, and `lanes` reports the
-lane as `waiting for build slot: n of m in use`. Waiting blocks that command
-only, not the lane or its admission.
+Build slots gate builds, not lanes. A writer is admitted on the writer caps
+and the memory and disk floors alone, however many writers are live, so one
+project's idle writers never block another's. The slots are a build throttle,
+not a hard cap and not a security boundary: they share CPU and memory fairly
+among our own lanes. `max_concurrent_builds` is the number of cargo builds
+that run at once on the host. The default is
+`max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))`, so a 10-core 16 GiB
+host with the default 5 jobs gets 2. Every lane that has the Rust toolchain
+gets a `cargo` shim first on its PATH. A cargo command that compiles (`build`,
+`check`, `clippy`, `test`, `run`, `bench`, `doc`, `rustc`, `rustdoc`, `fix`,
+`install`, `package`, `publish`, `nextest`, `llvm-cov` and `miri`, and their
+short aliases) takes one slot before the real cargo starts. The shim process
+holds the slot itself, runs cargo as its child and releases the slot when that
+child exits. Other commands, such as `fmt` and `metadata`, take none. A cargo
+started inside a gated build skips the gate only when the
+`PROVENANT_BUILD_SLOT` marker names a live ancestor of the nested shim (the
+marker holds the holder shim's pid); any other value, such as one a lane
+invents, is ignored and the command acquires normally.
 
-The slots are lock files under `<state>/fabric/locks/build-slots/`, so they are
-shared by every project on the same state directory and are released by the
-kernel when the build exits, even after a crash or `kill -9`. A lane can write
-only that directory for this purpose. If the directory is unusable the build
-runs without a slot and prints a warning. A build that runs `~/.cargo/bin/cargo`
-by absolute path bypasses the shim. A lane waits for another build's
-`.cargo-lock` on its own target directory before it takes a slot, so a slot is
-never held by a build that Cargo would queue anyway.
+A command that finds every slot taken waits, prints
+`provenant: waiting for a build slot (n of m in use)` on its own stderr, and
+repeats the message about every 60 seconds. It gives up after
+`build_wait_minutes` (default 30) with an error that names the slot count and
+suggests `provenant lanes` to find the holders. The same bounded wait and
+progress message apply while the command waits for another build's
+`.cargo-lock` on its target directory, which it does before it takes a slot so
+a slot is never held by a build that Cargo would queue anyway. Waiting blocks
+that command only, not the lane or its admission. `lanes` does not report
+build waits; the message is in the lane's output.
+
+The slots are files `slot-0.lock` to `slot-N-1.lock` under
+`<state>/fabric/locks/build-slots/`, shared by every project on the same state
+directory. Provenant creates them outside the sandbox when it launches a lane.
+A lane has read access to that directory and its files and no write access, so
+it cannot create, unlink or replace a slot file; the shim opens a slot file
+read-only and takes `flock` on it. The descriptor is close-on-exec, so a
+daemon or an orphaned grandchild (sccache, a backgrounded test process) never
+keeps a slot after the build exits. The kernel releases the slot when the shim
+exits, even after a crash or `kill -9`. The slot directory, count and wait
+come from the environment written into the shim script by the host, not from
+arguments the lane chooses.
+
+What this does not do, by design: a build that runs `~/.cargo/bin/cargo`,
+`rustc` or a non-cargo build tool directly is not gated, and a lane can hold a
+slot by locking a slot file on purpose. Gating non-cargo builds is out of
+scope. If the slot directory cannot be opened or locked for an unexpected
+reason, the build runs without a slot and prints a single warning: fair
+sharing fails open. A slot that stays busy for the whole wait is an error, not
+an ungated build.
 
 `cargo_build_jobs` is the separate per-build parallelism: Cargo defaults to
 half the available cores, at least one. Set host overrides in `config.toml`:
@@ -88,12 +117,19 @@ half the available cores, at least one. Set host overrides in `config.toml`:
 [domains.fabric.lanes]
 max_concurrent_builds = 2
 cargo_build_jobs = 5
+build_wait_minutes = 30
+max_writer_lanes = 40
+max_project_writer_lanes = 30
 ```
 
-Omit either build setting from `config.toml` to select its host-dependent default.
-The host settings are not workflow knobs managed by `provenant config set`;
-edit the `[domains.fabric.lanes]` table directly. The value `-1` also selects
-automatic behaviour. A lane keeps the slot count it was launched with; a
+Omit a key from `config.toml` to select its default. The host settings are
+not workflow knobs managed by `provenant config set`; edit the
+`[domains.fabric.lanes]` table directly. The value `-1` also selects automatic
+behaviour. `max_concurrent_builds` is 1 to 64, `cargo_build_jobs` 1 to 1024,
+`build_wait_minutes` 1 to 1440, `max_writer_lanes` 1 to 64 and
+`max_project_writer_lanes` 1 to 32 and at most `max_writer_lanes`. An
+out-of-range value is rejected when configuration loads, so it never blocks
+lane admission. A lane keeps the slot count and wait it was launched with; a
 change applies to lanes launched afterwards.
 
 Higher values can reduce waiting but increase peak memory and CPU demand.

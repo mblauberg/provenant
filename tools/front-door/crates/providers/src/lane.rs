@@ -13,7 +13,6 @@ use std::{
 #[derive(Default)]
 pub(crate) struct GitWrapper {
     pub(crate) scrub: bool,
-    pub(crate) routing: Option<Vec<u8>>,
     include: Option<String>,
     git: Option<PathBuf>,
 }
@@ -24,12 +23,19 @@ impl crate::LaunchSpec {
         bin: &Path,
         git: &Path,
     ) -> Result<(), ProviderError> {
-        let git = self.git_wrapper.git.as_deref().unwrap_or(git);
+        if self
+            .git_wrapper
+            .git
+            .as_deref()
+            .is_some_and(|selected| selected != git)
+        {
+            return Err(ProviderError::InvalidPath);
+        }
+        self.git_wrapper.git = Some(git.to_owned());
         let bytes = git_wrapper(
             git,
             &self.env,
             self.git_wrapper.scrub,
-            self.git_wrapper.routing.as_deref(),
             self.git_wrapper.include.as_deref(),
         )?;
         let wrapper = bin.join("git");
@@ -73,8 +79,14 @@ impl crate::LaunchSpec {
     /// Put a `cargo` shim first on the lane's PATH. Cargo commands that compile
     /// take one host build slot (`slots` across every project on this state
     /// directory) before the real `cargo` runs, and keep it until it exits.
-    /// Waiting blocks only that command. The only write it needs is the slot
-    /// directory, so that is the only path granted.
+    /// Waiting blocks only that command.
+    ///
+    /// The host provisions the slot files (`BuildSlots::provision`) before
+    /// the lane starts. The lane is granted read access to that directory and
+    /// nothing more, so it can neither create, unlink nor replace a slot file;
+    /// the shim opens a slot read-only and locks it. The directory and count
+    /// are written into the shim script as environment for the one command,
+    /// which overrides anything the lane's own environment says.
     pub fn configure_build_slots(
         &mut self,
         scratch: &Path,
@@ -87,21 +99,16 @@ impl crate::LaunchSpec {
             }
             Ok(shell_quote(value))
         };
-        if gate.attempt.is_empty()
-            || !gate
-                .attempt
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
+        if !(1..=64).contains(&gate.slots) || gate.wait_seconds == 0 {
             return Err(ProviderError::Malformed);
         }
         let bin = scratch.join("bin");
         let script = format!(
-            "#!/bin/sh\nexec {} internal build-slot --state-dir {} --slots {} --attempt {} -- {} \"$@\"\n",
-            text(gate.provenant)?,
+            "#!/bin/sh\nPROVENANT_BUILD_SLOT_STATE={} PROVENANT_BUILD_SLOTS={} PROVENANT_BUILD_WAIT_SECS={}\nexport PROVENANT_BUILD_SLOT_STATE PROVENANT_BUILD_SLOTS PROVENANT_BUILD_WAIT_SECS\nexec {} internal build-slot -- {} \"$@\"\n",
             text(gate.state)?,
             gate.slots,
-            gate.attempt,
+            gate.wait_seconds,
+            text(gate.provenant)?,
             text(gate.cargo)?,
         );
         let slots = gate
@@ -111,13 +118,10 @@ impl crate::LaunchSpec {
         if !self.setup.contains(&create) {
             self.setup.push(create);
         }
-        self.setup.extend([
-            SetupStep::CreateDir(slots.clone()),
-            SetupStep::WriteExecutable {
-                path: bin.join("cargo"),
-                bytes: script.into_bytes(),
-            },
-        ]);
+        self.setup.push(SetupStep::WriteExecutable {
+            path: bin.join("cargo"),
+            bytes: script.into_bytes(),
+        });
         let (_, path) = self
             .env
             .iter_mut()
@@ -130,7 +134,8 @@ impl crate::LaunchSpec {
             .map_err(|_| ProviderError::InvalidPath)?;
         }
         let profile = &mut self.profile.spec;
-        profile.state_writes.push(subtree(slots));
+        // Read only: no write grant covers the slot directory.
+        profile.runtime_reads.push(subtree(slots));
         profile
             .process_executables
             .extend([exact("/bin/sh"), exact(gate.provenant)]);
@@ -171,7 +176,6 @@ impl crate::LaunchSpec {
         let include = shell_quote(&format!("include.path={}", text(&config)?));
         self.git_wrapper.scrub = true;
         self.git_wrapper.include = Some(include);
-        self.git_wrapper.git = Some(git.to_owned());
         self.write_git_wrapper(&scratch.join("bin"), git)?;
         self.setup.extend([
             SetupStep::WriteFile {
@@ -218,7 +222,6 @@ fn git_wrapper(
     git: &Path,
     env: &[(OsString, OsString)],
     scrub: bool,
-    routing: Option<&[u8]>,
     include: Option<&str>,
 ) -> Result<Vec<u8>, ProviderError> {
     let git = git.to_str().ok_or(ProviderError::InvalidPath)?;
@@ -230,14 +233,7 @@ fn git_wrapper(
         bytes.extend_from_slice(b"GIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n");
         bytes.extend_from_slice(identity_exports(env)?.as_bytes());
     }
-    if let Some(routing) = routing {
-        bytes.extend_from_slice(routing);
-    }
-    let executable = if routing.is_some_and(|routing| !routing.is_empty()) {
-        "\"$lane_git\"".to_owned()
-    } else {
-        shell_quote(git)
-    };
+    let executable = shell_quote(git);
     let include = include
         .map(|value| format!(" -c {value}"))
         .unwrap_or_default();
@@ -289,8 +285,8 @@ pub struct BuildSlotGate<'a> {
     pub state: &'a Path,
     /// How many builds the host runs at once.
     pub slots: u64,
-    /// This lane's attempt id, named while the lane waits for a slot.
-    pub attempt: &'a str,
+    /// Seconds a build waits for a slot or a Cargo lock before giving up.
+    pub wait_seconds: u64,
     /// The real `cargo` the shim runs once it holds a slot.
     pub cargo: &'a Path,
 }
@@ -416,7 +412,7 @@ impl LaneRuntime<'_> {
         setup.push(if scrubbed_git_config {
             SetupStep::WriteExecutable {
                 path: bin.join("git"),
-                bytes: self.git_wrapper(env, &[])?,
+                bytes: git_wrapper(self.git, env, true, None)?,
             }
         } else {
             SetupStep::Symlink {
@@ -439,14 +435,6 @@ impl LaneRuntime<'_> {
             (RUN_STATE_DIRECTORY_ENV.into(), self.child_state.into()),
         ]);
         Ok(())
-    }
-
-    pub(crate) fn git_wrapper(
-        &self,
-        env: &[(OsString, OsString)],
-        before_exec: &[u8],
-    ) -> Result<Vec<u8>, ProviderError> {
-        git_wrapper(self.git, env, true, Some(before_exec), None)
     }
 
     /// Rust Fabric uses stdio and SQLite, so it needs no daemon socket grant.
@@ -524,6 +512,10 @@ fn identity_exports(env: &[(OsString, OsString)]) -> Result<String, ProviderErro
     let mut identity = String::new();
     for (key, value) in env {
         if [
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_WORK_TREE",
+            "GIT_OBJECT_DIRECTORY",
             "GIT_AUTHOR_NAME",
             "GIT_AUTHOR_EMAIL",
             "GIT_COMMITTER_NAME",
@@ -625,7 +617,7 @@ mod tests {
                 .push(("GIT_AUTHOR_NAME".into(), "Fixture Author".into()));
             let result = spec.configure_publishing(
                 &plan.permissions().scratch.path,
-                Path::new("/fixture/git"),
+                Path::new("/fixture/git/bin/git"),
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
                 &provenant_config::GithubPolicy::default(),
@@ -644,53 +636,19 @@ mod tests {
             let identity = wrapper_text
                 .find("export GIT_AUTHOR_NAME='Fixture Author'")
                 .ok_or(ProviderError::Malformed)?;
-            let routing = wrapper_text
-                .find("lane_writer=1")
-                .ok_or(ProviderError::Malformed)?;
-            let exec = wrapper_text
-                .find("exec \"$lane_git\" -c 'include.path=")
-                .ok_or(ProviderError::Malformed)?;
-            assert!(identity < routing && routing < exec, "{id}: {wrapper_text}");
-
-            // Simulate publishing before routing, which preparation normally
-            // installs first, and check that the later routing retains it.
-            spec.git_wrapper.routing = None;
-            spec.configure_publishing(
-                &plan.permissions().scratch.path,
-                Path::new("/fixture/git"),
-                Path::new("/fixture/gh"),
-                Path::new("/fixture/home"),
-                &provenant_config::GithubPolicy::default(),
-            )?;
-            crate::launch::private_git_objects(
-                &crate::tests::fixture_input(
-                    &route,
-                    &plan,
-                    &prompt,
-                    Path::new("/fixture/repo"),
-                    (id == "claude").then_some(&token),
-                ),
-                &mut spec,
-            )?;
-            let bytes = spec
-                .setup
-                .iter()
-                .find_map(|step| match step {
-                    SetupStep::WriteExecutable { path, bytes } if path == &wrapper => Some(bytes),
-                    _ => None,
-                })
-                .ok_or(ProviderError::Malformed)?;
-            let wrapper_text = String::from_utf8_lossy(bytes);
-            let identity = wrapper_text
-                .find("export GIT_AUTHOR_NAME='Fixture Author'")
-                .ok_or(ProviderError::Malformed)?;
-            let routing = wrapper_text
-                .find("lane_writer=1")
-                .ok_or(ProviderError::Malformed)?;
-            let exec = wrapper_text
-                .find("exec \"$lane_git\" -c 'include.path=")
-                .ok_or(ProviderError::Malformed)?;
-            assert!(identity < routing && routing < exec, "{id}: {wrapper_text}");
+            assert!(identity < wrapper_text.find("exec ").ok_or(ProviderError::Malformed)?);
+            assert!(spec.env.iter().any(|(key, value)| {
+                key == "GIT_DIR"
+                    && value
+                        == &plan
+                            .permissions()
+                            .scratch
+                            .path
+                            .join("git-common")
+                            .into_os_string()
+            }));
+            assert!(wrapper_text.contains("export GIT_DIR="));
+            assert!(wrapper_text.contains("include.path="));
         }
         Ok(())
     }
@@ -854,88 +812,10 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    #[allow(clippy::disallowed_methods)]
-    fn the_cargo_shim_hands_the_command_to_the_build_slot_gate() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (scratch, state) = (root.join("it's scratch"), root.join("state"));
-        let attempt = "0b0e1d54-3c1e-4a53-8f0b-1d7c2a9a4f10";
-        let mut spec = crate::LaunchSpec {
+    fn bare_spec(path: &str) -> crate::LaunchSpec {
+        crate::LaunchSpec {
             argv: Vec::new(),
-            env: vec![("PATH".into(), "/home/.cargo/bin:/usr/bin:/bin".into())],
-            stdin: crate::Stdin::Null,
-            secret_input: None,
-            cwd: root.clone(),
-            setup: Vec::new(),
-            git_wrapper: Default::default(),
-            profile: provenant_confinement::permissions::ProviderProfile {
-                spec: ProviderProfileSpec::default(),
-                observations: Default::default(),
-            },
-            stream: crate::StreamState::new("claude", |_| Ok(Vec::new())),
-        };
-        let provenant = root.join("fake provenant");
-        let gate = BuildSlotGate {
-            provenant: &provenant,
-            state: &state,
-            slots: 3,
-            attempt,
-            cargo: Path::new("/home/.cargo/bin/cargo"),
-        };
-        spec.configure_build_slots(&scratch, &gate).unwrap();
-        let (_, path) = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
-        assert_eq!(
-            std::env::split_paths(path).next().unwrap(),
-            scratch.join("bin")
-        );
-        // The only new write is the slot directory: not the state root, not
-        // `fabric/locks`, and nothing near a repository's `.git`.
-        assert_eq!(
-            spec.profile.spec.state_writes,
-            [subtree(state.join("fabric/locks/build-slots"))]
-        );
-        assert!(spec.profile.spec.tool_writes.is_empty());
-        assert!(spec.setup.contains(&SetupStep::CreateDir(
-            state.join("fabric/locks/build-slots")
-        )));
-        let bytes = spec
-            .setup
-            .iter()
-            .find_map(|step| match step {
-                SetupStep::WriteExecutable { path, bytes } if path.ends_with("bin/cargo") => {
-                    Some(bytes.clone())
-                }
-                _ => None,
-            })
-            .unwrap();
-        // Run the script against a stand-in for `provenant` that prints argv.
-        std::fs::write(&provenant, "#!/bin/sh\nprintf '<%s>' \"$@\"\n").unwrap();
-        let shim = root.join("cargo");
-        std::fs::write(&shim, bytes).unwrap();
-        for file in [&provenant, &shim] {
-            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let output = std::process::Command::new(&shim)
-            .args(["test", "--", "two words"])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            format!(
-                "<internal><build-slot><--state-dir><{}><--slots><3><--attempt><{attempt}><--></home/.cargo/bin/cargo><test><--><two words>",
-                state.display()
-            )
-        );
-    }
-
-    #[test]
-    fn the_cargo_shim_refuses_an_attempt_that_is_not_a_plain_identifier() {
-        let mut spec = crate::LaunchSpec {
-            argv: Vec::new(),
-            env: vec![("PATH".into(), "/usr/bin".into())],
+            env: vec![("PATH".into(), path.into())],
             stdin: crate::Stdin::Null,
             secret_input: None,
             cwd: PathBuf::from("/"),
@@ -946,18 +826,107 @@ mod tests {
                 observations: Default::default(),
             },
             stream: crate::StreamState::new("claude", |_| Ok(Vec::new())),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn the_cargo_shim_hands_the_command_to_the_build_slot_gate() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (scratch, state) = (root.join("it's scratch"), root.join("state"));
+        let mut spec = bare_spec("/home/.cargo/bin:/usr/bin:/bin");
+        spec.cwd = root.clone();
+        let provenant = root.join("fake provenant");
+        let gate = BuildSlotGate {
+            provenant: &provenant,
+            state: &state,
+            slots: 3,
+            wait_seconds: 1800,
+            cargo: Path::new("/home/.cargo/bin/cargo"),
         };
-        for attempt in ["", "a b", "a'; touch x; '", "../x"] {
+        spec.configure_build_slots(&scratch, &gate).unwrap();
+        let (_, path) = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
+        assert_eq!(
+            std::env::split_paths(path).next().unwrap(),
+            scratch.join("bin")
+        );
+        // The lane gets no write to the slot directory, the state root,
+        // `fabric/locks` or anything near a repository's `.git`: only a read
+        // of the slot directory, which the host provisions beforehand.
+        let slots = state.join("fabric/locks/build-slots");
+        assert!(spec.profile.spec.state_writes.is_empty());
+        assert!(spec.profile.spec.tool_writes.is_empty());
+        assert!(spec.profile.spec.runtime_reads.contains(&subtree(&slots)));
+        assert!(
+            !spec
+                .setup
+                .iter()
+                .any(|step| matches!(step, SetupStep::CreateDir(path) if path.starts_with(&slots))),
+            "the lane never creates the slot directory"
+        );
+        let bytes = spec
+            .setup
+            .iter()
+            .find_map(|step| match step {
+                SetupStep::WriteExecutable { path, bytes } if path.ends_with("bin/cargo") => {
+                    Some(bytes.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        // Run the script against a stand-in for `provenant` that prints argv
+        // and the host's slot environment, with hostile values in the lane's.
+        std::fs::write(
+            &provenant,
+            "#!/bin/sh\nprintf '<%s>' \"$@\"\nprintf '[%s|%s|%s]' \"$PROVENANT_BUILD_SLOT_STATE\" \"$PROVENANT_BUILD_SLOTS\" \"$PROVENANT_BUILD_WAIT_SECS\"\n",
+        )
+        .unwrap();
+        let shim = root.join("cargo");
+        std::fs::write(&shim, bytes).unwrap();
+        for file in [&provenant, &shim] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = std::process::Command::new(&shim)
+            .args(["test", "--", "two words"])
+            .env("PROVENANT_BUILD_SLOT_STATE", "/lane/chosen")
+            .env("PROVENANT_BUILD_SLOTS", "64")
+            .env("PROVENANT_BUILD_WAIT_SECS", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!(
+                "<internal><build-slot><--></home/.cargo/bin/cargo><test><--><two words>[{}|3|1800]",
+                state.display()
+            ),
+            "the host's slot directory, count and wait override the lane's environment"
+        );
+    }
+
+    #[test]
+    fn the_cargo_shim_refuses_settings_that_cannot_be_trusted() {
+        let mut spec = bare_spec("/usr/bin");
+        for (state, slots, wait) in [
+            ("/s", 0, 60),
+            ("/s", 65, 60),
+            ("/s", 1, 0),
+            ("relative", 1, 60),
+            ("/s\nx", 1, 60),
+        ] {
             let gate = BuildSlotGate {
                 provenant: Path::new("/p"),
-                state: Path::new("/s"),
-                slots: 1,
-                attempt,
+                state: Path::new(state),
+                slots,
+                wait_seconds: wait,
                 cargo: Path::new("/c"),
             };
             assert!(
                 spec.configure_build_slots(Path::new("/scratch"), &gate)
-                    .is_err()
+                    .is_err(),
+                "{state} {slots} {wait}"
             );
         }
         assert!(spec.setup.is_empty());
@@ -1009,12 +978,14 @@ mod tests {
         let wrapper = dir.path().join("wrapper");
         std::fs::write(
             &wrapper,
-            lane.git_wrapper(
+            git_wrapper(
+                lane.git,
                 &[
                     ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
                     ("GIT_COMMITTER_EMAIL".into(), "lane@example.org".into()),
                 ],
-                &[],
+                true,
+                None,
             )
             .unwrap(),
         )

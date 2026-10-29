@@ -469,6 +469,21 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             "build-slot is dispatched before the command table",
             globals,
         ),
+        Command::Internal(provenant_cli::Internal::Settle { request }) => {
+            match provenant_run::settlement::resume(
+                &request,
+                &provenant_cli::run::Registry::default(),
+            ) {
+                Ok(()) => 0,
+                Err(error) => fail(
+                    &inv.leaf,
+                    Outcome::Error,
+                    "SETTLEMENT",
+                    &error.to_string(),
+                    globals,
+                ),
+            }
+        }
         Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => match provenant_cli::provider_updates::housekeep(
@@ -808,36 +823,16 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     };
     let verb = verb.to_owned();
     // The lane's cargo shim runs on every build: it needs no roots, telemetry
-    // or result envelope, and ends by becoming cargo.
+    // or result envelope, and ends with cargo's exit code.
     if let ParseOutcome::Invocation(inv) = &parsed
-        && let Command::Internal(provenant_cli::Internal::BuildSlot {
-            slots,
-            attempt,
-            command,
-        }) = &inv.command
+        && let Command::Internal(provenant_cli::Internal::BuildSlot { command }) = &inv.command
     {
-        let Some(state) = inv.globals.state_dir.as_deref() else {
-            return fail(
-                &inv.leaf,
-                Outcome::Invalid,
-                "INVALID",
-                "build-slot needs --state-dir",
-                &inv.globals,
-            );
-        };
-        let error = build_slot::run(build_slot::Gate {
-            state,
-            slots: *slots,
-            attempt: attempt.as_deref(),
+        let env: Vec<_> = std::env::vars_os().collect();
+        return u8::try_from(build_slot::run(build_slot::Gate {
+            settings: build_slot::Settings::from_env(&env),
             command,
-        });
-        return fail(
-            &inv.leaf,
-            Outcome::Error,
-            "BUILD_SLOT",
-            &format!("cannot start cargo: {error}"),
-            &inv.globals,
-        );
+        }))
+        .unwrap_or(1);
     }
     // No product installation, Git probe or provider access is needed to count.
     // Read-only catalogue and checkpoint observation must not record demand
