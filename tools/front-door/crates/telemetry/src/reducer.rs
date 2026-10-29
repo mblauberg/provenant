@@ -585,12 +585,50 @@ fn groups<K, G>(
         .collect()
 }
 
+/// Allocate rounded aggregate cost from floors using largest remainders.
+/// Equal remainders follow sorted group keys; unknown and zero-cost rows
+/// receive no additional rounding units.
 fn reconcile_group_costs(
     groups: &mut [ContextGroup],
-    numerator: u128,
+    numerators: &[u128],
 ) -> Result<(), TelemetryError> {
+    let numerator = numerators
+        .iter()
+        .try_fold(0u128, |sum, numerator| sum.checked_add(*numerator))
+        .ok_or(TelemetryError::Overflow)?;
     let target = Money::from_numerator(numerator)?.microdollars;
-    let current = groups
+    let mut assigned = 0u128;
+    let mut candidates = Vec::new();
+    for (index, (group, numerator)) in groups.iter_mut().zip(numerators).enumerate() {
+        let Some(money) = &group.totals.cost.known_lower_bound else {
+            continue;
+        };
+        let floor = numerator / 1_000_000;
+        let delta = i128::try_from(floor).map_err(|_| TelemetryError::Overflow)?
+            - i128::from(money.microdollars);
+        adjust_group_money(group, delta)?;
+        assigned = assigned
+            .checked_add(floor)
+            .ok_or(TelemetryError::Overflow)?;
+        let remainder = numerator % 1_000_000;
+        if remainder > 0 {
+            candidates.push((index, remainder));
+        }
+    }
+    candidates.sort_by(|(a_index, a_remainder), (b_index, b_remainder)| {
+        b_remainder.cmp(a_remainder).then(a_index.cmp(b_index))
+    });
+    let remainder = u128::from(target)
+        .checked_sub(assigned)
+        .ok_or(TelemetryError::Overflow)?;
+    let remainder = usize::try_from(remainder).map_err(|_| TelemetryError::Overflow)?;
+    if remainder > candidates.len() {
+        return Err(TelemetryError::Overflow);
+    }
+    for (index, _) in candidates.into_iter().take(remainder) {
+        adjust_group_money(&mut groups[index], 1)?;
+    }
+    let reconciled = groups
         .iter()
         .try_fold(0u128, |sum, group| {
             sum.checked_add(u128::from(
@@ -599,35 +637,12 @@ fn reconcile_group_costs(
                     .cost
                     .known_lower_bound
                     .as_ref()
-                    .map_or(0, |m| m.microdollars),
+                    .map_or(0, |money| money.microdollars),
             ))
         })
         .ok_or(TelemetryError::Overflow)?;
-    if current < u128::from(target) {
-        let mut remainder = u128::from(target) - current;
-        for group in groups.iter_mut() {
-            if remainder == 0 {
-                break;
-            }
-            adjust_group_money(group, 1)?;
-            remainder -= 1;
-        }
-    } else if current > u128::from(target) {
-        let mut remainder = current - u128::from(target);
-        for group in groups.iter_mut().rev() {
-            let available = group
-                .totals
-                .cost
-                .known_lower_bound
-                .as_ref()
-                .map_or(0, |m| m.microdollars);
-            let decrement = u64::try_from(remainder.min(u128::from(available)))
-                .map_err(|_| TelemetryError::Overflow)?;
-            if decrement > 0 {
-                adjust_group_money(group, -i128::from(decrement))?;
-                remainder -= u128::from(decrement);
-            }
-        }
+    if reconciled != u128::from(target) {
+        return Err(TelemetryError::Overflow);
     }
     Ok(())
 }
@@ -941,16 +956,17 @@ fn stats_inner(
         totals,
     })?;
     daily.sort_by(|a, b| (&a.day, report_key(&a.route)).cmp(&(&b.day, report_key(&b.route))));
-    let grouped_numerator = context_groups
+    // Preserve exact numerators in the same key order as finished rows.
+    let grouped_numerators = context_groups
         .values()
-        .try_fold(0u128, |sum, group| sum.checked_add(group.numerator))
-        .ok_or(TelemetryError::Overflow)?;
+        .map(|group| group.numerator)
+        .collect::<Vec<_>>();
     let context_groups = if context_key.is_some() || external_groups.is_some() {
         let mut result = groups(context_groups, |value, totals| ContextGroup {
             value,
             totals,
         })?;
-        reconcile_group_costs(&mut result, grouped_numerator)?;
+        reconcile_group_costs(&mut result, &grouped_numerators)?;
         Some(result)
     } else {
         None

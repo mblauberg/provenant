@@ -66,6 +66,13 @@ prompt = "Implement ${prompt}"
 }
 
 #[test]
+fn expanded_preset_retains_pattern_attribution() {
+    let expansion = expand(&Layers::empty(), "fan-out", "brief", &[]).unwrap();
+    assert_eq!(expansion.document["context"]["preset"], "fan-out");
+    assert_eq!(expansion.document["context"]["pattern"], "fan-out");
+}
+
+#[test]
 fn stages_keep_nested_presets_and_heterogeneous_parallel_entries_grouped() {
     let mut layers = Layers::empty();
     layers

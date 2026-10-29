@@ -32,6 +32,8 @@ const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,6 +89,8 @@ pub enum DistinctFrom {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     #[serde(skip)]
@@ -715,6 +719,7 @@ pub struct Replay<'a> {
 
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
+    pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
     /// Attempts of the source writer whose model families must be avoided.
     pub distinct_from_attempts: &'a [String],
@@ -1269,6 +1274,8 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedGraph {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1282,6 +1289,8 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1328,6 +1337,40 @@ struct PlannedNode {
     routes: Vec<GraphRoute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     required_verdict: Option<String>,
+}
+
+/// Node labels override graph defaults. Scheduler identity comes from the plan.
+fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::run::WorkContext {
+    let defaults = provenant_records::run::WorkContext::default();
+    let graph = plan.context.as_ref().unwrap_or(&defaults);
+    let context = node.context.as_ref().unwrap_or(&defaults);
+    provenant_records::run::WorkContext {
+        graph_id: Some(plan.graph_id.clone()),
+        node_id: Some(node.id.clone()),
+        role: context
+            .role
+            .clone()
+            .or_else(|| node.role.clone())
+            .or_else(|| graph.role.clone()),
+        work_item: context
+            .work_item
+            .clone()
+            .or_else(|| graph.work_item.clone()),
+        preset: context.preset.clone().or_else(|| graph.preset.clone()),
+        pattern: context.pattern.clone().or_else(|| graph.pattern.clone()),
+        role_digest: context
+            .role_digest
+            .clone()
+            .or_else(|| graph.role_digest.clone()),
+        experiment_arm: context
+            .experiment_arm
+            .clone()
+            .or_else(|| graph.experiment_arm.clone()),
+        selection_source: context
+            .selection_source
+            .clone()
+            .or_else(|| graph.selection_source.clone()),
+    }
 }
 
 impl PlannedNode {
@@ -2051,6 +2094,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .observe_or_start(
                         &key,
                         NodeInput {
+                            context: node_context(&plan, node),
                             read_roots: &node.read_roots,
                             distinct_from_attempts: &distinct_attempts,
                             source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
@@ -2731,6 +2775,18 @@ fn validate_flat_plan(
     if document.schema_version != 1 {
         return Err("schema version");
     }
+    if document
+        .context
+        .as_ref()
+        .is_some_and(|context| !context.valid())
+        || document.nodes.iter().any(|node| {
+            node.context
+                .as_ref()
+                .is_some_and(|context| !context.valid())
+        })
+    {
+        return Err("invalid work context");
+    }
     use provenant_records::run::DeliveryMode;
     if !matches!(
         document.delivery,
@@ -2990,6 +3046,7 @@ fn validate_flat_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            context: node.context.clone(),
             extra: node.extra.clone(),
             composite_members: node.composite_members.clone(),
             composite: node.composite.clone(),
@@ -3105,6 +3162,7 @@ fn validate_flat_plan(
         .collect();
     Ok((
         PlannedGraph {
+            context: document.context.clone(),
             extra: document.extra.clone(),
             integration_branch: document.integration_branch.clone(),
             delivery: document.delivery.clone(),
@@ -3640,6 +3698,7 @@ mod tests {
 
     fn node(id: &str, route: GraphRoute) -> GraphNode {
         GraphNode {
+            context: None,
             extra: Default::default(),
             composite_members: Vec::new(),
             distinct_from: None,
@@ -3672,6 +3731,7 @@ mod tests {
 
     fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         GraphDocument {
+            context: None,
             extra: Default::default(),
             integration_branch: None,
             delivery: None,
@@ -5498,6 +5558,7 @@ mod tests {
             route("fourth"),
         ];
         let document = graph(vec![GraphNode {
+            context: None,
             extra: Default::default(),
             composite_members: Vec::new(),
             distinct_from: None,
@@ -5683,6 +5744,7 @@ mod tests {
         ] {
             let routes = vec![route("first"), route("second")];
             let document = graph(vec![GraphNode {
+                context: None,
                 extra: Default::default(),
                 composite_members: Vec::new(),
                 distinct_from: None,
@@ -5941,6 +6003,7 @@ mod tests {
     #[test]
     fn terminal_task_failure_does_not_try_a_fallback_route() {
         let document = graph(vec![GraphNode {
+            context: None,
             extra: Default::default(),
             composite_members: Vec::new(),
             distinct_from: None,

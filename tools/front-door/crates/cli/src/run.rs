@@ -1196,6 +1196,7 @@ struct Manifest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestTask {
+    context: Option<provenant_records::run::WorkContext>,
     #[serde(default)]
     build_heavy: bool,
     title: Option<String>,
@@ -1420,6 +1421,7 @@ pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::Lan
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
+    pub context: Option<provenant_records::run::WorkContext>,
     pub build_heavy: bool,
     pub title: Option<String>,
     pub task_id: TaskId,
@@ -1627,7 +1629,7 @@ pub fn submit_with_host(
         .into_iter()
         .map(|task| {
             Ok(run::DispatchTask {
-                context: None,
+                context: task.context,
                 build_heavy: task.build_heavy,
                 profile: profile.clone(),
                 title: task.title,
@@ -2691,6 +2693,7 @@ fn dispatch_inner(
                 task.deliver.or_else(|| flag_delivery.clone()),
                 task.base.or_else(|| command.base.clone()),
                 task.build_heavy || command.build_heavy,
+                task.context,
             ));
         }
     } else {
@@ -2717,6 +2720,7 @@ fn dispatch_inner(
             flag_delivery,
             command.base.clone(),
             command.build_heavy,
+            None,
         ));
     }
     let concurrency = if command.input.manifest.is_some() {
@@ -2739,6 +2743,7 @@ fn dispatch_inner(
                 deliver,
                 base,
                 build_heavy,
+                context,
             ),
         ) in tasks.into_iter().enumerate()
         {
@@ -2755,6 +2760,7 @@ fn dispatch_inner(
                 );
             }
             placed.push(remote::Task {
+                context,
                 build_heavy,
                 title,
                 base,
@@ -2788,7 +2794,7 @@ fn dispatch_inner(
         .operation(&command.operation_id, &call)?
         .is_none()
     {
-        for (_, _, _, _, _, _, _, delivery, _, _) in &tasks {
+        for (_, _, _, _, _, _, _, delivery, _, _, _) in &tasks {
             if let Some(delivery) = delivery {
                 check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
@@ -2808,8 +2814,10 @@ fn dispatch_inner(
                 deliver,
                 base,
                 build_heavy,
+                context,
             )| {
                 Submitted {
+                    context,
                     build_heavy,
                     title,
                     base,
@@ -8468,6 +8476,7 @@ mod tests {
             chair: chair.clone(),
             operation_id: OperationId::parse("context-ref-replay").unwrap(),
             tasks: vec![Submitted {
+                context: None,
                 build_heavy: false,
                 title: None,
                 task_id: TaskId::from_bytes([3; 16]),

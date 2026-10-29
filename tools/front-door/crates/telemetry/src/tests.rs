@@ -1062,3 +1062,94 @@ fn fractional_tokens_and_cost_remainders_reconcile_by_sorted_key() {
         report.totals.cost.known_lower_bound.unwrap().microdollars
     );
 }
+
+#[test]
+fn context_cost_rounding_skips_unknown_and_zero_cost_groups() {
+    let mut unknown = fact(1, None);
+    unknown.resolved_route = None;
+    let mut facts = vec![unknown];
+    for (number, label, input) in [
+        (2, "a-zero", 0),
+        (3, "b-first-priced", 400_000),
+        (4, "c-second-priced", 400_000),
+    ] {
+        let mut fact = fact(number, Some(input));
+        fact.context = Some(provenant_records::run::WorkContext {
+            node_id: Some(label.into()),
+            ..Default::default()
+        });
+        facts.push(fact);
+    }
+    let report = stats_by_context(
+        facts,
+        &prices(Some(1)),
+        Window::default(),
+        ContextKey::NodeId,
+    )
+    .unwrap();
+    let total = report.totals.cost.known_lower_bound.unwrap().microdollars;
+    assert_eq!(total, 1);
+    let groups = report.context_groups.unwrap();
+    assert!(groups[0].value.is_none());
+    assert!(groups[0].totals.cost.known_lower_bound.is_none());
+    assert!(groups[0].totals.cost.complete.is_none());
+    let costs = groups
+        .iter()
+        .map(|group| {
+            group
+                .totals
+                .cost
+                .known_lower_bound
+                .as_ref()
+                .map_or(0, |money| money.microdollars)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(costs, [0, 0, 1, 0]);
+    assert_eq!(costs.iter().sum::<u64>(), total);
+    for group in &groups[1..] {
+        assert_eq!(
+            group.totals.cost.complete.as_ref().unwrap().microdollars,
+            group
+                .totals
+                .cost
+                .known_lower_bound
+                .as_ref()
+                .unwrap()
+                .microdollars
+        );
+    }
+}
+
+#[test]
+fn context_cost_rounding_uses_largest_fractional_remainders() {
+    for (inputs, expected) in [
+        ([100_000, 400_000, 300_000], [0, 1, 0]),
+        ([600_000, 900_000, 700_000], [0, 1, 1]),
+        ([1_100_000, 1_400_000, 1_300_000], [1, 2, 1]),
+    ] {
+        let facts = inputs.into_iter().enumerate().map(|(index, input)| {
+            let mut fact = fact(index as u64 + 1, Some(input));
+            fact.context = Some(provenant_records::run::WorkContext {
+                node_id: Some(format!("node-{index}")),
+                ..Default::default()
+            });
+            fact
+        });
+        let report = stats_by_context(
+            facts,
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::NodeId,
+        )
+        .unwrap();
+        let total = report.totals.cost.complete.unwrap().microdollars;
+        let costs = report
+            .context_groups
+            .unwrap()
+            .iter()
+            .map(|group| group.totals.cost.complete.as_ref().unwrap().microdollars)
+            .collect::<Vec<_>>();
+        assert_eq!(costs, expected, "input numerators: {inputs:?}");
+        assert_eq!(costs.iter().sum::<u64>(), total);
+    }
+}
