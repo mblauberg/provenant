@@ -399,9 +399,7 @@ output_excluding_reasoning = 2000000
         )?;
         std::fs::write(
             session.join("agent-split.jsonl"),
-            concat!(
-                "{\"type\":\"assistant\",\"message\":{\"id\":\"split\",\"model\":\"example\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_1h_input_tokens\":7},\"output_tokens\":0}}}\n"
-            ),
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"split\",\"model\":\"example\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_1h_input_tokens\":7},\"output_tokens\":0}}}\n",
         )?;
         let split_report = import_subagents(&session, dir.path(), &validate_prices(&config)?)?;
         assert_eq!(split_report.models[0].usage.cache_write.known, 7);

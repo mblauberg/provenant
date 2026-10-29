@@ -232,7 +232,7 @@ fn oversized_log_reads_recent_complete_events() -> Result {
     let roots = roots(&base)?;
     std::fs::create_dir(roots.state.as_path())?;
     let mut bytes = vec![b'x'; CAP as usize];
-    bytes.extend_from_slice(b"\n{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00Z\"}\n");
+    bytes.extend_from_slice(b"\n{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00.000000Z\"}\n");
     std::fs::write(roots.state.as_path().join(LOG), bytes)?;
     let report = report(&roots, inventory(), None, None)?;
     assert_eq!(
