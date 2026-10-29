@@ -514,8 +514,7 @@ fn admission_refusal(error: &CustodyError) -> String {
         | CustodyError::AdmissionBuildSettings
         | CustodyError::AdmissionGuardianIdentity
         | CustodyError::AdmissionDisk { .. }
-        | CustodyError::AdmissionMemoryPressure { .. }
-        | CustodyError::AdmissionBuildSlots { .. } => error.to_string(),
+        | CustodyError::AdmissionMemoryPressure { .. } => error.to_string(),
         _ => "admission refused".into(),
     }
 }

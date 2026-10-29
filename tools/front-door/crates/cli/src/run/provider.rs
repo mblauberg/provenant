@@ -666,18 +666,37 @@ fn prepare_with(
                 spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
             }
         }
-        let jobs = provenant_config::LaneBuildSettings {
+        let build_settings = provenant_config::LaneBuildSettings {
             max_concurrent_builds: config.domains.fabric.lanes.max_concurrent_builds,
             cargo_build_jobs: config.domains.fabric.lanes.cargo_build_jobs,
-        }
-        .jobs();
+        };
         set_cargo_jobs(
             &mut spec.env,
             registry
                 .host
                 .and_then(|host| host.cargo_build_jobs.as_deref()),
-            jobs,
+            build_settings.jobs(),
         );
+        // Builds, not lanes, share the host's build slots: a `cargo` shim takes
+        // one around each compiling command. Memory is unreadable only on a
+        // host that cannot run lanes; assume the smaller default there.
+        let cargo = home.join(".cargo/bin/cargo");
+        if spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") && cargo.is_file() {
+            let total =
+                provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+            let attempt = paths.attempt_id.to_string();
+            spec.configure_build_slots(
+                scratch,
+                &provenant_providers::BuildSlotGate {
+                    provenant: &provenant_executable,
+                    state: roots.state.as_path(),
+                    slots: build_settings.build_limit(total),
+                    attempt: &attempt,
+                    cargo: &cargo,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        }
         if adapter.id() == "claude" {
             spec.configure_claude_shell(scratch)
                 .map_err(|error| error.to_string())?;

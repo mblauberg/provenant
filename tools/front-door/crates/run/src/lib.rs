@@ -224,10 +224,6 @@ pub enum RunError {
     #[error("memory pressure is {level}; wait for host memory pressure to fall")]
     MemoryPressure { level: String },
     #[error(
-        "writer build slots full: {active} of {limit} active; wait for a writer to finish or adjust lanes.max_concurrent_builds"
-    )]
-    BuildSlots { active: u64, limit: u64 },
-    #[error(
         "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds and domains.fabric.lanes.cargo_build_jobs"
     )]
     BuildSettings,

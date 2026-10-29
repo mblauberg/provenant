@@ -543,7 +543,6 @@ impl From<&RunError> for ErrorKind {
             | RunError::Refused
             | RunError::DiskFloor { .. }
             | RunError::MemoryPressure { .. }
-            | RunError::BuildSlots { .. }
             | RunError::BuildSettings
             | RunError::GuardianIdentityUnavailable => Self::Refused,
             RunError::Validation(_) | RunError::InvalidBase(_) | RunError::TooLarge { .. } => {

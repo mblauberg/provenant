@@ -1,6 +1,7 @@
 //! Operating-system primitives and bounded utility execution.
 #![deny(unsafe_code)]
 
+pub mod build_slots;
 pub mod capture;
 pub mod clock;
 pub mod disk;

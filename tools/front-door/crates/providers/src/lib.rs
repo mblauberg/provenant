@@ -14,7 +14,7 @@ pub mod host;
 pub mod identity;
 mod lane;
 mod launch;
-pub use lane::LaneRuntime;
+pub use lane::{BuildSlotGate, LaneRuntime};
 pub mod opencode;
 pub mod quota;
 pub mod quota_live;

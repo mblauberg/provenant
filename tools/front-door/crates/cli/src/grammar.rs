@@ -2,7 +2,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{DeliveryId, GitOid, OperationId, RunId, TaskId};
 pub use provenant_records::Harness;
-use std::{path::PathBuf, str::FromStr};
+use std::{ffi::OsString, path::PathBuf, str::FromStr};
 
 #[derive(Debug, Parser)]
 #[command(name = "provenant", disable_help_subcommand = true)]
@@ -1061,6 +1061,18 @@ pub enum GitHook {
 #[derive(Debug, Subcommand)]
 pub enum Internal {
     ProviderUpdates,
+    /// Take a host build slot under `--state-dir`, then run the given cargo command (the lane's cargo shim).
+    BuildSlot {
+        /// How many builds the host runs at once.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=64))]
+        slots: u64,
+        /// Lane attempt to name while waiting.
+        #[arg(long)]
+        attempt: Option<String>,
+        /// The real cargo, then its arguments.
+        #[arg(last = true, required = true, allow_hyphen_values = true)]
+        command: Vec<OsString>,
+    },
     Supervise {
         /// Private S2 handoff values, validated and adopted only by supervisor.
         #[arg(hide = true, num_args = 5..=6, value_parser = clap::value_parser!(u64).range(3..=2147483647))]

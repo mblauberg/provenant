@@ -70,6 +70,74 @@ impl crate::LaunchSpec {
             .push(("CLAUDE_CODE_SHELL_PREFIX".into(), path.into_os_string()));
         Ok(())
     }
+    /// Put a `cargo` shim first on the lane's PATH. Cargo commands that compile
+    /// take one host build slot (`slots` across every project on this state
+    /// directory) before the real `cargo` runs, and keep it until it exits.
+    /// Waiting blocks only that command. The only write it needs is the slot
+    /// directory, so that is the only path granted.
+    pub fn configure_build_slots(
+        &mut self,
+        scratch: &Path,
+        gate: &BuildSlotGate<'_>,
+    ) -> Result<(), ProviderError> {
+        let text = |path: &Path| -> Result<String, ProviderError> {
+            let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
+            if !path.is_absolute() || value.chars().any(char::is_control) {
+                return Err(ProviderError::InvalidPath);
+            }
+            Ok(shell_quote(value))
+        };
+        if gate.attempt.is_empty()
+            || !gate
+                .attempt
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(ProviderError::Malformed);
+        }
+        let bin = scratch.join("bin");
+        let script = format!(
+            "#!/bin/sh\nexec {} internal build-slot --state-dir {} --slots {} --attempt {} -- {} \"$@\"\n",
+            text(gate.provenant)?,
+            text(gate.state)?,
+            gate.slots,
+            gate.attempt,
+            text(gate.cargo)?,
+        );
+        let slots = gate
+            .state
+            .join(provenant_os::build_slots::DIRECTORY.join("/"));
+        let create = SetupStep::CreateDir(bin.clone());
+        if !self.setup.contains(&create) {
+            self.setup.push(create);
+        }
+        self.setup.extend([
+            SetupStep::CreateDir(slots.clone()),
+            SetupStep::WriteExecutable {
+                path: bin.join("cargo"),
+                bytes: script.into_bytes(),
+            },
+        ]);
+        let (_, path) = self
+            .env
+            .iter_mut()
+            .find(|(key, _)| key == "PATH")
+            .ok_or(ProviderError::InvalidPath)?;
+        if std::env::split_paths(path).next().as_deref() != Some(bin.as_path()) {
+            *path = std::env::join_paths(
+                std::iter::once(bin.clone()).chain(std::env::split_paths(path)),
+            )
+            .map_err(|_| ProviderError::InvalidPath)?;
+        }
+        let profile = &mut self.profile.spec;
+        profile.state_writes.push(subtree(slots));
+        profile
+            .process_executables
+            .extend([exact("/bin/sh"), exact(gate.provenant)]);
+        profile.runtime_reads.push(exact(gate.provenant));
+        profile.tool_exec_roots.push(subtree(bin));
+        Ok(())
+    }
     /// Configure shell Git after adapter preparation, including shells that
     /// scrub Git environment variables. No credential is read during setup.
     pub fn configure_publishing(
@@ -211,6 +279,20 @@ fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// What the `cargo` shim needs to take a host build slot.
+pub struct BuildSlotGate<'a> {
+    /// The `provenant` executable that runs `internal build-slot`.
+    pub provenant: &'a Path,
+    /// Host state directory, shared by every project, holding the slot files.
+    pub state: &'a Path,
+    /// How many builds the host runs at once.
+    pub slots: u64,
+    /// This lane's attempt id, named while the lane waits for a slot.
+    pub attempt: &'a str,
+    /// The real `cargo` the shim runs once it holds a slot.
+    pub cargo: &'a Path,
 }
 
 /// Canonical runtime paths supplied by the composition edge.

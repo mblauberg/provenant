@@ -3,6 +3,7 @@
 // file and dispatches with its fixture seams. Plain comments only: `include!`
 // refuses inner attributes.
 mod bench;
+mod build_slot;
 mod chair;
 mod checks;
 #[cfg(test)]
@@ -460,6 +461,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::Supervise { descriptors }) => {
             supervise(&descriptors, globals, process)
         }
+        // Handled in `dispatch` before roots and telemetry; it never gets here.
+        Command::Internal(provenant_cli::Internal::BuildSlot { .. }) => fail(
+            &inv.leaf,
+            Outcome::Error,
+            "INTERNAL",
+            "build-slot is dispatched before the command table",
+            globals,
+        ),
         Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => match provenant_cli::provider_updates::housekeep(
@@ -798,6 +807,38 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         ParseOutcome::Version { globals } => ("version", globals),
     };
     let verb = verb.to_owned();
+    // The lane's cargo shim runs on every build: it needs no roots, telemetry
+    // or result envelope, and ends by becoming cargo.
+    if let ParseOutcome::Invocation(inv) = &parsed
+        && let Command::Internal(provenant_cli::Internal::BuildSlot {
+            slots,
+            attempt,
+            command,
+        }) = &inv.command
+    {
+        let Some(state) = inv.globals.state_dir.as_deref() else {
+            return fail(
+                &inv.leaf,
+                Outcome::Invalid,
+                "INVALID",
+                "build-slot needs --state-dir",
+                &inv.globals,
+            );
+        };
+        let error = build_slot::run(build_slot::Gate {
+            state,
+            slots: *slots,
+            attempt: attempt.as_deref(),
+            command,
+        });
+        return fail(
+            &inv.leaf,
+            Outcome::Error,
+            "BUILD_SLOT",
+            &format!("cannot start cargo: {error}"),
+            &inv.globals,
+        );
+    }
     // No product installation, Git probe or provider access is needed to count.
     // Read-only catalogue and checkpoint observation must not record demand
     // telemetry, including on an otherwise empty state root.

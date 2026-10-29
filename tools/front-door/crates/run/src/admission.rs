@@ -176,7 +176,8 @@ impl RunStore {
                 let ticket = call.retry(|| self.ticket(&self.db, lane.attempt_id)).ok()?;
                 let class = ticket.lane_class;
                 let waiting_for = if lane.state == AttemptState::Running {
-                    self.disk_pause_wait(lane)?
+                    self.disk_pause_wait(lane)
+                        .or_else(|| self.build_slot_wait(lane, resources))?
                 } else if lane.state == AttemptState::Queued {
                     "launch: not yet handed to a guardian".to_owned()
                 } else {
@@ -213,18 +214,6 @@ impl RunStore {
                     )) = resources.pressure()
                     {
                         format!("host capacity: memory pressure {pressure:?}")
-                    } else if class == LaneClass::Writer
-                        && let (Ok(memory), Ok(settings), Some(count)) = (
-                            resources.memory(),
-                            provenant_config::LaneBuildSettings::read(&self.writer_registry),
-                            crate::ledger::writer_count(&self.writer_registry, call),
-                        )
-                        && count >= settings.build_limit(memory.total_bytes)
-                    {
-                        format!(
-                            "host capacity: {count} of {} writer build slots active",
-                            settings.build_limit(memory.total_bytes)
-                        )
                     } else {
                         "host capacity: active lane caps and memory or disk floors".to_owned()
                     }
@@ -236,6 +225,23 @@ impl RunStore {
                 })
             })
             .collect()
+    }
+    /// A running lane waits for a build slot while one of its cargo commands
+    /// is queued behind the host's `max_concurrent_builds`. The waiting
+    /// command holds a lock on its registration, so a leftover from a crashed
+    /// command is not reported.
+    fn build_slot_wait(&self, lane: &AttemptRecord, resources: &dyn Resources) -> Option<String> {
+        let slots = provenant_os::build_slots::BuildSlots::observe(&self.writer_registry).ok()?;
+        if !slots.waiting(&lane.attempt_id.to_string()) {
+            return None;
+        }
+        let limit = provenant_config::LaneBuildSettings::read(&self.writer_registry)
+            .ok()?
+            .build_limit(resources.memory().ok()?.total_bytes);
+        Some(format!(
+            "waiting for build slot: {} of {limit} in use",
+            slots.held(limit)
+        ))
     }
     /// The running guardian publishes this lane's pause in its checkpoint.
     fn disk_pause_wait(&self, lane: &AttemptRecord) -> Option<String> {
@@ -419,6 +425,8 @@ impl RunStore {
                 eprintln!("admission: memory pressure probe failed: {error}");
                 None
             });
+            // Build limits gate builds inside lanes, not admission; an invalid
+            // setting still refuses here so it is fixed before any build runs.
             let settings = provenant_config::LaneBuildSettings::read(&self.writer_registry);
             if settings
                 .as_ref()
@@ -433,7 +441,7 @@ impl RunStore {
                 disk_floor_bytes,
                 settings,
             ) {
-                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(settings)) => {
+                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(_)) => {
                     refusal = if disk < floor {
                         Some(RunError::DiskFloor { free: disk, floor })
                     } else if let Some(
@@ -458,28 +466,18 @@ impl RunStore {
                             >= u128::from(memory.total_bytes)
                                 * u128::from(ticket.memory_floor_basis_points)
                         && disk >= floor;
-                    fits.then_some(settings.build_limit(memory.total_bytes))
+                    fits
                 }
                 _ => {
                     refusal = None;
-                    None
+                    false
                 }
             };
-            if let Some(limit) = fits {
-                match self.claim_with_build_limit_observed(id, limit, clock, &call, &|| {
-                    resources.guardian_identity()
-                }) {
+            if fits {
+                match self.claim_observed(id, clock, &call, &|| resources.guardian_identity()) {
                     Ok(Some(record)) => return Ok(record),
                     // A busy store is transient; keep waiting to the deadline.
-                    Ok(None) => {
-                        if ticket.lane_class == LaneClass::Writer
-                            && let Some(active) =
-                                crate::ledger::writer_count(&self.writer_registry, &call)
-                            && active >= limit
-                        {
-                            refusal = Some(RunError::BuildSlots { active, limit });
-                        }
-                    }
+                    Ok(None) => {}
                     Err(RunError::GuardianIdentityUnavailable) => {
                         refusal = Some(RunError::GuardianIdentityUnavailable);
                     }
@@ -517,24 +515,11 @@ impl RunStore {
         clock: &dyn Clock,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
-        self.claim_with_build_limit(id, HOST_ACTIVE, clock, call)
+        self.claim_observed(id, clock, call, &|| SystemResources.guardian_identity())
     }
-    #[cfg(test)]
-    pub(crate) fn claim_with_build_limit(
+    fn claim_observed(
         &self,
         id: AttemptId,
-        max_builds: u64,
-        clock: &dyn Clock,
-        call: &Request<'_>,
-    ) -> Result<Option<AttemptRecord>> {
-        self.claim_with_build_limit_observed(id, max_builds, clock, call, &|| {
-            SystemResources.guardian_identity()
-        })
-    }
-    fn claim_with_build_limit_observed(
-        &self,
-        id: AttemptId,
-        max_builds: u64,
         clock: &dyn Clock,
         call: &Request<'_>,
         observe: &dyn Fn() -> Option<provenant_supervisor::census::ProcessIdentity>,
@@ -575,7 +560,6 @@ impl RunStore {
                 &ledger,
                 self.context.state_root.as_path(),
                 &ticket,
-                max_builds,
                 clock,
                 call,
                 observe,

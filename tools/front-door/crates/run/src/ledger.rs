@@ -128,7 +128,9 @@ fn version(db: &Connection) -> Result<i64> {
 }
 
 /// Take this attempt's lease when host and project counts and startup spacing
-/// allow, returning the wall time it started at, for display only. Spacing is
+/// allow, returning the wall time it started at, for display only. Idle
+/// writers are admitted whatever `max_concurrent_builds` says: that limit gates
+/// builds (`provenant_os::build_slots`), not live lanes. Spacing is
 /// judged on the host's monotonic clock, never the wall clock, and only
 /// against the last start of the same class: within one boot no two lanes of a
 /// class start less than one spacing apart. The clock is read inside the
@@ -139,7 +141,6 @@ pub(crate) fn lease(
     db: &Connection,
     store: &Path,
     ticket: &AdmissionTicket,
-    max_builds: u64,
     time: &dyn Clock,
     request: &Request<'_>,
     observe: &dyn Fn() -> Option<ProcessIdentity>,
@@ -169,9 +170,9 @@ pub(crate) fn lease(
                 return Ok(Some(now));
             }
         }
-        if full(tx, project)? || (class == LaneClass::Writer && writers_full(tx, max_builds)?) {
+        if full(tx, project)? {
             prune(tx, time)?;
-            if full(tx, project)? || (class == LaneClass::Writer && writers_full(tx, max_builds)?) {
+            if full(tx, project)? {
                 return Ok(None);
             }
         }
@@ -202,69 +203,6 @@ pub(crate) fn lease(
         )?;
         Ok(Some(now))
     })
-}
-fn writers_full(tx: &Connection, max: u64) -> Result<bool> {
-    let writers: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM leases WHERE class='writer'",
-        [],
-        |r| r.get(0),
-    )?;
-    Ok(writers >= sql_int(max)?)
-}
-pub(crate) fn writer_count(host: &Path, request: &Request<'_>) -> Option<u64> {
-    let db = provenant_sqlite::open_connection(&host.join(FILE), true).ok()?;
-    let boot = request.clock.boot_identity().ok()?;
-    let mut statement = db
-        .prepare("SELECT rowid, CAST(store AS BLOB), CAST(attempt AS BLOB), CAST(boot AS BLOB), CAST(guardian AS BLOB), CAST(owner_id AS BLOB) FROM leases WHERE class='writer'")
-        .ok()?;
-    let rows = statement
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Option<Vec<u8>>>(1)?,
-                r.get::<_, Option<Vec<u8>>>(2)?
-                    .and_then(|bytes| String::from_utf8(bytes).ok()),
-                r.get::<_, Option<Vec<u8>>>(3)?
-                    .and_then(|bytes| String::from_utf8(bytes).ok()),
-                r.get::<_, Option<Vec<u8>>>(4)?
-                    .and_then(|bytes| String::from_utf8(bytes).ok()),
-                r.get::<_, Option<Vec<u8>>>(5)?
-                    .and_then(|bytes| String::from_utf8(bytes).ok()),
-            ))
-        })
-        .ok()?;
-    let mut count = 0;
-    for row in rows {
-        let (rowid, store, attempt, lease_boot, guardian, owner_id) = row.ok()?;
-        let (Some(store), Some(attempt)) = (store, attempt.filter(|value| !value.is_empty()))
-        else {
-            malformed_row(rowid);
-            if !released(
-                &Owner::Unreadable,
-                "",
-                lease_boot.as_deref(),
-                guardian.as_deref(),
-                &boot,
-            ) {
-                count += 1;
-            }
-            continue;
-        };
-        let owner = Owner::open(
-            &Path::new(OsStr::from_bytes(&store)).join("run.sqlite3"),
-            owner_id.as_deref(),
-        );
-        if !released(
-            &owner,
-            &attempt,
-            lease_boot.as_deref(),
-            guardian.as_deref(),
-            &boot,
-        ) {
-            count += 1;
-        }
-    }
-    Some(count)
 }
 /// A reading of the host's monotonic clock and the boot it belongs to.
 struct HostInstant {
@@ -475,6 +413,16 @@ impl Owner {
 mod tests {
     use super::*;
     use provenant_core::{MonoTime, TestClock};
+
+    /// Whether `max` or more leases remain, as the removed writer cap counted.
+    fn writers_full(tx: &Connection, max: i64) -> Result<bool> {
+        let held: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM leases WHERE class='writer'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(held >= max)
+    }
 
     #[test]
     fn live_guardian_fences_busy_replaced_and_corrupt_store() {
