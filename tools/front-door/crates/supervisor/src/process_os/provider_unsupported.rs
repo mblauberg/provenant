@@ -175,6 +175,7 @@ mod tests {
                 input: false,
                 secret_input: None,
                 inherited_lease: None,
+                inherited_ports: None,
                 process_group: false,
                 capture_stdout: false,
                 capture_stderr: false,

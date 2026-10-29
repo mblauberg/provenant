@@ -166,6 +166,9 @@ impl LaneBuildSettings {
             invalid.push("lane_port_blocks");
         }
         if self.lane_port_blocks() > 0
+            && !invalid.contains(&"lane_port_base")
+            && !invalid.contains(&"lane_port_block")
+            && !invalid.contains(&"lane_port_blocks")
             && self.lane_port_base_value() + self.lane_port_block_size() * self.lane_port_blocks()
                 > 65536
         {
@@ -616,6 +619,9 @@ mod build_tests {
             toml_edit::de::from_str("lane_port_block = 1025\nlane_port_blocks = 1025").unwrap();
         assert!(huge.invalid_keys().contains(&"lane_port_block"));
         assert!(huge.invalid_keys().contains(&"lane_port_blocks"));
+        let overflow: LaneBuildSettings =
+            toml_edit::de::from_str("lane_port_block = 9223372036854775807").unwrap();
+        assert_eq!(overflow.invalid_keys(), ["lane_port_block"]);
     }
     #[test]
     fn writer_caps_and_wait_validate_and_default() {

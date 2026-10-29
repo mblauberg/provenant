@@ -142,12 +142,15 @@ from one host-wide range, `lane_port_base` (default 30000), `lane_port_block`
 30000 to 31023; set them under `[domains.fabric.lanes]` (see
 [configuration](configuration.md)) and set `lane_port_blocks = 0` to turn
 allocation off. The guardian takes the first free block with an advisory lock
-on `<state>/lane-ports/block-N.lock` just before the provider starts and holds
-it until the lane settles, so two live lanes never share a block, across every
-project on the same state directory. The kernel drops the lock when the
-guardian exits, even after a crash or `kill -9`, so there is no leaked range to
-reclaim and `provenant gc` has nothing to do; a later lane takes the same block
-again. A writer launched while every block is held does not start and reports
+on `<state>/lane-ports/block-FIRST-SIZE.lock` just before the provider starts.
+The provider and everything it starts inherit the lock descriptor, so the block
+stays held until the whole process tree has exited, even if the guardian dies
+first. Two live lanes never share a port, across every project on the same
+state directory, even when `lane_port_base` or `lane_port_block` changes between
+launches: a block is skipped while a held block of another layout overlaps it.
+The kernel drops the lock when the last holder exits, so there is no leaked
+range to reclaim and `provenant gc` has nothing to do; a later lane takes the
+same block again. A writer launched while every block is held does not start and reports
 `no free lane port block`; raise `lane_port_blocks`. Read-only lanes get no
 block. The block is a convention, not a firewall: a lane can still bind outside
 it, and an unrelated program can already be listening inside it.

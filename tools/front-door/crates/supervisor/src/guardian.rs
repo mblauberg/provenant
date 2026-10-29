@@ -631,8 +631,17 @@ impl Driver<'_> {
         let budgets =
             Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
         let mut state = State::prepared(budgets);
-        let spawn_result =
-            self.spawn_provider(argv, env, cwd, input, plan, provider_lease.as_ref());
+        let spawn_result = self.spawn_provider(
+            argv,
+            env,
+            cwd,
+            input,
+            plan,
+            [
+                provider_lease.as_ref(),
+                ports.as_ref().map(provenant_os::lane_ports::Lease::guard),
+            ],
+        );
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(error) => {
@@ -1313,7 +1322,7 @@ impl Driver<'_> {
         cwd: &Path,
         input: &[u8],
         plan: CapturePlan,
-        provider_lease: Option<&provenant_os::fs::LockGuard>,
+        leases: [Option<&provenant_os::fs::LockGuard>; 2],
     ) -> io::Result<crate::process_os::provider::ProviderGroup> {
         match argv.first() {
             Some(executable) => match snapshot_executable(executable.as_os_str()) {
@@ -1325,7 +1334,8 @@ impl Driver<'_> {
                             cwd,
                             input: !input.is_empty(),
                             secret_input: self.secret_input.as_ref(),
-                            inherited_lease: provider_lease,
+                            inherited_lease: leases[0],
+                            inherited_ports: leases[1],
                             process_group: false,
                             capture_stdout: plan.stdout.piped(),
                             capture_stderr: plan.stderr.piped(),
