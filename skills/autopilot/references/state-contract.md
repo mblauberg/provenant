@@ -12,6 +12,8 @@ resuming context; it is not a second source of task status.
 | Active and queued work, task assignments, run outputs, and admission | Run and Fabric | `provenant lanes`, Fabric tasks, and `provenant output` |
 | Interrupted or orphaned work | Run | `provenant reconcile`, then `fabric_run` `resume` |
 | Short context for one host session | Workflow session checkpoint, keyed by host session ID | SessionStart injects only that key, or explicit missing/stale status |
+| Progress for the user (merges, decisions, blockers) | Chair log (`provenant chair log append`) | `provenant chair log list --session` |
+| Harness scratch (drafts, helper scripts) | Harness scratch directory (`CLAUDE_CODE_TMPDIR` for Claude Code) | Disposable; move anything needed to its owner first |
 
 Do not create or maintain a manual queue, item lease, fixed set of state files,
 or parallel run journal. Do not infer a mission state from an empty lane list.
@@ -26,8 +28,8 @@ blockers, and a resume trigger:
 provenant workflow session save <session-id> --file <checkpoint.md>
 ```
 
-Use the actual host session ID. Checkpoint content is limited to 32 KiB and
-hook output to 8 KiB. The hook does not inspect transcripts or select another
+Use the actual host session ID. Keep the checkpoint near 2 KiB; the hard limit
+is 256 KiB, and hook output is limited to 8 KiB. The hook does not inspect transcripts or select another
 session's latest file. Reopen owner records and verify checkpoint claims after
 resuming.
 

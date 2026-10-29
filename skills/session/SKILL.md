@@ -23,9 +23,34 @@ leads. Live run status belongs to run lanes and Fabric tasks.
 
 ## Checkpoint
 
-Before compaction, handoff, or a substantial interruption, rewrite the checkpoint as concise current-state Markdown
-with the goal, authority and evidence references, verified progress, next
-actions, blockers, and a resume trigger. Keep it near 2 KiB; the hard checkpoint limit is 256 KiB. Put history in PRs and issues rather than appending it to the checkpoint. Do not paste transcripts, credentials, or unverified worker claims.
+Before compaction, handoff, or a substantial interruption, rewrite the checkpoint
+as concise current-state Markdown: goal, direction (user rulings and
+boundaries), process, and plan with its resume trigger. Keep it near 2 KiB; the
+hard limit is 256 KiB. Do not record live lanes, PR status, or progress history
+in it; the digest derives lanes and PRs, and the chair log holds history. Do not
+paste transcripts, credentials, or unverified worker claims.
+
+## Scratch and owners
+
+Harness scratch is disposable. Keep it in the harness scratch directory: for
+Claude Code, the scratchpad under `CLAUDE_CODE_TMPDIR`, which sets where that
+tree lives. Anything needed after the session moves to its owner before the
+session ends: a project document, the issue or PR body, a run record, the chair
+log, or the checkpoint's plan. Do not treat scratch as a resume source.
+
+## Progress for the user
+
+Append one chair-log entry per milestone: a merge, a release, a decision, or a
+blocker. Use the host session ID and a fresh operation ID:
+
+```sh
+provenant chair log append --session <session-id> --file update.json --operation-id <id> --issued-at <unix-seconds> --json
+```
+
+`update.json` holds `kind`, `markdown`, and `channel`, with optional
+`pr_ids` and `issue_ids`. Read the history with
+`provenant chair log list --session <session-id> --json`. Keep each entry short:
+the log is the record a person follows, and the checkpoint is not.
 
 Use the host session ID and the bounded save command:
 
@@ -67,7 +92,7 @@ for run scratch, merged worktrees and old state roots.
 
 For more detail, see the [chair continuity reference](references/chair-state.md),
 [context hygiene reference](references/context-hygiene.md), the
-[checkpoint template](templates/STATE.template.md), and the
+[checkpoint template](templates/checkpoint.template.md), and the
 [portable handoff schema](portable-workflow.v1.json).
 
 After changed work, run the checks assigned to this role or cite the owning
