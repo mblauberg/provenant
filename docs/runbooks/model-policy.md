@@ -97,10 +97,11 @@ model judgement, not an automatic compaction trigger.
 Cache `ttl_seconds` and `min_prefix`, and lane `max_context` and `max_turns`, are
 planning guidance supplied to the model. They do not change a provider's cache
 TTL or impose a process kill. Providers without an evidenced launch control
-receive guidance only. `stop_early_ok = false` asks for a final `Status: complete`
-or `Status: incomplete` line. An explicit incomplete result can continue the
-exact retained session, with `max_continuations` bounded to eight. Missing
-completion markers do not guess that more work is needed.
+receive guidance only. `stop_early_ok = false` asks for the shared schema v2 `handoff` fence. A
+`stopped_early` declaration can continue the retained session, or start fresh
+on the same worktree when resume is unavailable, with `max_continuations`
+bounded to eight. `done` and `blocked` do not request automatic continuation.
+Missing or malformed blocks do not guess that more work is needed.
 
 Automatic read-only fallback and continuation preserve each attempt in the same
 run. The terminal transaction queues the successor before the run can appear
@@ -109,7 +110,9 @@ existing recovery behaviour and do not trigger result-policy retries.
 Allowances reset for each run, including a manually resumed run. The first
 sealed retry decision survives interrupted settlement even if a scheduled or
 expiring rule changes before recovery.
-Fallback never carries write authority. Nested stores are lane-writable, so
+Result-check fallback never carries write authority. Capacity and account
+recovery retain the task's existing worktree and write authority, and carry its
+validated handoff rather than a transcript. Nested stores are lane-writable, so
 restricted routes select their reliable fallback before launch there instead of
 trusting a later retry record. Nested session continuations require explicit
 caller recovery. Exact attempt inspection preserves original evidence;

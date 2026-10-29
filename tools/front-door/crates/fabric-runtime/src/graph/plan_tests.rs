@@ -26,7 +26,7 @@ fn fixture_owner(results: &[&str]) -> FakeOwner {
     FakeOwner { observations: results.iter().map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)).collect(), ..Default::default() }
 }
 
-const STOP: &str = "```handoff\n{\"schema_version\":1,\"status\":\"stopped_early\",\"note\":\"First half committed; finish the second half and run checks.\"}\n```";
+const STOP: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"First half committed; finish the second half and run checks.\"}\n```";
 
 #[test]
 fn refused_planner_fragment_retries_after_file_journal_reopen() {
@@ -71,7 +71,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
 
 #[test]
 fn malformed_optional_handoff_warns_and_still_delivers() {
-    for output in ["```handoff\n{}\n```".to_owned(), format!("{STOP}\n{STOP}"), STOP.replace("stopped_early", "done"), STOP.trim_end_matches("\n```").to_owned(), format!("```handoff\n{}\n```", json!({"schema_version":1,"status":"stopped_early","note":"x".repeat(4097)}))] {
+    for output in ["```handoff\n{}\n```".to_owned(), format!("{STOP}\n{STOP}"), STOP.replace("stopped_early", "invalid"), STOP.trim_end_matches("\n```").to_owned(), format!("```handoff\n{}\n```", json!({"schema_version":1,"status":"stopped_early","note":"x".repeat(4097)}))] {
         let mut doc = writer_graph();
         doc.nodes[0].required_verdict = None;
         doc.delivery = Some(provenant_records::run::DeliveryMode::Pr);

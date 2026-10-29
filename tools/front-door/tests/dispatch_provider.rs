@@ -131,11 +131,15 @@ fn fixture() -> Result {
         return Ok(());
     }
     let answer = if prompt.contains("fixture policy continuation") {
-        if args.iter().any(|arg| arg == "resume") {
-            "Completed.\nStatus: complete".into()
+        let status = if args.iter().any(|arg| arg == "resume") {
+            "done"
         } else {
-            "More work remains.\nStatus: incomplete".into()
-        }
+            "stopped_early"
+        };
+        format!(
+            "```handoff\n{}\n```",
+            json!({"schema_version":2,"status":status,"note":"Fixture continuation state.","remaining":[],"decisions":[],"verify":[]})
+        )
     } else if prompt.contains("fixture policy result") && policy_model == Some("gpt-6-luna") {
         String::new()
     } else if prompt.contains("Review commit ") {

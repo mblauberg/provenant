@@ -36,6 +36,7 @@ pub enum AttemptFile {
     DeliveryStarted,
     ProviderStateExpired,
     PolicyRetry,
+    Handoff,
     Tmp,
     Scratch,
     ProviderState,
@@ -44,7 +45,7 @@ pub enum AttemptFile {
 }
 
 impl AttemptFile {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Prompt,
         Self::Result,
         Self::Stdout,
@@ -63,6 +64,7 @@ impl AttemptFile {
         Self::DeliveryStarted,
         Self::ProviderStateExpired,
         Self::PolicyRetry,
+        Self::Handoff,
         Self::Tmp,
         Self::Scratch,
         Self::ProviderState,
@@ -91,6 +93,7 @@ impl AttemptFile {
             Self::DeliveryStarted => "delivery-started.json",
             Self::ProviderStateExpired => "provider-state-expired.json",
             Self::PolicyRetry => "policy-retry.json",
+            Self::Handoff => "handoff.json",
             Self::Tmp => "tmp",
             Self::Scratch => "scratch",
             Self::ProviderState => "provider-state",

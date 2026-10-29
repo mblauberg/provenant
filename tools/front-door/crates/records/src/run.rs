@@ -735,7 +735,7 @@ pub struct AttemptRecord {
 #[serde(rename_all = "snake_case")]
 pub enum PartialSignal {
     /// The final answer ends with a valid `handoff` block whose status is
-    /// `stopped_early`: the lane's own statement that work remains.
+    /// `stopped_early` or `blocked`: the lane's statement that work remains.
     DeclaredStop,
     /// The provider reported a stop reason other than a finished turn.
     ProviderStop,

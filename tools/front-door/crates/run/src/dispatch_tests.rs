@@ -2895,7 +2895,7 @@ fn settle_with(
     Ok(store.finish(id, &dir, &observed, &fake, &call)?)
 }
 
-const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":1,\"status\":\"stopped_early\",\"note\":\"Parser done; renderer and tests remain.\"}\n```";
+const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Parser done; renderer and tests remain.\"}\n```";
 
 #[test]
 fn a_terra_style_early_stop_settles_succeeded_but_flagged_partial() -> TestResult {

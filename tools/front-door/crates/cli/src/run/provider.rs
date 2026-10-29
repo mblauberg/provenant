@@ -607,7 +607,11 @@ fn prepare_candidates(
             }
             None => prompt_text.to_owned(),
         };
-        let text = format!("{}\n\n{text}", model_policy.guidance());
+        let text = format!(
+            "{}\n{}\n{text}",
+            model_policy.guidance(),
+            run::handoff_progress_guidance(&private_state.join("handoff.json"))
+        );
         let prompt = match launch_prompt(&text, paths, state_root, adapter.id()) {
             Ok(prompt) => prompt,
             Err(error) => {

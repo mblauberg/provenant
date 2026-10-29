@@ -606,6 +606,7 @@ impl RunStore {
             }
             (None, false) => return Err(RunError::Validation("running attempt lacks a route")),
         };
+        let handoff = self.capture_handoff(attempt, &record, &decoded)?;
         // Failed headless tools can leave only stderr. Keep the recognised
         // provider diagnostic alongside any partial answer before sealing it.
         if decoded.outcome == Outcome::Failed
@@ -1000,6 +1001,7 @@ impl RunStore {
                     task,
                     &record,
                     &decoded,
+                    handoff.as_ref(),
                     completion.holder_context(),
                     self.policy_attempt_number(&record, call)?,
                 )
@@ -1026,9 +1028,12 @@ impl RunStore {
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
         ) {
             let mut notes = Vec::new();
-            if let Some(note) = crate::completion::declared_stop(&decoded.result) {
+            if let Some(handoff) = handoff.as_ref().filter(|handoff| handoff.unfinished()) {
                 partial.push(PartialSignal::DeclaredStop);
-                notes.push(format!("lane stopped early: {}", bounded_note(&note)));
+                notes.push(format!(
+                    "lane stopped early: {}",
+                    bounded_note(&handoff.note)
+                ));
             }
             if decoded.outcome == Outcome::Uncommitted {
                 partial.push(PartialSignal::UncommittedWork);

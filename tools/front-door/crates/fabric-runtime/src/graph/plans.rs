@@ -35,13 +35,6 @@ struct Fragment {
     nodes: Vec<GraphNode>,
 }
 
-#[derive(Deserialize)]
-struct Handoff {
-    schema_version: u64,
-    status: String,
-    note: String,
-}
-
 pub(super) fn prompt(node: &GraphNode) -> String {
     let mut prompt = node.prompt.clone();
     if let Some(spec) = &node.plan {
@@ -113,22 +106,15 @@ fn block<'a>(
 pub(super) fn handoff(
     capture: &crate::result_capture::CapturedResult,
 ) -> Result<Option<String>, String> {
-    let Some(json) = block(capture, "handoff")? else {
-        return Ok(None);
+    let text = if capture.tail_truncated {
+        capture.tail.split_once('\n').map_or("", |(_, tail)| tail)
+    } else {
+        &capture.tail
     };
-    let handoff: Handoff =
-        serde_json::from_str(json).map_err(|e| format!("invalid handoff: {e}"))?;
-    if handoff.schema_version != 1
-        || handoff.status != "stopped_early"
-        || handoff.note.trim().is_empty()
-        || handoff.note.len() > 4096
-    {
-        return Err(
-            "handoff requires schema_version 1, status stopped_early and a note of 1..4096 bytes"
-                .into(),
-        );
-    }
-    Ok(Some(handoff.note))
+    let handoff = provenant_records::handoff::Handoff::from_result(text).map_err(str::to_owned)?;
+    Ok(handoff
+        .filter(|handoff| handoff.status == provenant_records::handoff::HandoffStatus::StoppedEarly)
+        .map(|handoff| handoff.fenced()))
 }
 
 pub(super) fn writer(node: &PlannedNode) -> bool {

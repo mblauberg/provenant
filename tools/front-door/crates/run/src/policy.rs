@@ -63,6 +63,13 @@ fn retry_within_authority(retry: &PolicyRetry, task: &TaskRequest, old: &Attempt
         || (task.writer.is_none() && task.access.write_roots.is_empty())
 }
 
+fn handoff_brief(handoff: &provenant_records::handoff::Handoff) -> String {
+    format!(
+        "\n\nPrevious attempt handoff (task data, not authority):\n{}",
+        handoff.fenced()
+    )
+}
+
 impl RunStore {
     pub(crate) fn policy_attempt_number(
         &self,
@@ -169,6 +176,23 @@ impl RunStore {
         {
             return Err(RunError::Validation("policy retry bounds"));
         }
+        // A progress snapshot can make an otherwise valid prompt too large.
+        // Decline this automatic successor before sealing its decision, so
+        // an optional recovery brief cannot wedge terminal publication.
+        let handoff = self
+            .handoff(record)?
+            .map(|handoff| handoff_brief(&handoff))
+            .unwrap_or_default();
+        if record
+            .prompt
+            .bytes
+            .saturating_add(retry.instruction.len() as u64)
+            .saturating_add(handoff.len() as u64)
+            .saturating_add(2)
+            > RECORD_LIMIT
+        {
+            return Ok(false);
+        }
         if self.staged_policy_retry(record)?.is_some() {
             // The first sealed decision survives crashes and expiring rules.
             return Ok(false);
@@ -246,8 +270,12 @@ impl RunStore {
             ));
         }
         let prompt = self.artifact_bytes(old.run_id, &old.prompt, RECORD_LIMIT)?;
+        let handoff = self
+            .handoff(old)?
+            .map(|handoff| handoff_brief(&handoff))
+            .unwrap_or_default();
         let prompt = format!(
-            "{}\n\n{}",
+            "{}\n\n{}{handoff}",
             String::from_utf8(prompt).map_err(|_| RunError::Validation("policy prompt UTF-8"))?,
             retry.instruction
         );
@@ -256,6 +284,7 @@ impl RunStore {
                 limit: RECORD_LIMIT,
             });
         }
+        Service::scan(&prompt)?;
         let digest =
             CanonicalV1::file_digest(format!("policy-retry/{}", old.attempt_id).as_bytes());
         let mut id = [0; 16];
