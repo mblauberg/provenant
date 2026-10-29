@@ -1423,6 +1423,7 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                     part: Part::Result,
                     offset: 0,
                     tail: Some(20),
+                    summary: false,
                     max_bytes: 8192,
                     trace: false,
                 },
@@ -3908,7 +3909,57 @@ pub fn attempt_facts(
 }
 
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
-    reply("output", output_inner(command, edge))
+    let summary = command.summary;
+    reply(
+        "output",
+        output_inner(command, edge).map(|(data, text)| {
+            if summary {
+                summarise_output(data, &text)
+            } else {
+                (data, text)
+            }
+        }),
+    )
+}
+
+/// Bounded summary of observed settlement and result prose. Missing changed-file
+/// evidence stays null; it must never be mistaken for an empty diff.
+pub fn summarise_output(mut data: Value, text: &str) -> (Value, String) {
+    let paragraph = text
+        .trim()
+        .rsplit("\n\n")
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or_default();
+    let paragraph = paragraph.trim();
+    let paragraph = if paragraph.len() > 768 {
+        let mut start = paragraph.len() - 765;
+        while !paragraph.is_char_boundary(start) { start += 1; }
+        format!("...{}", &paragraph[start..])
+    } else { paragraph.to_owned() };
+    let state = crate::bounded_text(data["state"].as_str().unwrap_or("unknown"), 64);
+    let reason = crate::bounded_text(data["reason"].as_str().unwrap_or("none"), 128);
+    let files: Option<Vec<_>> = data["changed_files"].as_array().map(|files| {
+        files
+            .iter()
+            .take(8)
+            .filter_map(Value::as_str)
+            .map(|path| crate::bounded_text(path, 96))
+            .collect()
+    });
+    let changed = files
+        .as_ref()
+        .map(|files| files.join(", "))
+        .unwrap_or_else(|| "unavailable".into());
+    let mut human = format!("settlement: {state} ({reason})\nchanged files: {changed}\n{paragraph}\n");
+    let target = data["attempt_id"].as_str().and_then(|id| id.parse::<AttemptId>().ok()).map(|id| {
+        data["host"].as_str().and_then(|host| host.parse::<provenant_core::HostId>().ok())
+            .map_or_else(|| id.to_string(), |host| format!("{host}/{id}"))
+    });
+    human.push_str(&target.map_or_else(|| "next: provenant help output\n".into(), |target|
+        format!("next: provenant output {target} --full\n")));
+    data["summary"] = json!({"settlement": state, "reason": reason, "changed_files": files, "final_paragraph": paragraph});
+    data.as_object_mut().map(|map| map.remove("bytes"));
+    (data, human)
 }
 fn receipt_model(adapter: Option<&str>, model: Option<&str>) -> Option<String> {
     let adapter = adapter.filter(|value| !value.is_empty())?;
@@ -4047,6 +4098,10 @@ fn reviewer_receipt(
 const TAIL_MAX: u64 = 500;
 
 fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+    if command.summary {
+        command.tail = Some(500);
+        command.max_bytes = 8192;
+    }
     let site = match command.host.as_deref() {
         Some(host) => Some(remote::site(edge, host)?),
         None => command
@@ -4188,15 +4243,7 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         if !matches!(part, run::ArtifactPart::Transcript) || range.offset != chunk.offset {
             chunk = session.service().output(id, part, range, &call)?;
         }
-        let text = &chunk.bytes;
-        let body = text.strip_suffix(b"\n").unwrap_or(text);
-        let start = body
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, b)| **b == b'\n')
-            .nth(usize::try_from(lines - 1).unwrap_or(usize::MAX))
-            .map_or(0, |(i, _)| i + 1);
+        let start = tail_start(&chunk.bytes, lines);
         chunk.offset += start as u64;
         chunk.bytes.drain(..start);
     }
@@ -4225,7 +4272,79 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         data["tail"] = json!(lines);
         data["tail_clamped"] = json!(command.tail != tail);
     }
+    if command.summary {
+        data["changed_files"] = changed_file_evidence(&session, &record, &call);
+    }
     Ok((data, text))
+}
+
+/// Use the recorded base and final head, never the caller's current checkout
+/// diff. Pruned/private objects and read-only attempts may have no evidence.
+fn changed_file_evidence(
+    session: &Session,
+    record: &run::AttemptRecord,
+    call: &run::Request<'_>,
+) -> Value {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let read = || -> Option<Vec<String>> {
+        let task = session
+            .store
+            .request(record.run_id, call)
+            .ok()?
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == record.task_id)?;
+        let project = task.writer?.project;
+        let base: provenant_core::GitOid = task.base?.parse().ok()?;
+        let head = record.head?;
+        let git = provenant_os::git::git_executable()?;
+        let argv = [
+            git.into_os_string(),
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--name-only".into(),
+            "-z".into(),
+            base.to_string().into(),
+            head.to_string().into(),
+            "--".into(),
+        ];
+        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        options.stdout = StreamPolicy::Capture { limit: 65536 };
+        options.stderr = StreamPolicy::Discard;
+        options.stop_on_output_limit = true;
+        let output = SystemExecutor::new(1).ok()?.execute(options).ok()?;
+        if output.termination != Termination::Exit(0)
+            || output.timed_out
+            || output.cancelled
+            || output.stdout.truncated
+            || output.stdout.read_failed
+            || output.drain_truncated
+        {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout.bytes).ok()?;
+        Some(
+            text.split('\0')
+                .filter(|path| !path.is_empty())
+                .take(8)
+                .map(|path| crate::bounded_text(path, 120))
+                .collect(),
+        )
+    };
+    read().map_or(Value::Null, |paths| json!(paths))
+}
+
+fn tail_start(bytes: &[u8], lines: u64) -> usize {
+    bytes
+        .strip_suffix(b"\n")
+        .unwrap_or(bytes)
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, b)| **b == b'\n')
+        .nth(usize::try_from(lines.saturating_sub(1)).unwrap_or(usize::MAX))
+        .map_or(0, |(i, _)| i + 1)
 }
 
 /// The attempt's trace, then each parent's, nearest first. The chain ends at an
@@ -7467,6 +7586,30 @@ mod tests {
         assert_eq!(chunk.bytes, b"a");
         assert_eq!(chunk.next_offset, 1);
         assert_eq!(chunk.encoding, "utf8");
+    }
+    #[test]
+    fn output_summary_reports_settlement_and_bounded_final_paragraph() {
+        let result = format!("Details that should be omitted.\n\n{}", "界".repeat(5000));
+        let (data, text) = summarise_output(
+            json!({
+                "state": "review_required", "reason": "independent review needed", "bytes": "raw",
+                "changed_files": ["src/main.rs", "docs/reference/cli.md"]
+            }),
+            &result,
+        );
+        assert!(text.len() <= 2048);
+        assert!(text.contains("review_required"));
+        assert!(text.contains("src/main.rs"));
+        assert!(!text.contains("Details that should be omitted"));
+        assert!(data.get("bytes").is_none());
+        assert!(
+            data["summary"]["final_paragraph"]
+                .as_str()
+                .is_some_and(|text| text.len() <= 768)
+        );
+        let (data, text) = summarise_output(json!({"state":"succeeded"}), "Verdict.");
+        assert!(data["summary"]["changed_files"].is_null());
+        assert!(text.contains("changed files: unavailable"));
     }
     #[test]
     fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {

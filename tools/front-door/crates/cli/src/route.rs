@@ -1,5 +1,5 @@
 //! Routing's frozen clap leaves and read-only composition/rendering edge.
-use crate::{Globals, RenderMode};
+use crate::Globals;
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Roots, WallTime};
 use provenant_os::fs::FsError;
@@ -1458,14 +1458,10 @@ pub fn run(
             None => String::new(),
         }
     };
-    let mode = if globals.json {
-        RenderMode::Json
-    } else {
-        RenderMode::Human {
-            text: &human,
-            read_only: matches!(command, Route::List(_) | Route::Resolve(_)),
-        }
-    };
+    let mode = globals.render_mode(
+        &human,
+        matches!(command, Route::List(_) | Route::Resolve(_)),
+    );
     let outcome = crate::render_or_publish(
         &result,
         mode,

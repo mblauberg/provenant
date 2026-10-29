@@ -15,6 +15,7 @@ mod git;
 pub(crate) mod land;
 mod open;
 pub(crate) mod status;
+mod wait;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -159,7 +160,7 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
     let (leaf, number) = match command {
         Pr::Watch { number } => ("pr watch", number),
         Pr::Open(command) => return open::run(*command, globals),
-        Pr::Status { numbers } => return status::run(numbers, globals),
+        Pr::Status { numbers, wait } => return status::run(numbers, wait, globals),
         Pr::Contributions { number, bind } => return contributions::run(number, bind, globals),
     };
     let mut captured = None;

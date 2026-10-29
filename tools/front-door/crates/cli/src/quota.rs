@@ -1283,14 +1283,10 @@ pub fn run(
             (result, String::new())
         }
     };
-    let mode = if globals.json {
-        crate::RenderMode::Json
-    } else {
-        crate::RenderMode::Human {
-            text: &human,
-            read_only: matches!(command, Quota::Show(_) | Quota::Usage { .. }),
-        }
-    };
+    let mode = globals.render_mode(
+        &human,
+        matches!(command, Quota::Show(_) | Quota::Usage { .. }),
+    );
     let outcome = crate::render_or_publish(
         &envelope,
         mode,

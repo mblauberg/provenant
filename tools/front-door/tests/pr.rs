@@ -44,8 +44,8 @@ fn no_merge(rig: &TestRig) -> Result {
 }
 
 fn pr_watch_reports_the_verified_head_and_waits_via_gh() -> Result {
-    let rig = rig()?;
-    let output = rig.command(&["pr", "watch", "1668"])?;
+    let rig = self::rig()?;
+    let output = rig.command(&["pr", "watch", "1668", "--full"])?;
     assert_eq!(code(&output), 0, "{:?}", output);
     assert_eq!(
         String::from_utf8(output.stdout.bytes)?,
@@ -57,7 +57,7 @@ fn pr_watch_reports_the_verified_head_and_waits_via_gh() -> Result {
 
 fn pr_watch_failure_and_head_changes_report_fail_with_head() -> Result {
     for flag in ["watch-fail", "move-head"] {
-        let rig = rig()?;
+        let rig = self::rig()?;
         fs::write(rig.project.join(flag), "")?;
         let output = rig.command(&["pr", "watch", "1668"])?;
         assert_ne!(code(&output), 0, "{flag}");
@@ -80,7 +80,7 @@ fn land_refuses_unpassed_missing_and_malformed_checks() -> Result {
         "pass-pending",
         "pass-fail",
     ] {
-        let rig = rig()?;
+        let rig = self::rig()?;
         let checks = match bucket {
             "empty" => "[]".into(),
             "malformed" => "invalid json".into(),
@@ -97,7 +97,7 @@ fn land_refuses_unpassed_missing_and_malformed_checks() -> Result {
 
 fn land_refuses_head_changes_before_and_after_checks() -> Result {
     for changed_before in [false, true] {
-        let rig = rig()?;
+        let rig = self::rig()?;
         if changed_before {
             fs::write(
                 rig.project.join("head.json"),
@@ -116,19 +116,19 @@ fn land_refuses_head_changes_before_and_after_checks() -> Result {
 }
 
 fn land_reports_pending_merge_in_text() -> Result {
-    let rig = rig()?;
+    let rig = self::rig()?;
     let output = rig.command(&["land", "1668", "--head", HEAD])?;
     assert_eq!(code(&output), 0, "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout.bytes)?,
-        format!("pending #1668 {HEAD} (OPEN)\n")
+        format!("pending #1668 {HEAD} (OPEN)\nnext: provenant pr status 1668 --wait\n")
     );
     Ok(())
 }
 
 fn land_guards_head_and_uses_optional_git_email() -> Result {
     for email in [None, Some("123+fixture@users.noreply.github.com")] {
-        let rig = rig()?;
+        let rig = self::rig()?;
         if let Some(email) = email {
             let git = provenant_os::git::git_executable().ok_or("Git executable")?;
             assert_eq!(
@@ -151,14 +151,14 @@ fn land_guards_head_and_uses_optional_git_email() -> Result {
             fs::read_to_string(rig.project.join("merge-args"))?,
             expected
         );
-        assert!(rig.project.join("watched").exists());
+        assert!(!rig.project.join("watched").exists());
     }
     Ok(())
 }
 
 fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
     for flag in ["checks-fail", "merge-fail"] {
-        let rig = rig()?;
+        let rig = self::rig()?;
         fs::write(rig.project.join(flag), "")?;
         let output = merge(&rig)?;
         assert_ne!(code(&output), 0, "{flag}");
@@ -168,7 +168,7 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
             no_merge(&rig)?;
         }
     }
-    let rig = rig()?;
+    let rig = self::rig()?;
     for args in [
         vec!["pr", "merge", "1668"],
         vec!["pr", "merge", "1668", "--head", "abc"],
@@ -187,7 +187,7 @@ fn pr_external_failures_and_invalid_arguments_fail_closed() -> Result {
 }
 
 fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
-    let rig = rig()?;
+    let rig = self::rig()?;
     fs::write(
         rig.project.join("status-1668.json"),
         format!(
@@ -210,7 +210,7 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
         String::from_utf8(output.stdout.bytes)?,
         format!(
             "#1668 OPEN {HEAD} checks=2/2 merge=clean review=approved\n\
-             #1669 OPEN {OTHER} checks=2/4 fail=1 pending=1 merge=blocked review=none draft\n"
+             #1669 OPEN {OTHER} checks=2/4 fail=1 pending=1 merge=blocked review=none draft\nnext: provenant status\n"
         )
     );
     // Empty check data is unavailable, rather than a passing result.
@@ -231,6 +231,84 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
     let output = rig.command(&["pr", "status", "1668"])?;
     assert!(String::from_utf8(output.stdout.bytes)?.contains("checks=unavailable"));
     no_merge(&rig)
+}
+
+fn land_wait_is_bounded_and_requires_the_exact_head() -> Result {
+    for (bucket, expected, exit) in [("pending", "CI_TIMEOUT", 124), ("fail", "CI_FAILED", 1)] {
+        let rig = self::rig()?;
+        fs::write(
+            rig.project.join("checks.json"),
+            format!(r#"[{{"name":"build","bucket":"{bucket}"}}]"#),
+        )?;
+        let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=1s", "--json"])?;
+        assert_eq!(code(&output), exit);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(report["error"]["code"], expected, "{report}");
+        no_merge(&rig)?;
+    }
+    let rig = self::rig()?;
+    fs::write(rig.project.join("move-head"), "")?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=10s", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "HEAD_MOVED", "{report}");
+    no_merge(&rig)?;
+    let rig = self::rig()?;
+    fs::write(
+        rig.project.join("required.json"),
+        r#"[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"not-registered"}]}}]]"#,
+    )?;
+    let output = rig.command(&["land", "1668", "--wait=1s", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "CI_TIMEOUT", "{report}");
+    no_merge(&rig)
+}
+
+fn land_wait_handles_pending_exit_eight_then_passes() -> Result {
+    let rig = self::rig()?;
+    fs::write(rig.project.join("ruleset-only"), "")?;
+    fs::write(
+        rig.project.join("required.json"),
+        r#"[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}]]"#,
+    )?;
+    fs::write(
+        rig.project.join("checks.json"),
+        r#"[{"name":"build","bucket":"pending"}]"#,
+    )?;
+    fs::write(
+        rig.project.join("checks-next.json"),
+        r#"[{"name":"build","bucket":"pass"}]"#,
+    )?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=10s"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert!(rig.project.join("merge-args").exists());
+    assert!(output.stdout.bytes.len() <= 2048);
+    assert!(output.stderr.bytes.len() <= 2048);
+    Ok(())
+}
+
+fn pr_status_waits_for_change_and_preserves_partial_results() -> Result {
+    let rig = self::rig()?;
+    fs::write(
+        rig.project.join("status-1668.json"),
+        format!(r#"{{"state":"OPEN","headRefOid":"{HEAD}"}}"#),
+    )?;
+    fs::write(
+        rig.project.join("status-1668.next.json"),
+        format!(r#"{{"state":"OPEN","headRefOid":"{OTHER}"}}"#),
+    )?;
+    let output = rig.command(&["pr", "status", "1668", "--wait=10s", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["data"][0]["head"], OTHER);
+    let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    assert_eq!(calls.lines().count(), 2);
+    assert!(!calls.contains("pr checks"), "{calls}");
+    let output = rig.command(&["pr", "status", "1668", "9999", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["data"][0]["head"], OTHER);
+    assert!(report["data"][1]["error"].is_string());
+    Ok(())
 }
 
 fn fake_gh(args: &[String]) -> Result<u8> {
@@ -260,11 +338,31 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 return Ok(1);
             }
         }
+        "pr view 1668 --json baseRefName,baseRepository,baseRepositoryOwner" => {
+            io::stdout().write_all(br#"{"baseRefName":"main","baseRepository":{"name":"repo"},"baseRepositoryOwner":{"login":"owner"}}"#)?;
+        }
+        "api repos/owner/repo/branches/main" => {
+            if Path::new("ruleset-only").exists() { io::stdout().write_all(br#"{"protected":true}"#)?; }
+            else { io::stdout().write_all(br#"{"protected":false}"#)?; }
+        }
+        "api repos/owner/repo/branches/main/protection" => {
+            io::stdout().write_all(br#"{"message":"Branch not protected","status":"404"}"#)?;
+            return Ok(1);
+        }
+        "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" => {
+            if Path::new("required.json").exists() { io::stdout().write_all(&fs::read("required.json")?)?; }
+            else { io::stdout().write_all(b"[[]]")?; }
+        }
         "pr checks 1668 --json bucket" | "pr checks 1668 --json name,bucket" => {
             if Path::new("checks-fail").exists() {
                 return Ok(8);
             }
-            io::stdout().write_all(&fs::read("checks.json")?)?;
+            let checks = fs::read("checks.json")?;
+            io::stdout().write_all(&checks)?;
+            if Path::new("checks-next.json").exists() {
+                fs::rename("checks-next.json", "checks.json")?;
+            }
+            if String::from_utf8_lossy(&checks).contains("pending") { return Ok(8); }
         }
         "pr checks 1669 --json name,bucket" => {
             // Like gh: the JSON still prints, and pending or failing checks exit non-zero.
@@ -275,10 +373,27 @@ fn fake_gh(args: &[String]) -> Result<u8> {
         value
             if value.starts_with("pr view ")
                 && value.ends_with(
-                    "--json state,headRefOid,mergeStateStatus,reviewDecision,isDraft",
+                    "--json state,headRefOid,mergeStateStatus,reviewDecision,isDraft,statusCheckRollup",
                 ) =>
         {
-            io::stdout().write_all(&fs::read(format!("status-{}.json", args[2]))?)?;
+            let path = format!("status-{}.json", args[2]);
+            let mut view: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+            if view.get("statusCheckRollup").is_none() {
+                let checks_path = if args[2] == "1668" { "checks.json".into() } else { format!("checks-{}.json", args[2]) };
+                view["statusCheckRollup"] = if Path::new("checks-fail").exists() { serde_json::Value::Null } else {
+                    let checks: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(checks_path)?)?;
+                    serde_json::Value::Array(checks.into_iter().map(|check| {
+                        let (status, conclusion) = match check["bucket"].as_str().unwrap_or_default() {
+                            "pass" => ("COMPLETED", "SUCCESS"), "skipping" => ("COMPLETED", "SKIPPED"),
+                            "pending" => ("IN_PROGRESS", ""), _ => ("COMPLETED", "FAILURE")
+                        };
+                        serde_json::json!({"__typename":"CheckRun","name":"build","status":status,"conclusion":conclusion})
+                    }).collect())
+                };
+            }
+            io::stdout().write_all(&serde_json::to_vec(&view)?)?;
+            let next = format!("status-{}.next.json", args[2]);
+            if Path::new(&next).exists() { fs::rename(next, path)?; }
         }
         value
             if value.starts_with(&format!("pr merge 1668 --merge --match-head-commit {HEAD}")) =>
@@ -295,11 +410,26 @@ fn fake_gh(args: &[String]) -> Result<u8> {
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let result = if args.first().is_some_and(|arg| arg == "pr") {
+    let result = if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "pr" | "api"))
+    {
         fake_gh(&args)
     } else {
         type Test = (&'static str, fn() -> Result);
         let tests: &[Test] = &[
+            (
+                "land_wait_is_bounded_and_requires_the_exact_head",
+                land_wait_is_bounded_and_requires_the_exact_head,
+            ),
+            (
+                "land_wait_handles_pending_exit_eight_then_passes",
+                land_wait_handles_pending_exit_eight_then_passes,
+            ),
+            (
+                "pr_status_waits_for_change_and_preserves_partial_results",
+                pr_status_waits_for_change_and_preserves_partial_results,
+            ),
             (
                 "pr_watch_reports_the_verified_head_and_waits_via_gh",
                 pr_watch_reports_the_verified_head_and_waits_via_gh,

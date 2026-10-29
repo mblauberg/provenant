@@ -876,7 +876,12 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
     assert_eq!(assets.to_path_buf()?, fs::canonicalize(&release)?);
     assert_eq!(selected.to_path_buf()?, state);
     assert!(!state.exists());
-    let human = rig.execute(&executable, &["root"], None)?;
+    let compact = rig.execute(&executable, &["root"], None)?;
+    assert_eq!(code(&compact), 0);
+    let text = String::from_utf8_lossy(&compact.stdout.bytes);
+    assert!(text.contains("next: provenant help root"), "{text}");
+    assert!(compact.stdout.bytes.len() <= 2048);
+    let human = rig.execute(&executable, &["root", "--full"], None)?;
     assert_eq!(code(&human), 0);
     assert_eq!(
         human.stdout.bytes,

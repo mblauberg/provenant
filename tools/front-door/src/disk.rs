@@ -49,6 +49,11 @@ pub fn run(globals: &Globals) -> u8 {
             }
         }
     };
+    let human = if globals.full {
+        human
+    } else {
+        provenant_cli::compact_text("disk report", &human)
+    };
     render(
         &result,
         globals.json,

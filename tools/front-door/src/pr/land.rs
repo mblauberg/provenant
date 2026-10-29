@@ -1,7 +1,7 @@
 //! `land`: the existing CI watch and head-pinned merge, then local
 //! follow-up. No step forces: each one refuses and says why.
 use super::git::{Git, plain_ref};
-use super::{Result, checks, head, merge, successful};
+use super::{Result, head, merge, successful};
 use crate::{emit, roots, worktrees};
 use provenant_confinement::worktrees::{ObservedProcess, WorkerObserver};
 use provenant_core::GitOid;
@@ -672,6 +672,7 @@ fn delete_branch(
 pub(crate) fn run(
     number: u64,
     expected: Option<GitOid>,
+    wait: Option<u64>,
     globals: &provenant_cli::Globals,
     workers: &dyn WorkerObserver,
 ) -> u8 {
@@ -679,18 +680,21 @@ pub(crate) fn run(
     let mut captured = expected;
     let mut output_globals = provenant_cli::Globals {
         json: globals.json,
+        full: globals.full,
         state_dir: globals.state_dir.clone(),
         project: globals.project.clone(),
     };
     let mut merged = false;
     let mut state = String::new();
     let mut steps = Vec::new();
+    let mut failure_code = "PR_UNAVAILABLE";
     let result = (|| -> Result<()> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let text = number.to_string();
         let current = head(&project, &text)?;
         captured = Some(current);
         if expected.is_some_and(|expected| current != expected) {
+            failure_code = "HEAD_MOVED";
             return Err(format!("pull request head moved to {current}").into());
         }
         let view = pull(&project, &text)?;
@@ -713,9 +717,22 @@ pub(crate) fn run(
                 super::contributions::warn(Some(number), &error);
             }
         }
-        checks(&project, &text, current, true)?;
-        merge(&project, &text, current)?;
-        let view = pull(&project, &text)?;
+        // A retry after a successful merge only retries safe local cleanup.
+        // It must not wait for CI, merge again or depend on retained CI data.
+        let view = if view.state != "MERGED" {
+            if view.state == "CLOSED" {
+                failure_code = "PR_CLOSED";
+                return Err("pull request is closed without merging".into());
+            }
+            failure_code = "CI_UNAVAILABLE";
+            super::wait::checks(&project, number, current, wait, globals.json)?;
+            failure_code = "MERGE_FAILED";
+            merge(&project, &text, current)?;
+            failure_code = "PR_UNAVAILABLE";
+            pull(&project, &text)?
+        } else {
+            view
+        };
         state = view.state.clone();
         merged = view.state == "MERGED";
         if matches!(view.state.as_str(), "CLOSED" | "MERGED") && !view.cross_repository {
@@ -743,12 +760,25 @@ pub(crate) fn run(
         .filter(|step| step.status == Status::Refused)
         .map(|step| step.step)
         .collect();
-    let outcome = if result.is_err() && !merged {
-        Outcome::Error
-    } else if result.is_err() || !refused.is_empty() {
+    if let Some(error) = result
+        .as_ref()
+        .err()
+        .and_then(|error| error.downcast_ref::<super::wait::Failure>())
+    {
+        failure_code = error.code;
+    }
+    let cleanup_pending = merged && (result.is_err() || !refused.is_empty());
+    let outcome = if merged || result.is_ok() {
+        Outcome::Ok
+    } else if failure_code == "CI_TIMEOUT" {
+        Outcome::Timeout
+    } else if matches!(
+        failure_code,
+        "CI_PENDING" | "CI_FAILED" | "HEAD_MOVED" | "PR_CLOSED"
+    ) {
         Outcome::Refused
     } else {
-        Outcome::Ok
+        Outcome::Error
     };
     let mut report = CommandResult::new(
         LEAF,
@@ -758,34 +788,28 @@ pub(crate) fn run(
             "head": expected,
             "result": if merged || result.is_ok() { "pass" } else { "fail" },
             "merged": merged,
+            "reason": if cleanup_pending { "cleanup_pending" } else if merged { "landed" } else if result.is_ok() { "merge_pending" } else { failure_code },
+            "cleanup_pending": cleanup_pending,
+            "cleanup_refused": refused,
             "state": state,
             "steps": steps,
         }),
     );
-    if let Err(error) = &result {
+    if let Err(error) = &result
+        && !merged
+    {
         report.error = Some(CommandError {
-            code: "PR".into(),
-            message: if merged {
-                format!("merged #{number} {expected}, then: {error}")
-            } else {
-                format!("fail #{number} {expected}: {error}")
-            },
+            code: failure_code.into(),
+            message: format!("fail #{number} {expected}: {error}"),
             cause: None,
-            repair: Some(format!(
-                "run `provenant pr watch {number}`, then `provenant land {number}`"
-            )),
-        });
-    } else if !refused.is_empty() {
-        report.error = Some(CommandError {
-            code: "PR_LAND".into(),
-            message: format!(
-                "merged #{number} {expected}, but these steps refused: {}",
-                refused.join(", ")
-            ),
-            cause: None,
-            repair: Some(format!(
-                "run `provenant pr watch {number}`, then `provenant land {number}`"
-            )),
+            repair: Some(match failure_code {
+                "CI_PENDING" | "CI_TIMEOUT" => {
+                    format!("provenant land {number} --head {expected} --wait")
+                }
+                "CI_FAILED" => format!("gh pr checks {number}"),
+                "HEAD_MOVED" => format!("provenant pr status {number} --full"),
+                _ => "provenant help land".into(),
+            }),
         });
     }
     let mut text = if merged {
@@ -795,6 +819,12 @@ pub(crate) fn run(
     } else {
         format!("fail #{number} {expected}\n")
     };
+    if cleanup_pending {
+        text.push_str(&format!("cleanup pending: {}\n", refused.join(", ")));
+        if let Err(error) = &result {
+            text.push_str(&format!("cleanup: {error}\n"));
+        }
+    }
     for step in &steps {
         text.push_str(&format!(
             "  {} {} {}\n",
@@ -803,6 +833,13 @@ pub(crate) fn run(
             step.detail
         ));
     }
+    text.push_str(&if cleanup_pending {
+        format!("next: provenant land {number} --full\n")
+    } else if !merged {
+        format!("next: provenant pr status {number} --wait\n")
+    } else {
+        "next: provenant status\n".into()
+    });
     emit(&report, &output_globals, &text, false)
 }
 

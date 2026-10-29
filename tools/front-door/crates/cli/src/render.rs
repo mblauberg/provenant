@@ -8,6 +8,72 @@ pub const MAX_RESULT_BYTES: usize = 1024 * 1024;
 pub enum RenderMode<'a> {
     Json,
     Human { text: &'a str, read_only: bool },
+    Compact { text: &'a str, read_only: bool },
+}
+impl crate::Globals {
+    /// JSON is an independent transport; --full only affects human output.
+    pub fn render_mode<'a>(&self, text: &'a str, read_only: bool) -> RenderMode<'a> {
+        if self.json {
+            RenderMode::Json
+        } else if self.full {
+            RenderMode::Human { text, read_only }
+        } else {
+            RenderMode::Compact { text, read_only }
+        }
+    }
+}
+
+/// Clip on a UTF-8 boundary. The suffix makes omitted text explicit.
+pub fn bounded_text(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.into();
+    }
+    let mut end = max.saturating_sub(3).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &text[..end])
+}
+
+/// Shared human envelope: at most eight rows, 2 KiB including the next step.
+/// Owners retain their complete data and human text for --json and --full.
+pub fn compact_text(command: &str, text: &str) -> String {
+    let lines: Vec<_> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let next = lines.iter().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix("next: ")
+            .or_else(|| line.trim().strip_prefix("keep waiting: "))
+            .filter(|next| next.len() <= 384)
+    });
+    let mut out = String::new();
+    let row_bytes = if text.len() <= 1536 { 1536 } else { 200 };
+    for line in lines.iter().take(6) {
+        if !line.trim().starts_with("next: ") {
+            out.push_str(&bounded_text(line, row_bytes));
+            out.push('\n');
+        }
+    }
+    if lines.len() > 6 || lines.iter().any(|line| line.len() > row_bytes) {
+        out.push_str(&format!(
+            "({} lines; use --full for all detail)\n",
+            lines.len()
+        ));
+    }
+    if out.is_empty() {
+        out.push_str(&format!("{command}: done\n"));
+    }
+    out.push_str("next: ");
+    if let Some(next) = next {
+        out.push_str(next);
+    } else {
+        out.push_str("provenant help ");
+        out.push_str(if command == "parse" { "--all" } else { command });
+    }
+    out.push('\n');
+    out
 }
 #[derive(Debug, Error)]
 pub enum RenderError {
@@ -77,21 +143,26 @@ pub fn render<T: Serialize>(
         RenderMode::Json => serde_json::to_writer(&mut buffer, &result)
             .map_err(RenderError::Encode)
             .and_then(|()| buffer.write_all(b"\n").map_err(RenderError::Write)),
-        RenderMode::Human { text, .. } => {
-            if let Some(error) = &result.error {
-                writeln!(
-                    buffer,
-                    "provenant: {}: {}\nnext: {}",
+        RenderMode::Human { text, .. } | RenderMode::Compact { text, .. } => {
+            let error_text = result.error.as_ref().map(|error| {
+                format!(
+                    "provenant: {}: {}\nnext: {}\n",
                     error.code,
                     error.message,
                     error.repair.as_deref().unwrap_or_default()
                 )
-                .map_err(RenderError::Write)
+            });
+            let text = error_text.as_deref().unwrap_or(text);
+            let compacted;
+            let text = if matches!(mode, RenderMode::Compact { .. }) {
+                compacted = compact_text(&result.command, text);
+                compacted.as_str()
             } else {
-                buffer
-                    .write_all(text.as_bytes())
-                    .map_err(RenderError::Write)
-            }
+                text
+            };
+            buffer
+                .write_all(text.as_bytes())
+                .map_err(RenderError::Write)
         }
     };
     if buffer.overflow {
@@ -108,6 +179,9 @@ pub fn render<T: Serialize>(
                 && matches!(
                     mode,
                     RenderMode::Human {
+                        read_only: true,
+                        ..
+                    } | RenderMode::Compact {
                         read_only: true,
                         ..
                     }
@@ -224,6 +298,39 @@ pub fn terse(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compact_results_are_bounded_and_always_give_a_next_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let text = (0..100)
+            .map(|n| format!("row {n} {}\n", "界".repeat(1000)))
+            .collect::<String>();
+        let result = CommandResult::new("route list", Outcome::Ok, ());
+        let mut bytes = Vec::new();
+        render(
+            &result,
+            RenderMode::Compact {
+                text: &text,
+                read_only: true,
+            },
+            &mut bytes,
+        )?;
+        assert!(bytes.len() <= 2048, "{} bytes", bytes.len());
+        let compact = String::from_utf8(bytes)?;
+        assert!(compact.contains("row 0"));
+        assert!(compact.contains("--full"));
+        assert!(compact.contains("next: provenant help route list"));
+        let mut full = Vec::new();
+        render(
+            &result,
+            RenderMode::Human {
+                text: &text,
+                read_only: true,
+            },
+            &mut full,
+        )?;
+        assert_eq!(full, text.as_bytes());
+        Ok(())
+    }
     #[test]
     fn terse_is_one_line_per_record() {
         let value = serde_json::json!({
@@ -410,7 +517,7 @@ pub fn render_or_publish<T: Serialize>(
     stderr: &mut impl Write,
     publish: impl FnOnce(&CommandResult<T>) -> io::Result<provenant_records::AbsolutePath>,
 ) -> Result<Outcome, RenderError> {
-    let first = if matches!(mode, RenderMode::Human { .. }) && result.error.is_some() {
+    let first = if !matches!(mode, RenderMode::Json) && result.error.is_some() {
         render(result, mode, stderr)
     } else {
         render(result, mode, writer)
@@ -453,7 +560,7 @@ pub fn render_or_publish<T: Serialize>(
             };
             let fallback_mode = match mode {
                 RenderMode::Json => RenderMode::Json,
-                RenderMode::Human { .. } => RenderMode::Human {
+                RenderMode::Human { .. } | RenderMode::Compact { .. } => RenderMode::Human {
                     text: &human,
                     read_only: false,
                 },

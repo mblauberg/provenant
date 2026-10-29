@@ -17,6 +17,8 @@ struct View {
     review: Option<String>,
     #[serde(rename = "isDraft", default)]
     draft: bool,
+    #[serde(rename = "statusCheckRollup", default)]
+    checks: Option<Vec<serde_json::Value>>,
 }
 #[derive(Deserialize)]
 struct Check {
@@ -24,7 +26,7 @@ struct Check {
     name: String,
     bucket: String,
 }
-#[derive(Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct Line {
     number: u64,
     state: String,
@@ -36,9 +38,14 @@ struct Line {
     checks_pending: Option<usize>,
     merge: String,
     review: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 impl Line {
     fn text(&self) -> String {
+        if let Some(error) = &self.error {
+            return format!("#{} unavailable: {error}", self.number);
+        }
         let mut line = format!("#{} {} {}", self.number, self.state, self.head);
         if let (Some(passed), Some(total), Some(failed), Some(pending)) = (
             self.checks_passed,
@@ -110,7 +117,28 @@ fn observe_ci_with(
 
 // Both classic protection and rulesets may apply. Only trust the resolved
 // policy when both sources are readable.
-fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
+pub(super) fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
+    required_policy(project, target, None).filter(|names| !names.is_empty())
+}
+
+// A known empty policy is distinct from an unavailable policy. Landing still
+// requires at least one passing reported check when no names are required.
+#[allow(clippy::disallowed_methods)]
+pub(super) fn required_policy(
+    project: &Path,
+    target: &str,
+    deadline: Option<std::time::Instant>,
+) -> Option<Vec<String>> {
+    let read = |argv: &[&str]| {
+        let timeout = deadline.map_or(std::time::Duration::from_secs(60), |end| {
+            end.saturating_duration_since(std::time::Instant::now())
+                .min(std::time::Duration::from_secs(60))
+        });
+        if timeout.is_zero() {
+            return None;
+        }
+        super::execute_for(project, argv, timeout, false).ok()
+    };
     #[derive(Deserialize)]
     struct Repo {
         name: String,
@@ -128,21 +156,14 @@ fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
         #[serde(rename = "baseRepositoryOwner")]
         owner: Owner,
     }
-    let bytes = successful(
-        execute(
-            project,
-            &[
-                "gh",
-                "pr",
-                "view",
-                target,
-                "--json",
-                "baseRefName,baseRepository,baseRepositoryOwner",
-            ],
-            false,
-        )
-        .ok()?,
-    )
+    let bytes = successful(read(&[
+        "gh",
+        "pr",
+        "view",
+        target,
+        "--json",
+        "baseRefName,baseRepository,baseRepositoryOwner",
+    ])?)
     .ok()?;
     let base: Base = serde_json::from_slice(&bytes).ok()?;
     let encode = |value: &str| -> String {
@@ -169,18 +190,17 @@ fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
         } else {
             vec!["gh", "api", path]
         };
-        successful(execute(project, &args, false).ok()?).ok()
+        successful(read(&args)?).ok()
     };
     let branch_info: serde_json::Value =
         serde_json::from_slice(&get(&format!("{repo}/branches/{branch}"), false)?).ok()?;
     let protection = if branch_info.get("protected")?.as_bool()? {
-        Some(
-            serde_json::from_slice(&get(
-                &format!("{repo}/branches/{branch}/protection"),
-                false,
-            )?)
-            .ok()?,
-        )
+        let endpoint = format!("{repo}/branches/{branch}/protection");
+        let output = read(&["gh", "api", &endpoint])?;
+        classic_protection(
+            output.termination == provenant_os::exec::Termination::Exit(0),
+            &output.stdout.bytes,
+        )?
     } else {
         None
     };
@@ -190,6 +210,20 @@ fn required_checks(project: &Path, target: &str) -> Option<Vec<String>> {
     )?)
     .ok()?;
     parse_required_checks(protection.as_ref(), &pages)
+}
+
+// A ruleset can mark a branch protected without classic branch protection.
+// Only GitHub's explicit response proves absence; generic 404/403 is not proof.
+fn classic_protection(success: bool, bytes: &[u8]) -> Option<Option<serde_json::Value>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    if success {
+        return Some(Some(value));
+    }
+    if value["message"] == "Branch not protected" && value["status"] == "404" {
+        Some(None)
+    } else {
+        None
+    }
 }
 
 fn parse_required_checks(
@@ -218,8 +252,7 @@ fn parse_required_checks(
     }
     names.sort();
     names.dedup();
-    // An empty required set cannot establish that any CI ran.
-    (!names.is_empty()).then_some(names)
+    Some(names)
 }
 
 fn summarise_ci(
@@ -302,12 +335,16 @@ fn line(project: &Path, number: u64) -> Result<Line> {
             "view",
             &text,
             "--json",
-            "state,headRefOid,mergeStateStatus,reviewDecision,isDraft",
+            "state,headRefOid,mergeStateStatus,reviewDecision,isDraft,statusCheckRollup",
         ],
         false,
     )?)?;
     let view: View = serde_json::from_slice(&bytes)?;
-    let checks = counts(project, &text).filter(|checks| !checks.is_empty());
+    let checks = view
+        .checks
+        .as_deref()
+        .and_then(rollup_checks)
+        .filter(|checks| !checks.is_empty());
     let passed = checks.as_ref().map(|checks| {
         checks
             .iter()
@@ -344,25 +381,110 @@ fn line(project: &Path, number: u64) -> Result<Line> {
         checks_pending: pending,
         merge: word(&view.merge),
         review: word(view.review.as_deref().unwrap_or_default()),
+        error: None,
     })
 }
 
-pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
+/// Head and check states come from the same GitHub snapshot. A completed
+/// conclusion is never trusted while the check is still running.
+fn rollup_checks(values: &[serde_json::Value]) -> Option<Vec<Check>> {
+    values
+        .iter()
+        .map(|value| {
+            let kind = value.get("__typename")?.as_str()?;
+            let (name, bucket) = match kind {
+                "CheckRun" => {
+                    let status = value.get("status")?.as_str()?;
+                    let bucket = match status {
+                        "COMPLETED" => match value.get("conclusion")?.as_str()? {
+                            "SUCCESS" => "pass",
+                            "SKIPPED" | "NEUTRAL" => "skipping",
+                            "CANCELLED" => "cancel",
+                            "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE"
+                            | "STALE" => "fail",
+                            _ => return None,
+                        },
+                        "QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED" => "pending",
+                        _ => return None,
+                    };
+                    (value.get("name")?.as_str()?, bucket)
+                }
+                "StatusContext" => {
+                    let bucket = match value.get("state")?.as_str()? {
+                        "SUCCESS" => "pass",
+                        "PENDING" | "EXPECTED" => "pending",
+                        "ERROR" | "FAILURE" => "fail",
+                        _ => return None,
+                    };
+                    (value.get("context")?.as_str()?, bucket)
+                }
+                _ => return None,
+            };
+            Some(Check {
+                name: name.into(),
+                bucket: bucket.into(),
+            })
+        })
+        .collect()
+}
+
+fn snapshot(project: &Path, numbers: &[u64]) -> Vec<Line> {
+    numbers
+        .iter()
+        .map(|&number| {
+            line(project, number).unwrap_or_else(|error| Line {
+                number,
+                state: "UNAVAILABLE".into(),
+                head: "unknown".into(),
+                draft: false,
+                checks_passed: None,
+                checks_total: None,
+                checks_failed: None,
+                checks_pending: None,
+                merge: "unknown".into(),
+                review: "unknown".into(),
+                error: Some(provenant_cli::bounded_text(&error.to_string(), 256)),
+            })
+        })
+        .collect()
+}
+
+// CLI polling owns the real clock and wait interval.
+#[allow(clippy::disallowed_methods)]
+pub(super) fn run(numbers: Vec<u64>, wait: Option<u64>, globals: &Globals) -> u8 {
     const LEAF: &str = "pr status";
-    let result = (|| -> Result<Vec<Line>> {
+    let result = (|| -> Result<(Vec<Line>, bool)> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let numbers = if numbers.is_empty() {
             open_numbers(&project)?
         } else {
             numbers
         };
-        numbers
-            .into_iter()
-            .map(|number| line(&project, number))
-            .collect()
+        let initial = snapshot(&project, &numbers);
+        let Some(seconds) = wait else {
+            return Ok((initial, false));
+        };
+        if initial.is_empty() || initial.iter().all(|line| line.error.is_some()) {
+            return Ok((initial, false));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Ok((initial, true));
+            }
+            std::thread::sleep(left.min(std::time::Duration::from_secs(5)));
+            if std::time::Instant::now() >= deadline {
+                return Ok((initial, true));
+            }
+            let current = snapshot(&project, &numbers);
+            if current != initial {
+                return Ok((current, false));
+            }
+        }
     })();
     match result {
-        Ok(lines) => {
+        Ok((lines, timed_out)) => {
             let attribution = std::cell::OnceCell::new();
             for line in &lines {
                 if matches!(line.state.as_str(), "CLOSED" | "MERGED") {
@@ -378,9 +500,23 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
                     }
                 }
             }
-            let text: String = lines.iter().map(|line| line.text() + "\n").collect();
+            let mut text: String = lines.iter().map(|line| line.text() + "\n").collect();
+            if timed_out {
+                text.push_str("snapshot unchanged within wait limit\n");
+            }
+            text.push_str(&match lines.as_slice() {
+                [line] => format!("next: provenant land {} --wait\n", line.number),
+                _ => "next: provenant status\n".into(),
+            });
+            let outcome = if timed_out {
+                Outcome::Timeout
+            } else if !lines.is_empty() && lines.iter().all(|line| line.error.is_some()) {
+                Outcome::Unavailable
+            } else {
+                Outcome::Ok
+            };
             emit(
-                &CommandResult::new(LEAF, Outcome::Ok, lines),
+                &CommandResult::new(LEAF, outcome, lines),
                 globals,
                 &text,
                 true,
@@ -392,6 +528,50 @@ pub(super) fn run(numbers: Vec<u64>, globals: &Globals) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ruleset_only_protection_is_distinct_from_a_failed_policy_lookup() {
+        assert_eq!(
+            super::classic_protection(
+                false,
+                br#"{"message":"Branch not protected","status":"404"}"#
+            ),
+            Some(None)
+        );
+        assert_eq!(
+            super::classic_protection(false, br#"{"message":"Not Found","status":"404"}"#),
+            None
+        );
+        assert_eq!(
+            super::classic_protection(
+                false,
+                br#"{"message":"Resource not accessible","status":"403"}"#
+            ),
+            None
+        );
+    }
+    #[test]
+    fn rollup_distinguishes_running_completed_and_legacy_contexts() {
+        use serde_json::json;
+        let checks = super::rollup_checks(&[
+            json!({"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":"SUCCESS"}),
+            json!({"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"}),
+            json!({"__typename":"StatusContext","context":"external","state":"SUCCESS"}),
+        ]).expect("valid rollup");
+        assert_eq!(
+            checks
+                .iter()
+                .map(|check| check.bucket.as_str())
+                .collect::<Vec<_>>(),
+            ["pending", "fail", "pass"]
+        );
+        assert!(
+            super::rollup_checks(&[
+                json!({"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":""})
+            ])
+            .is_none()
+        );
+        assert!(super::rollup_checks(&[json!({"__typename":"CheckRun","name":"build","status":"UNKNOWN","conclusion":"SUCCESS"})]).is_none());
+    }
     #[test]
     fn failed_policy_lookup_uses_all_reported_checks() {
         use super::*;
@@ -453,11 +633,15 @@ mod tests {
     }
 
     #[test]
-    fn branch_requirements_reject_incomplete_data_and_empty_sets() {
+    fn branch_requirements_reject_incomplete_data_and_accept_known_empty_policy() {
         use super::*;
         use serde_json::json;
         let no_protection = json!({"required_status_checks": null});
-        assert_eq!(parse_required_checks(Some(&no_protection), &[]), None);
+        assert_eq!(
+            parse_required_checks(Some(&no_protection), &[]),
+            Some(vec![])
+        );
+        assert_eq!(parse_required_checks(None, &[vec![]]), Some(vec![]));
         assert_eq!(parse_required_checks(Some(&json!({})), &[]), None);
         assert_eq!(
             parse_required_checks(

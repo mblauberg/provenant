@@ -1,7 +1,7 @@
 //! Workflow leaves: review coverage, receipts and session checkpoints. The edge
 //! gathers owner facts (run attempts, trusted actor, clock) and hands workflow
 //! plain values; request JSON never supplies verified facts or authority.
-use crate::{Globals, RenderMode};
+use crate::Globals;
 use clap::{Args, Subcommand};
 use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock, DeliveryId, DurationMicros, ProjectId, Roots,
@@ -937,14 +937,7 @@ pub fn run(
     } else {
         String::new()
     };
-    let mode = if globals.json {
-        RenderMode::Json
-    } else {
-        RenderMode::Human {
-            text: &human,
-            read_only,
-        }
-    };
+    let mode = globals.render_mode(&human, read_only);
     match crate::render_or_publish(
         &out,
         mode,

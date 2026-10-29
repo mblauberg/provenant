@@ -10,6 +10,29 @@ define the envelope, exit codes and wait budgets. The machine-readable help
 catalogue owns command syntax; the generated [CLI reference](../reference/cli.md)
 lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 
+## Agent output
+
+Ordinary human results default to a summary of at most 2 KiB and a next
+command. Global `--full` restores complete human detail within the owner's
+page bounds. `--json` keeps the machine envelope and takes precedence over
+human presentation flags. Explicit help and protocol transports retain their
+complete output. Streaming commands keep their bounded state-change output.
+
+`output` defaults to settlement and the final result paragraph. Explicit
+`--summary` also works with `--json` and peers. Changed-file evidence uses a
+local writer's recorded base and final head when readable; missing evidence,
+including peer diffs, is null. The summary retains at most eight paths, 96
+bytes each, and a 768-byte final paragraph. `--tail N` retains at most 500
+lines within `--max-bytes`, locally or over the existing peer paging protocol.
+Peer tail scans share a 30-second budget and reject changed artifact digests.
+
+The core verbs remain `run`, `status`, `land` and `quota`. `dispatch` is the
+advanced submission-only operation; `run` adds waiting and a result summary.
+Route resolution accepts a pool or exact model positionally. Account selection
+uses `--account` on `run` or `dispatch`; peer output uses
+`output ATTEMPT --host HOST`. Nearby command and flag spellings receive a
+scoped suggestion, and common malformed forms receive an invocation example.
+
 ## Console catalogue and peer coverage
 
 `console board` and `console tree` default to local reads. `--hosts all` or a
@@ -312,7 +335,7 @@ attempt. Ambiguous targets,
 nonterminal attempts and peer transport are refused. `--trace` conflicts with
 `--part receipt`.
 
-The human output has this exact shape:
+The full human output has this shape (compact output adds a next command):
 
 ```text
 Reviewer: codex/gpt-6.1-sol@high (openai; resolved from explicit), run RUN/TASK/ATTEMPT
@@ -457,8 +480,15 @@ incomplete evidence.
 
 ### Landing adds no merge authority
 
-`land NUMBER` runs the `pr watch` wait and the guarded merge at the verified
-head, then follows up locally: fetch the base, fast-forward the
+`land NUMBER` checks CI once; `--wait` waits up to one hour and
+`--wait=30m` selects a bounded limit up to four hours. Landing verifies
+required-check registration, checks the exact head around each sample and
+uses a matching-head merge guard. Progress is capped at eight stderr lines.
+`pr status` reads head and checks from one snapshot per PR; `--wait` blocks
+until that snapshot changes and exits 124 if unchanged at the limit. A failed
+lookup preserves other PR rows.
+
+After the guarded merge, landing follows up locally: fetch the base, fast-forward the
 local base only in a checkout with no changes, delete declared build output
 and remove the branch's registered worktree through `worktree remove`, and
 delete the merged branch. The two cleanup steps act only
@@ -493,7 +523,9 @@ the branch against the merged head and deletes in one ref transaction, so a
 branch moved after the check is kept. (A checkout, rebase or bisect of the
 branch that begins between that test and the deletion is not caught.) A failure
 before the merge changes nothing. After it, each step refuses and reports
-instead of forcing, and the command exits 1 with `merged: true`.
+instead of forcing. A successful merge exits 0 with `merged: true`; incomplete
+cleanup adds `cleanup_pending: true` and keeps each refused step's reason.
+Retrying an already-merged PR bypasses CI and merge and retries safe cleanup.
 - Why: a landing is four routine steps, and none of them may widen what was
   reviewed or delete work that is not merged.
 - Test: `src/pr_land_tests.rs::pr_land_merges_then_fetches_fast_forwards_and_prunes`;

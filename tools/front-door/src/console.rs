@@ -138,6 +138,11 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             .map(provenant_cli::terse)
             .unwrap_or_default()
     };
+    let human = if globals.full {
+        human
+    } else {
+        provenant_cli::compact_text("console", &human)
+    };
     render(
         &result,
         globals.json,

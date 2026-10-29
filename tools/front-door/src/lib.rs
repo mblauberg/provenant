@@ -112,13 +112,13 @@ fn emit<T: Serialize>(
     human: &str,
     read_only: bool,
 ) -> u8 {
-    let mode = if globals.json {
-        RenderMode::Json
-    } else {
+    let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
         RenderMode::Human {
             text: human,
             read_only,
         }
+    } else {
+        globals.render_mode(human, read_only)
     };
     let rendered = provenant_cli::render_or_publish(
         result,
@@ -600,10 +600,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Review(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::review(cmd, edge)
         }),
-        Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
+        Command::Status(mut cmd) => run_edge(&inv.leaf, globals, |edge| {
+            cmd.all |= globals.full && !globals.json;
             provenant_cli::run::status(cmd, globals.json, edge)
         }),
-        Command::Land { number, head } => pr::land::run(number, head, globals, process.workers()),
+        Command::Land { number, head, wait } => {
+            pr::land::run(number, head, wait, globals, process.workers())
+        }
         Command::Dispatch(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::dispatch(*cmd, edge);
             if let Err(error) =
@@ -628,7 +631,16 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Lanes(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::lanes(cmd, edge)
         }),
-        Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
+        Command::Output(mut cmd) => run_edge(&inv.leaf, globals, |edge| {
+            if !globals.full
+                && !globals.json
+                && matches!(cmd.part, provenant_cli::Part::Result)
+                && !cmd.trace
+                && cmd.tail.is_none()
+                && cmd.offset == 0
+            {
+                cmd.summary = true;
+            }
             provenant_cli::run::output(cmd, edge)
         }),
         Command::Cancel(cmd) => run_edge(&inv.leaf, globals, |edge| {

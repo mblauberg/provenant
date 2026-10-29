@@ -15,7 +15,7 @@ pub(crate) fn identity(
     Ok((ctx.roots, ctx.identity.project, ctx.identity.inbox.actor))
 }
 
-use crate::{Globals, RenderMode};
+use crate::Globals;
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{
     ActorId, CancelToken, ClaimId, Clock, GitOid, OperationId, TaskId, WaitBudget,
@@ -949,14 +949,7 @@ pub fn run(
     } else {
         String::new()
     };
-    let mode = if globals.json {
-        RenderMode::Json
-    } else {
-        RenderMode::Human {
-            text: &human,
-            read_only,
-        }
-    };
+    let mode = globals.render_mode(&human, read_only);
     // Runtime pages/mutation receipts are bounded well below the ordinary cap.
     match crate::render_or_publish(
         &result,
