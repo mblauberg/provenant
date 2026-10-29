@@ -275,8 +275,7 @@ Use `provenant check writing PATHS --rules general` for prose, with
 `--rules academic` or `--rules legal` where they apply. Git pre-push
 protection uses `provenant hook git pre-push REMOTE LOCATION`, and
 `install --hooks on` owns hook registration. Follow the
-[branch and commit doctrine](skills/setup-repo/references/doctrine.md) when
-preparing changes.
+[GitHub workflow](docs/runbooks/github-workflow.md) when preparing changes.
 
 Each check returns ordered findings, exits 1 for findings, 2 for malformed
 command input and 3 for unreadable evidence. Use `--limit N` and the returned

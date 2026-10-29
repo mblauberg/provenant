@@ -131,7 +131,7 @@ run's ladder rather than a fixed colour.
 ```mermaid
 flowchart TB
     accTitle: The full delivery lifecycle and its user gates
-    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification, an optional conditional evaluate gate and independent review in fresh contexts. Coverage follows the HARNESS.md Review ladder, with an adversarial lens added at terminal. Failed checks and blocking findings return to execute under the repair guidance in the delivery skills; no runtime repair budget is enforced. Objective checks and tier-required review meet acceptance, or a project may name its landing gate. Explicit user acceptance is required only for terminal work or approved scope. The chair reports the outcome and the user may reject it. Any external action needs separate user authorisation before release and observation. A failed observation opens diagnose. Returns to scope converge on one back-to-scope collector.
+    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, test-design, refactor or diagnose, then deterministic verification, an optional conditional evaluate gate and independent review in fresh contexts. Coverage follows the HARNESS.md Review ladder, with an adversarial lens added at terminal. Failed checks and blocking findings return to execute under the repair guidance in the delivery skills; no runtime repair budget is enforced. Objective checks and tier-required review meet acceptance, or a project may name its landing gate. Explicit user acceptance is required only for terminal work or approved scope. The chair reports the outcome and the user may reject it. Any external action needs separate user authorisation before release and observation. A failed observation opens diagnose. Returns to scope converge on one back-to-scope collector.
     SE(["session"]) --> SC["scope<br/>spec, risk tier, authority"]
     SC --> G1{{"USER GATE<br/>approve spec, risk tier, one-way doors"}}
     G1 -. "send back" .-> SC
@@ -139,7 +139,7 @@ flowchart TB
 
     subgraph DEL["deliver kernel: one delivery-run receipt binds every gate below"]
       direction TB
-      EX["execute<br/>implement, tdd, refactor, diagnose"] --> VF["verify<br/>deterministic checks"]
+      EX["execute<br/>implement, test-design, refactor, diagnose"] --> VF["verify<br/>deterministic checks"]
       VF -. "failed" .-> EX
       VF --> Q{"behaviour stochastic<br/>or judgement bearing?"}
       Q -- "no" --> RV
@@ -197,9 +197,9 @@ implementation run. `retrospect` closes the quality flywheel by benchmarking
 the completed trajectory, clustering root causes, proposing small
 evidence-backed harness changes, adding regression gates and monitoring the
 next comparable run. It promotes durable learning into canonical project docs
-instead of accumulating retrospective logs. `autopilot` adds crash-safe
-persistence for genuinely sprawling run-until-STOP work, but does not replace
-the ordinary delivery loop.
+instead of accumulating retrospective logs. `session` carries crash-safe
+continuity for long run-until-STOP work, but does not replace the ordinary
+delivery loop.
 
 User approval is required for:
 
@@ -222,7 +222,7 @@ coverage against the risk tier. The receipt records those claims; it does not
 contain release, observation or retrospective gates.
 
 Software execution composes bounded techniques rather than duplicating
-lifecycle owners: `tdd` for new or changed observable behaviour, `refactor` for
+lifecycle owners: `test-design` for choosing and pruning tests, `refactor` for
 approved behaviour-preserving structural work, and `diagnose` when root cause is
 unknown. `code-review` remains source-read-only and independent. SOLID,
 information hiding, cohesion, coupling, simplicity, idempotency and similar
