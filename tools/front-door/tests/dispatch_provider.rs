@@ -324,7 +324,10 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     )?;
     assert_eq!(code(&commit), 0);
     // Review derives its base from origin's default branch.
+    let project = rig.project.to_str().ok_or("project path")?;
     for args in [
+        &["branch", "-M", "main"][..],
+        &["remote", "add", "origin", project][..],
         &["update-ref", "refs/remotes/origin/main", "HEAD"][..],
         &[
             "symbolic-ref",

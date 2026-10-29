@@ -357,8 +357,17 @@ directory, so a lane can undo it (an accepted residual risk).
 
 ### Host-pinned Git and writer grants
 
-Git is resolved once on the host, canonicalised and pinned in provider and
-MCP environments as the only Git lanes may execute. Writer-only grants come
+Git is resolved on the host and pinned in provider and MCP environments as
+the only Git lanes may execute. The pin keeps the stable locator (such as
+`/opt/homebrew/bin/git`) and runs that. Its canonical target must be a
+regular file named `git`, owned by the current user or root, and neither
+group- nor world-writable. Every ancestor directory of the locator and the
+target must not be world-writable without the sticky bit; a group-writable
+ancestor owned by root or the current user is accepted (Intel Homebrew's
+`/usr/local/bin`). A `stat` through the locator before each spawn, and an
+ENOENT from a spawn, re-validate the target when it changed, so
+`brew upgrade git` does not break a long-lived process while a replaced or
+loosened target is refused. Writer-only grants come
 from confinement's writer profile, and each attempt records its write
 allowances and Git grants digest. Writers use a complete private Git directory
 and index under attempt scratch with the shared object store as a read-only
@@ -370,6 +379,7 @@ and publishes the real branch itself; lane configuration never becomes host
 configuration.
 - Why: a lane-chosen Git or helper would run with host authority.
 - Test: `crates/os/src/git.rs::override_wins_and_invalid_override_does_not_fall_back`;
+  `crates/confinement/src/utility.rs::executable_pin_keeps_the_locator_and_follows_a_swapped_target`;
   `crates/cli/src/run/provider.rs::host_write_paths_reach_writers_only`
 - Owner: `crates/os/src/git.rs`
 
