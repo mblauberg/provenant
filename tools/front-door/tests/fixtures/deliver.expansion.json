@@ -3,7 +3,7 @@
     "pattern": "deliver",
     "preset": "deliver"
   },
-  "graph_id": "preset-2018d84d922f4f8b510723769e011aee",
+  "graph_id": "preset-d0210c82efd8d853345bc85e6787f873",
   "nodes": [
     {
       "acceptance_checks": [
@@ -107,9 +107,9 @@
                       ]
                     }
                   ],
-                  "prompt": "You repair failing CI checks on an open pull request branch. You are a fresh agent with no earlier transcript.\n\nRepair the failing CI checks on the pull request for: brief\nSpec (acceptance criteria): \nThe inputs carry the failing check names with log excerpts, the writer's final\nreport and the previous repair's report. A report cut short also carries its\nclosing `remaining` window, where remaining work is handed off. Work from those\nand the worktree. Fix the cause rather than the symptom, keep within the write\nscope and commit on the current branch; the host pushes it to the same pull\nrequest and CI runs again on the new head.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Fix the failing checks named in the inputs\n- Run the failing checks locally where practical\n- Commit on the existing branch",
+                  "prompt": "You repair failing CI checks on an open pull request branch. You are a fresh agent with no earlier transcript.\n\nRepair the failing CI checks on the pull request for: brief\nSpec (acceptance criteria): \nThe inputs carry the failing check names with log excerpts, the writer's final\nreport and the previous repair's report, each with the `remaining` items of its\nhandoff block where one was declared. Work from those\nand the worktree. Fix the cause rather than the symptom, keep within the write\nscope and commit on the current branch; the host pushes it to the same pull\nrequest and CI runs again on the new head.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Fix the failing checks named in the inputs\n- Run the failing checks locally where practical\n- Commit on the existing branch",
                   "role": "repairer",
-                  "role_digest": "sha256:49270759b10c6a437e71c7d7e644633142eef8988ac2562fd470be451c7462ab",
+                  "role_digest": "sha256:9f3ecc316bd6244013694f6a07e5cc536b4fbfbd88d9173339a8a673f3ee3994",
                   "route": {
                     "alias": "senior"
                   },
@@ -719,7 +719,7 @@
         "references": []
       },
       "repairer": {
-        "digest": "sha256:49270759b10c6a437e71c7d7e644633142eef8988ac2562fd470be451c7462ab",
+        "digest": "sha256:9f3ecc316bd6244013694f6a07e5cc536b4fbfbd88d9173339a8a673f3ee3994",
         "extends": [
           "repairer"
         ],

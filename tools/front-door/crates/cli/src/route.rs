@@ -2080,7 +2080,7 @@ mod route_tests {
         assert_eq!(instant("1s", 99), Some(100));
         assert_eq!(instant("2h", 0), Some(7200));
         assert_eq!(instant("0h", 0), None);
-        assert_eq!(instant("1970-01-01T00:01:00Z", 0), Some(60));
+        assert_eq!(instant("1970-01-01T00:01:00Z", 0), Some(60)); // timebomb: allow parse-only fixture with an injected instant
         let weekdays = parse_window("mon-wed,fri,6@23-2").expect("window");
         assert_eq!(weekdays.weekdays, [0, 1, 2, 4, 6]);
         assert_eq!((weekdays.start_hour, weekdays.end_hour), (23, 2));

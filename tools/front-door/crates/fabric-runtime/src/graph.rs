@@ -5306,8 +5306,10 @@ mod tests {
 
     #[test]
     fn plan_fragment_target_is_checked_before_expansion_is_published() {
+        // The document names the destination, so the fragment passes the plan
+        // check and reaches the owner's target validation.
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1, "graph_id": "planned", "nodes": [{
+            "schema_version": 1, "graph_id": "planned", "integration_branch": "target", "nodes": [{
                 "id": "planner", "kind": "plan", "access": "read_only", "prompt": "Plan",
                 "plan": {"kinds": ["task"], "max_nodes": 1}, "route": {"alias": "senior"}
             }]
@@ -5328,6 +5330,7 @@ mod tests {
         ));
         assert!(journal.0.as_ref().unwrap().expansions.is_empty());
         assert_eq!(owner.calls.len(), 1);
+        assert_eq!(owner.expansion_validations, 1);
     }
 
     #[test]
