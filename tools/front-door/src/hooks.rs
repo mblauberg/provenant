@@ -839,6 +839,8 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
     let project = crate::roots::selected_project(globals.project.as_deref(), true)?;
     with_git(|runtime, executor, budget, cancel| {
         let repo = runtime.open_read_repo(executor, &project, budget, cancel)?;
+        // The default-branch check contacts the remote and needs a network budget.
+        let budget = UtilityBudget::bounded(Duration::from_secs(30))?;
         PushContext {
             repo: &repo,
             runtime,

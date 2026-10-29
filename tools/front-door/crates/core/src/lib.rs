@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 
 mod bytes;
+mod refs;
+pub use refs::*;
 mod ids;
 pub use bytes::{hex, unhex};
 pub use ids::*;
