@@ -5,6 +5,7 @@ use crate::{
 use provenant_config::{DomainConfig, DomainSection, Profile, SectionError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -60,13 +61,62 @@ pub struct PacingProfile {
     pub after_deadline: AfterDeadline,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PacingOverride {
     pub account: Option<String>,
     pub provider: Option<String>,
     pub policy: PacingPolicy,
     pub schedule: crate::Schedule,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PacingOverrideInput {
+    account: Option<String>,
+    provider: Option<String>,
+    policy: PacingPolicy,
+    schedule: Option<crate::Schedule>,
+    starts_unix_seconds: Option<i64>,
+    expires_unix_seconds: Option<i64>,
+    windows: Option<Vec<crate::ScheduleWindow>>,
+}
+fn deserialize_pacing_overrides<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<PacingOverride>, D::Error> {
+    let inputs = Vec::<PacingOverrideInput>::deserialize(deserializer)?;
+    let now = jiff::Timestamp::now().as_second();
+    let mut migrated = false;
+    let overrides = inputs
+        .into_iter()
+        .filter_map(|input| {
+            let legacy = input.starts_unix_seconds.is_some()
+                || input.expires_unix_seconds.is_some()
+                || input.windows.is_some();
+            migrated |= legacy;
+            let schedule = input.schedule.unwrap_or_else(|| crate::Schedule {
+                starts: input.starts_unix_seconds,
+                expires: input.expires_unix_seconds,
+                windows: input.windows.unwrap_or_default(),
+                ..Default::default()
+            });
+            if legacy && schedule.expires.is_some_and(|expiry| expiry <= now) {
+                return None;
+            }
+            Some(PacingOverride {
+                account: input.account,
+                provider: input.provider,
+                policy: input.policy,
+                schedule,
+            })
+        })
+        .collect();
+    if migrated {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "note: legacy routing schedules were converted; rewrite the configuration file"
+        );
+    }
+    Ok(overrides)
 }
 
 /// Fixed deadlines use host-local time. Reset references use fresh quota facts.
@@ -203,6 +253,7 @@ pub struct RoutingConfig {
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
     pub pacing: PacingSettings,
     pub pacing_reserve: BTreeMap<String, PacingReserve>,
+    #[serde(deserialize_with = "deserialize_pacing_overrides")]
     pub pacing_overrides: Vec<PacingOverride>,
     pub opencode_go: OpenCodeGoSettings,
 }
@@ -277,6 +328,39 @@ impl RoutingConfig {
                     ));
                 }
             }
+        }
+        warnings
+    }
+    pub fn model_policy_fallback_warnings(&self, catalogue: &Catalogue) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mut inspect = |policy: &crate::ModelPolicy, field: &str| {
+            if let Some(model) = policy.result.fallback.as_ref() {
+                let entry = catalogue.model(model);
+                let reason = if entry.is_none() {
+                    Some("unknown model")
+                } else if policy
+                    .result
+                    .fallback_effort
+                    .as_ref()
+                    .is_some_and(|effort| {
+                        !entry.is_some_and(|entry| entry.efforts.contains(effort))
+                    })
+                {
+                    Some("unsupported effort")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    warnings.push(format!(
+                        "warning: domains.routing.{field}.result.fallback: {} ({reason}); dropped",
+                        model.as_str()
+                    ));
+                }
+            }
+        };
+        inspect(&self.model_policy.defaults, "model_policy.defaults");
+        for (index, rule) in self.model_policy.rules.iter().enumerate() {
+            inspect(&rule.policy, &format!("model_policy.rules.{index}"));
         }
         warnings
     }
@@ -380,44 +464,6 @@ impl DomainConfig for RoutingConfig {
             });
         }
         let catalogue = Catalogue::bundled().ok();
-        let validate_fallback = |policy: &crate::ModelPolicy,
-                                 field: &str,
-                                 errors: &mut Vec<SectionError>| {
-            let Some(model) = policy.result.fallback.as_ref() else {
-                return;
-            };
-            let entry = catalogue
-                .as_ref()
-                .and_then(|catalogue| catalogue.model(model));
-            if entry.is_none() {
-                errors.push(SectionError {
-                    field: format!("{field}.result.fallback"),
-                    code: "unknown_model",
-                });
-            } else if policy
-                .result
-                .fallback_effort
-                .as_ref()
-                .is_some_and(|effort| !entry.is_some_and(|entry| entry.efforts.contains(effort)))
-            {
-                errors.push(SectionError {
-                    field: format!("{field}.result.fallback_effort"),
-                    code: "unsupported_effort",
-                });
-            }
-        };
-        validate_fallback(
-            &self.model_policy.defaults,
-            "model_policy.defaults",
-            &mut errors,
-        );
-        for (index, rule) in self.model_policy.rules.iter().enumerate() {
-            validate_fallback(
-                &rule.policy,
-                &format!("model_policy.rules.{index}"),
-                &mut errors,
-            );
-        }
         self.review.validate(self, catalogue.as_ref(), &mut errors);
         for (name, route) in &self.routes {
             if catalogue
@@ -1089,23 +1135,54 @@ mod tests {
     use provenant_records::{RouteEligibility, RouteReadiness};
 
     #[test]
-    fn model_policy_fallbacks_are_validated_against_catalogue_on_load()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn model_policy_fallbacks_are_warned_and_reconciled() -> Result<(), Box<dyn std::error::Error>>
+    {
         let mut config = RoutingConfig::default();
         config.model_policy.defaults.result.fallback =
             Some(ModelId::parse("codex/not-catalogued")?);
-        let errors = config.validate();
-        assert!(errors.iter().any(|error| {
-            error.field == "model_policy.defaults.result.fallback" && error.code == "unknown_model"
-        }));
+        assert!(config.validate().is_empty());
+        assert!(
+            config
+                .model_policy_fallback_warnings(&Catalogue::bundled()?)
+                .len()
+                == 1
+        );
+        let effective =
+            config
+                .model_policy
+                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, 1);
+        assert!(effective.policy.result.fallback.is_none());
 
         config.model_policy.defaults.result.fallback = Some(ModelId::parse("codex/gpt-6-luna")?);
         config.model_policy.defaults.result.fallback_effort = Some("unsupported".into());
-        let errors = config.validate();
-        assert!(errors.iter().any(|error| {
-            error.field == "model_policy.defaults.result.fallback_effort"
-                && error.code == "unsupported_effort"
-        }));
+        assert!(config.validate().is_empty());
+        assert!(
+            config
+                .model_policy_fallback_warnings(&Catalogue::bundled()?)
+                .len()
+                == 1
+        );
+        config.model_policy.rules.push(crate::ModelPolicyRule {
+            schedule: crate::Schedule {
+                expires: Some(1),
+                ..Default::default()
+            },
+            policy: crate::ModelPolicy {
+                result: crate::ResultPolicy {
+                    fallback: Some(ModelId::parse("codex/not-catalogued")?),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(config.validate().is_empty());
+        assert_eq!(
+            config
+                .model_policy_fallback_warnings(&Catalogue::bundled()?)
+                .len(),
+            2
+        );
         Ok(())
     }
 

@@ -269,7 +269,7 @@ fn pacing_override_persists_replaces_and_clears() -> Result {
     assert_eq!(overrides.len(), 2);
     assert_eq!(overrides[0]["account"], "claude/pro");
     assert_eq!(overrides[0]["policy"], "pace");
-    assert!(overrides[0]["expires_unix_seconds"].as_i64().is_some());
+    assert!(overrides[0]["schedule"]["expires"].as_i64().is_some());
     let cleared = call(&rig, &["route", "pacing", "override", "clear"], 0)?;
     assert_eq!(cleared["data"]["recorded"], "cleared every pacing override");
     assert_eq!(cleared["data"]["active_overrides"], serde_json::json!([]));
@@ -331,6 +331,63 @@ fn pacing_override_resolves_labels_and_rejects_ambiguous_keys() -> Result {
         .ok_or("overrides")?;
     assert_eq!(overrides.len(), 1);
     assert_eq!(overrides[0]["account"], "claude/shared");
+    Ok(())
+}
+
+#[test]
+fn override_list_shows_active_future_and_expired_schedules() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    let now = jiff::Timestamp::now().as_second();
+    let config = format!(
+        "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n[[domains.routing.pacing_overrides]]\nprovider='agy'\npolicy='off'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n",
+        now - 30,
+        now + 300,
+        now + 300,
+        now + 600,
+        now - 600,
+        now - 300,
+    );
+    fs::write(rig.state.join("config.toml"), config)?;
+    let listed = call(&rig, &["route", "override", "list"], 0)?;
+    let rows = listed["data"]["overrides"].as_array().ok_or("overrides")?;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["active"], true);
+    assert_eq!(rows[1]["active"], false);
+    assert_eq!(rows[2]["active"], false);
+    Ok(())
+}
+
+#[test]
+fn pacing_write_rewrites_legacy_override_rows() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\nexpires_unix_seconds=2000000000\nwindows=[]\n",
+    )?;
+    call(
+        &rig,
+        &[
+            "route",
+            "pacing",
+            "override",
+            "--provider",
+            "claude",
+            "--policy",
+            "spend",
+            "--until",
+            "2h",
+        ],
+        0,
+    )?;
+    let config = call(&rig, &["config", "show"], 0)?;
+    let rows = config["data"]["domains"]["routing"]["pacing_overrides"]
+        .as_array()
+        .ok_or("overrides")?;
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0]["schedule"]["expires"].is_number());
+    assert!(rows[0]["expires_unix_seconds"].is_null());
     Ok(())
 }
 #[test]

@@ -462,10 +462,38 @@ fn schedule_windows(schedule: &provenant_routing::Schedule) -> String {
                         .join(",")
                 )
             };
-            format!("{days} {:02}-{:02} UTC", window.start_hour, window.end_hour)
+            format!(
+                "{days} {:02}-{:02} {}",
+                window.start_hour,
+                window.end_hour,
+                schedule.tz.as_deref().unwrap_or("UTC")
+            )
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+fn migrate_pacing_override_value(value: toml_edit::Value) -> toml_edit::Value {
+    let toml_edit::Value::InlineTable(mut row) = value else {
+        return value;
+    };
+    let mut schedule = row
+        .get("schedule")
+        .and_then(toml_edit::Value::as_inline_table)
+        .cloned()
+        .unwrap_or_default();
+    for (old, new) in [
+        ("starts_unix_seconds", "starts"),
+        ("expires_unix_seconds", "expires"),
+        ("windows", "windows"),
+    ] {
+        if let Some(value) = row.remove(old) {
+            schedule.insert(new, value);
+        }
+    }
+    if !schedule.is_empty() {
+        row.insert("schedule", toml_edit::Value::InlineTable(schedule));
+    }
+    toml_edit::Value::InlineTable(row)
 }
 fn override_line(row: &provenant_routing::PacingOverride) -> String {
     let scope = match (&row.account, &row.provider) {
@@ -1351,6 +1379,11 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<St
             }
             _ => return Err("domains.routing.pacing_overrides must be an array of tables"),
         };
+        let mut migrated_values = toml_edit::Array::new();
+        for value in values.iter() {
+            migrated_values.push(migrate_pacing_override_value(value.clone()));
+        }
+        values = migrated_values;
         values.retain(|value| {
             let Some(row) = value.as_inline_table() else {
                 return true;
@@ -1391,6 +1424,7 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<St
         schedule: provenant_routing::Schedule {
             starts: None,
             expires: Some(expiry),
+            tz: None,
             windows: Vec::new(),
         },
     };

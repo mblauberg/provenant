@@ -19,7 +19,7 @@ fn default_pools_do_not_include_free_routes() -> Result<(), Box<dyn std::error::
 fn model_policy_config_accepts_layered_rules() -> Result<(), Box<dyn std::error::Error>> {
     let config = serde_json::from_value::<RoutingConfig>(serde_json::json!({
         "model_policy": {"rules": [{"model": "codex/gpt-6.1-terra", "account": "work",
-            "expires_unix_seconds": 200, "policy": {"lane": {"stop_early_ok": false}}}]}
+            "schedule": {"expires": 200}, "policy": {"lane": {"stop_early_ok": false}}}]}
     }));
     assert!(
         config.is_ok(),
@@ -310,6 +310,65 @@ fn effort_errors_report_recorded_controls_and_nearest_models()
             .map(String::as_str),
         Some("codex/gpt-6-luna")
     );
+    Ok(())
+}
+
+#[test]
+fn pacing_evaluator_applies_overnight_weekday_and_sunday_windows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let model = ModelId::parse("codex/gpt-6.1-terra")?;
+    for (weekday, day) in [(vec![3_u8], 0_i64), (vec![6_u8], 3_i64)] {
+        for hour in [23_i64, 24 + 1] {
+            let now = day * 86_400 + hour * 3600;
+            let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+                "pacing_overrides": [{"provider":"codex", "policy":"spend", "schedule":{"windows":[{"weekdays":weekday,"start_hour":23,"end_hour":2}]}}]
+            }))?;
+            let context = context(
+                &catalogue,
+                &config,
+                provenant_core::WallTime::from_micros(now * 1_000_000)?,
+            );
+            assert_eq!(
+                pacing_preview(&model, &context)[0].policy,
+                PacingPolicy::Spend
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_pacing_override_loads_and_evaluates_like_schedule_form()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let now = jiff::Timestamp::now().as_second();
+    let expires = now + 3600;
+    let legacy: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing_overrides": [{"provider":"codex", "policy":"spend", "starts_unix_seconds":now-60, "expires_unix_seconds":expires, "windows":[]}]
+    }))?;
+    let canonical: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing_overrides": [{"provider":"codex", "policy":"spend", "schedule":{"starts":now-60,"expires":expires,"windows":[]}}]
+    }))?;
+    let time = provenant_core::WallTime::from_micros(now * 1_000_000)?;
+    let old_context = context(&catalogue, &legacy, time);
+    let new_context = context(&catalogue, &canonical, time);
+    let model = ModelId::parse("codex/gpt-6.1-terra")?;
+    assert_eq!(
+        pacing_preview(&model, &old_context)[0].policy,
+        PacingPolicy::Spend
+    );
+    assert_eq!(
+        pacing_preview(&model, &old_context)[0].policy,
+        pacing_preview(&model, &new_context)[0].policy
+    );
+    assert!(
+        serde_json::to_value(&legacy)?["pacing_overrides"][0]["schedule"]["expires"].is_number()
+    );
+    let expired: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing_overrides": [{"provider":"codex", "policy":"spend", "expires_unix_seconds":now-1}]
+    }))?;
+    assert!(expired.pacing_overrides.is_empty());
     Ok(())
 }
 #[test]
@@ -1468,7 +1527,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     let roots = inputs.resolve(&Resolver)?;
     let model_policy_config = provenant_config::load_with_domains(
         &roots,
-        Some("schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nexpires_unix_seconds=200\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n".as_bytes()),
+        Some("schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.schedule]\nexpires=200\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n".as_bytes()),
         &sections,
     )?;
     assert_eq!(
@@ -1798,7 +1857,8 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         let route = resolve(&request("codex/test")?, &ctx)?;
         assert_eq!(
             reason(&route) == Some(&RouteExclusionReason::PacingReserve),
-            excluded
+            excluded,
+            "profile={profile}, overrides={overrides}"
         );
     }
     Ok(())
