@@ -49,15 +49,17 @@ fn usage_reads_terminal_lanes_across_projects_and_keeps_unknown_accounts() -> Re
     for row in rows {
         assert_eq!(row["lane_attempts"], 1);
         assert_eq!(row["chair_sessions"], 0);
+        assert_eq!(row["chair_sessions_unread"], 0);
         assert!(row["account"].is_null());
         assert_eq!(row["lane_usage"]["uncached_input"]["missing"], 1);
     }
     assert!(!String::from_utf8_lossy(&output.stdout.bytes).contains("private fixture prompt"));
     let human = rig.command(&["quota", "usage"])?;
     let human = String::from_utf8(human.stdout.bytes)?;
-    assert!(human.contains("Chair token usage is not recorded"));
+    assert!(human.contains("Chair tokens are read from each recorded chair session"));
     assert!(human.contains("unknown account"));
-    assert!(human.contains("attempts missing this category"));
+    assert!(human.contains("records missing this category"));
+    assert!(human.contains("lanes cache-read share: not reported"));
     assert!(!rig.state.join("quota").exists());
     rig.assert_legacy_unchanged()
 }

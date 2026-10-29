@@ -5330,15 +5330,38 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         })
         .transpose()?
         .unwrap_or_default();
-    let report = provenant_telemetry::stats(facts, &prices, window)
+    // Chair sessions span projects, so the host's whole window is read. They are
+    // best effort: an unreadable usage log must not hide the lane figures.
+    let chair_window = (
+        window.since.map_or(jiff::Timestamp::MIN, |t| t.as_timestamp()),
+        window.until.map_or(jiff::Timestamp::MAX, |t| t.as_timestamp()),
+    );
+    let (chairs, chair_error) = match crate::quota::chair_sessions_with_usage(
+        edge.roots,
+        Some(edge.home),
+        chair_window.0,
+        chair_window.1,
+    ) {
+        Ok(chairs) => (chairs, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+    let report = provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let human = stats_summary(&report.totals);
-    let data = serde_json::to_value(&report)
+    let mut human = stats_summary(&report);
+    let mut data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    if let Some(error) = chair_error {
+        human.push_str(&format!(
+            "chair sessions not read: {}\n",
+            plain_text(&error, usize::MAX)
+        ));
+        data["chair_error"] = Value::String(error);
+    }
     Ok((data, human))
 }
 
-fn stats_summary(totals: &provenant_telemetry::Totals) -> String {
+fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
+    let totals = &report.totals;
     let cost = &totals.cost;
     let human = if let Some(money) = &cost.complete {
         format!("est. API-equivalent ${}", money.usd)
@@ -5353,7 +5376,48 @@ fn stats_summary(totals: &provenant_telemetry::Totals) -> String {
             cost.missing_attempts
         )
     };
-    format!("{} attempts, {human}\n", totals.attempts)
+    let mut text = format!("{} attempts, {human}\n", totals.attempts);
+    if totals.attempts == 0
+        && let Some(project) = report.window.project
+    {
+        text.push_str(&format!(
+            "no terminal attempts recorded for project {project}; run from its checkout to see its lanes\n"
+        ));
+    }
+    let mut share = |label: &str, rows: &[provenant_telemetry::CacheGroup]| {
+        for row in rows {
+            let name = [&row.provider, &row.model, &row.account]
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            text.push_str(&format!(
+                "cache read {label} {} {}: {}\n",
+                row.source,
+                plain_text(&name, usize::MAX),
+                crate::quota::cache_share(&row.cache)
+            ));
+        }
+    };
+    share("by source", &report.cache.by_source);
+    share("by model", &report.cache.by_model);
+    share("by account", &report.cache.by_account);
+    if let Some(chair) = &report.chair {
+        let unread: u64 = chair.unread.values().sum();
+        text.push_str(&format!(
+            "chair: {} sessions on this host ({unread} unread), {}\n",
+            chair.sessions,
+            chair.cost.complete.as_ref().map_or_else(
+                || chair.cost.known_lower_bound.as_ref().map_or_else(
+                    || "cost unknown".to_owned(),
+                    |money| format!("est. API-equivalent at least ${}", money.usd),
+                ),
+                |money| format!("est. API-equivalent ${}", money.usd)
+            )
+        ));
+    }
+    text
 }
 
 /// Offline lane timeline: terminal attempts as Chrome Trace Event JSON.

@@ -225,6 +225,7 @@ fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
         text.replace("[knobs]", "[knobs]\n\"usage.project_attribution\" = true")
             .replace("label = \"current\"", "label = \"primary\""),
     )?;
+    write_transcript(&rig.root.join("claude"), "ordinary-session")?;
     for _ in 0..2 {
         let output = hook(&rig, true, "ordinary-session")?;
         assert_eq!(code(&output), 0);
@@ -257,11 +258,79 @@ fn chair_start_records_serving_account_without_a_pending_handoff() -> Result {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["account"], "primary");
     assert_eq!(rows[0]["chair_sessions"], 1);
+    assert_eq!(rows[0]["chair_sessions_unread"], 0);
+    // Tokens come from the session's own transcript: 5 uncached, 400 read.
+    assert_eq!(rows[0]["chair_usage"]["uncached_input"]["known"], 5);
+    assert_eq!(rows[0]["chair_usage"]["cache_read"]["known"], 400);
+    assert_eq!(rows[0]["chair_cache"]["read_share_basis_points"], 9638);
     assert!(
         report["data"]["chair_usage_note"]
             .as_str()
-            .is_some_and(|s| s.contains("not recorded"))
+            .is_some_and(|s| s.contains("unattributed"))
     );
+    fs::create_dir_all(rig.project.join("config"))?;
+    fs::write(
+        rig.project.join("config/telemetry-prices.toml"),
+        include_str!("../../../config/telemetry-prices.toml"),
+    )?;
+    let stats = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(
+        code(&stats),
+        0,
+        "{} {}",
+        String::from_utf8_lossy(&stats.stdout.bytes),
+        String::from_utf8_lossy(&stats.stderr.bytes)
+    );
+    let stats: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
+    let chair = &stats["data"]["chair"];
+    assert_eq!(chair["sessions"], 1);
+    assert_eq!(chair["groups"][0]["account"], "primary");
+    assert_eq!(chair["groups"][0]["model"], "claude/claude-opus-5-5");
+    assert_eq!(chair["groups"][0]["usage"]["cache_read"]["known"], 400);
+    Ok(())
+}
+
+/// One assistant message streamed twice, so the final counts must win:
+/// 5 uncached, 400 cache read, 10 cache write and 45 output tokens.
+fn write_transcript(config: &std::path::Path, session: &str) -> Result {
+    let directory = config.join("projects/-fixture");
+    fs::create_dir_all(&directory)?;
+    let line = |output: u64| {
+        json!({"type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","content":[],
+            "usage":{"input_tokens":5,"cache_read_input_tokens":400,
+                "cache_creation_input_tokens":10,"output_tokens":output}}})
+        .to_string()
+    };
+    fs::write(
+        directory.join(format!("{session}.jsonl")),
+        format!("{}\n{}\n", line(1), line(45)),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn chair_on_an_unregistered_config_directory_is_recorded_as_unattributed() -> Result {
+    let mut rig = configured()?;
+    // The default `~/.claude` is not a registered account.
+    rig.env.retain(|(key, _)| key != "CLAUDE_CONFIG_DIR");
+    write_transcript(&rig.home.join(".claude"), "default-session")?;
+    let output = hook(&rig, true, "default-session")?;
+    assert_eq!(code(&output), 0);
+    let log = fs::read_to_string(rig.state.join("usage.jsonl"))?;
+    let event = log
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|e| e["kind"] == "chair.session")
+        .ok_or("the default config directory must still be recorded")?;
+    assert_eq!(event["account"], "unattributed");
+    assert_eq!(event["config"], ".claude");
+    let report = rig.command(&["quota", "usage", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&report.stdout.bytes)?;
+    let row = &report["data"]["rows"][0];
+    assert_eq!(row["account"], "unattributed");
+    assert_eq!(row["chair_usage"]["cache_read"]["known"], 400);
     Ok(())
 }
 
