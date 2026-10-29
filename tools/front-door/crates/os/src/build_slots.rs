@@ -30,8 +30,8 @@ pub const DEFAULT_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How often a waiting build repeats its progress message.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 
-/// File a gated build writes in the lane's private temporary directory while
-/// it waits, so the host can show the wait. It holds a kind and the host's
+/// Prefix of the file (`build-slot-wait.PID`, one per command) a gated build
+/// writes in the lane's writable scratch directory while it waits, so the host can show the wait. It holds a kind and the host's
 /// wall-clock seconds and is refreshed about every `PROGRESS_EVERY`, so a
 /// build that died while waiting stops showing once the file goes stale.
 pub const WAIT_MARKER: &str = "build-slot-wait";

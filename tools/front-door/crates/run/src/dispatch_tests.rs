@@ -7212,9 +7212,10 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
             .join("attempts")
             .join(id.to_string())
     };
-    let tmp = attempt(id, running.run_id).join("tmp");
+    // The shim's marker lives in the lane's scratch, `tmp/candidate-N`.
+    let tmp = attempt(id, running.run_id).join("tmp/candidate-0");
     std::fs::create_dir_all(&tmp)?;
-    let marker = tmp.join(WAIT_MARKER);
+    let marker = tmp.join(format!("{WAIT_MARKER}.100"));
     let records = [running.clone(), other];
     assert!(store.lane_waits(&records, &call).is_empty());
     std::fs::write(&marker, "slot 0")?;
@@ -7234,6 +7235,13 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
         std::fs::write(&marker, forged)?;
         assert!(store.lane_waits(&records, &call).is_empty(), "{forged}");
     }
+    // One marker per command: a sibling's marker going away leaves the wait.
+    let sibling = tmp.join(format!("{WAIT_MARKER}.101"));
+    std::fs::write(&sibling, "slot 0")?;
+    std::fs::write(&marker, "disk 0")?;
+    assert_eq!(store.lane_waits(&records, &call).len(), 1);
+    std::fs::remove_file(&sibling)?;
+    assert!(store.lane_waits(&records, &call).is_empty());
     std::fs::remove_file(&marker)?;
     std::os::unix::fs::symlink(temp.path().join("elsewhere"), &marker)?;
     std::fs::write(temp.path().join("elsewhere"), "slot 0")?;

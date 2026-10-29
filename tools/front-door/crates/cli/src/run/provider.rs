@@ -758,7 +758,6 @@ fn prepare_candidates(
             &build_settings,
             &home,
             scratch,
-            &paths.temporary,
             &provenant_executable,
             roots.state.as_path(),
         )?;
@@ -1065,7 +1064,6 @@ fn prepare_command(
         &settings,
         &home,
         &scratch,
-        &paths.temporary,
         &runtime,
         roots.state.as_path(),
     )?;
@@ -1154,7 +1152,6 @@ fn configure_build_slots(
     settings: &provenant_config::LaneBuildSettings,
     home: &Path,
     scratch: &Path,
-    temporary: &Path,
     runtime: &Path,
     state: &Path,
 ) -> Result<(), String> {
@@ -1176,8 +1173,9 @@ fn configure_build_slots(
                         slots,
                         wait_seconds: settings.build_wait().as_secs(),
                         cargo: &cargo,
-                        // The lane's own $TMPDIR, which the host reads back.
-                        wait_marker: &temporary.join(provenant_os::build_slots::WAIT_MARKER),
+                        // Inside the lane's writable scratch (its $TMPDIR), where
+                        // the host finds it; each waiting build adds its pid.
+                        wait_marker: &scratch.join(provenant_os::build_slots::WAIT_MARKER),
                     },
                 )
                 .map_err(|error| error.to_string())?,
@@ -3674,8 +3672,7 @@ mod tests {
             &mut codex,
             &provenant_config::LaneBuildSettings::default(),
             &home,
-            &paths.scratch,
-            &paths.temporary,
+            &confinement.plan.permissions().scratch.path,
             &codex_runtime,
             &state,
         )?;
@@ -3692,6 +3689,37 @@ mod tests {
         let grants =
             provenant_confinement::write_grants(confinement.plan.permissions(), &codex.profile);
         assert!(!grants.is_empty(), "the profile lists its write grants");
+        // The shim's wait marker must be writable by the lane, or a sandboxed
+        // wait is never shown.
+        let shim = codex
+            .setup
+            .iter()
+            .find_map(|step| match step {
+                provenant_providers::SetupStep::WriteExecutable { path, bytes }
+                    if path.ends_with("bin/cargo") =>
+                {
+                    String::from_utf8(bytes.clone()).ok()
+                }
+                _ => None,
+            })
+            .ok_or("cargo shim")?;
+        let marker = confinement
+            .plan
+            .permissions()
+            .scratch
+            .path
+            .join(provenant_os::build_slots::WAIT_MARKER);
+        assert!(
+            shim.contains(&marker.to_string_lossy().into_owned()),
+            "{shim}"
+        );
+        assert!(
+            grants
+                .iter()
+                .any(|grant| grant.scope == PathScope::Subtree && marker.starts_with(&grant.path)),
+            "no write grant covers the wait marker {}",
+            marker.display()
+        );
         for grant in &grants {
             let reaches = match grant.scope {
                 PathScope::Exact => grant.path == slots,

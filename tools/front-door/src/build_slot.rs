@@ -38,7 +38,8 @@ pub(crate) const STATE_ENV: &str = "PROVENANT_BUILD_SLOT_STATE";
 pub(crate) const SLOTS_ENV: &str = "PROVENANT_BUILD_SLOTS";
 /// Seconds a build waits for a slot or a Cargo lock before giving up.
 pub(crate) const WAIT_ENV: &str = "PROVENANT_BUILD_WAIT_SECS";
-/// File where a waiting build says so, in the lane's temporary directory.
+/// Prefix of the file where a waiting build says so, in the lane's scratch
+/// directory; the build adds `.pid`.
 pub(crate) const MARKER_ENV: &str = "PROVENANT_BUILD_WAIT_MARKER";
 
 /// What the host's shim script supplies, read from the environment.
@@ -299,12 +300,20 @@ fn mark(settings: &Settings, kind: WaitKind) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    let _ = std::fs::write(marker, kind.marker(now));
+    let _ = std::fs::write(own_marker(marker), kind.marker(now));
+}
+
+/// One marker per command, so a sibling that gets a slot cannot remove the
+/// wait of one that still waits.
+fn own_marker(base: &std::path::Path) -> PathBuf {
+    let mut name = base.as_os_str().to_owned();
+    name.push(format!(".{}", std::process::id()));
+    name.into()
 }
 
 fn unmark(settings: &Settings) {
     if let Some(marker) = &settings.marker {
-        let _ = std::fs::remove_file(marker);
+        let _ = std::fs::remove_file(own_marker(marker));
     }
 }
 

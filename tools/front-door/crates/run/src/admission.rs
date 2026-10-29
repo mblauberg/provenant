@@ -263,7 +263,7 @@ impl RunStore {
             .collect()
     }
     /// A gated build in the lane says it waits by writing a marker in the
-    /// lane's private temporary directory. The lane writes it, so it is read
+    /// lane's scratch directory. The lane writes it, so it is read
     /// without following links, bounded, and trusted only for which of two
     /// fixed waits it names and that it is fresh.
     fn build_slot_wait(&self, lane: &AttemptRecord, call: &Request<'_>) -> Option<String> {
@@ -274,9 +274,28 @@ impl RunStore {
             _ => return None,
         }
         let temporary = attempt.open_directory("tmp".as_ref()).ok()?;
-        let raw = temporary.read_stable(WAIT_MARKER.as_ref(), 64).ok()?;
-        let now = call.clock.wall_now().ok()?.as_micros() / 1_000_000;
-        match WaitKind::from_marker(std::str::from_utf8(&raw).ok()?, u64::try_from(now).ok()?)? {
+        let now = u64::try_from(call.clock.wall_now().ok()?.as_micros() / 1_000_000).ok()?;
+        // The marker sits in the lane's scratch (`tmp/candidate-N`), one file
+        // per waiting command. Bound how much a lane can make the host scan.
+        let kind = temporary
+            .entries()
+            .ok()?
+            .map_while(|entry| entry.ok())
+            .take(32)
+            .filter_map(|name| temporary.open_directory(&name).ok())
+            .find_map(|scratch| {
+                scratch
+                    .entries()
+                    .ok()?
+                    .map_while(|entry| entry.ok())
+                    .filter(|name| name.to_string_lossy().starts_with(WAIT_MARKER))
+                    .take(32)
+                    .find_map(|name| {
+                        let raw = scratch.read_stable(&name, 64).ok()?;
+                        WaitKind::from_marker(std::str::from_utf8(&raw).ok()?, now)
+                    })
+            })?;
+        match kind {
             WaitKind::Slot => {
                 Some("build slot: a cargo build waits for one of the host's build slots".to_owned())
             }
