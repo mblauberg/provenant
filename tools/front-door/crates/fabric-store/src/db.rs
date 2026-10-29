@@ -364,11 +364,10 @@ impl Store {
         }
         Ok(store)
     }
-    pub(crate) fn signal_changes(&self) -> Result<()> {
-        use provenant_os::changes::{Scope, bump};
-        bump(&self.state_root, Scope::Inbox).map_err(Error::ChangeSignal)?;
-        bump(&self.state_root, Scope::Board).map_err(Error::ChangeSignal)?;
-        Ok(())
+    /// Called after commit. The signal is a hint, so a failure never fails the write.
+    pub(crate) fn signal_changes(&self) {
+        use provenant_os::changes::{Scope, hint};
+        hint(&self.state_root, &[Scope::Inbox, Scope::Board]);
     }
     pub(crate) fn write<T>(
         &self,
@@ -383,7 +382,7 @@ impl Store {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let value = action(&tx)?;
         tx.commit()?;
-        self.signal_changes()?;
+        self.signal_changes();
         Ok(value)
     }
 }

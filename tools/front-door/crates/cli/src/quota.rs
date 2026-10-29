@@ -130,8 +130,6 @@ impl From<Power> for schedule::Power {
 }
 #[derive(Debug, Error)]
 pub(crate) enum EdgeError {
-    #[error("change signal failed after quota commit; reread state before retrying")]
-    ChangeSignal(#[source] io::Error),
     #[error(transparent)]
     Usage(#[from] provenant_telemetry::usage::UsageError),
     #[error(transparent)]
@@ -350,7 +348,7 @@ pub(crate) fn persist_provider_refusal(
         now_unix_seconds,
         resets_unix_seconds,
     )?;
-    write_intent(&directory, &intent, &mut records)
+    write_intent(&directory, state_root, &intent, &mut records)
 }
 
 pub(crate) fn persist_capacity_cooldown(
@@ -414,7 +412,7 @@ pub(crate) fn persist_capacity_cooldown(
     else {
         return Ok(());
     };
-    write_intent(&directory, &intent, &mut records)
+    write_intent(&directory, state_root, &intent, &mut records)
 }
 
 /// Record successful account-scoped provider evidence, without inventing quota.
@@ -494,7 +492,7 @@ pub(crate) fn persist_provider_success(
         expected: current,
         replacement: Some(next),
     };
-    write_intent(&directory, &intent, &mut records)?;
+    write_intent(&directory, state_root, &intent, &mut records)?;
 
     // Publish the changed row so an already-open menu receives the event.
     let mut bytes = Vec::new();
@@ -565,24 +563,20 @@ pub(crate) fn persist_provider_success(
             0o600,
             PublishMode::Replace,
         )?)?;
-        signal_quota(&directory)?;
+        signal_quota(state_root);
     }
     Ok(())
 }
 
-fn signal_quota(dir: &Directory) -> Result<(), EdgeError> {
-    let path = dir.current_path()?;
-    if path.file_name() == Some(OsStr::new("quota"))
-        && let Some(state) = path.parent()
-    {
-        provenant_os::changes::bump(state, provenant_core::changes::Scope::Quota)
-            .map_err(EdgeError::ChangeSignal)?;
-    }
-    Ok(())
+/// Publish the quota generation after a committed quota write. The state root
+/// is passed by each caller, so no signal depends on the directory's name.
+fn signal_quota(state: &Path) {
+    provenant_os::changes::hint(state, &[provenant_core::changes::Scope::Quota]);
 }
 
 fn write_intent(
     dir: &Directory,
+    state: &Path,
     intent: &UpdateIntent,
     records: &mut Vec<AccountRecord>,
 ) -> Result<(), EdgeError> {
@@ -624,7 +618,7 @@ fn write_intent(
             }
         }
     }
-    signal_quota(dir)?;
+    signal_quota(state);
     Ok(())
 }
 
@@ -751,6 +745,7 @@ fn credential_metadata(
 
 fn refresh_auth_metadata(
     dir: &Directory,
+    state: &Path,
     records: &mut Vec<AccountRecord>,
     entries: &provenant_providers::accounts::Settings,
     detected: &[Detection],
@@ -814,6 +809,7 @@ fn refresh_auth_metadata(
             .ok_or(QuotaError::NumberOutOfRange)?;
         write_intent(
             dir,
+            state,
             &UpdateIntent {
                 account: next.account.clone(),
                 expected: current,
@@ -938,6 +934,7 @@ fn execute(
         let home = std::env::var_os("HOME").map(PathBuf::from);
         refresh_auth_metadata(
             &dir,
+            roots.state.as_path(),
             &mut records,
             &entries,
             &detected,
@@ -948,7 +945,7 @@ fn execute(
             &policies, &records, &detected, &tick, now, &settings,
         )?;
         for drop in &plan.drops {
-            write_intent(&dir, drop, &mut records)?;
+            write_intent(&dir, roots.state.as_path(), drop, &mut records)?;
         }
         clean_orphan_dirs(&dir)?;
         plan
@@ -986,7 +983,7 @@ fn execute(
                 Err(QuotaError::Conflict) => continue,
                 Err(error) => return Err(error.into()),
             };
-            write_intent(&dir, &intent, &mut records)?;
+            write_intent(&dir, roots.state.as_path(), &intent, &mut records)?;
             current
         };
         // The durable claim owns this probe; never hold quota.lock across host I/O.
@@ -1029,7 +1026,7 @@ fn execute(
         {
             match schedule::complete(reserved, &token, finished, outcome, None) {
                 Ok(complete) => {
-                    write_intent(&dir, &complete, &mut records)?;
+                    write_intent(&dir, roots.state.as_path(), &complete, &mut records)?;
                     // Best effort: a history fault never fails the refresh.
                     if let Some(snapshot) = complete
                         .replacement
@@ -1078,7 +1075,7 @@ fn execute(
         0o600,
         PublishMode::Replace,
     )?)?;
-    signal_quota(&dir)?;
+    signal_quota(roots.state.as_path());
     // Publish all accounts even when the caller requests a filtered projection.
     let mut shown = schedule::report(
         &policies,
@@ -1690,6 +1687,7 @@ mod tests {
         record.revision = 1;
         write_intent(
             &dir,
+            temp.path(),
             &UpdateIntent {
                 account,
                 expected: None,
@@ -1742,6 +1740,7 @@ mod tests {
         let mut records = Vec::new();
         write_intent(
             &dir,
+            temp.path(),
             &UpdateIntent {
                 account: account.clone(),
                 expected: None,
@@ -1759,7 +1758,15 @@ mod tests {
             trigger: schedule::Trigger::Panel,
             power: schedule::Power::Ac,
         };
-        refresh_auth_metadata(&dir, &mut records, &entries, &detected, &tick, None)?;
+        refresh_auth_metadata(
+            &dir,
+            temp.path(),
+            &mut records,
+            &entries,
+            &detected,
+            &tick,
+            None,
+        )?;
         assert!(
             schedule::plan_tick(&policies, &records, &detected, &tick, 110)?
                 .batches
@@ -1771,7 +1778,15 @@ mod tests {
         let credential = profile.join("auth.json");
         std::fs::write(&credential, b"fake credential contents are never parsed")?;
         std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o000))?;
-        refresh_auth_metadata(&dir, &mut records, &entries, &detected, &tick, None)?;
+        refresh_auth_metadata(
+            &dir,
+            temp.path(),
+            &mut records,
+            &entries,
+            &detected,
+            &tick,
+            None,
+        )?;
         assert_eq!(
             schedule::plan_tick(&policies, &records, &detected, &tick, 110)?.batches,
             vec![vec![account.clone()]]
@@ -1790,6 +1805,7 @@ mod tests {
         .unwrap();
         write_intent(
             &dir,
+            temp.path(),
             &UpdateIntent {
                 account: account.clone(),
                 expected: Some(records[0].clone()),
@@ -1802,6 +1818,7 @@ mod tests {
             .unwrap();
         write_intent(
             &dir,
+            temp.path(),
             &UpdateIntent {
                 account: account.clone(),
                 expected: Some(records[0].clone()),
@@ -1809,7 +1826,15 @@ mod tests {
             },
             &mut records,
         )?;
-        refresh_auth_metadata(&dir, &mut records, &entries, &detected, &tick, None)?;
+        refresh_auth_metadata(
+            &dir,
+            temp.path(),
+            &mut records,
+            &entries,
+            &detected,
+            &tick,
+            None,
+        )?;
         assert!(
             schedule::plan_tick(&policies, &records, &detected, &tick, 113)?
                 .batches
@@ -1824,7 +1849,15 @@ mod tests {
             trigger: schedule::Trigger::Wake,
             ..tick
         };
-        refresh_auth_metadata(&dir, &mut records, &entries, &detected, &wake, None)?;
+        refresh_auth_metadata(
+            &dir,
+            temp.path(),
+            &mut records,
+            &entries,
+            &detected,
+            &wake,
+            None,
+        )?;
         assert_eq!(
             schedule::plan_tick(&policies, &records, &detected, &wake, 114)?.batches,
             vec![vec![account]]
@@ -1858,6 +1891,7 @@ mod tests {
             });
             write_intent(
                 &dir,
+                temp.path(),
                 &UpdateIntent {
                     account,
                     expected: None,
@@ -1996,7 +2030,9 @@ mod tests {
             expected: None,
             replacement: Some(initial),
         };
-        write_intent(&dir, &add, &mut records)?;
+        write_intent(&dir, temp.path(), &add, &mut records)?;
+        // The state root is explicit, so a directory not named quota still signals.
+        assert_eq!(provenant_os::changes::read(temp.path())?.quota, Some(1));
         assert_eq!(records.len(), 1);
         assert!(dir.open_verified_directory(OsStr::new("go")).is_ok());
 
@@ -2005,7 +2041,7 @@ mod tests {
             expected: Some(records[0].clone()),
             replacement: None,
         };
-        write_intent(&dir, &drop_intent, &mut records)?;
+        write_intent(&dir, temp.path(), &drop_intent, &mut records)?;
         assert_eq!(records.len(), 0);
         assert!(dir.open_verified_directory(OsStr::new("go")).is_err());
 

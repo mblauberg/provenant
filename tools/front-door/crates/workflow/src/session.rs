@@ -243,8 +243,6 @@ impl From<HostSessionId> for String {
 
 #[derive(Debug, Error)]
 pub enum SessionError {
-    #[error("change signal failed after checkpoint commit; reread state before retrying")]
-    ChangeSignal(#[source] std::io::Error),
     #[error("checkpoint exceeds 256 KiB")]
     TooLarge,
     #[error("checkpoint is not UTF-8")]
@@ -510,8 +508,13 @@ impl SessionStore {
             let _ = dir.unlink(OsStr::new(&revision_file(old.revision)));
         }
         remove_orphans(dir, &manifest);
-        provenant_os::changes::bump(self.root.as_path(), provenant_core::changes::Scope::Chair)
-            .map_err(SessionError::ChangeSignal)?;
+        // Only a chair-bound store writes the chair summary; other sessions do not signal Chair.
+        if self.chair.is_some() {
+            provenant_os::changes::hint(
+                self.root.as_path(),
+                &[provenant_core::changes::Scope::Chair],
+            );
+        }
         Ok(Saved {
             revision: current.revision,
             parent: current.parent,
@@ -1637,6 +1640,15 @@ mod tests {
         update_at(&chair, change("Next"), 1, "signal", 1).unwrap();
         let after = provenant_os::changes::read(root.as_path()).unwrap();
         assert!(after.chair > before.chair);
+    }
+    #[test]
+    fn session_save_without_chair_identity_does_not_signal_chair() {
+        let (_tmp, root, project) = setup();
+        let worker = store(&root, project, "worker");
+        saved(&worker, "notes\n");
+        saved(&worker, "more notes\n");
+        let after = provenant_os::changes::read(root.as_path()).unwrap();
+        assert_eq!(after.chair, None);
     }
     fn chair_store(root: &StateRoot, project: ProjectId) -> SessionStore {
         use provenant_core::{ActorId, HostId};

@@ -394,11 +394,10 @@ where
             PublishMode::Replace,
         )?
         .require_durable()?;
-    provenant_os::changes::bump(
+    provenant_os::changes::hint(
         roots.state.as_path(),
-        provenant_core::changes::Scope::Configuration,
-    )
-    .map_err(ConfigError::ChangeSignal)?;
+        &[provenant_core::changes::Scope::Configuration],
+    );
     crate::loader::read_with_domains(roots, sections)
 }
 

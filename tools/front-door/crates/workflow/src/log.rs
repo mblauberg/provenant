@@ -76,8 +76,6 @@ pub struct Page {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("change signal failed after log commit; reread state before retrying")]
-    ChangeSignal(#[source] std::io::Error),
     #[error(transparent)]
     Filesystem(#[from] FsError),
     #[error(transparent)]
@@ -335,8 +333,10 @@ impl LogStore {
         let count = Self::prune(&tx, retention, now)?;
         tx.commit()?;
         if count > 0 {
-            provenant_os::changes::bump(self.root.as_path(), provenant_core::changes::Scope::Chair)
-                .map_err(Error::ChangeSignal)?;
+            provenant_os::changes::hint(
+                self.root.as_path(),
+                &[provenant_core::changes::Scope::Chair],
+            );
         }
         Ok(count)
     }
@@ -473,8 +473,10 @@ impl LogStore {
         tx.execute("UPDATE meta SET total_appended=?1 WHERE id=1", [sequence])?;
         Self::prune(&tx, retention, now)?;
         tx.commit()?;
-        provenant_os::changes::bump(self.root.as_path(), provenant_core::changes::Scope::Chair)
-            .map_err(Error::ChangeSignal)?;
+        provenant_os::changes::hint(
+            self.root.as_path(),
+            &[provenant_core::changes::Scope::Chair],
+        );
         Ok(entry)
     }
     pub fn page(

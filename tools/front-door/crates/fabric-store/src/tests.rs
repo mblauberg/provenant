@@ -49,10 +49,10 @@ fn signal_failure_reports_a_committed_fabric_write() {
         .join(provenant_core::changes::FILE_NAME);
     std::fs::remove_file(&signal).unwrap();
     std::fs::create_dir(&signal).unwrap();
-    assert!(matches!(
-        store.send(&message(&fixture, 5), &fixture.request()),
-        Err(Error::ChangeSignal(_))
-    ));
+    // The signal is a hint: a forced failure must not fail the committed write.
+    store
+        .send(&message(&fixture, 5), &fixture.request())
+        .unwrap();
     assert_eq!(
         store
             .read_mail(project(), actor(3), Some(0), 10, &fixture.request())

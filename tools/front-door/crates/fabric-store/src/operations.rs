@@ -46,7 +46,7 @@ impl Store {
         )
         .map_err(Error::from)?;
         tx.commit().map_err(Error::from)?;
-        self.signal_changes().map_err(E::from)?;
+        self.signal_changes();
         Ok(result)
     }
 }

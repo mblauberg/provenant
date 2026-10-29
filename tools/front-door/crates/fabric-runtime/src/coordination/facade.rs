@@ -411,10 +411,6 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
                 // Fabric's held directories are traversed from `/`.
                 Self::filesystem_anchored(error, Some(std::path::Path::new("/")))
             }
-            Error::ChangeSignal(_) => Self::Io {
-                operation: "publish the change signal".into(),
-                path: None,
-            },
             Error::Io { path, .. } => Self::Io {
                 operation: "access Fabric store".into(),
                 path: Some(path.to_string_lossy().into_owned()),

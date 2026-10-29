@@ -99,8 +99,6 @@ pub enum ConfigError {
     },
     #[error("config edit refused: {reason}")]
     Edit { reason: &'static str },
-    #[error("config was committed but its change signal failed; re-read before retrying")]
-    ChangeSignal(#[source] std::io::Error),
     #[error("unknown knob {name}; close matches: {}", .close.join(", "))]
     UnknownKnob { name: String, close: Vec<String> },
     #[error("invalid value for knob {name} ({rule})")]
