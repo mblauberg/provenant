@@ -3103,11 +3103,7 @@ fn graph_ask_close(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), FacadeError> {
-    use provenant_fabric_runtime::inbox::{InboxFilter, InboxInput, InboxResult};
-    use provenant_records::inbox::RequestState;
-    let map = |e: provenant_fabric_runtime::inbox::InboxError| FacadeError::DispatchRefused {
-        reason: format!("close graph ask {}: {e}", scope.ask.ask_id),
-    };
+    use provenant_fabric_runtime::inbox::InboxInput;
     let InboxInput::Ask {
         operation_id: Some(operation),
         ..
@@ -3115,7 +3111,34 @@ fn graph_ask_close(
     else {
         return Err(FacadeError::StateCorrupt);
     };
-    // Find the request through the normal bounded inbox list. Closing never creates an ask.
+    graph_inbox_close(
+        service,
+        &scope.ask.session,
+        &operation,
+        actor,
+        &format!("close graph ask {}", scope.ask.ask_id),
+        budget,
+        cancel,
+    )
+}
+
+/// Supersede the open request raised under `operation` by `actor`, if any.
+/// Closing never creates a request, and a closed one is left as it is.
+fn graph_inbox_close(
+    service: &provenant_fabric_runtime::inbox::InboxService<'_>,
+    session: &str,
+    operation: &provenant_core::OperationId,
+    actor: provenant_core::ActorId,
+    context: &str,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    use provenant_fabric_runtime::inbox::{InboxFilter, InboxInput, InboxResult};
+    use provenant_records::inbox::RequestState;
+    let map = |e: provenant_fabric_runtime::inbox::InboxError| FacadeError::DispatchRefused {
+        reason: format!("{context}: {e}"),
+    };
+    // Find the request through the normal bounded inbox list.
     let mut cursor = None;
     loop {
         let InboxResult::Listed {
@@ -3125,7 +3148,7 @@ fn graph_ask_close(
                 InboxInput::List {
                     extra: Default::default(),
                     id: None,
-                    session: Some(scope.ask.session.clone()),
+                    session: Some(session.into()),
                     state: InboxFilter::All,
                     limit: 50,
                     cursor,
@@ -3139,7 +3162,7 @@ fn graph_ask_close(
         };
         if let Some(item) = items
             .into_iter()
-            .find(|item| item.operation_id == operation && item.chair_actor == actor)
+            .find(|item| &item.operation_id == operation && item.chair_actor == actor)
         {
             if matches!(
                 item.state,
@@ -3171,6 +3194,51 @@ fn graph_ask_close(
         };
         cursor = Some(next);
     }
+}
+
+/// Close the loop requests a checkpoint from before node asks raised under
+/// `actor`, by their original inbox operation. Only cancel does this; such a
+/// checkpoint is never migrated.
+fn graph_legacy_loop_close(
+    service: &provenant_fabric_runtime::inbox::InboxService<'_>,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    actor: provenant_core::ActorId,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    let Some(instance_id) = checkpoint.instance_id.as_deref() else {
+        return Ok(());
+    };
+    let asks = provenant_fabric_runtime::graph::legacy_loop_asks(checkpoint);
+    for ask in asks.iter().filter(|ask| ask.actor == actor.to_string()) {
+        let digest = provenant_records::CanonicalV1::record_digest(
+            "graph-loop-inbox",
+            1,
+            &(
+                checkpoint.graph_id.as_str(),
+                instance_id,
+                ask.node_id.as_str(),
+                ask.rounds,
+                ask.session.as_str(),
+            ),
+        )
+        .map_err(|_| FacadeError::StateCorrupt)?;
+        let operation = provenant_core::OperationId::parse(&format!(
+            "loop-{}",
+            provenant_core::hex(digest.as_bytes())
+        ))
+        .map_err(|_| FacadeError::StateCorrupt)?;
+        graph_inbox_close(
+            service,
+            &ask.session,
+            &operation,
+            actor,
+            &format!("close legacy loop ask {}", ask.node_id),
+            budget,
+            cancel,
+        )?;
+    }
+    Ok(())
 }
 
 fn load_graph_prices(assets: &std::path::Path) -> Result<provenant_telemetry::PriceTable, String> {
@@ -4779,6 +4847,9 @@ impl Factory {
             {
                 first_error.get_or_insert_with(|| FacadeError::io("close cancelled graph asks"));
             }
+            if let Err(error) = self.close_legacy_loop_asks(&checkpoint, budget, cancel) {
+                first_error.get_or_insert(error);
+            }
             if let Some(error) = first_error {
                 return Err(error);
             }
@@ -4823,6 +4894,37 @@ fn graph_snapshot(
 }
 
 impl Factory {
+    /// Close the inbox requests of a checkpoint from before node asks, one
+    /// inbox actor at a time.
+    fn close_legacy_loop_asks(
+        &self,
+        checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<(), FacadeError> {
+        let actors: std::collections::BTreeSet<_> =
+            provenant_fabric_runtime::graph::legacy_loop_asks(checkpoint)
+                .into_iter()
+                .map(|ask| ask.actor)
+                .collect();
+        for actor in actors {
+            let mut identity = self.context.identity.clone();
+            identity.inbox.actor = actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
+            let service = provenant_fabric_runtime::inbox::InboxService::open(
+                &self.context.roots.state,
+                &identity,
+                &self.clock,
+                budget,
+                cancel,
+            )
+            .map_err(|error| FacadeError::DispatchRefused {
+                reason: format!("close legacy loop asks: {error}"),
+            })?;
+            graph_legacy_loop_close(&service, checkpoint, identity.inbox.actor, budget, cancel)?;
+        }
+        Ok(())
+    }
+
     /// Cancel one live graph attempt. A missing checkpoint reference (a crash
     /// between acceptance and the save) is recovered from the stable operation ID.
     fn cancel_graph_attempt(
@@ -5832,6 +5934,143 @@ mod graph_ask_inbox_tests {
             .as_ref()
             .and_then(|o| o.verdict.as_deref());
         assert_eq!(verdict, Some("ship"));
+        Ok(())
+    }
+
+    #[test]
+    fn cancel_closes_a_legacy_loop_request_by_its_original_operation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+        use provenant_records::inbox::{RequestDraft, RequestKind, RequestOption};
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        let identity = Identity {
+            project: provenant_core::ProjectId::from_bytes([2; 16]),
+            host,
+            inbox: provenant_fabric_runtime::identity::Address::new(host, "chair")?,
+            client: "test".into(),
+            cwd: provenant_records::AbsolutePath::new(&base)?,
+            common_dir: provenant_records::AbsolutePath::new(&base)?,
+            federation: None,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = || WaitBudget::cli(clock.mono_now(), 5);
+        let service = InboxService::open(&roots.state, &identity, &clock, budget()?, &cancel)?;
+        let mut owner = InboxOwner {
+            service: &service,
+            clock: &clock,
+            cancel: &cancel,
+            actor: identity.inbox.actor.to_string(),
+        };
+        // Any saved checkpoint with an instance ID stands in for the legacy one.
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "legacy-loop", "decision_session": "chair-session",
+            "nodes": [{"id": "revise", "kind": "decide", "access": "read_only", "decide": {
+                "question": "Ship the change?",
+                "options": [{"id": "ship", "label": "Ship"}, {"id": "hold", "label": "Hold"}]}}]
+        }))?;
+        let mut journal = MemoryJournal::default();
+        advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let mut checkpoint = journal.0.take().ok_or("missing checkpoint")?;
+        let instance = checkpoint.instance_id.clone().ok_or("missing instance")?;
+        checkpoint.asks.clear();
+        checkpoint.ask_actor = None;
+        let node = &mut checkpoint.nodes[0];
+        node.extra.insert(
+            "loop_decision_actor".into(),
+            serde_json::json!(identity.inbox.actor.to_string()),
+        );
+        node.extra.insert(
+            "loop_asks".into(),
+            serde_json::json!([
+                {"rounds": 2, "session": "legacy-session", "resolved": false, "closed": false}
+            ]),
+        );
+
+        // The request as a pre-ask loop raised it, under its original operation.
+        let digest = provenant_records::CanonicalV1::record_digest(
+            "graph-loop-inbox",
+            1,
+            &(
+                "legacy-loop",
+                instance.as_str(),
+                "revise",
+                2usize,
+                "legacy-session",
+            ),
+        )?;
+        let operation = provenant_core::OperationId::parse(&format!(
+            "loop-{}",
+            provenant_core::hex(digest.as_bytes())
+        ))?;
+        let option = |id: &str| RequestOption {
+            extra: Default::default(),
+            id: id.into(),
+            label: id.into(),
+            description: id.into(),
+        };
+        service.execute(
+            InboxInput::Ask {
+                extra: Default::default(),
+                session: "legacy-session".into(),
+                request: Box::new(RequestDraft {
+                    extra: Default::default(),
+                    supersedes: None,
+                    deadline: None,
+                    work: None,
+                    kind: RequestKind::Decision,
+                    title: "Graph loop revise exhausted".into(),
+                    body: "Graph legacy-loop, loop revise exhausted after 2 rounds.".into(),
+                    blocking: true,
+                    options: vec![option("stop"), option("extend"), option("accept")],
+                    recommended_option_id: None,
+                    proceeding_with: None,
+                }),
+                operation_id: Some(operation),
+            },
+            budget()?,
+            &cancel,
+        )?;
+        let states = || -> Result<Vec<RequestState>, Box<dyn std::error::Error>> {
+            let InboxResult::Listed { items, .. } = service.execute(
+                InboxInput::List {
+                    extra: Default::default(),
+                    id: None,
+                    session: Some("legacy-session".into()),
+                    state: InboxFilter::All,
+                    limit: 50,
+                    cursor: None,
+                },
+                budget()?,
+                &cancel,
+            )?
+            else {
+                return Err("missing inbox listing".into());
+            };
+            Ok(items.into_iter().map(|item| item.state).collect())
+        };
+        assert_eq!(states()?, [RequestState::Open]);
+        for _ in 0..2 {
+            graph_legacy_loop_close(
+                &service,
+                &checkpoint,
+                identity.inbox.actor,
+                budget()?,
+                &cancel,
+            )?;
+            assert_eq!(states()?, [RequestState::Superseded]);
+        }
         Ok(())
     }
 }

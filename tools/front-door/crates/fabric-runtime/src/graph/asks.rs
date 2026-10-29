@@ -188,9 +188,6 @@ pub fn loop_ask(graph_id: &str, node: &str, rounds: usize, session: &str) -> Nod
     ask
 }
 
-/// The longest decide timeout, 100 years, so a deadline set from any present
-/// wall time is representable. An unrepresentable deadline is never stored.
-pub(super) const MAX_TIMEOUT_SECONDS: u64 = 100 * 366 * 86_400;
 const PREVIOUS_ANSWER: &str = "\n\nThe previous answer was not applied: ";
 
 /// The rendered decide request body. A rejected previous answer is noted at
@@ -327,11 +324,16 @@ pub(super) fn validate_decide(
     {
         return Err("decide default must name an option, and a timeout needs a default");
     }
-    if spec
-        .timeout_seconds
-        .is_some_and(|seconds| seconds == 0 || seconds > MAX_TIMEOUT_SECONDS)
-    {
-        return Err("decide timeout_seconds must be from 1 to 3162240000 (100 years)");
+    // A timeout must be a representable duration that fits the wall-time
+    // range at all; the deadline itself is checked when the ask is raised.
+    if spec.timeout_seconds.is_some_and(|seconds| {
+        seconds == 0
+            || DurationMicros::from_seconds(seconds)
+                .ok()
+                .and_then(|duration| WallTime::from_micros(0).ok()?.checked_add(duration).ok())
+                .is_none()
+    }) {
+        return Err("decide timeout_seconds must be positive and end within the wall-time range");
     }
     if decide_body(graph_id, &node.id, spec, None).len()
         > provenant_records::inbox::REQUEST_BODY_BYTES
@@ -446,20 +448,24 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
             // advance is refused and retried, so the timeout is never lost.
             let wake_at = match spec.timeout_seconds {
                 None => None,
-                Some(seconds) => Some(
-                    owner
-                        .wall_now()
-                        .and_then(|now| {
-                            now.checked_add(DurationMicros::from_seconds(seconds).ok()?)
-                                .ok()
-                        })
+                Some(seconds) => {
+                    let now = owner.wall_now().ok_or_else(|| {
+                        GraphError::Refused(format!(
+                            "node {}: no wall clock to set its decide deadline; retry the advance",
+                            node.id
+                        ))
+                    })?;
+                    let deadline = DurationMicros::from_seconds(seconds)
+                        .ok()
+                        .and_then(|duration| now.checked_add(duration).ok())
                         .ok_or_else(|| {
                             GraphError::Refused(format!(
-                                "node {}: no wall clock to set its decide deadline; retry the advance",
+                                "node {}: decide deadline passes the last representable wall time; lower timeout_seconds",
                                 node.id
                             ))
-                        })?,
-                ),
+                        })?;
+                    Some(deadline)
+                }
             };
             identity::<R, J::Error>(checkpoint, owner)?;
             let previous = latest.map(|position| &checkpoint.asks[position]);

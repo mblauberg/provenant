@@ -634,12 +634,15 @@ reuse an old answer. A checkpoint written before node asks, whose nodes still
 carry `loop_asks`, `loop_inbox_error` or `loop_decision_actor`, is not
 migrated: advancing or resuming it is refused with a message that names
 `graph cancel`, which still works on it, and a rerun under a new `graph_id`.
+Cancelling it also supersedes each open loop request under the inbox operation
+it was first sent with, without rewriting the checkpoint.
 
 A node with `kind: "decide"` and `access: "read_only"` declares a `decide`
 object: a `question`, 2 to 16 `options` (each an `id` that is a valid inbox
 option ID, a `label` and an optional `description`), an optional `default`
-naming an option, an optional `timeout_seconds` from 1 to 3162240000 (100
-years, so every deadline is representable; a timeout needs a default) and an
+naming an option, an optional positive `timeout_seconds` whose deadline falls
+within the wall-time range (a timeout needs a default; an advance whose
+deadline from now would pass the last representable wall time is refused) and an
 optional inbox `session`. Without `session`, the graph's
 top-level `decision_session` is used; one of the two is required. A decide node
 takes no prompt, route, worktree, inputs, delivery, `required_verdict` or
@@ -703,9 +706,11 @@ graph advance compares the deadline with the host wall clock itself.
   `::a_budget_pause_raises_one_ask_and_an_extend_answer_resumes`;
   `::a_pause_answer_can_cancel_and_a_rejected_answer_asks_again`;
   `::a_planner_fragment_can_add_a_decide_node_when_its_kinds_allow_it`;
+  `::decide_timeouts_past_a_century_are_kept_until_the_deadline_overflows`;
   `crates/fabric-runtime/src/graph/loop_tests.rs::loop_checkpoint_from_before_node_asks_refuses_to_advance_but_can_be_cancelled`;
   `src/fabric.rs::graph_ask_inbox_tests::graph_ask_inbox_replays_requests_and_acknowledged_answers`;
   `::graph_decide_asks_stay_fresh_across_repeated_cancel_and_resume`;
+  `::cancel_closes_a_legacy_loop_request_by_its_original_operation`;
   `src/fabric/loop_repair_tests.rs::bound_loop_inbox_keeps_original_actor_under_another_client`.
 - Owner: `crates/fabric-runtime/src/graph/asks.rs`, `src/fabric.rs`
 
@@ -886,7 +891,9 @@ can hold:
 The runtime cuts each runtime string to its cap when it stores it. Lists that
 grow during a run keep only their newest entries and count the rest:
 `unknown_usage` keeps the 64 lines of the most recently settled attempts,
-ordered by each attempt's `settled` sequence, with `unknown_usage_omitted`, and
+ordered by each attempt's `settled` sequence (a delivery retry clears it, so
+the retried attempt is ordered by when it settles again), with
+`unknown_usage_omitted`, and
 `usage_events` keeps 128 events with `usage_events_omitted`. Events are emitted
 once, when their attempt settles. Extensions have no count or length cap of
 their own; the bound counts the saved extensions at their actual size, and an
@@ -906,6 +913,7 @@ saved can be read back.
   `::a_loop_extension_past_the_envelope_pauses_instead_of_growing`;
   `::usage_events_keep_the_newest_and_count_the_rest_without_churn`;
   `::usage_warnings_keep_the_most_recently_settled_attempts`;
+  `::a_delivery_retry_takes_a_fresh_settlement_order`;
   `::long_and_many_extensions_are_kept_and_count_toward_the_envelope`;
   `::a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit`
 - Owner: `crates/fabric-runtime/src/graph/envelope.rs`

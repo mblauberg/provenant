@@ -30,7 +30,7 @@ pub use asks::{
     close_resolved_asks, loop_ask,
 };
 pub use composites::CompositeSpec;
-pub use loops::{LoopDecision, LoopRound, LoopSpec};
+pub use loops::{LegacyLoopAsk, LoopDecision, LoopRound, LoopSpec, legacy_loop_asks};
 pub use plans::{Expansion, PlanSpec, RemainingBudgets};
 
 const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
@@ -987,6 +987,8 @@ impl FileJournal {
                     node.state = NodeState::Running;
                     last.state = AttemptState::Starting;
                     last.outcome = None;
+                    // The retry settles again and takes a fresh settlement order.
+                    last.settled = 0;
                     changed = true;
                 }
             }

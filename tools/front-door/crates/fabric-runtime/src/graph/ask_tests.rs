@@ -33,6 +33,9 @@ fn state(run: &GraphRun, id: &str) -> NodeState {
     run.checkpoint.nodes.iter().find(|n| n.id == id).unwrap().state
 }
 
+/// Seconds in a Julian year.
+const YEAR: u64 = 31_557_600;
+
 fn at(seconds: i64) -> provenant_core::WallTime {
     provenant_core::WallTime::from_micros(1_800_000_000_000_000 + seconds * 1_000_000).unwrap()
 }
@@ -173,6 +176,22 @@ fn decide_deadlines_wait_for_a_clock_instead_of_dropping_the_timeout() {
 }
 
 #[test]
+fn decide_timeouts_past_a_century_are_kept_until_the_deadline_overflows() {
+    let owner = || FakeOwner { now: Some(at(0)), ..Default::default() };
+    let long = routed(Some(YEAR * 200));
+    let waiting = advance(&long, &mut owner(), &mut MemoryJournal::default()).unwrap();
+    assert_eq!(waiting.checkpoint.asks[0].wake_at, Some(at(YEAR as i64 * 200)));
+
+    // Valid against the wall-time range, but past it from the present time.
+    let late = routed(Some(YEAR * 8_000));
+    validate_plan(&late).unwrap();
+    let mut journal = MemoryJournal::default();
+    let error = advance(&late, &mut owner(), &mut journal).unwrap_err();
+    assert!(matches!(&error, GraphError::Refused(reason) if reason.contains("last representable wall time")), "{error}");
+    assert!(journal.0.as_ref().is_none_or(|checkpoint| checkpoint.asks.is_empty()));
+}
+
+#[test]
 fn completion_closes_a_pause_ask_left_by_lowered_limits() {
     let mut document = graph(vec![node("one", route("first")), node("two", route("first"))]);
     document.decision_session = Some("chair-session".into());
@@ -292,8 +311,8 @@ fn decide_configuration_is_checked_against_the_inbox_contract() {
         ("timeout without default", |n| n.decide.as_mut().unwrap().default = None),
         ("zero timeout", |n| n.decide.as_mut().unwrap().timeout_seconds = Some(0)),
         ("empty question", |n| n.decide.as_mut().unwrap().question = " ".into()),
-        ("timeout past 100 years", |n| {
-            n.decide.as_mut().unwrap().timeout_seconds = Some(asks::MAX_TIMEOUT_SECONDS + 1)
+        ("timeout past the wall-time range", |n| {
+            n.decide.as_mut().unwrap().timeout_seconds = Some(YEAR * 9_000)
         }),
         ("unrepresentable timeout", |n| n.decide.as_mut().unwrap().timeout_seconds = Some(u64::MAX)),
         ("body past the inbox limit", |n| n.decide.as_mut().unwrap().question = "q".repeat(8_000)),
@@ -306,7 +325,7 @@ fn decide_configuration_is_checked_against_the_inbox_contract() {
         assert!(validate_plan(&document).is_err(), "{name}");
     }
     let mut longest = base.clone();
-    longest.nodes[0].decide.as_mut().unwrap().timeout_seconds = Some(asks::MAX_TIMEOUT_SECONDS);
+    longest.nodes[0].decide.as_mut().unwrap().timeout_seconds = Some(YEAR * 1_000);
     // The question may use whatever the rendered body leaves of the inbox limit.
     longest.nodes[0].decide.as_mut().unwrap().question = "q".repeat(7_800);
     validate_plan(&longest).unwrap();

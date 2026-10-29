@@ -509,3 +509,55 @@ fn usage_warnings_keep_the_most_recently_settled_attempts() {
     assert_eq!(checkpoint.unknown_usage.len(), MAX_UNKNOWN_USAGE);
     assert!(checkpoint.unknown_usage.iter().all(|line| line.starts_with("node one ")), "{:?}", checkpoint.unknown_usage);
 }
+
+#[test]
+fn a_delivery_retry_takes_a_fresh_settlement_order() {
+    use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
+    use std::os::unix::fs::PermissionsExt;
+    let temp = crate::test_support::tempdir().unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let attempt = provenant_core::AttemptId::from_bytes([2; 16]);
+    let document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    let mut failed = terminal(AttemptOutcome::OtherFailure);
+    if let AttemptObservation::Terminal { attempt_ref, .. } = &mut failed {
+        *attempt_ref = Some(format!("host/{attempt}"));
+    }
+    // One settles first and fails delivery; two settles after it.
+    let mut owner = FakeOwner {
+        observations: [failed, terminal(AttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    let limits = crate::config::GraphLimits::default();
+    {
+        let mut journal = FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+        journal
+            .bind(GraphExecution {
+                extra: Default::default(),
+                integration_base: None,
+                directory: base.clone(),
+                document: document.clone(),
+            })
+            .unwrap();
+        let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
+        let settled: Vec<_> = run.checkpoint.nodes.iter().map(|n| n.attempts[0].settled).collect();
+        assert_eq!(settled, [1, 2]);
+    }
+    FileJournal::retry_delivered_attempt(&root, project, attempt, budget, &cancel, &clock).unwrap();
+    let reopened = FileJournal::read_checkpoint(&root, project, &document.graph_id).unwrap().unwrap();
+    assert_eq!(reopened.nodes[0].attempts[0].settled, 0);
+
+    let mut journal = FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    let mut owner = FakeOwner { observations: [terminal(AttemptOutcome::Succeeded)].into(), ..Default::default() };
+    let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!((run.checkpoint.nodes[0].attempts[0].settled, run.checkpoint.settlements), (3, 3));
+    assert!(run.checkpoint.unknown_usage.last().unwrap().starts_with("node one "));
+}
