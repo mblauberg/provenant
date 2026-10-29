@@ -93,6 +93,7 @@ cargo_incremental = true       # CARGO_INCREMENTAL=1
 cargo_debug = "full"           # CARGO_PROFILE_DEV_DEBUG
 build_dir_max_bytes = 21474836480
 build_dir_grace_seconds = 900
+build_dir_survey_interval_seconds = 300
 ```
 
 `cargo_debug` takes any Cargo `debug` level: `none`, `line-directives-only`,
@@ -115,7 +116,8 @@ not counted or collected here.
 
 Free locks do not prove a directory is unused: test and run binaries keep
 executing after Cargo drops its locks, and Cargo can open a lock file just
-before it takes the lock. A directory whose newest modification is within
+before it takes the lock. The grace does not cover Cargo opening an existing
+lock file without writing anything; the `flock` probe covers that case. A directory whose newest modification is within
 `build_dir_grace_seconds` (15 minutes by default) is therefore never removed,
 and neither is one written after the sweep measured it. These directories still
 count toward the cap and are reported as `recent`. Set the grace to 0 to turn
@@ -133,6 +135,13 @@ The walk that measures the caches takes no lock, and a sweep that finds the cap
 and the floor already met stops there. Only removal holds the host admission
 lock, so no lane is admitted mid-removal; it probes each candidate again under
 that lock. A settling lane waits at most 5 seconds for it.
+
+Settlement does not walk the caches every time. It walks only when free space is
+below `gc.free_floor`, when the last walk is older than
+`build_dir_survey_interval_seconds` (5 minutes by default), or when that walk
+found the total within 10% of the cap. The last result is kept in the state
+root, and a settlement that finds another walk running skips. `provenant gc`
+always walks.
 
 `provenant gc` reports the directories removed or reclaimable, the bytes
 reclaimed, how many bytes of lane build output remain and how many directories

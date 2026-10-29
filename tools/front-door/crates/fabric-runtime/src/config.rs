@@ -131,6 +131,9 @@ pub struct Lanes {
     /// Seconds after its newest write during which a profile directory is
     /// never removed; 15 minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
+    /// Seconds between settlement-triggered walks of the lane caches; 5
+    /// minutes unless set.
+    pub build_dir_survey_interval_seconds: Option<u64>,
 }
 
 impl Lanes {
@@ -142,6 +145,7 @@ impl Lanes {
             cargo_debug: self.cargo_debug.clone(),
             build_dir_max_bytes: self.build_dir_max_bytes,
             build_dir_grace_seconds: self.build_dir_grace_seconds,
+            build_dir_survey_interval_seconds: self.build_dir_survey_interval_seconds,
         }
     }
 }

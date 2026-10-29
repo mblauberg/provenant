@@ -27,6 +27,11 @@ pub struct LaneBuildSettings {
     /// execute after Cargo drops its locks, and Cargo may be opening its lock
     /// files. 15 minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
+    /// Seconds between walks of the lane caches by settlement-triggered
+    /// collection. Within it, a settlement skips the walk unless free space is
+    /// below the floor or the last walk found the total near the cap. 5
+    /// minutes unless set.
+    pub build_dir_survey_interval_seconds: Option<u64>,
 }
 /// Cargo's accepted `debug` levels, including the legacy numeric and boolean forms.
 const CARGO_DEBUG_LEVELS: [&str; 10] = [
@@ -45,6 +50,9 @@ const CARGO_DEBUG_LEVELS: [&str; 10] = [
 pub const DEFAULT_BUILD_DIR_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 /// Recency grace for lane build output when `build_dir_grace_seconds` is unset.
 pub const DEFAULT_BUILD_DIR_GRACE_SECONDS: u64 = 15 * 60;
+/// Interval between settlement-triggered walks when
+/// `build_dir_survey_interval_seconds` is unset.
+pub const DEFAULT_BUILD_DIR_SURVEY_INTERVAL_SECONDS: u64 = 5 * 60;
 /// The asset's -1 sentinel selects the host-dependent default.
 pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -143,6 +151,10 @@ impl LaneBuildSettings {
     pub fn build_dir_grace_seconds(&self) -> u64 {
         self.build_dir_grace_seconds
             .unwrap_or(DEFAULT_BUILD_DIR_GRACE_SECONDS)
+    }
+    pub fn build_dir_survey_interval_seconds(&self) -> u64 {
+        self.build_dir_survey_interval_seconds
+            .unwrap_or(DEFAULT_BUILD_DIR_SURVEY_INTERVAL_SECONDS)
     }
     pub fn build_limit(&self, total_bytes: u64) -> u64 {
         self.max_concurrent_builds
