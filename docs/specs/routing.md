@@ -112,6 +112,13 @@ capture. Tests live in `crates/routing/src/policy.rs::tests`,
 `crates/run/src/policy.rs::tests` and
 `tests/dispatch_provider.rs::policy_empty_result_falls_back_without_a_chair_turn`.
 
+Policy rules and pacing overrides use the same UTC `Schedule` shape:
+`starts`, `expires` and zero or more hour windows. Windows may list
+Monday-based weekday indexes (Monday `0` through Sunday `6`); an empty list matches every day.
+Start is inclusive, expiry and window end are exclusive, and overnight windows
+wrap midnight. `provenant route override list` displays both policy rules and
+pacing overrides, including active state and remaining expiry time.
+
 ### Go monthly allowance floor
 
 Every OpenCode Go candidate, including an explicit or uncatalogued exact ID,

@@ -66,7 +66,7 @@ pub struct PacingOverride {
     pub account: Option<String>,
     pub provider: Option<String>,
     pub policy: PacingPolicy,
-    pub expires_unix_seconds: i64,
+    pub schedule: crate::Schedule,
 }
 
 /// Fixed deadlines use host-local time. Reset references use fresh quota facts.
@@ -380,6 +380,44 @@ impl DomainConfig for RoutingConfig {
             });
         }
         let catalogue = Catalogue::bundled().ok();
+        let validate_fallback = |policy: &crate::ModelPolicy,
+                                 field: &str,
+                                 errors: &mut Vec<SectionError>| {
+            let Some(model) = policy.result.fallback.as_ref() else {
+                return;
+            };
+            let entry = catalogue
+                .as_ref()
+                .and_then(|catalogue| catalogue.model(model));
+            if entry.is_none() {
+                errors.push(SectionError {
+                    field: format!("{field}.result.fallback"),
+                    code: "unknown_model",
+                });
+            } else if policy
+                .result
+                .fallback_effort
+                .as_ref()
+                .is_some_and(|effort| !entry.is_some_and(|entry| entry.efforts.contains(effort)))
+            {
+                errors.push(SectionError {
+                    field: format!("{field}.result.fallback_effort"),
+                    code: "unsupported_effort",
+                });
+            }
+        };
+        validate_fallback(
+            &self.model_policy.defaults,
+            "model_policy.defaults",
+            &mut errors,
+        );
+        for (index, rule) in self.model_policy.rules.iter().enumerate() {
+            validate_fallback(
+                &rule.policy,
+                &format!("model_policy.rules.{index}"),
+                &mut errors,
+            );
+        }
         self.review.validate(self, catalogue.as_ref(), &mut errors);
         for (name, route) in &self.routes {
             if catalogue
@@ -528,7 +566,30 @@ impl DomainConfig for RoutingConfig {
                         .iter()
                         .any(|r| r.adapter.id() == p)
                 })
-                || override_.expires_unix_seconds <= 0
+                || override_
+                    .schedule
+                    .expires
+                    .is_none_or(|expires| expires <= 0)
+                || override_
+                    .schedule
+                    .starts
+                    .zip(override_.schedule.expires)
+                    .is_some_and(|(starts, expires)| starts >= expires)
+                || override_.schedule.windows.len() > 16
+                || override_.schedule.windows.iter().any(|window| {
+                    window.start_hour >= 24
+                        || window.end_hour > 24
+                        || window.start_hour == window.end_hour
+                        || window.weekdays.len() > 7
+                        || window.weekdays.iter().any(|day| *day > 6)
+                        || window
+                            .weekdays
+                            .iter()
+                            .copied()
+                            .collect::<BTreeSet<_>>()
+                            .len()
+                            != window.weekdays.len()
+                })
             {
                 errors.push(SectionError {
                     field: format!("pacing_overrides[{index}]"),
@@ -1026,6 +1087,27 @@ mod tests {
     use crate::{AccessContext, Fallback, RouteChoice, RouteRequest, RoutingContext, resolve};
     use provenant_providers::{AvailabilityRecord, REGISTRY};
     use provenant_records::{RouteEligibility, RouteReadiness};
+
+    #[test]
+    fn model_policy_fallbacks_are_validated_against_catalogue_on_load()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = RoutingConfig::default();
+        config.model_policy.defaults.result.fallback =
+            Some(ModelId::parse("codex/not-catalogued")?);
+        let errors = config.validate();
+        assert!(errors.iter().any(|error| {
+            error.field == "model_policy.defaults.result.fallback" && error.code == "unknown_model"
+        }));
+
+        config.model_policy.defaults.result.fallback = Some(ModelId::parse("codex/gpt-6-luna")?);
+        config.model_policy.defaults.result.fallback_effort = Some("unsupported".into());
+        let errors = config.validate();
+        assert!(errors.iter().any(|error| {
+            error.field == "model_policy.defaults.result.fallback_effort"
+                && error.code == "unsupported_effort"
+        }));
+        Ok(())
+    }
 
     #[test]
     fn bundled_go_models_resolve_and_only_flash_models_have_provisional_pool_weights()

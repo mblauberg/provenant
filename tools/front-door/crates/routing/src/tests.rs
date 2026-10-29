@@ -1773,17 +1773,17 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         ("spend", serde_json::json!([]), false),
         (
             "pace",
-            serde_json::json!([{"account":"codex/opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
+            serde_json::json!([{"account":"codex/opaque-account", "policy":"spend", "schedule":{"expires":101}}]),
             false,
         ),
         (
             "pace",
-            serde_json::json!([{"account":"claude/opaque-account", "policy":"spend", "expires_unix_seconds":101}]),
+            serde_json::json!([{"account":"claude/opaque-account", "policy":"spend", "schedule":{"expires":101}}]),
             true,
         ),
         (
             "pace",
-            serde_json::json!([{"account":"opaque-account", "policy":"spend", "expires_unix_seconds":100}]),
+            serde_json::json!([{"account":"opaque-account", "policy":"spend", "schedule":{"expires":100}}]),
             true,
         ),
     ] {
@@ -2895,7 +2895,7 @@ fn account_profile_and_overrides_govern_free_models() -> Result<(), Box<dyn std:
     assert!(!blocked(serde_json::json!({"pacing":{
         "accounts":{"zen":{"policy":"max"}}, "free":{"opencode":{"policy":"off"}}}}))?);
     // An active override outranks the account profile; an expired one does not.
-    let override_row = |expires| serde_json::json!([{"account":"zen", "policy":"spend", "expires_unix_seconds":expires}]);
+    let override_row = |expires| serde_json::json!([{"account":"zen", "policy":"spend", "schedule":{"expires":expires}}]);
     assert!(!blocked(serde_json::json!({
         "pacing":{"accounts":{"zen":{"policy":"off"}}}, "pacing_overrides": override_row(1_000_000)
     }))?);

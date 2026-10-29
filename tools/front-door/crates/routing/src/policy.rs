@@ -214,15 +214,42 @@ impl ModelPolicy {
     }
 }
 
+/// Reusable UTC activation schedule for policies, pacing overrides and future
+/// time-scoped routing records. Weekdays use Monday-based indexes: Monday is 0.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Schedule {
+    pub starts: Option<i64>,
+    pub expires: Option<i64>,
+    pub windows: Vec<ScheduleWindow>,
+}
+impl Schedule {
+    pub fn active(&self, now: i64) -> bool {
+        self.starts.is_none_or(|start| now >= start)
+            && self.expires.is_none_or(|end| now < end)
+            && (self.windows.is_empty() || self.windows.iter().any(|window| window.active(now)))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UtcWindow {
+pub struct ScheduleWindow {
+    /// Monday-based weekday indexes, Monday = 0 through Sunday = 6. Empty means every day.
+    #[serde(default)]
+    pub weekdays: Vec<u8>,
     pub start_hour: u8,
     pub end_hour: u8,
 }
-impl UtcWindow {
+impl ScheduleWindow {
     fn active(&self, now: i64) -> bool {
         let hour = now.rem_euclid(86_400) / 3600;
+        let mut day = (now.div_euclid(86_400) + 3).rem_euclid(7) as u8;
+        if self.start_hour >= self.end_hour && hour < i64::from(self.end_hour) {
+            day = (day + 6) % 7;
+        }
+        if !self.weekdays.is_empty() && !self.weekdays.contains(&day) {
+            return false;
+        }
         if self.start_hour < self.end_hour {
             hour >= i64::from(self.start_hour) && hour < i64::from(self.end_hour)
         } else {
@@ -237,10 +264,7 @@ pub struct ModelPolicyRule {
     pub model: Option<ModelId>,
     /// Canonical adapter/key or a registry-free account key.
     pub account: Option<String>,
-    pub starts_unix_seconds: Option<i64>,
-    pub expires_unix_seconds: Option<i64>,
-    /// Any matching UTC window activates this rule. Empty means all day.
-    pub windows: Vec<UtcWindow>,
+    pub schedule: Schedule,
     pub policy: ModelPolicy,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,9 +329,7 @@ impl ModelPolicies {
                             a == key || a == format!("{}/{key}", model.adapter())
                         })
                     })
-                    && rule.starts_unix_seconds.is_none_or(|start| now >= start)
-                    && rule.expires_unix_seconds.is_none_or(|end| now < end)
-                    && (rule.windows.is_empty() || rule.windows.iter().any(|w| w.active(now)))
+                    && rule.schedule.active(now)
             })
             .collect();
         matching.sort_by_key(|(index, r)| {
@@ -393,14 +415,24 @@ impl ModelPolicies {
                         || a.split('/').any(|part| !crate::request::identifier(part))
                 })
                 || rule
-                    .starts_unix_seconds
-                    .zip(rule.expires_unix_seconds)
+                    .schedule
+                    .starts
+                    .zip(rule.schedule.expires)
                     .is_some_and(|(s, e)| s >= e)
-                || rule.windows.len() > 16
-                || rule
-                    .windows
-                    .iter()
-                    .any(|w| w.start_hour >= 24 || w.end_hour > 24 || w.start_hour == w.end_hour)
+                || rule.schedule.windows.len() > 16
+                || rule.schedule.windows.iter().any(|w| {
+                    w.start_hour >= 24
+                        || w.end_hour > 24
+                        || w.start_hour == w.end_hour
+                        || w.weekdays.len() > 7
+                        || w.weekdays.iter().any(|day| *day > 6)
+                        || w.weekdays
+                            .iter()
+                            .copied()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len()
+                            != w.weekdays.len()
+                })
             {
                 errors.push(SectionError {
                     field: format!("model_policy.rules.{i}"),
@@ -563,8 +595,9 @@ mod tests {
             [[rules]]
             model = "codex/gpt-6.1-terra"
             account = "codex/work"
-            starts_unix_seconds = 3600
-            expires_unix_seconds = 10800
+            [rules.schedule]
+            starts = 3600
+            expires = 10800
             windows = [{ start_hour = 1, end_hour = 2 }]
             [rules.policy.compaction]
             window = 300000
@@ -585,18 +618,43 @@ mod tests {
             assert_eq!(effective.policy.lane.stop_early_ok, Some(false));
         }
         assert!(
-            UtcWindow {
+            ScheduleWindow {
+                weekdays: vec![],
                 start_hour: 23,
                 end_hour: 2
             }
             .active(0)
         );
         assert!(
-            !UtcWindow {
+            !ScheduleWindow {
+                weekdays: vec![],
                 start_hour: 23,
                 end_hour: 2
             }
             .active(7200)
+        );
+        let weekdays = ScheduleWindow {
+            weekdays: vec![3], // Thursday, ISO Monday = 0.
+            start_hour: 1,
+            end_hour: 4,
+        };
+        assert!(weekdays.active(3600));
+        assert!(!weekdays.active(86_400 + 3600));
+        assert!(
+            !Schedule {
+                starts: Some(10),
+                expires: Some(20),
+                windows: vec![]
+            }
+            .active(9)
+        );
+        assert!(
+            Schedule {
+                starts: Some(10),
+                expires: Some(20),
+                windows: vec![]
+            }
+            .active(10)
         );
         Ok(())
     }
@@ -678,7 +736,10 @@ mod tests {
             ..Default::default()
         };
         disabled.rules.push(ModelPolicyRule {
-            expires_unix_seconds: Some(100),
+            schedule: Schedule {
+                expires: Some(100),
+                ..Default::default()
+            },
             policy: gemini,
             ..Default::default()
         });
@@ -700,7 +761,7 @@ mod tests {
             "[defaults.cache]\nread_share_target=1.1",
             "[defaults.lane]\nmax_continuations=9",
             "[[rules]]\nwindows=[{start_hour=24,end_hour=1}]",
-            "[[rules]]\nstarts_unix_seconds=10\nexpires_unix_seconds=5",
+            "[[rules]]\nschedule={ starts=10, expires=5 }",
             "[defaults.result]\nsections=['']",
         ] {
             let policy: ModelPolicies = toml_edit::de::from_str(text)?;

@@ -27,6 +27,18 @@ pub enum Route {
     /// Set a provider policy or manage a temporary pacing override. Without a
     /// value, `override` lists the active overrides.
     Pacing(RoutePacing),
+    /// Inspect scheduled policy and pacing overrides.
+    Override(RouteOverride),
+}
+#[derive(Debug, Args)]
+pub struct RouteOverride {
+    #[command(subcommand)]
+    pub command: RouteOverrideCommand,
+}
+#[derive(Debug, Subcommand)]
+pub enum RouteOverrideCommand {
+    /// List recorded schedules, their current activity and remaining time.
+    List,
 }
 #[derive(Debug, Args)]
 pub struct RouteListRequest {
@@ -395,6 +407,20 @@ pub enum Data {
     List(Box<provenant_routing::RouteList>),
     Resolved(Box<RoutePreview>),
     Pacing(Box<PacingReport>),
+    Overrides(Box<OverrideReport>),
+}
+#[derive(Serialize)]
+pub struct OverrideReport {
+    pub overrides: Vec<OverrideRow>,
+}
+#[derive(Serialize)]
+pub struct OverrideRow {
+    pub kind: &'static str,
+    pub scope: String,
+    pub value: String,
+    pub schedule: provenant_routing::Schedule,
+    pub active: bool,
+    pub remaining_seconds: Option<i64>,
 }
 /// What a `route pacing` command recorded, if anything, and the overrides now
 /// in force.
@@ -415,17 +441,48 @@ fn expiry_text(expires_unix_seconds: i64) -> String {
     jiff::Timestamp::from_second(expires_unix_seconds)
         .map_or_else(|_| expires_unix_seconds.to_string(), |at| at.to_string())
 }
+fn schedule_windows(schedule: &provenant_routing::Schedule) -> String {
+    if schedule.windows.is_empty() {
+        return "all hours".into();
+    }
+    schedule
+        .windows
+        .iter()
+        .map(|window| {
+            let days = if window.weekdays.is_empty() {
+                "every day".to_owned()
+            } else {
+                format!(
+                    "days {}",
+                    window
+                        .weekdays
+                        .iter()
+                        .map(u8::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+            format!("{days} {:02}-{:02} UTC", window.start_hour, window.end_hour)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
 fn override_line(row: &provenant_routing::PacingOverride) -> String {
     let scope = match (&row.account, &row.provider) {
         (Some(account), _) => format!("account {account}"),
         (None, Some(provider)) => format!("provider {provider}"),
         (None, None) => "all accounts".to_owned(),
     };
-    format!(
-        "{scope} {} until {}",
-        policy_name(row.policy),
-        expiry_text(row.expires_unix_seconds)
-    )
+    let until = row.schedule.expires.map_or_else(
+        || "no expiry".into(),
+        |expiry| {
+            let remaining = expiry
+                .saturating_sub(jiff::Timestamp::now().as_second())
+                .max(0);
+            format!("until {} ({remaining}s remaining)", expiry_text(expiry))
+        },
+    );
+    format!("{scope} {} {until}", policy_name(row.policy))
 }
 #[derive(Serialize)]
 pub struct RoutePreview {
@@ -1317,7 +1374,9 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<St
             row.insert("provider", toml_edit::Value::from(provider.as_str()));
         }
         row.insert("policy", toml_edit::Value::from(policy));
-        row.insert("expires_unix_seconds", toml_edit::Value::from(expiry));
+        let mut schedule = toml_edit::InlineTable::new();
+        schedule.insert("expires", toml_edit::Value::from(expiry));
+        row.insert("schedule", toml_edit::Value::InlineTable(schedule));
         values.push(toml_edit::Value::InlineTable(row));
         routing.insert(
             "pacing_overrides",
@@ -1329,7 +1388,11 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<St
         account,
         provider: request.provider.clone(),
         policy: request.policy.map_or(PacingPolicy::Pace, Into::into),
-        expires_unix_seconds: expiry,
+        schedule: provenant_routing::Schedule {
+            starts: None,
+            expires: Some(expiry),
+            windows: Vec::new(),
+        },
     };
     Ok(Some(format!("override {}", override_line(&recorded))))
 }
@@ -1439,6 +1502,60 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
                 active_overrides: list.active_overrides,
             })))
         }
+        Route::Override(_) => {
+            let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+                .domains
+                .routing;
+            let now = jiff::Timestamp::now().as_second();
+            let mut overrides = Vec::new();
+            for row in &config.pacing_overrides {
+                overrides.push(OverrideRow {
+                    kind: "pacing",
+                    scope: row.account.as_ref().map_or_else(
+                        || {
+                            row.provider
+                                .as_ref()
+                                .map_or_else(|| "all accounts".into(), |p| format!("provider {p}"))
+                        },
+                        |a| format!("account {a}"),
+                    ),
+                    value: policy_name(row.policy).into(),
+                    schedule: row.schedule.clone(),
+                    active: row.schedule.active(now),
+                    remaining_seconds: row
+                        .schedule
+                        .expires
+                        .map(|end| end.saturating_sub(now).max(0)),
+                });
+            }
+            for (index, row) in config.model_policy.rules.iter().enumerate() {
+                let scope = [
+                    row.adapter.as_deref().map(|v| format!("adapter {v}")),
+                    row.model.as_ref().map(|v| format!("model {}", v.as_str())),
+                    row.account.as_deref().map(|v| format!("account {v}")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
+                overrides.push(OverrideRow {
+                    kind: "model_policy",
+                    scope: if scope.is_empty() {
+                        "all routes".into()
+                    } else {
+                        scope
+                    },
+                    value: format!("rules[{index}]"),
+                    schedule: row.schedule.clone(),
+                    active: row.schedule.active(now),
+                    remaining_seconds: row
+                        .schedule
+                        .expires
+                        .map(|end| end.saturating_sub(now).max(0)),
+                });
+            }
+            Ok(Data::Overrides(Box::new(OverrideReport { overrides })))
+        }
     }
 }
 pub fn run(
@@ -1454,6 +1571,7 @@ pub fn run(
         Route::Remove(_) => "route remove",
         Route::Reset(_) => "route reset",
         Route::Pacing(_) => "route pacing",
+        Route::Override(_) => "route override list",
     };
     let result = match execute(&command, roots) {
         Ok(data) => CommandResult::new(name, Outcome::Ok, Some(data)),
@@ -1635,6 +1753,34 @@ pub fn run(
                 );
                 format!("{}\n", lines.join("\n"))
             }
+            Some(Data::Overrides(report)) => {
+                let mut lines = vec![format!("overrides: {}", report.overrides.len())];
+                lines.extend(report.overrides.iter().map(|row| {
+                    let starts = row
+                        .schedule
+                        .starts
+                        .map_or_else(|| "open".into(), expiry_text);
+                    let expiry = row
+                        .schedule
+                        .expires
+                        .map_or_else(|| "no expiry".into(), expiry_text);
+                    let remaining = row
+                        .remaining_seconds
+                        .map_or_else(String::new, |s| format!(" ({s}s remaining)"));
+                    format!(
+                        "{} {} {} active={} starts={} expires={} windows={}{}",
+                        row.kind,
+                        row.scope,
+                        row.value,
+                        row.active,
+                        starts,
+                        expiry,
+                        schedule_windows(&row.schedule),
+                        remaining
+                    )
+                }));
+                format!("{}\n", lines.join("\n"))
+            }
             None => String::new(),
         }
     };
@@ -1686,12 +1832,24 @@ pub fn run(
                 Some(next.to_owned()),
             ))
         }
+        Some(Data::Overrides(report)) => Some(crate::Summary::new(
+            format!("{} scheduled overrides", report.overrides.len()),
+            report
+                .overrides
+                .iter()
+                .map(|row| {
+                    format!(
+                        "{} {} {} active={}",
+                        row.kind, row.scope, row.value, row.active
+                    )
+                })
+                .collect(),
+            Some("provenant route override list".to_owned()),
+        )),
         _ => None,
     };
-    let listing = matches!(
-        &result.data,
-        Some(Data::Pacing(report)) if report.recorded.is_none()
-    );
+    let listing = matches!(&result.data, Some(Data::Pacing(report)) if report.recorded.is_none())
+        || matches!(&result.data, Some(Data::Overrides(_)));
     let mode = globals.render_mode(
         &human,
         listing || matches!(command, Route::List(_) | Route::Resolve(_)),
@@ -1783,7 +1941,7 @@ mod route_tests {
         ] {
             let mut config: RoutingConfig =
                 serde_json::from_value(serde_json::json!({"pacing_overrides": [{
-                    "account": input, "policy": "pace", "expires_unix_seconds": 2000000000_i64
+                    "account": input, "policy": "pace", "schedule": {"expires": 2000000000_i64}
                 }]}))
                 .unwrap();
             super::resolve_pacing_accounts(&mut config, &settings).unwrap();
