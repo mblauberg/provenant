@@ -507,6 +507,7 @@ dependencies = [
  "provenant-providers",
  "provenant-quota",
  "provenant-records",
+ "provenant-routing",
  "provenant-run",
  "provenant-supervisor",
  "provenant-telemetry",

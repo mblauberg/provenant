@@ -1974,6 +1974,56 @@ fn lane_graph_status_does_not_create_shared_graph_store() -> Result {
 }
 
 #[test]
+fn sandboxed_lane_environment_refuses_mutating_provenant_before_coordination_access() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
+    let parent = "11111111111111111111111111111111";
+    let child_state = rig.state.join("children").join(parent);
+    std::fs::create_dir_all(&child_state)?;
+    std::fs::set_permissions(
+        rig.state.join("children"),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
+    std::fs::set_permissions(&child_state, std::fs::Permissions::from_mode(0o700))?;
+    for (key, value) in &mut rig.env {
+        if key == "PROVENANT_AGENT_LABEL" {
+            *value = format!("lane-{parent}").into();
+        }
+    }
+    rig.env.push((
+        provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
+        child_state.clone().into(),
+    ));
+    rig.env
+        .push((provenant_run::PARENT_ATTEMPT_ENV.into(), parent.into()));
+    rig.env
+        .push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+
+    let refused = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "missing.json",
+        "--json",
+    ])?;
+    assert_ne!(code(&refused), 0);
+    let result: Value = serde_json::from_slice(&refused.stdout.bytes)?;
+    assert_eq!(
+        result["error"]["code"], "lane_coordination_refused",
+        "{result}"
+    );
+    assert_eq!(
+        result["error"]["message"], "coordination mutations are not allowed inside a lane",
+        "{result}"
+    );
+    assert!(!rig.state.join("fabric/graphs").exists());
+    assert!(!child_state.join("fabric/graphs").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn lane_cli_cancel_refuses_peer_placement() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;

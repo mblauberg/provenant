@@ -115,6 +115,8 @@ fn wire(path: &Path) -> Result<PathWire, CheckError> {
 #[derive(Debug, Serialize)]
 pub struct CheckPage<T = Finding> {
     pub findings: Vec<T>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub count: u64,
     pub offset: u64,
     pub next_cursor: Option<String>,
@@ -132,6 +134,10 @@ impl<T> CheckPage<T> {
 impl CheckPage {
     pub fn human(&self) -> Result<String, serde_json::Error> {
         let mut text = String::new();
+        for warning in &self.warnings {
+            text.push_str(warning);
+            text.push('\n');
+        }
         for finding in &self.findings {
             text.push_str(&format!(
                 "{}:{}: {}: {}\n",
@@ -194,6 +200,7 @@ pub fn findings_page<T: Serialize>(
     }
     let mut result = CheckPage {
         findings: Vec::new(),
+        warnings: Vec::new(),
         count,
         offset,
         next_cursor: None,
@@ -429,6 +436,7 @@ pub(super) fn index_records(bytes: &[u8]) -> Result<Vec<IndexRecord<'_>>, CheckE
 /// Library owners supply config/install inspections. CLI retains only a page.
 pub fn config_page(
     inspection: provenant_config::ConfigInspection,
+    warnings: Vec<String>,
     selector: impl Serialize,
     page: &Page,
 ) -> Result<CheckPage, CheckError> {
@@ -454,7 +462,9 @@ pub fn config_page(
             "configuration violates the typed TOML schema",
         )?;
     }
-    paginate(scan, selector, page)
+    let mut result = paginate(scan, selector, page)?;
+    result.warnings = warnings;
+    Ok(result)
 }
 /// `accounts` names the registered directories, so a finding inside one says
 /// which account drifted and how `accounts sync` repairs it.
