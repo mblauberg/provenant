@@ -26,6 +26,10 @@ const WAIT_PREFIX: &str = "wait-";
 const CREATE_TRIES: usize = 4;
 const POLL: Duration = Duration::from_millis(100);
 
+fn directory(state: &Path) -> PathBuf {
+    DIRECTORY.iter().fold(state.to_owned(), |p, n| p.join(n))
+}
+
 fn slot_name(index: u64) -> OsString {
     format!("slot-{index}.lock").into()
 }
@@ -47,32 +51,40 @@ pub struct BuildSlots {
 
 impl BuildSlots {
     /// Open the slot directory under `state`, creating it (mode 0700) when
-    /// missing. Lanes use this; `state` is the host state root.
+    /// missing. Lanes use this; `state` is the host state root. The slot
+    /// directory is opened by its own path, so a lane needs access to nothing
+    /// above it.
     pub fn open(state: &Path) -> Result<Self> {
-        let mut dir = Directory::open_anchor(state)?;
-        for name in DIRECTORY {
-            match dir.mkdir(name.as_ref(), 0o700) {
-                Ok(()) => {}
-                Err(error) if error.is_exists() => {}
-                Err(error) => return Err(error),
-            }
-            dir = dir.open_directory(name.as_ref())?;
+        let path = directory(state);
+        match Directory::open_anchor(&path) {
+            Ok(dir) => return Ok(Self { dir, path }),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error),
+        }
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&path)
+                .map_err(|source| FsError::Io {
+                    operation: "create build slot directory",
+                    path: path.clone(),
+                    source,
+                })?;
         }
         Ok(Self {
-            dir,
-            path: DIRECTORY.iter().fold(state.to_owned(), |p, n| p.join(n)),
+            dir: Directory::open_anchor(&path)?,
+            path,
         })
     }
 
     /// Open the slot directory only when it exists, never creating it.
     pub fn observe(state: &Path) -> Result<Self> {
-        let mut dir = Directory::open_anchor(state)?;
-        for name in DIRECTORY {
-            dir = dir.open_directory(name.as_ref())?;
-        }
+        let path = directory(state);
         Ok(Self {
-            dir,
-            path: DIRECTORY.iter().fold(state.to_owned(), |p, n| p.join(n)),
+            dir: Directory::open_anchor(&path)?,
+            path,
         })
     }
 
