@@ -471,6 +471,15 @@ wall_time_seconds = 1800
 tokens = 1000000
 cost_usd = 50.0
 wall_time_seconds = 7200
+
+[domains.fabric.graph.land]
+routine = "auto"     # default
+substantial = "auto" # default
+crucial = "ask"      # default
+terminal = "ask"     # default
+
+[domains.fabric.graph.land.projects."PROJECT_ID"]
+substantial = "ask"
 ```
 
 Limits also include `routes_per_node`, `node_prompt_bytes`,
@@ -493,6 +502,16 @@ in graph status and the checkpoint's usage events. By default,
 to pause instead. Wall time uses
 the sum of observed provider run times, excluding time spent paused or idle,
 and is checked on graph advancement and attempt settlement.
+
+`graph.land` sets what a graph land node does for each risk tier: `auto`
+merges once the gates pass, and `ask` raises a land ask in the graph's
+decision session first. A tier set under `projects."PROJECT_ID"` overrides
+the host value for that project's graphs, and unset tiers fall through to the
+host value and then the default. Project keys are the project's ID. The land
+record in the checkpoint names the effective policy, its source (`default`,
+`config` or `project`) and who or what authorised the merge. Graph land uses
+the same merge path as `provenant land`, so the repository's merge rules and
+CI still apply.
 
 ## SSH and peer protocol
 

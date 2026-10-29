@@ -691,6 +691,14 @@ fn delete_branch(
     )
 }
 
+/// One land's report, rendered but not yet printed.
+pub(crate) struct Landing {
+    pub(crate) report: CommandResult<serde_json::Value>,
+    text: String,
+    summary: provenant_cli::Summary,
+    globals: provenant_cli::Globals,
+}
+
 pub(crate) fn run(
     number: u64,
     expected: Option<GitOid>,
@@ -698,6 +706,101 @@ pub(crate) fn run(
     globals: &provenant_cli::Globals,
     workers: &dyn WorkerObserver,
 ) -> u8 {
+    let landing = execute(number, expected, wait, globals, workers);
+    emit_summarised(
+        &landing.report,
+        &landing.globals,
+        &landing.text,
+        false,
+        Some(&landing.summary),
+    )
+}
+
+/// Land a graph node's pull request: the same head-pinned merge and cleanup
+/// as `provenant land`, for the open PR whose head is `branch`.
+pub(crate) fn graph_land(
+    project: &Path,
+    state: &Path,
+    branch: &str,
+    head: &str,
+    workers: &dyn WorkerObserver,
+) -> provenant_fabric_runtime::graph::LandObservation {
+    use provenant_fabric_runtime::graph::LandObservation;
+    let Ok(head) = head.parse::<GitOid>() else {
+        return LandObservation::Refused {
+            reason: format!("{head} is not a full commit ID"),
+        };
+    };
+    if !plain_ref(branch) {
+        return LandObservation::Refused {
+            reason: format!("{branch} is not a plain branch name"),
+        };
+    }
+    let number = match super::number_for_branch(project, branch) {
+        Ok(number) => number,
+        Err(error) => {
+            return LandObservation::Pending {
+                reason: format!("no pull request found for {branch} yet: {error}"),
+            };
+        }
+    };
+    let globals = provenant_cli::Globals {
+        json: true,
+        full: false,
+        state_dir: Some(state.to_owned()),
+        project: Some(project.to_owned()),
+    };
+    observation(&execute(number, Some(head), None, &globals, workers).report)
+}
+
+/// What a graph land node makes of a land report. Only a merged PR succeeds;
+/// a state that can still change is observed again; the rest fail the node.
+pub(crate) fn observation(
+    report: &CommandResult<serde_json::Value>,
+) -> provenant_fabric_runtime::graph::LandObservation {
+    use provenant_fabric_runtime::graph::LandObservation;
+    let data = &report.data;
+    let number = data["number"].as_u64();
+    if data["merged"].as_bool() == Some(true) {
+        let cleanup = (data["cleanup_pending"].as_bool() == Some(true)).then(|| {
+            format!(
+                "cleanup pending; next: provenant land {} --full",
+                number.unwrap_or_default()
+            )
+        });
+        return LandObservation::Merged {
+            pull_request: number,
+            note: data["merge_note"].as_str().map(str::to_owned).or(cleanup),
+        };
+    }
+    let Some(error) = &report.error else {
+        return LandObservation::Pending {
+            reason: format!(
+                "pull request #{} is not merged yet ({})",
+                number.unwrap_or_default(),
+                data["state"].as_str().unwrap_or("unknown")
+            ),
+        };
+    };
+    let reason = match &error.repair {
+        Some(repair) => format!("{}: {}; next: {repair}", error.code, error.message),
+        None => format!("{}: {}", error.code, error.message),
+    };
+    match error.code.as_str() {
+        "CI_PENDING" | "CI_UNAVAILABLE" | "MERGE_STATE_UNKNOWN" | "PR_UNAVAILABLE" => {
+            LandObservation::Pending { reason }
+        }
+        _ => LandObservation::Refused { reason },
+    }
+}
+
+pub(crate) fn execute(
+    number: u64,
+    expected: Option<GitOid>,
+    wait: Option<u64>,
+    globals: &provenant_cli::Globals,
+    workers: &dyn WorkerObserver,
+) -> Landing {
     const LEAF: &str = "land";
     let mut captured = expected;
     let mut output_globals = provenant_cli::Globals {
@@ -909,7 +1012,12 @@ pub(crate) fn run(
         rows,
         Some(next),
     );
-    emit_summarised(&report, &output_globals, &text, false, Some(&summary))
+    Landing {
+        report,
+        text,
+        summary,
+        globals: output_globals,
+    }
 }
 
 /// Test seam: the cleanup check for `feat` merged at `merged` into `main`, then
@@ -941,4 +1049,57 @@ pub(crate) fn delete_after_check(
     }
     let step = delete_branch(&git, project, "feat", "main", upstream, tip, false)?;
     Ok((step.status.name(), step.detail))
+}
+
+#[cfg(test)]
+#[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
+mod graph_land_tests {
+    use super::*;
+    use provenant_fabric_runtime::graph::LandObservation;
+
+    fn report(data: serde_json::Value, code: Option<&str>) -> CommandResult<serde_json::Value> {
+        let mut report = CommandResult::new("land", Outcome::Error, data);
+        report.error = code.map(|code| CommandError {
+            code: code.into(),
+            message: "fail #7".into(),
+            cause: None,
+            repair: Some("provenant land 7".into()),
+        });
+        report
+    }
+
+    #[test]
+    fn a_land_report_maps_to_a_graph_observation() {
+        assert_eq!(
+            observation(&report(
+                json!({"number":7, "merged":true, "cleanup_pending":true, "merge_note":null}),
+                None
+            )),
+            LandObservation::Merged {
+                pull_request: Some(7),
+                note: Some("cleanup pending; next: provenant land 7 --full".into()),
+            }
+        );
+        assert!(matches!(
+            observation(&report(json!({"number":7, "merged":false, "state":"OPEN"}), None)),
+            LandObservation::Pending { reason } if reason.contains("not merged yet (OPEN)")
+        ));
+        for code in [
+            "CI_PENDING",
+            "CI_UNAVAILABLE",
+            "MERGE_STATE_UNKNOWN",
+            "PR_UNAVAILABLE",
+        ] {
+            assert!(matches!(
+                observation(&report(json!({"number":7, "merged":false}), Some(code))),
+                LandObservation::Pending { .. }
+            ));
+        }
+        for code in ["CI_FAILED", "HEAD_MOVED", "PR_CLOSED", "MERGE_FAILED"] {
+            assert!(matches!(
+                observation(&report(json!({"number":7, "merged":false}), Some(code))),
+                LandObservation::Refused { reason } if reason.starts_with(code) && reason.contains("next: provenant land 7")
+            ));
+        }
+    }
 }

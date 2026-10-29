@@ -109,6 +109,15 @@ fn children(
             *source = reference(prefix, source, &locals, incoming)
                 .unwrap_or_else(|| scoped(prefix, source));
         }
+        // A continued or landed writer may sit inside or outside the composite.
+        for writer in node
+            .continues
+            .iter_mut()
+            .chain(node.land.as_mut().map(|spec| &mut spec.node))
+        {
+            *writer = reference(prefix, writer, &locals, incoming)
+                .unwrap_or_else(|| scoped(prefix, writer));
+        }
         if original
             .depends_on
             .iter()

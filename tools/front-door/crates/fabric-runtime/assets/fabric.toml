@@ -49,3 +49,8 @@ unknown_usage = "warn"
 
 [graph.budget.per_node]
 [graph.budget.per_graph]
+
+# Graph `land` node policy per risk tier: "auto" or "ask". An unset tier uses
+# the built-in default (routine and substantial auto, crucial and terminal ask).
+# Per-project values go under [graph.land.projects."PROJECT_ID"].
+[graph.land]

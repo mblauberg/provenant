@@ -23,6 +23,10 @@ mod envelope;
 #[cfg(test)]
 #[path = "graph/forward_compatibility.rs"]
 mod forward_compatibility;
+mod land;
+#[cfg(test)]
+#[path = "graph/land_tests.rs"]
+mod land_tests;
 mod loops;
 mod plans;
 pub use asks::{
@@ -30,6 +34,7 @@ pub use asks::{
     close_resolved_asks, loop_ask,
 };
 pub use composites::CompositeSpec;
+pub use land::{LandAuthority, LandObservation, LandRecord, LandRequest, LandSpec};
 pub use loops::{LegacyLoopAsk, LoopDecision, LoopRound, LoopSpec, legacy_loop_asks};
 pub use plans::{Expansion, PlanSpec, RemainingBudgets};
 
@@ -148,6 +153,12 @@ pub struct GraphNode {
     pub loop_body: Option<LoopSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decide: Option<DecideSpec>,
+    /// Continue this upstream writer's delivery branch in its worktree. The
+    /// host fast-forward pushes the node's commits to that branch only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub land: Option<LandSpec>,
     #[serde(skip)]
     round: Option<LoopRound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -274,6 +285,7 @@ pub enum NodeKind {
     Gate,
     Loop,
     Decide,
+    Land,
 }
 
 /// Immutable review subject or the commit a later writer must start from.
@@ -549,6 +561,9 @@ pub struct NodeProgress {
     pub gate: Option<GateResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiEvidence>,
+    /// A land node's pinned subject, tier policy and authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub land: Option<LandRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// Retain the writer checkout for chair inspection after a failed launch.
@@ -785,6 +800,9 @@ pub struct GraphRun {
 #[derive(Clone, Copy, Debug)]
 pub struct Replay<'a> {
     pub delivery: Option<&'a provenant_records::run::DeliveryMode>,
+    /// The delivery branch a continuing writer must push to. The host refuses
+    /// a worktree on any other branch.
+    pub branch: Option<&'a str>,
     /// Reference to the accepted attempt, once saved.
     pub stored_ref: Option<&'a str>,
     /// Actor to submit under when no reference was saved.
@@ -867,6 +885,23 @@ pub trait AttemptOwner {
 
     fn cost_unknown_reason(&mut self) -> Option<String> {
         None
+    }
+
+    /// The effective land policy for a risk tier and the layer it came from.
+    fn land_policy(
+        &self,
+        tier: provenant_records::workflow::RiskTier,
+    ) -> crate::config::LandChoice {
+        crate::config::GraphLand::default().choose(None, tier)
+    }
+
+    /// Merge an authorised land node's pull request through the repository's
+    /// own workflow, pinned to `request.head`. Idempotent: a PR already merged
+    /// at that head reports `Merged`. A host without one refuses.
+    fn land(&mut self, _request: LandRequest<'_>) -> Result<LandObservation, Self::Error> {
+        Ok(LandObservation::Refused {
+            reason: "this host cannot land pull requests".into(),
+        })
     }
 
     fn observe_or_start(
@@ -1398,6 +1433,10 @@ struct PlannedNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     decide: Option<DecideSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    continues: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    land: Option<LandSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     round: Option<LoopRound>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<NodeKind>,
@@ -1581,6 +1620,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         round: node.round.clone(),
                         gate: None,
                         ci: None,
+                        land: None,
                         id: node.id.clone(),
                         title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
                         worktree: node.worktree.clone(),
@@ -1886,6 +1926,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 )?;
                 continue;
             }
+            if let Some(spec) = &node.land {
+                if structural_pause.is_none() && checkpoint.pause_reason.is_none() {
+                    land::advance(
+                        node_index,
+                        node,
+                        spec,
+                        &plan,
+                        &mut checkpoint,
+                        owner,
+                        journal,
+                    )?;
+                }
+                continue;
+            }
             if let Some(condition) = &node.condition {
                 if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
                     continue;
@@ -2060,6 +2114,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     && node.ci.is_none()
                                     && plan.nodes[*index].composite.is_none()
                                     && plan.nodes[*index].decide.is_none()
+                                    && plan.nodes[*index].land.is_none()
                             })
                             .count()
                             >= cap
@@ -2148,6 +2203,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
+                    if node.continues.is_some()
+                        && land::continued_branch(node, &checkpoint, &positions).is_none()
+                    {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error = Some(format!(
+                            "node {}: the writer it continues recorded no delivery branch",
+                            node.id
+                        ));
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
                     checkpoint.nodes[node_index].attempts.push(GraphAttempt {
                         extra: Default::default(),
                         key: key.clone(),
@@ -2199,6 +2266,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                     }
                 }
+                let continued = land::continued_branch(node, &checkpoint, &positions);
                 let observation = owner
                     .observe_or_start(
                         &key,
@@ -2214,7 +2282,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         node.access,
                         node.worktree.as_deref(),
                         Replay {
-                            delivery: node.delivery.as_ref(),
+                            delivery: land::delivery(node),
+                            branch: continued.as_deref(),
                             stored_ref: stored_ref.as_deref(),
                             launch_actor: &launch_actor,
                         },
@@ -2434,7 +2503,7 @@ fn may_ask(plan: &PlannedGraph) -> bool {
         || plan
             .nodes
             .iter()
-            .any(|n| n.loop_body.is_some() || n.decide.is_some())
+            .any(|n| n.loop_body.is_some() || n.decide.is_some() || n.land.is_some())
 }
 
 /// A failure target must declare its gate as a dependency. Other dependants
@@ -3017,6 +3086,11 @@ fn validate_flat_plan(
             node,
             document.decision_session.as_deref(),
         )?;
+        let is_land = node.kind == Some(NodeKind::Land);
+        if is_land != node.land.is_some() {
+            return Err("land requires a land spec naming its writer");
+        }
+        land::validate_node(node)?;
         let is_gate = node.kind == Some(NodeKind::Gate);
         if is_gate != node.condition.is_some()
             || !is_gate && node.on_fail.is_some()
@@ -3136,7 +3210,7 @@ fn validate_flat_plan(
             }
             _ => {}
         }
-        if (is_gate || is_loop || is_composite || is_decide)
+        if (is_gate || is_loop || is_composite || is_decide || is_land)
             && (node.source.is_some() || !node.read_roots.is_empty())
         {
             return Err("execution bindings require an agent node");
@@ -3150,7 +3224,7 @@ fn validate_flat_plan(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err("graph PR is exclusive with node PRs");
         }
-        if !is_gate && !is_loop && !is_composite && !is_decide && node.prompt.is_empty()
+        if !is_gate && !is_loop && !is_composite && !is_decide && !is_land && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
             return Err("prompt size");
@@ -3169,7 +3243,9 @@ fn validate_flat_plan(
         }
 
         let routes = match (&node.route, &node.routes) {
-            (None, None) if is_gate || is_loop || is_composite || is_decide => Vec::new(),
+            (None, None) if is_gate || is_loop || is_composite || is_decide || is_land => {
+                Vec::new()
+            }
             (Some(route), None) => vec![route.clone()],
             (None, Some(routes)) if !routes.is_empty() => routes.clone(),
             (Some(_), Some(_)) => return Err("route and routes are exclusive"),
@@ -3249,6 +3325,8 @@ fn validate_flat_plan(
             acceptance_checks: node.acceptance_checks.clone(),
             loop_body: node.loop_body.clone(),
             decide: node.decide.clone(),
+            continues: node.continues.clone(),
+            land: node.land.clone(),
             round: node.round.clone(),
             kind: match node.kind {
                 Some(
@@ -3257,7 +3335,8 @@ fn validate_flat_plan(
                     | NodeKind::Gate
                     | NodeKind::Loop
                     | NodeKind::Composite
-                    | NodeKind::Decide,
+                    | NodeKind::Decide
+                    | NodeKind::Land,
                 ) => node.kind,
                 _ => None,
             },
@@ -3303,6 +3382,7 @@ fn validate_flat_plan(
     if order.len() != nodes.len() {
         return Err("dependency cycle");
     }
+    land::validate_relations(&nodes, &positions)?;
 
     // Dependencies are conjunctive. Reject nodes that require mutually
     // exclusive branches, including through transitive dependencies.
@@ -3713,6 +3793,12 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 .map_err(|_| GraphError::BadCheckpoint)?;
             continue;
         }
+        if node.land.is_some() {
+            land::validate_progress(progress, checkpoint).map_err(|_| GraphError::BadCheckpoint)?;
+            continue;
+        } else if progress.land.is_some() {
+            return Err(GraphError::BadCheckpoint);
+        }
         if !progress.attempts.is_empty()
             && node.source.is_some()
             && progress.source_commit.is_none()
@@ -3974,6 +4060,8 @@ mod tests {
             write_scope: Vec::new(),
             acceptance_checks: Vec::new(),
             decide: None,
+            continues: None,
+            land: None,
             loop_body: None,
             round: None,
             kind: None,
@@ -5834,6 +5922,8 @@ mod tests {
             write_scope: Vec::new(),
             acceptance_checks: Vec::new(),
             decide: None,
+            continues: None,
+            land: None,
             loop_body: None,
             round: None,
             kind: None,
@@ -6020,6 +6110,8 @@ mod tests {
                 write_scope: Vec::new(),
                 acceptance_checks: Vec::new(),
                 decide: None,
+                continues: None,
+                land: None,
                 loop_body: None,
                 round: None,
                 kind: None,
@@ -6279,6 +6371,8 @@ mod tests {
             write_scope: Vec::new(),
             acceptance_checks: Vec::new(),
             decide: None,
+            continues: None,
+            land: None,
             loop_body: None,
             round: None,
             kind: None,

@@ -281,6 +281,11 @@ fn expand_loops(
             {
                 return Err("loop body cannot nest loops or deliver or route on_fail");
             }
+            if child.land.is_some() {
+                return Err("loop body cannot land");
+            }
+            // A continued writer is outside the body; the expanded plan checks it.
+            child.continues = None;
             if child.access == AccessMode::WorktreeWrite {
                 if writer
                     .as_ref()
@@ -475,6 +480,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 round: n.round.clone(),
                 gate: None,
                 ci: None,
+                land: None,
                 title: Some(n.title.as_deref().unwrap_or(&n.id).into()),
                 worktree: n.worktree.clone(),
                 id: n.id.clone(),

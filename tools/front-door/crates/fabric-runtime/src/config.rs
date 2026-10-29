@@ -35,6 +35,119 @@ pub struct GraphConfig {
     /// Absolute host directories graph nodes may read besides the project's own
     /// registered worktrees. Empty confines read roots to the project.
     pub allowed_read_roots: Vec<String>,
+    /// What a graph `land` node does at each risk tier.
+    pub land: GraphLand,
+}
+
+/// What a graph `land` node does once its PR is reviewed and green.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandPolicy {
+    /// Merge through the repository's `land` workflow.
+    Auto,
+    /// Raise a node ask and merge only on a `land` answer.
+    Ask,
+}
+
+/// One policy per risk tier. An unset tier falls through to the next layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LandTiers {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routine: Option<LandPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub substantial: Option<LandPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crucial: Option<LandPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<LandPolicy>,
+}
+
+impl LandTiers {
+    fn get(&self, tier: provenant_records::workflow::RiskTier) -> Option<LandPolicy> {
+        use provenant_records::workflow::RiskTier;
+        match tier {
+            RiskTier::Routine => self.routine,
+            RiskTier::Substantial => self.substantial,
+            RiskTier::Crucial => self.crucial,
+            RiskTier::Terminal => self.terminal,
+        }
+    }
+}
+
+/// Host-wide tier policy, with per-project overrides keyed by Fabric project ID.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphLand {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routine: Option<LandPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub substantial: Option<LandPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crucial: Option<LandPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<LandPolicy>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub projects: BTreeMap<String, LandTiers>,
+}
+
+/// The effective policy for one tier and the layer it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandChoice {
+    pub policy: LandPolicy,
+    pub source: LandSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandSource {
+    Default,
+    Config,
+    Project,
+}
+
+impl GraphLand {
+    /// Routine and substantial land automatically; crucial and terminal ask.
+    pub fn default_policy(tier: provenant_records::workflow::RiskTier) -> LandPolicy {
+        use provenant_records::workflow::RiskTier;
+        match tier {
+            RiskTier::Routine | RiskTier::Substantial => LandPolicy::Auto,
+            RiskTier::Crucial | RiskTier::Terminal => LandPolicy::Ask,
+        }
+    }
+
+    /// Project entry, then host entry, then the compiled default.
+    pub fn choose(
+        &self,
+        project: Option<&str>,
+        tier: provenant_records::workflow::RiskTier,
+    ) -> LandChoice {
+        let host = LandTiers {
+            routine: self.routine,
+            substantial: self.substantial,
+            crucial: self.crucial,
+            terminal: self.terminal,
+        };
+        if let Some(policy) = project
+            .and_then(|id| self.projects.get(id))
+            .and_then(|tiers| tiers.get(tier))
+        {
+            LandChoice {
+                policy,
+                source: LandSource::Project,
+            }
+        } else if let Some(policy) = host.get(tier) {
+            LandChoice {
+                policy,
+                source: LandSource::Config,
+            }
+        } else {
+            LandChoice {
+                policy: Self::default_policy(tier),
+                source: LandSource::Default,
+            }
+        }
+    }
 }
 
 const LIMIT_CEILING_WARNING: &str = "warning: domains.fabric.graph.limit_ceiling is deprecated and ignored; host graph limits apply";
@@ -350,6 +463,11 @@ impl DomainConfig for FabricConfig {
         {
             reject("graph.allowed_read_roots".into());
         }
+        for project in self.graph.land.projects.keys() {
+            if !crate::graph::valid_identifier(project) {
+                reject(format!("graph.land.projects.{project}"));
+            }
+        }
         let limits = &self.graph.limits;
         for (name, value) in [
             ("nodes", limits.nodes),
@@ -626,6 +744,55 @@ mod tests {
         }
         value["graph"]["limits"]["unexpected"] = true.into();
         assert!(serde_json::from_value::<FabricConfig>(value).is_err());
+    }
+
+    #[test]
+    fn land_policy_layers_project_then_host_then_default() {
+        use provenant_records::workflow::RiskTier;
+        let mut land = GraphLand::default();
+        let choose = |land: &GraphLand, project, tier| land.choose(project, tier);
+        assert_eq!(
+            choose(&land, None, RiskTier::Routine),
+            LandChoice {
+                policy: LandPolicy::Auto,
+                source: LandSource::Default
+            }
+        );
+        assert_eq!(
+            choose(&land, None, RiskTier::Substantial).policy,
+            LandPolicy::Auto
+        );
+        assert_eq!(
+            choose(&land, None, RiskTier::Crucial).policy,
+            LandPolicy::Ask
+        );
+        assert_eq!(
+            choose(&land, None, RiskTier::Terminal).policy,
+            LandPolicy::Ask
+        );
+        land =
+            serde_json::from_str(r#"{"crucial":"auto","projects":{"p1":{"substantial":"ask"}}}"#)
+                .unwrap();
+        assert_eq!(
+            choose(&land, Some("p1"), RiskTier::Substantial),
+            LandChoice {
+                policy: LandPolicy::Ask,
+                source: LandSource::Project
+            }
+        );
+        assert_eq!(
+            choose(&land, Some("p2"), RiskTier::Substantial).source,
+            LandSource::Default
+        );
+        assert_eq!(
+            choose(&land, Some("p1"), RiskTier::Crucial),
+            LandChoice {
+                policy: LandPolicy::Auto,
+                source: LandSource::Config
+            }
+        );
+        assert!(serde_json::from_str::<GraphLand>(r#"{"crucial":"never"}"#).is_err());
+        assert!(serde_json::from_str::<GraphLand>(r#"{"urgent":"ask"}"#).is_err());
     }
 
     #[test]

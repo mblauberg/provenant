@@ -124,6 +124,16 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 (1..=rounds).map(|round| filled_ask(asks::loop_ask(&plan.graph_id, &node.id, usize::MAX - round, session))),
             );
         }
+        if let Some(spec) = &node.land {
+            asks.push(filled_ask(land::land_ask(
+                &plan.graph_id,
+                node,
+                &filled_land(spec.tier),
+                land::session(spec, plan).unwrap(),
+                u64::MAX,
+                Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+            )));
+        }
         if let Some(spec) = &node.decide {
             let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap();
             asks.push(filled_ask(asks::decide_ask(
@@ -149,6 +159,23 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
         }));
     }
     asks
+}
+
+fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
+    LandRecord {
+        extra: Default::default(),
+        tier,
+        policy: crate::config::LandPolicy::Ask,
+        policy_source: crate::config::LandSource::Project,
+        branch: worst(OUTPUT_FIELD_BYTES),
+        head: worst(OUTPUT_FIELD_BYTES),
+        authorised_by: Some(LandAuthority::Ask {
+            ask_id: format!("{}.ask-{}", "l".repeat(64), u64::MAX),
+            actor: worst(HOST_ID_BYTES),
+        }),
+        pull_request: Some(u64::MAX),
+        note: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+    }
 }
 
 fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphCheckpoint {
@@ -192,6 +219,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     state: CiState::Unavailable,
                     summary: worst(OUTPUT_FIELD_BYTES),
                 }),
+                land: node.land.as_ref().map(|spec| filled_land(spec.tier)),
                 title: Some(node.title.clone().unwrap_or_else(|| node.id.clone())),
                 worktree: node.worktree.clone(),
                 id: node.id.clone(),
@@ -284,7 +312,34 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
 
 #[test]
 fn worst_case_checkpoint_fits_its_bound() {
-    let document = mixed();
+    assert_fits(mixed());
+}
+
+#[test]
+fn worst_case_land_checkpoint_fits_its_bound() {
+    assert_fits(
+        serde_json::from_value(json!({
+            "schema_version":1, "graph_id":"envelope-land", "decision_session":"chair", "nodes":[
+                {"id":"write", "access":"worktree_write", "worktree":"/fixture/writer", "delivery":"pr",
+                 "prompt":"write", "routes":routes(2)},
+                {"id":"review", "access":"read_only", "prompt":"Review", "depends_on":["write"],
+                 "route":{"alias":"senior"}},
+                {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["write"],
+                 "condition":{"type":"ci", "target":"feature/example"}},
+                {"id":"repair", "access":"worktree_write", "worktree":"/fixture/writer",
+                 "continues":"write", "prompt":"repair", "depends_on":["ci"], "route":{"alias":"senior"}},
+                {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["review", "repair"],
+                 "inputs":[{"node":"review","outputs":["verdict"]}],
+                 "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}},
+                {"id":"land", "kind":"land", "access":"read_only", "depends_on":["accepted", "ci"],
+                 "land":{"node":"write", "tier":"crucial", "session":"chair"}}
+            ]
+        }))
+        .unwrap(),
+    );
+}
+
+fn assert_fits(document: GraphDocument) {
     let plan = planned(&document);
     let checkpoint = filled_checkpoint(&document, &plan);
     let execution = GraphExecution {
