@@ -205,7 +205,7 @@ impl GraphDocument {
             dependency_depth,
             max_attempts: plan.nodes.iter().map(|node| node.routes.len()).sum(),
             prompt_bytes: plan.nodes.iter().map(|node| node.prompt.len()).sum(),
-            limit_reason: structural_limit_reason(&expanded, &plan, limits, &[]),
+            limit_reason: structural_limit_reason(&expanded, &plan, limits),
         })
     }
 }
@@ -3715,6 +3715,7 @@ mod tests {
             synthesis.source = Some(SourceBinding::Integration);
             synthesis.depends_on = vec!["lens".into()];
             synthesis.inputs = vec![GraphInput {
+                extra: Default::default(),
                 node: "lens".into(),
                 outputs: vec![OutputKind::Result],
             }];
@@ -3932,7 +3933,6 @@ mod tests {
             &mut owner,
             &mut journal,
             &limits,
-            &limits,
             &Default::default(),
         )
         .unwrap();
@@ -3945,7 +3945,6 @@ mod tests {
             &document,
             &mut owner,
             &mut journal,
-            &limits,
             &limits,
             &Default::default(),
         )

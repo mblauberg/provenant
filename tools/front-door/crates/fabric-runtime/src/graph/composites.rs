@@ -14,16 +14,8 @@ pub struct CompositeSpec {
 pub(super) const DEFAULT_COMPOSITE_DEPTH: usize = 8;
 pub(super) const DEFAULT_COMPOSITE_NODES: usize = 512;
 
-fn bounds(document: &GraphDocument) -> (usize, usize) {
-    let stated = document.limits.as_ref();
-    (
-        stated
-            .and_then(|l| l.expansion_depth)
-            .map_or(DEFAULT_COMPOSITE_DEPTH, |v| v.max(DEFAULT_COMPOSITE_DEPTH)),
-        stated
-            .and_then(|l| l.nodes)
-            .map_or(DEFAULT_COMPOSITE_NODES, |v| v.max(DEFAULT_COMPOSITE_NODES)),
-    )
+fn bounds(_document: &GraphDocument) -> (usize, usize) {
+    (DEFAULT_COMPOSITE_DEPTH, DEFAULT_COMPOSITE_NODES)
 }
 
 /// Expand only at the execution boundary. The submitted document remains nested.
@@ -279,6 +271,7 @@ fn outputs(
     positions: &BTreeMap<String, usize>,
 ) -> NodeOutputs {
     let mut selected = NodeOutputs {
+        extra: Default::default(),
         schema_version: 2,
         result: None,
         verdict: None,
@@ -323,6 +316,7 @@ fn outputs(
             let digest = CanonicalV1::file_digest(excerpt.as_bytes()).to_string();
             truncated |= excerpt.len() > 65_536;
             Some(ResultOutput {
+                extra: Default::default(),
                 digest,
                 excerpt: bounded(&excerpt, 65_536),
                 truncated,

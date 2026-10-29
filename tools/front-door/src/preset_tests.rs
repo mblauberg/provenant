@@ -196,12 +196,9 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
-        let limits = document
-            .limits
-            .as_ref()
-            .unwrap_or(&Default::default())
-            .resolve(&config)
-            .unwrap();
+        // Composed batches need a host that raises the depth limit; documents cannot.
+        let mut limits = config.limits.clone();
+        limits.expansion_depth = 64;
         let inspection = document
             .inspect(&limits)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -310,12 +307,9 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
-        let limits = document
-            .limits
-            .as_ref()
-            .unwrap_or(&Default::default())
-            .resolve(&config)
-            .unwrap();
+        // Composed batches need a host that raises the depth limit; documents cannot.
+        let mut limits = config.limits.clone();
+        limits.expansion_depth = 64;
         let mut owner = PresetOwner::default();
         let mut journal = PresetJournal::default();
         let run = advance_with_budget(
@@ -323,7 +317,6 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
             &mut owner,
             &mut journal,
             &limits,
-            &config.limit_ceiling,
             &config.budget,
         )
         .unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -387,7 +380,6 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
             &mut owner,
             &mut journal,
             &limits,
-            &config.limit_ceiling,
             &config.budget,
         )
         .unwrap();

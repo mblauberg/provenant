@@ -613,7 +613,6 @@ mod tests {
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
         assert_eq!(config.graph.limits.expansion_depth, 4);
-        assert_eq!(config.graph.limit_ceiling.expansion_depth, 64);
         assert_eq!(config.graph.limits.nodes, 512);
         assert_eq!(config.graph.limits.continuations, 2);
         config.graph.limits.continuations = 0;

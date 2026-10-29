@@ -4065,6 +4065,7 @@ impl BoundGraphOwner<'_> {
         for reference in attempts {
             let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
             let target = AttemptTarget {
+                extra: Default::default(),
                 host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
                 attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
             };
@@ -4367,6 +4368,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         }
                         None if !excluded_families.is_empty() => {
                             provenant_records::run::RequestedRoute::Review {
+                                extra: Default::default(),
                                 name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
                                 effort: route.effort.clone(),
                                 excluded_families,
@@ -5035,6 +5037,7 @@ pub(crate) fn run_preset_graph(
             let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
             let run = factory.graph(
                 GraphInput::Run {
+                    extra: Default::default(),
                     document: document.clone(),
                 },
                 budget,
