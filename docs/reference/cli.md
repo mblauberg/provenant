@@ -1762,6 +1762,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--valid` | `{"defaults": ["false"], "name": "valid", "values": ["true", "false"]}` |
 | `--adapter` | `{"name": "adapter"}` |
 | `--pool` | `{"name": "pool"}` |
 | `--json` | `{"name": "json", "values": ["true", "false"]}` |
@@ -1775,6 +1776,7 @@ bounds are null. Positional arguments have no long flag.
   "groups": [
     {
       "arguments": [
+        "valid",
         "adapter",
         "pool"
       ],
@@ -1790,7 +1792,10 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
+| `--writes` | `{"defaults": ["false"], "name": "writes", "values": ["true", "false"]}` |
+| `--account` | `{"name": "account"}` |
 | `name` | `{"conflicts": ["model", "route"], "name": "name", "positional": true}` |
+| `--read-heavy` | `{"defaults": ["false"], "name": "read_heavy", "values": ["true", "false"]}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
 | `--route` | `{"name": "route"}` |
 | `--effort` | `{"name": "effort"}` |
@@ -1818,6 +1823,7 @@ bounds are null. Positional arguments have no long flag.
     },
     {
       "arguments": [
+        "read_heavy",
         "model",
         "route",
         "effort",
@@ -2019,7 +2025,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
 | `--set` | `{"name": "preset_set", "repeatable": true}` |
 | `--params-file` | `{"name": "preset_params_file"}` |
 | `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
@@ -2034,6 +2040,7 @@ bounds are null. Positional arguments have no long flag.
 | `--deliver-remote` | `{"name": "deliver_remote"}` |
 | `--deliver-branch` | `{"name": "deliver_branch"}` |
 | `--open-pr` | `{"defaults": ["false"], "name": "open_pr", "values": ["true", "false"]}` |
+| `--read-heavy` | `{"defaults": ["false"], "name": "read_heavy", "values": ["true", "false"]}` |
 | `--route` | `{"name": "route"}` |
 | `--effort` | `{"name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "name": "confidential", "values": ["true", "false"]}` |
@@ -2094,6 +2101,7 @@ bounds are null. Positional arguments have no long flag.
     },
     {
       "arguments": [
+        "read_heavy",
         "model",
         "route",
         "effort",
@@ -2234,7 +2242,7 @@ bounds are null. Positional arguments have no long flag.
 
 | Argument | Contract |
 |---|---|
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
 | `--set` | `{"name": "preset_set", "repeatable": true}` |
 | `--params-file` | `{"name": "preset_params_file"}` |
 | `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
@@ -2249,6 +2257,7 @@ bounds are null. Positional arguments have no long flag.
 | `--deliver-remote` | `{"name": "deliver_remote"}` |
 | `--deliver-branch` | `{"name": "deliver_branch"}` |
 | `--open-pr` | `{"defaults": ["false"], "name": "open_pr", "values": ["true", "false"]}` |
+| `--read-heavy` | `{"defaults": ["false"], "name": "read_heavy", "values": ["true", "false"]}` |
 | `--route` | `{"name": "route"}` |
 | `--effort` | `{"name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "name": "confidential", "values": ["true", "false"]}` |
@@ -2308,6 +2317,7 @@ bounds are null. Positional arguments have no long flag.
     },
     {
       "arguments": [
+        "read_heavy",
         "model",
         "route",
         "effort",

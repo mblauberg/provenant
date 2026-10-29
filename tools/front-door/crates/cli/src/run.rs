@@ -20,6 +20,7 @@ use run::ErrorKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     io::Read,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -209,6 +210,52 @@ impl run::Providers for Registry<'_> {
             .get(provider)?
             .runtime_deadline_seconds
     }
+    fn assess_result(
+        &self,
+        task: &run::TaskRequest,
+        record: &run::AttemptRecord,
+        decoded: &run::Decoded,
+        context: Option<&run::HolderContext>,
+        policy_attempt: u64,
+    ) -> Result<run::ResultAssessment, String> {
+        let Some(route) = record.applied_route.as_ref() else {
+            return Ok(Default::default());
+        };
+        let Some(model) = route.model.as_deref() else {
+            return Ok(Default::default());
+        };
+        let model = ModelId::parse(model).map_err(|error| error.to_string())?;
+        let context_roots = context
+            .map(|context| {
+                let mut inputs = provenant_core::RootInputs::new(
+                    context.roots.home.clone(),
+                    context.roots.checkout.clone(),
+                );
+                inputs.state_dir = Some(context.disk_roots().0.to_owned());
+                inputs
+                    .resolve(&provenant_os::fs::SystemPathResolver)
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?;
+        let policies = match context_roots.as_ref().or(self.roots) {
+            Some(roots) => {
+                provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+                    .map_err(|error| error.to_string())?
+                    .domains
+                    .routing
+                    .model_policy
+            }
+            None => provenant_routing::ModelPolicies::default(),
+        };
+        let policy = policies
+            .effective(
+                &model,
+                route.account_key.as_deref(),
+                jiff::Timestamp::now().as_second(),
+            )
+            .policy;
+        assess_model_result(&policy, task, record, decoded, policy_attempt)
+    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         let roots = self.roots.ok_or("routing context is unavailable")?;
         let priority = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
@@ -326,6 +373,83 @@ impl run::Providers for Registry<'_> {
     ) -> Result<run::Decoded, String> {
         self.decode_inner(route, stdout, exit, provider_state, false)
     }
+}
+fn assess_model_result(
+    policy: &provenant_routing::ModelPolicy,
+    task: &run::TaskRequest,
+    record: &run::AttemptRecord,
+    decoded: &run::Decoded,
+    policy_attempt: u64,
+) -> Result<run::ResultAssessment, String> {
+    let failed_check = !policy.result_valid(&decoded.result);
+    if policy.result.check == Some(true)
+        && matches!(
+            decoded.outcome,
+            run::Outcome::Succeeded | run::Outcome::Failed | run::Outcome::Uncommitted
+        )
+        && (failed_check || decoded.outcome == run::Outcome::Failed)
+    {
+        let retry = if task.writer.is_none()
+            && task.access.write_roots.is_empty()
+            && record.continuation.as_deref() != Some("policy_fallback")
+        {
+            // Caller alternatives take precedence over the bundled fallback.
+            let fallback = task.fallback.first().cloned().or_else(|| {
+                policy
+                    .result
+                    .fallback
+                    .as_ref()
+                    .map(|model| run::RouteRecord {
+                        provider: Some(model.adapter().into()),
+                        model: Some(model.as_str().into()),
+                        effort: policy.result.fallback_effort.clone(),
+                        ..Default::default()
+                    })
+            });
+            fallback.and_then(|fallback| fallback.model.map(|model| run::PolicyRetry {
+                schema_version: 1,
+                route: run::RequestedRoute::Model { extra: Default::default(), provider: fallback.provider.unwrap_or_default(), model, effort: fallback.effort },
+                resume: false, max_attempts: 2,
+                instruction: "The previous read-only route failed its result check. Complete the original task and include concrete evidence in your final answer.".into(),
+            }))
+        } else {
+            None
+        };
+        return Ok(run::ResultAssessment {
+            refusal: (failed_check && decoded.outcome == run::Outcome::Succeeded).then(|| {
+                "model policy result check failed: empty answer or missing expected sections".into()
+            }),
+            retry,
+        });
+    }
+    if policy.lane.stop_early_ok == Some(false)
+        && matches!(
+            decoded.outcome,
+            run::Outcome::Succeeded | run::Outcome::Uncommitted
+        )
+        && decoded.complete
+        && decoded
+            .result
+            .lines()
+            .last()
+            .is_some_and(|line| line.trim() == "Status: incomplete")
+    {
+        let route = record
+            .applied_route
+            .as_ref()
+            .ok_or("continuation route missing")?;
+        let model = route.model.clone().ok_or("continuation model missing")?;
+        return Ok(run::ResultAssessment {
+            refusal: Some("model reported unfinished work".into()),
+            retry: (policy_attempt <= u64::from(policy.lane.max_continuations.unwrap_or(0))).then(|| run::PolicyRetry {
+                schema_version: 1,
+                route: run::RequestedRoute::Model { extra: Default::default(), provider: route.provider.clone().unwrap_or_default(), model, effort: route.effort.clone() },
+                resume: true, max_attempts: u64::from(policy.lane.max_continuations.unwrap_or(0)) + 1,
+                instruction: "Continue the unfinished task in this session. Carry out the remaining work and verification. End with Status: complete only when done; otherwise Status: incomplete.".into(),
+            }),
+        });
+    }
+    Ok(Default::default())
 }
 impl Registry<'_> {
     fn decode_inner(
@@ -722,6 +846,24 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         )
     };
     Ok(provenant_routing::RouteRequest {
+        intent: provenant_routing::RouteIntent {
+            writes: task.writer.is_some() || !task.access.write_roots.is_empty(),
+            workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
+                provenant_routing::Workload::Review
+            } else {
+                match task
+                    .profile
+                    .knobs
+                    .get("routing.workload")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("read_heavy") => provenant_routing::Workload::ReadHeavy,
+                    Some("edit_heavy") => provenant_routing::Workload::EditHeavy,
+                    Some("review") => provenant_routing::Workload::Review,
+                    _ => provenant_routing::Workload::General,
+                }
+            },
+        },
         choice,
         effort,
         fallback,
@@ -1491,7 +1633,10 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
             ));
         }
         human.push_str(&format!("more: provenant output {id}\n"));
-        if !timed_out && !matches!(state, "succeeded" | "review_required" | "input_required") {
+        if !timed_out
+            && !row["superseded_by"].is_string()
+            && !matches!(state, "succeeded" | "review_required" | "input_required")
+        {
             result.result.status = Status::Failed;
         }
     }
@@ -1962,6 +2107,9 @@ fn dispatch_inner(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
+    if command.route.read_heavy {
+        command.knobs.push("routing.workload=read_heavy".into());
+    }
     let flag_route = (
         command.route.model.as_ref().map(|m| m.0.clone()),
         command.route.route.clone(),
@@ -2664,6 +2812,67 @@ fn seal_launch_task(
     }
 }
 
+/// Called after guardian custody is released. The successor was queued in the
+/// terminal transaction; a crashed launcher leaves it for ordinary recovery.
+pub fn launch_policy_successor(context: &run::HolderContext) -> Result<(), String> {
+    let Some(host) = context.launch.as_ref() else {
+        return Ok(());
+    };
+    if host.configuration_root != context.roots.state_root {
+        return Ok(());
+    }
+    let mut inputs =
+        provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
+    inputs.state_dir = Some(context.roots.state_root.clone());
+    let roots = inputs
+        .resolve(&provenant_os::fs::SystemPathResolver)
+        .map_err(|error| error.to_string())?;
+    let (_, store) =
+        run::HolderContext::open(&context.encode().map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|error| error.message)?;
+    let pending = store
+        .pending_attempts(context.run_id, &call)
+        .map_err(|error| error.to_string())?;
+    if !pending.iter().any(|attempt| {
+        attempt.retry_of == Some(context.attempt_id)
+            && matches!(
+                attempt.continuation.as_deref(),
+                Some("policy_fallback" | "policy_continuation")
+            )
+    }) {
+        return Ok(());
+    }
+    let session = Session {
+        context: run::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: context.project_id,
+            actor_id: context.actor_id,
+            read_prompts: true,
+        },
+        store,
+    };
+    let edge = Edge {
+        roots: &roots,
+        home: &context.roots.home,
+        assets: &context.roots.checkout,
+        cwd: &host.cwd,
+    };
+    launch_on_host(
+        &session,
+        context.run_id,
+        &edge,
+        &call,
+        Some(host),
+        None,
+        None,
+    )
+    .map_err(|error| error.message)?;
+    Ok(())
+}
+
 /// A child carries the request `validate_child` returned, which is the only
 /// copy launched from. The store carries its parent's sealed requester.
 fn launch_on_host(
@@ -2970,6 +3179,12 @@ fn report(
     let canonical = session.store.request(record.run_id, call)?;
     if let Some(rows) = data["lanes"].as_array_mut() {
         for row in rows {
+            if let Some(id) = row["attempt_id"].as_str().and_then(|id| id.parse().ok()) {
+                let tail = session.store.policy_tail(id, call)?;
+                if tail.attempt_id != id {
+                    row["superseded_by"] = json!(tail.attempt_id);
+                }
+            }
             if let Some(task) = canonical
                 .tasks
                 .iter()
@@ -3266,6 +3481,7 @@ fn render_lanes(
                 "protected_paths": lane.protected_paths,
                 "delivery": lane.delivery,
                 "continuation": lane.continuation,
+                "cache_read_share": provenant_routing::cache_read_share(lane.usage.uncached_input, lane.usage.cache_read, lane.usage.cache_write),
                 "result_path": result,
                 "transcript": transcript,
             });
@@ -3470,10 +3686,24 @@ fn candidates<'a>(
             _ => select(session, picks.targets, seen, picks.owner, &call)?,
         };
         let mut lanes = Vec::with_capacity(ids.len());
-        for id in ids {
-            let lane = session.service().status_for_wait(id, &call)?;
-            if picks.label.is_none() || lane.verified_owner == Some(picks.owner) {
-                lanes.push(lane);
+        let mut included = std::collections::BTreeSet::new();
+        for mut id in ids {
+            // Settlement may have queued a successor after the selection read.
+            // Keep the original receipt and wait for its current policy tail.
+            for _ in 0..9 {
+                let lane = session.service().status_for_wait(id, &call)?;
+                if included.insert(id)
+                    && (picks.label.is_none() || lane.verified_owner == Some(picks.owner))
+                {
+                    lanes.push(lane);
+                }
+                // Read the tail after the state: a terminal state must already
+                // have committed any successor in the same transaction.
+                let tail = session.store.policy_tail(id, &call)?.attempt_id;
+                if tail == id {
+                    break;
+                }
+                id = tail;
             }
         }
         Ok(lanes)
@@ -5380,6 +5610,38 @@ fn reconcile_inner(
 pub fn stats(command: Stats, edge: &Edge<'_>) -> Reply {
     reply("telemetry stats", stats_inner(command, edge))
 }
+
+fn cache_kpi_rows(
+    facts: &[&provenant_records::AttemptFact],
+    domains: &crate::domains::Domains,
+    now: i64,
+) -> Value {
+    let mut grouped: BTreeMap<(Option<String>, Option<String>), Vec<&provenant_records::Usage>> =
+        BTreeMap::new();
+    let share = |usage: &provenant_records::Usage| {
+        provenant_routing::cache_read_share(
+            usage.uncached_input,
+            usage.cache_read,
+            usage.cache_write,
+        )
+    };
+    let lanes: Vec<_> = facts.iter().map(|fact| {
+        let route = fact.applied_route.as_ref();
+        let model = route.and_then(|route| route.model.clone());
+        let account = route.and_then(|route| route.account_label.clone());
+        grouped.entry((model.clone(), account.clone())).or_default().push(&fact.usage);
+        json!({"attempt_id": fact.attempt_id, "model": model, "account": account, "share": share(&fact.usage)})
+    }).collect();
+    let routes: Vec<_> = grouped.into_iter().map(|((model, account), usages)| {
+        let sum = |select: fn(&provenant_records::Usage) -> Option<u64>| usages.iter().try_fold(0u64, |sum, usage| sum.checked_add(select(usage)?));
+        let target = model.as_deref().and_then(|model| ModelId::parse(model).ok()).and_then(|model| {
+            let key = account.as_deref().and_then(|label| domains.accounts.entries.values().find(|entry| entry.adapter == model.adapter() && (entry.label == label || entry.key == label))).map(|entry| entry.key.as_str()).or(account.as_deref());
+            domains.routing.model_policy.effective(&model, key, now).policy.cache.read_share_target
+        });
+        json!({"model": model, "account": account, "share": provenant_routing::cache_read_share(sum(|u| u.uncached_input), sum(|u| u.cache_read), sum(|u| u.cache_write)), "target": target})
+    }).collect();
+    json!({"scope": "project terminal attempts", "routes": routes, "lanes": lanes})
+}
 fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
     use run::AttemptReader;
     let path = edge.assets.join("config/telemetry-prices.toml");
@@ -5469,6 +5731,20 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         })
         .transpose()?
         .unwrap_or_default();
+    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    let selected: Vec<_> = facts
+        .iter()
+        .filter(|fact| {
+            window.since.is_none_or(|s| fact.finished_at >= s)
+                && window.until.is_none_or(|u| fact.finished_at < u)
+        })
+        .collect();
+    let cache_kpis = cache_kpi_rows(
+        &selected,
+        &config.domains,
+        jiff::Timestamp::now().as_second(),
+    );
     // Chair sessions span projects, so the host's whole window is read. They are
     // best effort: an unreadable usage log must not hide the lane figures.
     let chair_window = (
@@ -5491,8 +5767,18 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
     let report = provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let mut human = stats_summary(&report);
+    let total_share = totals_cache_read_share(&report.totals);
+    human.push_str(&format!(
+        "cache-read share: {}\n",
+        total_share.map_or_else(
+            || "unknown (incomplete input categories)".into(),
+            |share| format!("{:.1}%", share * 100.0)
+        )
+    ));
     let mut data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    data["cache_read_share"] = cache_kpis;
+    data["cache_read_share"]["overall"] = json!(total_share);
     if let Some(error) = chair_error {
         human.push_str(&format!(
             "chair sessions not read: {}\n",
@@ -5501,6 +5787,16 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         data["chair_error"] = Value::String(error);
     }
     Ok((data, human))
+}
+
+fn totals_cache_read_share(totals: &provenant_telemetry::Totals) -> Option<f64> {
+    let known =
+        |total: &provenant_telemetry::TokenTotal| (total.missing == 0).then_some(total.known);
+    provenant_routing::cache_read_share(
+        known(&totals.usage.uncached_input),
+        known(&totals.usage.cache_read),
+        known(&totals.usage.cache_write),
+    )
 }
 
 fn cost_summary(totals: &provenant_telemetry::Totals) -> String {
@@ -5920,6 +6216,97 @@ mod lane_depth_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn model_policy_results_check_sections_and_bound_continuations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|error| error.message)?;
+        let store = trace_store(&temp, &call)?;
+        let input = trace_run(40, AttemptId::from_bytes([41; 16]), clock.wall_now()?)?;
+        store.create(&input, &call)?;
+        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        let task = &input.request.tasks[0];
+        let policies = provenant_routing::ModelPolicies::default();
+        let mut decoded = run::Decoded {
+            outcome: run::Outcome::Succeeded,
+            result: "unstructured answer".into(),
+            complete: true,
+            observed_route: None,
+            usage: Default::default(),
+            session: Some("fixture".into()),
+            reason: None,
+            partial_signals: Vec::new(),
+        };
+        let gemini = policies
+            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, 0)
+            .policy;
+        let decision =
+            assess_model_result(&gemini, task, &record, &decoded, record.attempt_number)?;
+        assert!(decision.refusal.is_some());
+        let fallback = decision.retry.ok_or("missing fallback")?;
+        assert!(!fallback.resume);
+        assert_eq!(fallback.max_attempts, 2);
+        record.continuation = Some("policy_fallback".into());
+        assert!(
+            assess_model_result(&gemini, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .is_none()
+        );
+        record.continuation = None;
+        decoded.result = "## Findings\nClean.\n## Evidence\nChecked.".into();
+        let decision =
+            assess_model_result(&gemini, task, &record, &decoded, record.attempt_number)?;
+        assert!(decision.refusal.is_none() && decision.retry.is_none());
+        // Typed quota and stop outcomes retain their own recovery semantics,
+        // even when their result is empty.
+        decoded.result.clear();
+        for outcome in [
+            run::Outcome::QuotaLimited,
+            run::Outcome::Cancelled,
+            run::Outcome::TimedOut,
+            run::Outcome::Lost,
+        ] {
+            decoded.outcome = outcome;
+            let decision = assess_model_result(&gemini, task, &record, &decoded, 1)?;
+            assert!(decision.refusal.is_none() && decision.retry.is_none());
+        }
+        decoded.outcome = run::Outcome::Succeeded;
+        let terra = policies
+            .effective(&ModelId::parse("codex/gpt-6.1-terra")?, None, 0)
+            .policy;
+        record.applied_route = Some(run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-terra".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+        decoded.result = "More work remains.\nStatus: incomplete".into();
+        let continuation =
+            assess_model_result(&terra, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .ok_or("missing continuation")?;
+        assert!(continuation.resume);
+        assert_eq!(continuation.max_attempts, 3);
+        decoded.outcome = run::Outcome::Uncommitted;
+        assert!(
+            assess_model_result(&terra, task, &record, &decoded, 1)?
+                .retry
+                .is_some()
+        );
+        decoded.outcome = run::Outcome::Succeeded;
+        record.attempt_number = 3;
+        let decision = assess_model_result(&terra, task, &record, &decoded, record.attempt_number)?;
+        assert!(decision.refusal.is_some() && decision.retry.is_none());
+        decoded.result = "Done.\nStatus: complete".into();
+        assert!(
+            assess_model_result(&terra, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .is_none()
+        );
+        Ok(())
+    }
+    #[test]
     fn unsafe_store_path_reason_survives_cli_conversion() {
         let failure = super::Fail::from(provenant_run::RunError::UnsafePath {
             path: "runs/example/process.json".into(),
@@ -5948,6 +6335,12 @@ mod tests {
             },
             outcomes: Default::default(),
         };
+        assert_eq!(totals_cache_read_share(&totals), None);
+        totals.usage.uncached_input.known = 10;
+        totals.usage.cache_read.known = 90;
+        assert_eq!(totals_cache_read_share(&totals), Some(0.9));
+        totals.usage.cache_write.missing = 1;
+        assert_eq!(totals_cache_read_share(&totals), None);
         assert_eq!(
             cost_summary(&totals),
             "3 attempts, cost unknown (3 attempts missing cost data)\n"
@@ -6029,6 +6422,45 @@ mod tests {
         );
         let text = report(usage(None));
         assert!(!text.contains("cache read"), "{text}");
+    }
+
+    #[test]
+    fn core_run_status_uses_policy_successor_and_retains_receipts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let edge = Edge {
+            roots: &roots,
+            home: &root.join("home"),
+            assets: root,
+            cwd: root,
+        };
+        for (tail, expected) in [("succeeded", Status::Ok), ("failed", Status::Failed)] {
+            let result = super::reply(
+                "dispatch",
+                Ok((
+                    json!({
+                        "lanes": [
+                            {"attempt_id":"01010101010101010101010101010101", "state":"failed", "superseded_by":"02020202020202020202020202020202"},
+                            {"attempt_id":"02020202020202020202020202020202", "state":tail}
+                        ]
+                    }),
+                    String::new(),
+                )),
+            );
+            let report = super::render_run(result, &edge);
+            assert_eq!(report.result.status, expected);
+            assert_eq!(
+                report.result.data["lanes"].as_array().ok_or("lanes")?.len(),
+                2
+            );
+            assert!(report.human.contains("01010101 failed"));
+            assert!(report.human.contains(&format!("02020202 {tail}")));
+        }
+        Ok(())
     }
 
     #[test]

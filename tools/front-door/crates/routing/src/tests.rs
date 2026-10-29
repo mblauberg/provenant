@@ -5,6 +5,181 @@ use provenant_records::{RouteEligibility, RouteExclusionReason, RouteReadiness};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[test]
+fn default_pools_do_not_include_free_routes() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let context = context(&catalogue, &config, now()?);
+    let listed = list(&RouteListQuery::default(), &context)?;
+    assert!(listed.pools.values().flatten().all(|member| !member.free));
+    Ok(())
+}
+
+#[test]
+fn model_policy_config_accepts_layered_rules() -> Result<(), Box<dyn std::error::Error>> {
+    let config = serde_json::from_value::<RoutingConfig>(serde_json::json!({
+        "model_policy": {"rules": [{"model": "codex/gpt-6.1-terra", "account": "work",
+            "expires_unix_seconds": 200, "policy": {"lane": {"stop_early_ok": false}}}]}
+    }));
+    assert!(
+        config.is_ok(),
+        "layered model policy must be accepted: {config:?}"
+    );
+    assert!(config?.validate().is_empty());
+    Ok(())
+}
+
+#[test]
+fn restricted_routes_refuse_writes() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let context = context(&catalogue, &config, now()?);
+    let mut query = request("agy/gemini-3.8-flash")?;
+    query.intent.writes = true;
+    assert!(matches!(
+        resolve(&query, &context),
+        Err(RoutingError::ReadOnlyPolicy)
+    ));
+    Ok(())
+}
+
+#[test]
+fn account_policy_filters_accounts_before_selecting_a_writer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = toml_edit::de::from_str(
+        "[[model_policy.rules]]\naccount='codex/review'\n[model_policy.rules.policy.lane]\nread_only=true\n",
+    )?;
+    let records = [
+        AvailabilityRecord {
+            account_key: Some("work".into()),
+            ..availability()
+        },
+        AvailabilityRecord {
+            account_key: Some("review".into()),
+            ..availability()
+        },
+    ];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let context = RoutingContext {
+        availability: &records,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let mut request = request("codex/gpt-6-luna")?;
+    request.intent.writes = true;
+    let selected = resolve(&request, &context)?;
+    assert_eq!(selected.account_key.as_deref(), Some("work"));
+    assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+    Ok(())
+}
+
+#[test]
+fn valid_list_contains_only_resolvable_recorded_pairs() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let context = context(&catalogue, &config, now()?);
+    let listed = list(
+        &RouteListQuery {
+            valid: true,
+            adapter: Some("codex".into()),
+            pool: None,
+        },
+        &context,
+    )?;
+    assert!(!listed.valid_pairs.is_empty());
+    assert!(listed.models.is_empty() && listed.pools.is_empty() && listed.named_routes.is_empty());
+    assert!(
+        !listed
+            .valid_pairs
+            .iter()
+            .any(|pair| pair.model.as_str() == "codex/gpt-6.1-luna")
+    );
+    for pair in listed.valid_pairs {
+        assert_eq!(pair.model.adapter(), "codex");
+        let mut request = request(pair.model.as_str())?;
+        request.effort = pair.effort;
+        assert_eq!(
+            resolve(&request, &context)?.eligibility,
+            RouteEligibility::Eligible
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn read_heavy_routing_records_cache_preference_without_forcing_edit_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = toml_edit::de::from_str(
+        "[pools]\ncachetest=[{model='opencode/opencode-go/deepseek-v4.1-flash',weight=1},{model='codex/gpt-6-luna',weight=1}]\n",
+    )?;
+    let records: Vec<_> = [
+        ("codex", "gpt-6-luna"),
+        ("opencode", "opencode-go/deepseek-v4.1-flash"),
+    ]
+    .into_iter()
+    .map(|(adapter, model)| AvailabilityRecord {
+        adapter: adapter.into(),
+        observed_models: vec![model.into()],
+        ..availability()
+    })
+    .collect();
+    let access = [
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        },
+        AccessContext {
+            adapter: "opencode",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        },
+    ];
+    let context = RoutingContext {
+        availability: &records,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    for (workload, expected) in [
+        (Workload::General, 10_000),
+        (Workload::ReadHeavy, 30_000),
+        (Workload::Review, 30_000),
+        (Workload::EditHeavy, 10_000),
+    ] {
+        let request = RouteRequest {
+            intent: RouteIntent {
+                workload,
+                writes: false,
+            },
+            choice: RouteChoice::NamedRoute(RouteName::parse("cachetest")?),
+            effort: None,
+            confidential: false,
+            allow_free: false,
+            fallback: Fallback::None,
+        };
+        let route = resolve_with_seed(&request, &context, "cache-test", 0)?;
+        let receipt = route.pool_selection.ok_or("pool receipt")?;
+        assert_eq!(receipt.candidates[0].factor_basis_points, expected);
+        assert_eq!(receipt.candidates[1].factor_basis_points, 10_000);
+        assert_eq!(receipt.total_weight, u64::from(expected) + 10_000);
+        if expected == 30_000 {
+            assert!(
+                receipt.candidates[0]
+                    .pacing_detail
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("cheap-cache read-heavy preference"))
+            );
+        }
+    }
+    Ok(())
+}
+
 fn now() -> Result<provenant_core::WallTime, Box<dyn std::error::Error>> {
     Ok(provenant_core::WallTime::from_micros(100_000_000)?)
 }
@@ -14,6 +189,7 @@ fn context<'a>(
     now: provenant_core::WallTime,
 ) -> RoutingContext<'a> {
     RoutingContext {
+        policy_account_hint: None,
         catalogue,
         config,
         registry: REGISTRY,
@@ -27,6 +203,7 @@ fn context<'a>(
 }
 fn request(model: &str) -> Result<RouteRequest, RoutingError> {
     Ok(RouteRequest {
+        intent: Default::default(),
         choice: RouteChoice::Model(ModelId::parse(model)?),
         effort: None,
         confidential: false,
@@ -175,7 +352,7 @@ fn model_selector_keeps_the_entire_provider_path() -> Result<(), RoutingError> {
 }
 #[test]
 fn route_names_validate_at_the_string_boundary() -> Result<(), Box<dyn std::error::Error>> {
-    let wire = r#"{"choice":{"kind":"named_route","value":"review.v1-_2"},"effort":null,"confidential":false,"allow_free":false,"fallback":{"kind":"none"}}"#;
+    let wire = r#"{"intent":{"workload":"general","writes":false},"choice":{"kind":"named_route","value":"review.v1-_2"},"effort":null,"confidential":false,"allow_free":false,"fallback":{"kind":"none"}}"#;
     let query: RouteRequest = serde_json::from_str(wire)?;
     assert_eq!(serde_json::to_string(&query)?, wire);
     assert_eq!(
@@ -366,6 +543,7 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
     };
     let context = context(&catalogue, &config, now()?);
     let mut query = RouteRequest {
+        intent: Default::default(),
         choice: RouteChoice::NamedRoute(RouteName::parse("review")?),
         effort: None,
         confidential: false,
@@ -1115,6 +1293,7 @@ fn candidate_errors_and_fallback_effort_match_request_fixtures()
 fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
     catalogue.models.push(ModelEntry {
+        free: false,
         model: ModelId::parse("codex/test")?,
         efforts: vec!["high".into()],
         evidence_ref: "test".into(),
@@ -1214,6 +1393,21 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/assets".into());
     inputs.state_dir = Some("/fixture/state".into());
     let roots = inputs.resolve(&Resolver)?;
+    let model_policy_config = provenant_config::load_with_domains(
+        &roots,
+        Some("schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nexpires_unix_seconds=200\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n".as_bytes()),
+        &sections,
+    )?;
+    assert_eq!(
+        model_policy_config
+            .domains
+            .routing
+            .model_policy
+            .defaults
+            .cache
+            .read_share_target,
+        Some(0.95)
+    );
     let cfg = provenant_config::load_with_domains(
         &roots,
         Some(
@@ -1369,6 +1563,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
     assert_eq!(wrong.record().family, None);
     let mut broker = catalogue.clone();
     broker.models.push(ModelEntry {
+        free: false,
         model: ModelId::parse("codex/claude-haiku-4-5-20251001")?,
         efforts: vec![],
         family: Some("anthropic".into()),
@@ -2068,6 +2263,7 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
     let mut catalogue = Catalogue::bundled()?;
     for id in ["codex/test", "claude/test"] {
         catalogue.models.push(ModelEntry {
+            free: false,
             model: ModelId::parse(id)?,
             efforts: vec![],
             evidence_ref: "synthetic-controls".into(),

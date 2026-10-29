@@ -971,6 +971,41 @@ impl RunStore {
             decoded.outcome = Outcome::ReviewRequired;
             decoded.reason = Some("protected changes require review".into());
         }
+        let frozen_policy_retry = self.staged_policy_retry(&record)?.is_some();
+        if frozen_policy_retry
+            && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted)
+        {
+            decoded.outcome = if cancelled {
+                Outcome::Cancelled
+            } else {
+                Outcome::Failed
+            };
+            decoded.reason =
+                Some("result-policy recovery decision retained from interrupted settlement".into());
+        }
+        if !frozen_policy_retry
+            && !cancelled
+            && exit.stop_reason.is_none()
+            && !exit.never_spawned
+            && !exit.unresolved_cleanup
+        {
+            let assessment = providers
+                .assess_result(
+                    task,
+                    &record,
+                    &decoded,
+                    completion.holder_context(),
+                    self.policy_attempt_number(&record, call)?,
+                )
+                .map_err(RunError::ProviderEvidence)?;
+            if let Some(reason) = assessment.refusal {
+                decoded.outcome = Outcome::Failed;
+                decoded.reason = Some(reason);
+            }
+            if let Some(retry) = assessment.retry {
+                self.stage_policy_retry(&record, &retry, call)?;
+            }
+        }
         // A finish that settled well can still be a partial one. Flag it for
         // the chair, who decides whether to resume; the outcome stays as is.
         let mut partial = std::mem::take(&mut decoded.partial_signals);

@@ -2619,8 +2619,8 @@ impl BinaryRunOwner<'_> {
                         for index in &local_indices {
                             attempts[*index] = Some(
                                 session
-                                    .service()
-                                    .status(targets[*index].attempt, &local_call)
+                                    .store
+                                    .policy_tail(targets[*index].attempt, &local_call)
                                     .map_err(run_error)?,
                             );
                         }
@@ -3338,6 +3338,7 @@ pub(crate) fn advance_settled_graphs(
     let Some(settled) = holder.settled()? else {
         return Ok(());
     };
+    provenant_cli::run::launch_policy_successor(&settled).map_err(std::io::Error::other)?;
     advance_graphs_after_settlement(&settled, workers)
 }
 
@@ -3477,6 +3478,10 @@ fn settle_owned_worktree(
     let store =
         provenant_run::RunStore::open(&context, &call)?.with_writer_registry(roots.state.as_path());
     let record = store.record(settled.attempt_id, &call)?;
+    if store.policy_tail(record.attempt_id, &call)?.attempt_id != record.attempt_id {
+        // The successor owns this writer's remaining work and settlement.
+        return Ok(());
+    }
     if !matches!(record.state, provenant_run::AttemptState::Terminal { .. }) {
         return Ok(());
     }
@@ -4433,7 +4438,21 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             ));
             (target, reference)
         };
-        let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        let mut attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        let mut reference = reference;
+        if target
+            .host
+            .is_none_or(|host| host == self.factory.context.identity.host)
+        {
+            let store = owner.store(self.budget, self.cancel)?;
+            attempt = store
+                .policy_tail(attempt.attempt_id, &owner.call(self.budget, self.cancel))
+                .map_err(run_error)?;
+            reference = Some(format!(
+                "{}/{}",
+                self.factory.context.identity.host, attempt.attempt_id
+            ));
+        }
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => {

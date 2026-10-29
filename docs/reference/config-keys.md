@@ -238,6 +238,18 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | `type` | `"enum"` |
 | `values` | `["delta", "full"]` |
 
+## `routing.workload`
+
+| Field | Value |
+|---|---|
+| `default` | `"general"` |
+| `effect` | `"Describe the task for model policy. Read-heavy and review work give cheap-cache, million-token models a configurable preference in pools."` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A preference preserves model choice and readiness gates; it does not force every read-heavy task onto one model."` |
+| `type` | `"enum"` |
+| `values` | `["general", "read_heavy", "edit_heavy", "review"]` |
+
 ## `usage.project_attribution`
 
 | Field | Value |
