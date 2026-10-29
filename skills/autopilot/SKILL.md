@@ -46,8 +46,9 @@ one-way-door decision. Keep other in-scope work moving where it is independent.
 7. Before compaction or a substantial handoff, save a bounded Markdown
    checkpoint for the host session with
    `provenant workflow session save <session-id> --file <checkpoint.md>`.
-   Include authority/evidence references, verified progress, next actions,
-   blockers, and a resume trigger.
+   Keep it to goal, direction, process and plan with the resume trigger; live
+   status stays with the run. Record each milestone, such as a merge, decision
+   or blocker, with `provenant chair log append` for the user's progress record.
 8. If the run has no eligible or active work, follow run admission and pause
    behaviour. Report the waiting condition and resume trigger. Do not label the
    mission complete or change `STATUS`; only the user can stop it.
@@ -73,6 +74,6 @@ for decisions made within an approved authority envelope.
 
 Use the [Codex operating reference](references/codex-operator.md),
 [cross-family review reference](references/cross-family-review.md), and the
-[goal](templates/GOAL.template.md), [state](templates/STATE.template.md),
+[goal](templates/GOAL.template.md), [checkpoint](templates/checkpoint.template.md),
 [handoff](templates/HANDOFF.template.md), and
 [README](templates/README.template.md) templates when preparing those artifacts.

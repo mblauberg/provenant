@@ -28,9 +28,10 @@ for the actual host session:
 provenant workflow session save <session-id> --file <checkpoint.md>
 ```
 
-Keep the goal, authority and evidence references, verified progress, next
-actions, blockers, and resume trigger within 32 KiB. Hooks inject only the
-checkpoint for that session key, or an explicit missing/stale status.
+Keep the goal, direction, process, and plan with the resume trigger, near 2 KiB.
+Record milestones in the chair log with `provenant chair log append`. Hooks
+inject only the checkpoint for that session key, or an explicit missing/stale
+status.
 
 ## User control
 
