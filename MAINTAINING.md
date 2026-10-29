@@ -145,14 +145,16 @@ Harness asset checks enforce the machine-checkable subset.
 6. Keep `SKILL.md` roughly 500 words or less. Move depth into narrowly named
    references loaded only when needed and deterministic behaviour into scripts.
 7. Add positive, negative and boundary fixtures with exact primary and companion
-   routes. Trigger fixtures are mandatory for every skill change. A contract
-   test is mandatory only where the change introduces or alters an invariant a
-   script, validator or CI gate evaluates at runtime, so that violating it fails
-   a command rather than a reviewer's reading. A change confined to wording,
+   routes. Trigger fixtures are mandatory for every skill change;
+   `scripts/check-skill-negatives` inventories the near-miss negatives under
+   `skills/` and `library/`. A contract test is mandatory only where the change
+   introduces or alters an invariant a script, validator or CI gate evaluates at
+   runtime, so that violating it fails a command rather than a reviewer's
+   reading. A change confined to wording,
    ordering, examples or explanation adds no contract test; the fixture set and
    the harness gates carry it. Assert parsed structure (fixture routes, JSON
    policy values, resolved paths) or a script's output, exit code or side
-   effect. Never assert the text of a document. See `tdd` for the
+   effect. Never assert the text of a document. See `test-design` for the
    exclusion list.
 8. A skill behaviour change runs its fixtures with and without the skill and
    records the difference for the reviewer; frozen comparative evals are
@@ -181,7 +183,7 @@ rule; no contract test currently scans it. Required licence notices may name
 the files they cover.
 
 `natural-writing` is the writing hub and single owner of the shared prose
-doctrine (tiered anti-AI taxonomy, Australian-English house style, condense pass
+doctrine (mechanism catalogue, Australian-English house style, condense pass
 and claim discipline) plus academic prose; `engineering-writing` and
 `legal-writing` keep only their domain overlay and link back to the hub. Change
 the shared doctrine in the hub, not in a domain skill. The hub's
@@ -244,6 +246,14 @@ numerator and denominator, model and harness versions.
 - Derive expected registries and lists from their source of truth.
 - Keep security, confidentiality, evidence, lease, and schema assertions.
 - When an unbreaking change fails a test, rewrite it to pin behaviour or delete it; never bend product code around it.
+
+Three advisory test-strength signals run in `.github/workflows/test-signals.yml`.
+They always exit 0, so they only warn:
+
+- `scripts/assertion-diff` flags Rust test assertions that a diff removes or
+  loosens.
+- `scripts/run-mutants` mutation-tests the source lines a diff changed.
+- `scripts/find-changed-tests` lists the Rust tests a change adds or alters.
 
 ## Verify and release
 
