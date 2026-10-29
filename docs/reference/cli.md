@@ -2534,6 +2534,13 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
+| `--outcomes` | `{"conflicts": ["usage", "claude_subagents", "by"], "defaults": ["false"], "name": "outcomes", "values": ["true", "false"]}` |
+| `--suggest` | `{"conflicts": ["usage", "claude_subagents", "by"], "defaults": ["false"], "name": "suggest", "values": ["true", "false"]}` |
+| `--main-ref` | `{"defaults": ["main"], "name": "main_ref"}` |
+| `--ci-file` | `{"name": "ci_file"}` |
+| `--outcome-days` | `{"defaults": ["14"], "name": "outcome_days"}` |
+| `--min-samples` | `{"defaults": ["20"], "name": "min_samples"}` |
+| `--expiry-days` | `{"defaults": ["14"], "name": "expiry_days"}` |
 | `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id", "by"], "name": "claude_subagents"}` |
 | `--usage` | `{"defaults": ["false"], "name": "usage", "values": ["true", "false"]}` |
 | `--since` | `{"name": "since"}` |
@@ -2552,17 +2559,21 @@ Accepted by every command, before or after the subcommand.
   ],
   "groups": [
     {
-      "arguments": [
-        "claude_subagents",
-        "usage",
-        "since",
-        "until",
-        "run_id",
-        "by",
-        "detail"
-      ],
+      "arguments": [],
       "multiple": true,
       "name": "Stats",
+      "required": false
+    },
+    {
+      "arguments": [
+        "main_ref",
+        "ci_file",
+        "outcome_days",
+        "min_samples",
+        "expiry_days"
+      ],
+      "multiple": true,
+      "name": "PipelineOptions",
       "required": false
     }
   ]
