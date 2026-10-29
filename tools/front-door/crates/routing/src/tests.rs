@@ -2443,11 +2443,28 @@ fn qualified_pacing_and_reset_references_respect_adapter() -> Result<(), Box<dyn
 
 /// Exercise profile decisions through the public resolver and its receipt.
 fn profile_preview(
+    config: RoutingConfig,
+    model: &str,
+    account: &str,
+    windows: Vec<provenant_quota::QuotaWindow>,
+    references: Vec<QuotaObservation>,
+) -> Result<ResolvedRoute, Box<dyn std::error::Error>> {
+    profile_preview_with_status(
+        config,
+        model,
+        account,
+        windows,
+        references,
+        provenant_quota::QuotaStatus::Available,
+    )
+}
+fn profile_preview_with_status(
     mut config: RoutingConfig,
     model: &str,
     account: &str,
     windows: Vec<provenant_quota::QuotaWindow>,
     mut references: Vec<QuotaObservation>,
+    status: provenant_quota::QuotaStatus,
 ) -> Result<ResolvedRoute, Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let id = ModelId::parse(model)?;
@@ -2470,14 +2487,7 @@ fn profile_preview(
         disclosure_ref: "policy",
         confinement_ref: "grant",
     }];
-    let mut observation = quota(
-        model,
-        account,
-        provenant_quota::QuotaStatus::Available,
-        1,
-        80,
-        120,
-    )?;
+    let mut observation = quota(model, account, status, 1, 80, 120)?;
     observation.snapshot.account.adapter = id.adapter().into();
     observation.snapshot.windows = windows;
     references.push(observation);
@@ -3514,5 +3524,53 @@ fn quota_pool_is_validated_and_limited_to_grouped_adapters()
         row.quota_pool = pool.map(Into::into);
         assert_eq!(catalogue.validate().is_ok(), valid, "{model} {pool:?}");
     }
+    Ok(())
+}
+
+#[test]
+fn agy_exhaustion_follows_the_models_serving_windows() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let window = |pool: &str, used, reset| QuotaWindow {
+        pool: pool.into(),
+        window_seconds: Some(604_800),
+        used_basis_points: used,
+        resets_unix_seconds: Some(reset),
+    };
+    let ready = |model: &str, status, windows| -> Result<bool, Box<dyn std::error::Error>> {
+        let config: RoutingConfig = serde_json::from_value(
+            serde_json::json!({"pacing":{"accounts":{"agy-host":{"policy":"max"}}}}),
+        )?;
+        let route =
+            profile_preview_with_status(config, model, "agy-host", windows, vec![], status)?;
+        Ok(matches!(route.readiness, RouteReadiness::Ready { .. }))
+    };
+    let (claude, gemini) = ("agy/claude-sonnet-4-6", "agy/gemini-3.8-flash");
+    // An exhausted ungrouped window serves every model.
+    for model in [claude, gemini] {
+        let windows = vec![
+            window("gemini.weekly", 0, 604_900),
+            window("claude.weekly", 0, 604_900),
+            window("quota", 10_000, 604_900),
+        ];
+        assert!(!ready(model, QuotaStatus::Available, windows)?, "{model}");
+    }
+    // A spent Gemini group leaves Claude ready, and the reverse.
+    let split = |g, c| {
+        vec![
+            window("gemini.weekly", g, 604_900),
+            window("claude.weekly", c, 604_900),
+        ]
+    };
+    assert!(ready(claude, QuotaStatus::Available, split(10_000, 0))?);
+    assert!(!ready(gemini, QuotaStatus::Available, split(10_000, 0))?);
+    assert!(ready(gemini, QuotaStatus::Available, split(0, 10_000))?);
+    assert!(!ready(claude, QuotaStatus::Available, split(0, 10_000))?);
+    // Exhaustion lapses per model: Claude's reset has passed, Gemini's has not.
+    let lapsed = vec![
+        window("gemini.weekly", 10_000, 604_900),
+        window("claude.weekly", 10_000, 50),
+    ];
+    assert!(ready(claude, QuotaStatus::Exhausted, lapsed.clone())?);
+    assert!(!ready(gemini, QuotaStatus::Exhausted, lapsed)?);
     Ok(())
 }

@@ -292,11 +292,9 @@ fn free_pool(adapter: &str) -> Option<&'static str> {
 
 fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
     window == pool
-        || (provenant_records::AdapterSpec::get(adapter)
-            .is_some_and(|spec| spec.grouped_quota_pools)
-            && window
-                .split_once('.')
-                .is_some_and(|(group, _)| group == pool))
+        || provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+            spec.grouped_quota_pools && spec.window_serves_pool(window, Some(pool))
+        })
 }
 
 #[cfg(test)]
@@ -982,6 +980,35 @@ mod refusal_scope_tests {
             used_basis_points: used,
             resets_unix_seconds: Some(3000),
         };
+        // An exhausted ungrouped window blocks every model.
+        let mut record = AccountRecord::empty(account.clone());
+        record.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: account.clone(),
+            revision: 0,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 960,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![window("quota", 10000)],
+        });
+        for (model, pool) in [
+            ("gemini-3.8-flash", "gemini"),
+            ("claude-sonnet-4-6", "claude"),
+        ] {
+            assert!(
+                Admission {
+                    policies: crate::source::TEST_POLICIES,
+                    now_unix_seconds: 1000,
+                    records: &[record.clone()],
+                    pools: &[pool.into()],
+                }
+                .check(&route(model))
+                .is_err(),
+                "{model}"
+            );
+        }
         for (gemini, claude) in [(10000, 0), (0, 10000)] {
             let mut record = AccountRecord::empty(account.clone());
             record.snapshot = Some(QuotaSnapshot {
