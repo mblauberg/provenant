@@ -1,6 +1,6 @@
 //! The real Rust command edge runs without Python, Node or ambient state.
 mod support;
-use provenant_fabric_runtime::hosts::PROTOCOL;
+use provenant_fabric_runtime::hosts::{DOCTOR_PROTOCOL, PROTOCOL};
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -210,6 +210,187 @@ fn hosts_probe_only_the_requested_page() -> Result {
             assert_eq!(host["available"], false);
             assert!(host.get("protocol").is_none());
         }
+    }
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn peer_doctor_returns_the_local_report() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let host = identity["data"]["host"].as_str().ok_or("host")?;
+    let source = next_host(host.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    let request = json!({
+        "version": 1, "protocol":DOCTOR_PROTOCOL,
+        "target_host": host,
+        "source_host": source,
+        "agent": "fixture",
+        "project": {"key": key, "common_dir": "repo/.git"},
+        "action": {"action":"doctor"}
+    });
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.state.clone().into(),
+            "fabric".into(),
+            "peer".into(),
+        ],
+        Some(&serde_json::to_vec(&request)?),
+    )?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response["result"]["result"], "doctor", "{response}");
+    let report = &response["result"]["data"];
+    assert!(report["claude"].is_array(), "{report}");
+    assert!(report["peer_agent"].is_string(), "{report}");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn hosts_doctor_uses_the_configured_peer_transport() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let local = identity["data"]["host"].as_str().ok_or("host")?;
+    let host = next_host(local.parse()?)?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    let ssh = rig.root.join("ssh");
+    let args = rig.root.join("ssh-args");
+    let request = rig.root.join("ssh-request");
+    let response = rig.root.join("ssh-response");
+    std::fs::write(
+        &response,
+        serde_json::to_vec(&json!({
+            "version": 1, "protocol":DOCTOR_PROTOCOL,
+            "host": host.to_string(),
+            "project": key,
+            "result": {"result":"doctor","data":{
+                "claude":[{"label":"default (~/.claude)","signin":{
+                    "state":"signed_out","token_validity":"unverified"
+                }}],
+                "peer_agent":"running",
+                "managed":[],
+                "warnings":[]
+            }}
+        }))?,
+    )?;
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\ncat '{}'\n",
+            args.display(),
+            request.display(),
+            response.display()
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n\
+             [domains.fabric.peers.workshop]\nhost='{}'\ndestination='workshop-fabric'\n\
+             remote_executable='/opt/provenant'\n",
+            ssh.to_string_lossy(),
+            host
+        ),
+    )?;
+    let (status, output) = json_command(&rig, &["hosts", "doctor", "workshop", "--json"])?;
+    assert_eq!(status, 0, "{output}");
+    assert_eq!(
+        output["data"]["claude"][0]["label"], "default (~/.claude)",
+        "{output}"
+    );
+    let args = std::fs::read_to_string(args)?;
+    assert!(args.lines().any(|arg| arg == "workshop-fabric"), "{args}");
+    assert!(
+        args.lines().any(|arg| arg == "/opt/provenant fabric peer"),
+        "{args}"
+    );
+    let request: Value = serde_json::from_slice(&std::fs::read(request)?)?;
+    assert_eq!(request["action"], json!({"action": "doctor"}), "{request}");
+    assert_eq!(request["protocol"], DOCTOR_PROTOCOL, "{request}");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn hosts_doctor_unknown_peer_refuses_with_unknown_host() -> Result {
+    let mut rig = TestRig::new()?;
+    federated_identity(&mut rig)?;
+    let (status, output) = json_command(&rig, &["hosts", "doctor", "nowhere", "--json"])?;
+    assert_ne!(status, 0);
+    assert_eq!(output["error"]["code"], "UNKNOWN_HOST", "{output}");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn hosts_doctor_rejects_untrusted_peer_reports() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let local = identity["data"]["host"].as_str().ok_or("host")?;
+    let host = next_host(local.parse()?)?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    let ssh = rig.root.join("ssh");
+    let response_path = rig.root.join("ssh-response");
+    let good = json!({
+        "claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],
+        "peer_agent":"running","managed":[],"warnings":[]
+    });
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\ncat '{}'\n",
+            response_path.display()
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n
+             [domains.fabric.peers.workshop]\nhost='{}'\ndestination='workshop-fabric'\n",
+            ssh.to_string_lossy(),
+            host
+        ),
+    )?;
+
+    let invalid_replies = [
+        json!({"result":"doctor","data":{
+            "claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"valid"}}],
+            "peer_agent":"running","managed":[],"warnings":[]
+        }}),
+        {
+            let mut report = good.clone();
+            report["claude"][0]["label"] = json!("bad\u{0007}label");
+            json!({"result":"doctor","data":report})
+        },
+        {
+            let mut report = good.clone();
+            report["claude"] = json!(vec![report["claude"][0].clone(); 129]);
+            json!({"result":"doctor","data":report})
+        },
+        json!({"result":"health","data":{"host":host,"available":true,"execution":true}}),
+    ];
+    for result in invalid_replies {
+        let envelope = json!({
+            "version":1,"protocol":DOCTOR_PROTOCOL,"host":host,"project":key,"result":result
+        });
+        std::fs::write(&response_path, serde_json::to_vec(&envelope)?)?;
+        let (status, output) = json_command(&rig, &["hosts", "doctor", "workshop", "--json"])?;
+        assert_ne!(status, 0, "{output}");
+        assert_eq!(output["error"]["code"], "PEER", "{output}");
     }
     rig.assert_legacy_unchanged()
 }

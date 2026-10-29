@@ -24,12 +24,19 @@ probes only Claude identities under `~/.claude` and `~/.claude-*`; it is not a
 general provider sign-in check. It also lists, for every registered account,
 whether its managed skills, MCP entry and hooks match the installed release
 (`provenant accounts sync` repairs drift; see the
-[install runbook](install.md#account-sync)). Remote doctor uses
-`~/.local/bin/provenant` on the peer. Peer calls run `provenant fabric peer`
-through the peer's non-interactive `PATH`. The hidden `fabric peer` command is
-the fixed SSH protocol entrypoint; the hidden `fabric peer-agent` command is the
-macOS LaunchAgent that runs it in the login session (see below). Remote
-dispatch uses top-level `dispatch --host`. The Rust CLI grammar lives in
+[install runbook](install.md#account-sync)). Remote doctor names a configured
+peer: `hosts doctor NAME` resolves `NAME` through `domains.fabric.peers` and
+sends a read-only doctor action over the same `provenant fabric peer` transport
+as the other peer reads. It uses the peer's `destination`,
+`domains.fabric.ssh_executable` and `remote_executable`, so a key restricted to
+the peer entrypoint still serves it. An unknown name is refused as
+`UNKNOWN_HOST`. Remote doctor requires a project checkout with Fabric peer
+configuration; the peer must hold the same project key. Peer calls run
+`provenant fabric peer` through the peer's
+non-interactive `PATH`. The hidden `fabric peer` command is the fixed SSH
+protocol entrypoint; the hidden `fabric peer-agent` command is the macOS
+LaunchAgent that runs it in the login session (see below). Remote dispatch uses
+top-level `dispatch --host`. The Rust CLI grammar lives in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
 
@@ -634,8 +641,9 @@ workshop` from the other host: the `peer agent` line reads `running`,
 `unsupported` (not macOS). Use receipt-aware `provenant uninstall --harness NAME`
 for each installed harness. Removing the last recorded target boots out the
 agent and removes its unchanged plist; edited plists are preserved and
-reported. See the [install runbook](install.md). Doctor uses a separate remote
-command, so a key forced to the peer entrypoint cannot also run remote doctor.
+reported. See the [install runbook](install.md). Remote doctor uses the same
+forced-command peer entrypoint, so a key restricted to `provenant fabric peer`
+also serves it.
 
 `fabric peer` is a hidden machine entrypoint, not an interactive operator
 command. The typed `PeerRequest`, `PeerAction` and `PeerResponse` in

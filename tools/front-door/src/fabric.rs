@@ -1078,7 +1078,8 @@ fn peer_read_only(action: &PeerAction) -> bool {
     match action {
         PeerAction::ConsoleBoard { .. }
         | PeerAction::ConsoleTree { .. }
-        | PeerAction::ConsoleDetail { .. } => true,
+        | PeerAction::ConsoleDetail { .. }
+        | PeerAction::Doctor { .. } => true,
         PeerAction::Inbox { input, .. } => !matches!(
             input,
             InboxInput::Answer {
@@ -1464,6 +1465,26 @@ pub fn peer(
                 },
                 extra: Default::default(),
             },
+            PeerAction::Doctor { .. } => {
+                match crate::hosts::local(&home, &context.roots).and_then(|report| {
+                    serde_json::to_value(report)
+                        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+                }) {
+                    Ok(data) => PeerResult::Doctor {
+                        data,
+                        extra: Default::default(),
+                    },
+                    Err(error) => PeerResult::Error {
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::io(format!(
+                                "build the local doctor report: {error}"
+                            )),
+                        },
+                        extra: Default::default(),
+                    },
+                }
+            }
             PeerAction::LandingPush {
                 proof,
                 operation_id,

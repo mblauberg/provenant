@@ -404,7 +404,7 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `host` | `{"description": "SSH alias to probe; all configured hosts when omitted", "name": "host", "positional": true}` |
+| `host` | `{"description": "Configured peer to probe; the local host when omitted", "name": "host", "positional": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 

@@ -17,6 +17,7 @@ use std::{
 pub const PROTOCOL: u64 = 6;
 pub const CONSOLE_PROTOCOL: u64 = 7;
 pub const INBOX_PROTOCOL: u64 = 8;
+pub const DOCTOR_PROTOCOL: u64 = 9;
 pub const CONSOLE_DETAIL_PROTOCOL: u64 = 10;
 pub const MAX_FRAME: usize = 1_048_576;
 
@@ -322,6 +323,11 @@ pub enum PeerAction {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
+    /// The peer's own sign-in and managed-install report, read-only.
+    Doctor {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
     Inbox {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
@@ -453,6 +459,8 @@ impl PeerRequest {
                 PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
             ) {
                 CONSOLE_PROTOCOL
+            } else if matches!(action, PeerAction::Doctor { .. }) {
+                DOCTOR_PROTOCOL
             } else {
                 PROTOCOL
             },
@@ -595,6 +603,11 @@ pub enum PeerResult {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
+    Doctor {
+        data: serde_json::Value,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
     Console {
         data: serde_json::Value,
         #[serde(flatten)]
@@ -660,6 +673,8 @@ pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError>
         INBOX_PROTOCOL
     } else if console {
         CONSOLE_PROTOCOL
+    } else if request.action["action"] == "doctor" {
+        DOCTOR_PROTOCOL
     } else {
         PROTOCOL
     };
@@ -885,6 +900,7 @@ impl SshTransport<'_> {
                         | PeerAction::ConsoleTree { .. }
                         | PeerAction::ConsoleDetail { .. }
                         | PeerAction::Inbox { .. }
+                        | PeerAction::Doctor { .. }
                 ) && stderr_has_line(
                     &outcome.stderr.bytes,
                     "provenant: fabric peer: invalid peer frame",
@@ -912,6 +928,7 @@ impl SshTransport<'_> {
                             | PeerAction::ConsoleTree { .. }
                             | PeerAction::ConsoleDetail { .. }
                             | PeerAction::Inbox { .. }
+                            | PeerAction::Doctor { .. }
                     )
                     && String::from_utf8_lossy(&outcome.stderr.bytes)
                         .lines()
@@ -1576,6 +1593,50 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(refusal.protocol, CONSOLE_PROTOCOL);
+    }
+    #[test]
+    fn doctor_action_uses_its_protocol_and_is_refused_before_action_decode() {
+        let host = HostId::from_bytes([2; 16]);
+        let project = ProjectLocator {
+            extra: Default::default(),
+            key: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        let request = PeerRequest::new(
+            host,
+            HostId::from_bytes([1; 16]),
+            "chair".into(),
+            project,
+            PeerAction::Doctor {
+                extra: Default::default(),
+            },
+        );
+        assert_eq!(request.protocol, DOCTOR_PROTOCOL);
+        assert!(
+            protocol_refusal(&serde_json::to_vec(&request).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        let mut old = serde_json::to_value(&request).unwrap();
+        old["protocol"] = PROTOCOL.into();
+        let refusal = protocol_refusal(&serde_json::to_vec(&old).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(refusal.protocol, DOCTOR_PROTOCOL);
+        assert!(matches!(
+            refusal.result,
+            PeerResult::Error {
+                data: crate::hosts::PeerResultError {
+                    error: facade::FacadeError::PeerVersion,
+                    ..
+                },
+                ..
+            }
+        ));
     }
     #[test]
     fn console_detail_uses_its_own_protocol() {

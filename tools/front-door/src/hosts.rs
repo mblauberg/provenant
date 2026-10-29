@@ -1,8 +1,14 @@
 //! Non-billable sign-in diagnostics. Captures remain bounded and in memory.
 use crate::{emit, fail, roots};
-use provenant_cli::{Globals, Hosts};
-use provenant_os::exec::{
-    ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
+use provenant_cli::{
+    Globals, Hosts,
+    fabric::{Context, PeerFailure, facade_outcome},
+};
+use provenant_core::{CancelToken, Clock, WaitBudget};
+use provenant_fabric_runtime::hosts::{PeerAction, PeerResult};
+use provenant_os::{
+    clock::SystemClock,
+    exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination},
 };
 use provenant_providers::claude::{CredentialPresence, SigninStatus, signin_status};
 use provenant_records::{CommandResult, Outcome};
@@ -30,7 +36,7 @@ struct Managed {
     findings: u64,
 }
 #[derive(Serialize, Deserialize)]
-struct Report {
+pub(crate) struct Report {
     claude: Vec<Identity>,
     /// The macOS login-session peer agent.
     peer_agent: provenant_fabric_runtime::peer_agent::Status,
@@ -150,7 +156,10 @@ fn managed(roots: &provenant_core::Roots, home: &Path) -> (Vec<Managed>, Option<
         Err(error) => (Vec::new(), Some(error.to_string())),
     }
 }
-fn local(home: &Path, roots: &provenant_core::Roots) -> Result<Report, Box<dyn std::error::Error>> {
+pub(crate) fn local(
+    home: &Path,
+    roots: &provenant_core::Roots,
+) -> Result<Report, Box<dyn std::error::Error>> {
     let state = roots.state.as_path();
     let mut identities = vec![("default (~/.claude)".to_owned(), home.join(".claude"))];
     for entry in fs::read_dir(home)? {
@@ -215,61 +224,110 @@ fn local(home: &Path, roots: &provenant_core::Roots) -> Result<Report, Box<dyn s
         warnings: crate::pool_effort_warnings(roots),
     })
 }
-fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, Box<dyn std::error::Error>> {
-    let resolved = roots::resolve(globals, roots::Workspace::Home, roots::Product::Optional)?;
-    let home = resolved.home;
-    let Some(host) = host else {
-        return local(&home, &resolved.roots);
-    };
-    let ssh = executable("ssh").ok_or("SSH executable is unavailable")?;
-    let argv = [
-        ssh.into_os_string(),
-        "-T".into(),
-        "-o".into(),
-        "BatchMode=yes".into(),
-        "-o".into(),
-        "ConnectTimeout=3".into(),
-        "--".into(),
-        host.into(),
-        // Fixed remote command; no user content is interpolated into its shell.
-        "exec ~/.local/bin/provenant hosts doctor --json".into(),
-    ];
-    let out = probe(&argv, &home, None, 30)?;
-    if !complete(&out) || out.termination != Termination::Exit(0) {
-        return Err("remote sign-in probe unavailable or incomplete".into());
+struct DoctorError {
+    outcome: Outcome,
+    code: &'static str,
+    message: String,
+}
+impl DoctorError {
+    fn local(error: impl std::fmt::Display) -> Self {
+        Self {
+            outcome: Outcome::Unavailable,
+            code: "SIGNIN_PROBE",
+            message: error.to_string(),
+        }
     }
-    #[derive(Deserialize)]
-    struct Remote {
-        command: String,
-        status: String,
-        data: Report,
+    fn unknown(name: &str) -> Self {
+        Self {
+            outcome: Outcome::Invalid,
+            code: "UNKNOWN_HOST",
+            message: format!(
+                "peer {name} is not configured; run `provenant hosts` to list configured peers"
+            ),
+        }
     }
-    let remote: Remote =
-        provenant_records::decode(&out.stdout.bytes[..], provenant_records::Limits::CONFIG)?;
-    if remote.command != "hosts doctor"
-        || remote.status != "ok"
-        || remote.data.claude.len() > 128
-        || remote.data.claude.iter().any(|row| {
-            row.label.is_empty()
-                || row.label.len() > 128
-                || row.label.chars().any(char::is_control)
-                || row.signin.token_validity != "unverified"
+    fn peer(failure: PeerFailure) -> Self {
+        let PeerFailure { error, detail } = failure;
+        let message = match detail {
+            Some(detail) => format!("{error} ({detail})"),
+            None => error.to_string(),
+        };
+        let (outcome, kind) = facade_outcome(&error);
+        Self {
+            outcome,
+            code: kind.code(),
+            message: format!("peer: {message}"),
+        }
+    }
+    fn malformed() -> Self {
+        Self {
+            outcome: Outcome::Error,
+            code: "PEER",
+            message: "peer doctor report is not a valid report".into(),
+        }
+    }
+}
+/// Peer text is untrusted: bounded labels, no controls, and an unverified
+/// token validity exactly as the local report produces it.
+fn valid_remote(report: &Report) -> bool {
+    report.claude.len() <= 128
+        && report.claude.iter().all(|row| {
+            !row.label.is_empty()
+                && row.label.len() <= 128
+                && !row.label.chars().any(char::is_control)
+                && row.signin.token_validity == "unverified"
         })
-        || remote.data.managed.len() > 128
-        || remote.data.managed.iter().any(|row| {
-            [&row.adapter, &row.label].iter().any(|text| {
-                text.is_empty() || text.len() > 128 || text.chars().any(char::is_control)
+        && report.managed.len() <= 128
+        && report.managed.iter().all(|row| {
+            [&row.adapter, &row.label].iter().all(|text| {
+                !text.is_empty() && text.len() <= 128 && !text.chars().any(char::is_control)
             })
         })
-        || remote
-            .data
+        && report
             .managed_error
             .as_ref()
-            .is_some_and(|text| text.len() > 1024 || text.chars().any(char::is_control))
-    {
-        return Err("invalid remote doctor report".into());
+            .is_none_or(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
+        && report.warnings.len() <= 128
+        && report
+            .warnings
+            .iter()
+            .all(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
+}
+fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError> {
+    let Some(name) = host else {
+        let resolved = roots::resolve(globals, roots::Workspace::Home, roots::Product::Optional)
+            .map_err(DoctorError::local)?;
+        return local(&resolved.home, &resolved.roots).map_err(DoctorError::local);
+    };
+    let resolved = roots::resolve(globals, roots::Workspace::Project, roots::Product::Required)
+        .map_err(DoctorError::local)?;
+    let context = Context::open_read_only(resolved.roots, &resolved.home, &resolved.project)
+        .map_err(DoctorError::local)?;
+    let host = context
+        .peer_host(name)
+        .ok_or_else(|| DoctorError::unknown(name))?;
+    let clock = SystemClock::new();
+    let budget = WaitBudget::cli(clock.mono_now(), context.config.limits.peer_seconds)
+        .map_err(DoctorError::local)?;
+    let result = context
+        .peer(
+            &clock,
+            host,
+            PeerAction::Doctor {
+                extra: Default::default(),
+            },
+            budget,
+            &CancelToken::new(),
+        )
+        .map_err(DoctorError::peer)?;
+    let PeerResult::Doctor { data, .. } = result else {
+        return Err(DoctorError::malformed());
+    };
+    let report: Report = serde_json::from_value(data).map_err(|_| DoctorError::malformed())?;
+    if !valid_remote(&report) {
+        return Err(DoctorError::malformed());
     }
-    Ok(remote.data)
+    Ok(report)
 }
 pub fn run(command: Hosts, globals: &Globals) -> u8 {
     let Hosts::Doctor { host } = command;
@@ -336,9 +394,9 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
         }
         Err(error) => fail(
             "hosts doctor",
-            Outcome::Unavailable,
-            "SIGNIN_PROBE",
-            &error.to_string(),
+            error.outcome,
+            error.code,
+            &error.message,
             globals,
         ),
     }
@@ -367,5 +425,32 @@ mod tests {
             provenant_fabric_runtime::peer_agent::Status::Stopped
         );
         assert!(serde_json::from_str::<super::Report>(r#"{"claude":[]}"#).is_err());
+    }
+
+    #[test]
+    fn remote_doctor_report_requires_bounded_safe_fields() {
+        let report: super::Report = serde_json::from_str(
+            r#"{"claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],"peer_agent":"stopped","warnings":["check config"]}"#,
+        )
+        .unwrap();
+        assert!(super::valid_remote(&report));
+
+        let mut report: super::Report = serde_json::from_str(
+            r#"{"claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],"peer_agent":"stopped","warnings":[]}"#,
+        )
+        .unwrap();
+        report.warnings.push("x".repeat(1025));
+        assert!(!super::valid_remote(&report));
+
+        let mut report: super::Report =
+            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","warnings":[]}"#).unwrap();
+        report.warnings = vec!["ok".into(); 129];
+        assert!(!super::valid_remote(&report));
+
+        let mut report: super::Report =
+            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","warnings":["safe"]}"#)
+                .unwrap();
+        report.warnings[0] = "bad\nwarning".into();
+        assert!(!super::valid_remote(&report));
     }
 }
