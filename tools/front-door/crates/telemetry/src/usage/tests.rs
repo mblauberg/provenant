@@ -225,3 +225,24 @@ fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> R
     assert_eq!(std::fs::read_to_string(target)?, "unchanged");
     Ok(())
 }
+
+#[test]
+fn oversized_log_reads_recent_complete_events() -> Result {
+    let (_temp, base) = tempdir()?;
+    let roots = roots(&base)?;
+    std::fs::create_dir(roots.state.as_path())?;
+    let mut bytes = vec![b'x'; CAP as usize];
+    bytes.extend_from_slice(b"\n{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00Z\"}\n");
+    std::fs::write(roots.state.as_path().join(LOG), bytes)?;
+    let report = report(&roots, inventory(), None, None)?;
+    assert_eq!(
+        report
+            .units
+            .iter()
+            .find(|unit| unit.unit == "root")
+            .unwrap()
+            .calls,
+        1
+    );
+    Ok(())
+}

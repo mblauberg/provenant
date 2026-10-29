@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
 };
 use thiserror::Error;
 
@@ -283,7 +283,17 @@ fn events(roots: &Roots) -> Result<Vec<Event>, UsageError> {
             let mut bytes = Vec::new();
             // A writer can cross the cap while rotation is busy. Bound the read,
             // rather than failing the report when the file grows.
+            let size = file.metadata()?.size;
+            let offset = size.saturating_sub(CAP);
+            file.seek(SeekFrom::Start(offset))?;
             (&mut file).take(CAP).read_to_end(&mut bytes)?;
+            if offset > 0 {
+                if let Some(end) = bytes.iter().position(|byte| *byte == b'\n') {
+                    bytes.drain(..=end);
+                } else {
+                    bytes.clear();
+                }
+            }
             // Ignore torn or malformed records; only complete bounded lines count.
             for line in bytes.split_inclusive(|byte| *byte == b'\n') {
                 if line.len() > LINE_CAP || !line.ends_with(b"\n") {
