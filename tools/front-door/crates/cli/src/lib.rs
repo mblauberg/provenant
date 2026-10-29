@@ -1994,6 +1994,24 @@ mod tests {
         }
     }
     #[test]
+    fn experiment_show_parses_the_experiment_id_and_comparison_options() {
+        let invocation = valid(&[
+            "telemetry",
+            "experiments",
+            "show",
+            "retry-shape",
+            "--min-samples",
+            "5",
+        ]);
+        let Command::Telemetry(Telemetry::Experiments(Experiments::Show(show))) =
+            invocation.command
+        else {
+            panic!("telemetry experiments show");
+        };
+        assert_eq!(show.id, "retry-shape");
+        assert_eq!(show.pipeline.min_samples, 5);
+    }
+    #[test]
     fn paging_recovery_and_removal_require_explicit_scopes() {
         invalid(&["lanes", "--condition", "all"]);
         invalid(&["lanes", "--wait", "1", "--cursor", "next"]);

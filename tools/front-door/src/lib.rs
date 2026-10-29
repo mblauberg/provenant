@@ -11,6 +11,7 @@ mod compose_tests;
 mod console;
 mod disk;
 mod disk_guard;
+mod experiment;
 mod fabric;
 mod tick;
 mod tick_agent;
@@ -221,7 +222,6 @@ fn preset_ignored_flags(request: &provenant_cli::Dispatch) -> Vec<&'static str> 
         ("--write-root", !access.write_root.is_empty()),
         ("--capability", !access.capability.is_empty()),
         ("--knob", !request.knobs.is_empty()),
-        ("--task-id", request.task_id.is_some()),
         ("--delivery-id", request.delivery_id.is_some()),
         ("--head", request.head.is_some()),
         ("--base", request.base.is_some()),
@@ -1119,6 +1119,49 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             &inv.leaf,
             globals,
         ),
+        Command::Telemetry(provenant_cli::Telemetry::Experiments(
+            provenant_cli::Experiments::Show(cmd),
+        )) => run_edge_workspace(&inv.leaf, globals, Workspace::Project, |edge| {
+            let stats = provenant_cli::Stats {
+                outcomes: true,
+                suggest: false,
+                pipeline: cmd.pipeline,
+                claude_subagents: None,
+                usage: false,
+                since: None,
+                until: None,
+                run_id: None,
+                by: None,
+                detail: false,
+            };
+            let mut reply = provenant_cli::run::stats(stats, edge);
+            if let Some(pipeline) = reply.result.data.get("pipeline") {
+                match provenant_telemetry::experiments::show(pipeline, &cmd.id) {
+                    Ok(report) => {
+                        reply.result.command = "telemetry experiments show".into();
+                        reply.result.data = report;
+                        reply.human = format!(
+                            "Experiment {}: {} arms; {} comparisons\n",
+                            cmd.id,
+                            reply.result.data["arms"].as_array().map_or(0, Vec::len),
+                            reply.result.data["suggestions"]
+                                .as_array()
+                                .map_or(0, Vec::len),
+                        );
+                    }
+                    Err(message) => {
+                        reply.result.status = Outcome::Invalid;
+                        reply.result.error = Some(CommandError {
+                            code: "EXPERIMENT_REPORT".into(),
+                            message,
+                            cause: None,
+                            repair: None,
+                        });
+                    }
+                }
+            }
+            reply
+        }),
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Console(cmd) => console::run(cmd, globals),
         Command::Quota { command } => {

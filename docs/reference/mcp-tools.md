@@ -710,6 +710,9 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
                         "selection_source": {
                           "$ref": "#/$defs/ContextLabel"
                         },
+                        "shadow_of": {
+                          "$ref": "#/$defs/ContextLabel"
+                        },
                         "work_item": {
                           "$ref": "#/$defs/ContextLabel"
                         }

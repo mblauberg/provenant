@@ -317,6 +317,18 @@ read-event source for that measurement.
 - Owner: `crates/telemetry/src/outcome.rs`, `crates/telemetry/src/suggest.rs`,
   `crates/cli/src/run.rs`
 
+Experiment assignments add `experiment_arm` to retained work context. Their
+pattern label names the executed arm, `experiment:ID:ARM`, so
+`telemetry experiments show ID` uses the same mature outcomes, cost coverage,
+CI and risk-tier/task-kind strata as the pipeline ranking report. A shadow
+graph executes the control, so its label is `experiment:ID:control`, and its
+retained context carries the candidate as `shadow_of`. The report does not yet
+read `shadow_of`, so shadow outcomes count toward control. Comparisons are
+advisory and do not change preset defaults. Observed spend is read from the
+last 14 days of outcome rows, at most once per run. Absent or unreadable spend
+is not treated as zero: an experiment with a budget or cost ratio that cannot
+read its spend is skipped for that run.
+
 ## Demand counters are lossy and private
 
 `usage.jsonl` records are appended best-effort under an existing root, never

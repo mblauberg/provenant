@@ -146,6 +146,9 @@ pub struct WorkContext {
     pub role_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiment_arm: Option<String>,
+    /// The candidate assigned while the control executed under shadow mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow_of: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_source: Option<String>,
 }
@@ -164,6 +167,7 @@ impl WorkContext {
             &self.role,
             &self.role_digest,
             &self.experiment_arm,
+            &self.shadow_of,
             &self.selection_source,
         ]
         .into_iter()

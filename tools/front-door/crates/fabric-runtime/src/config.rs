@@ -24,6 +24,9 @@ pub struct FabricConfig {
     pub graph: GraphConfig,
     #[serde(default)]
     pub lanes: Lanes,
+    /// The front door reads and validates pipeline experiments. The runtime only accepts the key.
+    #[serde(default, skip_serializing)]
+    pub pipelines: provenant_config::experiment::PipelineExperiments,
 }
 
 /// Named command policy supplied by host configuration, never by task prompts.
@@ -854,6 +857,7 @@ mod tests {
             client_label: "agent".into(),
             commands: BTreeMap::new(),
             host_native: BTreeMap::new(),
+            pipelines: Default::default(),
             home_hosts: BTreeMap::new(),
             peers: BTreeMap::from([(
                 "worker".into(),
