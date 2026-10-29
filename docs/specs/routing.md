@@ -46,21 +46,28 @@ setting `domains.routing.capacity_cooldown_seconds` defaults to 600 seconds; zer
 ### Settlement retry
 
 Every adapter types a provider capacity error as `model_unavailable` and a spent
-account as `quota_limited`; neither settles as a generic failure. Such a settlement
-retries up to `domains.routing.settlement_retries` times (default 2; zero
-disables). A capacity stop resumes the same session after
-`domains.routing.capacity_retry_seconds` multiplied by the retry's number (default 30,
-capped at 600). Without a session, a read-only lane takes its first fallback and a
-writer redraws its granted route. A quota stop retries its granted route at once
-when the account is not pinned; a single-model route retries only when another
-registered account serves the model. Admission then refuses the spent account and
-resolution falls through to the next eligible one. The lane's reason names the
-retry and its attempt number.
+account as `quota_limited`; neither settles as a generic failure. Claude's rate
+limit counts as quota only when its text names a usage, session or weekly limit or
+a reset; any other 429 is transient capacity. Such a settlement retries up to
+`domains.routing.settlement_retries` times (default 2; zero disables). A capacity
+stop resumes the same session when the adapter's launch table allows resume, after
+`domains.routing.capacity_retry_seconds` multiplied by the retry's number plus up to
+a quarter of jitter drawn from the attempt ID (default 30, capped at 600). Without a
+session, a read-only lane takes its first fallback and a writer redraws its granted
+route. A quota stop retries at once only when the account is not pinned and another
+registered account serves the applied model with no live refusal or exhausted
+reading. The retry keeps that exact model, so a redraw cannot reach the spent account
+through another model; admission refuses the spent account and resolution falls
+through to the other. The retry seals its earliest launch time. The settling
+guardian advances graphs first, then waits for that time and launches the successor.
+A later sweep may launch a successor that is still queued once its time has passed.
+The lane's reason names the retry and its attempt number.
 - Why: a provider's capacity or one account's quota should cost a short wait, not a
   chair turn.
 - Test: `crates/providers/src/tests.rs::agy_overload_is_typed_capacity_not_a_generic_failure`;
   `::codex_usage_limit_is_quota_limited`;
-  `crates/providers/src/claude.rs::tests::usage_limit_is_a_typed_quota_refusal_not_a_generic_failure`;
+  `crates/providers/src/claude.rs::overload_tests::usage_limit_is_a_typed_quota_refusal_not_a_generic_failure`;
+  `crates/run/src/policy.rs::tests::writer_retry_keeps_its_granted_route_and_child_stores_never_retry`;
   `crates/cli/src/run.rs::tests::capacity_and_quota_settlements_retry_within_their_bounds`;
   `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
   `tests/dispatch_provider.rs::capacity_settlement_resumes_the_same_session`
@@ -72,7 +79,8 @@ Resolution runs once against immutable catalogue, availability and quota
 snapshots and returns one route with at most two ordered alternatives, each
 passing the same checks; Run never rebuilds candidates. Fallback to
 another route is read-only and explicit, except for configurable result-policy
-fallback on restricted routes; a writer may retry only its granted route. Unsupported effort fails; where clamping is permitted, the requested,
+fallback on restricted routes; a writer may retry only its granted route or the
+exact model that route applied. Unsupported effort fails; where clamping is permitted, the requested,
 applied and observed values are recorded. `route list` and `resolve` start no
 process and mutate nothing.
 - Why: the fallback plan is decided once and visible.

@@ -252,37 +252,52 @@ impl run::Providers for Registry<'_> {
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
-        let (routing, accounts) = match context_roots.as_ref().or(self.roots) {
+        let (routing, accounts, quota) = match context_roots.as_ref().or(self.roots) {
             Some(roots) => {
                 let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
                     .map_err(|error| error.to_string())?;
                 (
                     config.domains.routing,
                     config.domains.accounts.with_derived_accounts(),
+                    // Unreadable quota is unknown, and unknown is not spent.
+                    crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default(),
                 )
             }
             None => Default::default(),
         };
+        let now = jiff::Timestamp::now().as_second();
         let policy = routing
             .model_policy
-            .effective(
-                &model,
-                route.account_key.as_deref(),
-                jiff::Timestamp::now().as_second(),
-            )
+            .effective(&model, route.account_key.as_deref(), now)
             .policy;
         let assessment = assess_model_result(&policy, task, record, decoded, policy_attempt)?;
         if assessment.refusal.is_some() || assessment.retry.is_some() {
             return Ok(assessment);
         }
-        // Another registered account that can serve this model.
+        // Another registered account that serves this model and is not known
+        // to be spent: no live refusal for the model and no exhausted reading.
+        let served = model.model();
+        let spent = |adapter: &str, key: &str| {
+            quota.iter().any(|record| {
+                record.account.adapter == adapter
+                    && record.account.account_key == key
+                    && (record.snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot.status == provenant_quota::QuotaStatus::Exhausted
+                    }) || record.refusals.iter().any(|refusal| {
+                        refusal.model == served
+                            && refusal
+                                .expires_unix_seconds()
+                                .is_ok_and(|expires| expires > now)
+                    }))
+            })
+        };
         let other_account = |adapter: &str, key: &str| {
-            let served = model.model();
             accounts.entries.values().any(|entry| {
                 entry.adapter == adapter
                     && entry.key != key
                     && provenant_records::AdapterSpec::get(adapter)
                         .is_none_or(|spec| spec.account_serves_model(&entry.key, served))
+                    && !spent(adapter, &entry.key)
             })
         };
         Ok(assess_settlement_retry(
@@ -292,6 +307,7 @@ impl run::Providers for Registry<'_> {
             record,
             decoded,
             policy_attempt,
+            now,
         ))
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
@@ -445,7 +461,7 @@ fn assess_model_result(
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: fallback.provider.unwrap_or_default(), model, effort: fallback.effort },
                 resume: false, max_attempts: 2,
                 instruction: "The previous read-only route failed its result check. Complete the original task and include concrete evidence in your final answer.".into(),
-                backoff_seconds: 0,
+                not_before_unix_seconds: None,
             }))
         } else {
             None
@@ -483,7 +499,7 @@ fn assess_model_result(
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: route.provider.clone().unwrap_or_default(), model, effort: route.effort.clone() },
                 resume: true, max_attempts: u64::from(policy.lane.max_continuations.unwrap_or(0)) + 1,
                 instruction: "Continue the unfinished task in this session. Carry out the remaining work and verification. End with Status: complete only when done; otherwise Status: incomplete.".into(),
-                backoff_seconds: 0,
+                not_before_unix_seconds: None,
             }),
             note: None,
         });
@@ -509,6 +525,7 @@ fn assess_settlement_retry(
     record: &run::AttemptRecord,
     decoded: &run::Decoded,
     policy_attempt: u64,
+    now_unix_seconds: i64,
 ) -> run::ResultAssessment {
     let max_attempts = u64::from(config.settlement_retries) + 1;
     let capacity = decoded.outcome == run::Outcome::ModelUnavailable
@@ -529,24 +546,27 @@ fn assess_settlement_retry(
             effort: route.effort.clone(),
         })
     };
-    let session = decoded.session.as_deref().is_some_and(|s| !s.is_empty());
+    // Resume only where the adapter's launch table says it can.
+    let session = decoded.session.as_deref().is_some_and(|s| !s.is_empty())
+        && route
+            .provider
+            .as_deref()
+            .and_then(provenant_records::AdapterSpec::get)
+            .is_some_and(|spec| spec.launch.resume);
     let (route_choice, resume) = if capacity && session {
         (applied(), true)
     } else if quota {
-        // A pinned account is the caller's choice, and an exact model on its
-        // only account has nowhere else to go.
-        let elsewhere = match &task.route {
-            run::RequestedRoute::Model { .. } => {
-                task.account.is_none()
-                    && route
-                        .provider
-                        .as_deref()
-                        .zip(route.account_key.as_deref())
-                        .is_some_and(|(adapter, key)| other_account(adapter, key))
-            }
-            _ => task.account.is_none(),
-        };
-        (elsewhere.then(|| task.route.clone()), false)
+        // A pinned account is the caller's choice. Otherwise another unspent
+        // account must serve the applied model, and the retry keeps that model
+        // so a redraw cannot reach the spent account through another model;
+        // admission then refuses the spent account and resolution falls through.
+        let elsewhere = task.account.is_none()
+            && route
+                .provider
+                .as_deref()
+                .zip(route.account_key.as_deref())
+                .is_some_and(|(adapter, key)| other_account(adapter, key));
+        (elsewhere.then(applied).flatten(), false)
     } else if !writes && let Some(fallback) = task.fallback.first() {
         let fallback = fallback
             .model
@@ -564,11 +584,16 @@ fn assess_settlement_retry(
     let Some(route_choice) = route_choice else {
         return Default::default();
     };
+    // Linear backoff with up to a quarter more, drawn from the attempt ID so
+    // lanes that hit the same capacity error do not retry in step.
     let backoff_seconds = if capacity {
-        config
-            .capacity_retry_seconds
-            .saturating_mul(policy_attempt)
-            .min(600)
+        let base = config.capacity_retry_seconds.saturating_mul(policy_attempt);
+        let draw = u64::from_le_bytes(
+            record.attempt_id.as_bytes()[..8]
+                .try_into()
+                .unwrap_or_default(),
+        );
+        base.saturating_add(draw % (base / 4 + 1)).min(600)
     } else {
         0
     };
@@ -583,7 +608,7 @@ fn assess_settlement_retry(
         )
     } else if writes {
         format!(
-            "A previous attempt at this task stopped because {cause}. The worktree may hold its partial work: inspect `git status` and `git log` first, keep what is useful, then complete the original task."
+            "A previous attempt at this task stopped because {cause}. The worktree may hold its partial work: inspect `git status` and `git log` first, and before pushing or opening a pull request check whether the branch was already pushed and a pull request already exists. Keep what is useful, then complete the original task."
         )
     } else {
         format!(
@@ -610,7 +635,9 @@ fn assess_settlement_retry(
             resume,
             max_attempts,
             instruction,
-            backoff_seconds,
+            not_before_unix_seconds: (backoff_seconds > 0).then(|| {
+                now_unix_seconds.saturating_add(i64::try_from(backoff_seconds).unwrap_or(600))
+            }),
         }),
     }
 }
@@ -3230,7 +3257,12 @@ fn seal_launch_task(
 
 /// Called after guardian custody is released. The successor was queued in the
 /// terminal transaction; a crashed launcher leaves it for ordinary recovery.
-pub fn launch_policy_successor(context: &run::HolderContext) -> Result<(), String> {
+/// When the staged retry must wait, `before_wait` runs first so other work,
+/// such as graph advancement, is not held behind the backoff.
+pub fn launch_policy_successor(
+    context: &run::HolderContext,
+    before_wait: impl FnOnce(),
+) -> Result<(), String> {
     let Some(host) = context.launch.as_ref() else {
         return Ok(());
     };
@@ -3264,15 +3296,25 @@ pub fn launch_policy_successor(context: &run::HolderContext) -> Result<(), Strin
     if !successor_pending(&pending) {
         return Ok(());
     }
-    // A capacity retry waits out its backoff here, in the settled attempt's
-    // guardian, and gives up the wait once the successor is no longer queued.
+    // A capacity retry waits until its recorded time here, in the settled
+    // attempt's guardian, and gives up the wait once the successor is no
+    // longer queued. The time is sealed with the retry, so a later sweep can
+    // launch the successor if this guardian dies.
+    use provenant_core::Clock;
     let backoff = store
         .record(context.attempt_id, &call)
         .ok()
         .and_then(|record| store.staged_policy_retry(&record).ok().flatten())
-        .map_or(0, |retry| retry.backoff_seconds.min(3_600));
+        .and_then(|retry| retry.not_before_unix_seconds)
+        .zip(clock.wall_now().ok())
+        .map_or(0, |(not_before, now)| {
+            let now = now.as_micros().div_euclid(1_000_000);
+            u64::try_from(not_before.saturating_sub(now))
+                .unwrap_or(0)
+                .min(3_600)
+        });
     if backoff > 0 {
-        use provenant_core::Clock;
+        before_wait();
         let start = clock.mono_now();
         let deadline = provenant_core::DurationMicros::from_seconds(backoff)
             .and_then(|wait| start.checked_add(wait))
@@ -7000,31 +7042,48 @@ mod tests {
             Some("thread"),
             "provider capacity: Selected model is at capacity",
         );
+        const NOW: i64 = 1_800_000_000;
+        let assess_at = |record: &run::AttemptRecord,
+                         task: &run::TaskRequest,
+                         decoded: &run::Decoded,
+                         attempt: u64,
+                         others: bool| {
+            assess_settlement_retry(&config, |_, _| others, task, record, decoded, attempt, NOW)
+        };
         let assess =
             |task: &run::TaskRequest, decoded: &run::Decoded, attempt: u64, others: bool| {
-                assess_settlement_retry(&config, |_, _| others, task, &record, decoded, attempt)
+                assess_at(&record, task, decoded, attempt, others)
             };
+        let wait = |retry: &run::PolicyRetry| retry.not_before_unix_seconds.map(|t| t - NOW);
         // Capacity with a session resumes it on the applied model, waiting
-        // longer on each retry.
+        // longer on each retry, with up to a quarter of jitter.
         let first = assess(&task, &capacity, 1, false);
         let retry = first.retry.ok_or("capacity retry")?;
         assert!(retry.resume && first.refusal.is_none());
         assert_eq!(retry.max_attempts, 3);
-        assert_eq!(retry.backoff_seconds, 30);
+        let waited = wait(&retry).ok_or("not before")?;
+        assert!((30..=37).contains(&waited), "{waited}");
         assert!(
             matches!(&retry.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
         );
         assert_eq!(
             first.note.as_deref(),
-            Some("retrying this session in 30 s (attempt 2 of 3)")
+            Some(format!("retrying this session in {waited} s (attempt 2 of 3)").as_str())
         );
-        assert_eq!(
-            assess(&task, &capacity, 2, false)
-                .retry
-                .ok_or("second")?
-                .backoff_seconds,
-            60
-        );
+        let second = wait(&assess(&task, &capacity, 2, false).retry.ok_or("second")?)
+            .ok_or("second wait")?;
+        assert!((60..=75).contains(&second), "{second}");
+        // The jitter differs between lanes, so they do not retry in step.
+        let draws: std::collections::BTreeSet<_> = (0..8u8)
+            .map(|byte| {
+                let mut other = record.clone();
+                other.attempt_id = AttemptId::from_bytes([byte.wrapping_mul(37); 16]);
+                assess_at(&other, &task, &capacity, 1, false)
+                    .retry
+                    .and_then(|retry| wait(&retry))
+            })
+            .collect();
+        assert!(draws.len() > 1, "{draws:?}");
         assert!(assess(&task, &capacity, 3, false).retry.is_none());
         // Without a session a pool route is drawn again, fresh.
         let sessionless = decoded(
@@ -7056,6 +7115,7 @@ mod tests {
             .ok_or("writer")?;
         assert_eq!(writer.route, fallback.route);
         assert!(writer.instruction.contains("git status"));
+        assert!(writer.instruction.contains("already pushed"));
         // Other model failures are not capacity.
         let unavailable = decoded(
             run::Outcome::ModelUnavailable,
@@ -7070,19 +7130,30 @@ mod tests {
             None,
             "You've hit your weekly limit",
         );
-        let spent = assess(&task, &quota, 1, false);
+        // A named route on its only account, or every other account spent,
+        // has nowhere to go: a redraw could reach the spent account again
+        // through another model.
+        assert!(assess(&task, &quota, 1, false).retry.is_none());
+        let spent = assess(&task, &quota, 1, true);
         let retry = spent.retry.ok_or("quota retry")?;
-        assert!(!retry.resume && retry.backoff_seconds == 0);
+        assert!(!retry.resume && retry.not_before_unix_seconds.is_none());
+        // It keeps the applied model, so admission refuses the spent account
+        // and resolution falls through to another for that model.
+        assert!(
+            matches!(&retry.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
+        );
         assert_eq!(
             spent.note.as_deref(),
             Some("retrying on the next eligible account (attempt 2 of 3)")
         );
+        let mut pinned = task.clone();
+        pinned.account = Some("work".into());
+        assert!(assess(&pinned, &quota, 1, true).retry.is_none());
         let mut exact = task.clone();
         exact.route = input.request.tasks[0].route.clone();
         assert!(assess(&exact, &quota, 1, false).retry.is_none());
-        assert_eq!(
-            assess(&exact, &quota, 1, true).retry.ok_or("exact")?.route,
-            exact.route
+        assert!(
+            matches!(&assess(&exact, &quota, 1, true).retry.ok_or("exact")?.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
         );
         exact.account = Some("work".into());
         assert!(assess(&exact, &quota, 1, true).retry.is_none());
@@ -7092,7 +7163,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            assess_settlement_retry(&off, |_, _| true, &task, &record, &quota, 1)
+            assess_settlement_retry(&off, |_, _| true, &task, &record, &quota, 1, NOW)
                 .retry
                 .is_none()
         );

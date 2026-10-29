@@ -116,13 +116,13 @@
     "domains.routing.settlement_retries": {
       "type": "int", "min": 0, "max": 8, "default": 2, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs",
-      "effect": "Retry a lane that settled for provider capacity or a spent account up to this many times. A capacity stop resumes its session, or redraws the route when it has none; a quota stop redraws at once, and admission skips the spent account. Zero disables these retries.",
+      "effect": "Retry a lane that settled for provider capacity or a spent account up to this many times. A capacity stop resumes its session where the adapter supports resume, or redraws the route when it has none. A quota stop retries the applied model at once when another unpinned, unspent account serves it, and admission skips the spent account. Zero disables these retries.",
       "trade_off": "More retries recover more lanes without a chair turn but spend more attempts when a provider stays at capacity."
     },
     "domains.routing.capacity_retry_seconds": {
       "type": "int", "min": 0, "max": 600, "default": 30, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs",
-      "effect": "Wait this long before a capacity retry, multiplied by the retry's number and capped at 600 seconds. Quota retries do not wait.",
+      "effect": "Wait this long before a capacity retry, multiplied by the retry's number, plus up to a quarter of jitter, capped at 600 seconds. Quota retries do not wait.",
       "trade_off": "A longer wait gives the provider time to recover but delays the lane."
     },
     "usage.project_attribution": {

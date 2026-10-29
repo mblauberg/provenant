@@ -176,7 +176,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | Field | Value |
 |---|---|
 | `default` | `30` |
-| `effect` | `"Wait this long before a capacity retry, multiplied by the retry's number and capped at 600 seconds. Quota retries do not wait."` |
+| `effect` | `"Wait this long before a capacity retry, multiplied by the retry's number, plus up to a quarter of jitter, capped at 600 seconds. Quota retries do not wait."` |
 | `max` | `600` |
 | `min` | `0` |
 | `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
@@ -189,7 +189,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | Field | Value |
 |---|---|
 | `default` | `2` |
-| `effect` | `"Retry a lane that settled for provider capacity or a spent account up to this many times. A capacity stop resumes its session, or redraws the route when it has none; a quota stop redraws at once, and admission skips the spent account. Zero disables these retries."` |
+| `effect` | `"Retry a lane that settled for provider capacity or a spent account up to this many times. A capacity stop resumes its session where the adapter supports resume, or redraws the route when it has none. A quota stop retries the applied model at once when another unpinned, unspent account serves it, and admission skips the spent account. Zero disables these retries."` |
 | `max` | `8` |
 | `min` | `0` |
 | `reader` | `"tools/front-door/crates/cli/src/run.rs"` |

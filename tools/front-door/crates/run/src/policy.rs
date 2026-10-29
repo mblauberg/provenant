@@ -19,9 +19,11 @@ pub struct PolicyRetry {
     /// Attempts in this run including its first, capped again by the store.
     pub max_attempts: u64,
     pub instruction: String,
-    /// Seconds the host waits before launching the successor.
-    #[serde(default)]
-    pub backoff_seconds: u64,
+    /// Earliest wall time, in Unix seconds, at which the successor may
+    /// launch. The settling guardian waits for it; a later sweep that finds
+    /// the successor still queued may launch it once this has passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before_unix_seconds: Option<i64>,
 }
 #[derive(Default)]
 pub struct ResultAssessment {
@@ -30,11 +32,29 @@ pub struct ResultAssessment {
     /// Appended to the settled reason when the retry is staged.
     pub note: Option<String>,
 }
-/// A fresh retry may use write authority only on the route the task was
-/// granted: the same request, drawn again, cannot widen what the task may do.
-fn retry_within_authority(retry: &PolicyRetry, task: &TaskRequest) -> bool {
+/// A fresh retry may use write authority only on what the task was granted:
+/// its requested route drawn again, or the exact model that route already
+/// applied. Neither widens what the task may do.
+fn retry_within_authority(retry: &PolicyRetry, task: &TaskRequest, old: &AttemptRecord) -> bool {
+    let applied_model = match (&retry.route, old.applied_route.as_ref()) {
+        (
+            RequestedRoute::Model {
+                provider,
+                model,
+                effort,
+                ..
+            },
+            Some(applied),
+        ) => {
+            applied.provider.as_ref() == Some(provider)
+                && applied.model.as_ref() == Some(model)
+                && applied.effort == *effort
+        }
+        _ => false,
+    };
     retry.resume
         || retry.route == task.route
+        || applied_model
         || (task.writer.is_none() && task.access.write_roots.is_empty())
 }
 
@@ -136,12 +156,16 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("policy retry task missing"))?;
         if retry.schema_version != 1
-            || !retry_within_authority(retry, task)
+            || !retry_within_authority(retry, task, record)
             || retry.max_attempts > 9
             || retry.max_attempts < 2
             || retry.instruction.is_empty()
             || retry.instruction.len() > 4096
-            || retry.backoff_seconds > 3_600
+            || retry.not_before_unix_seconds.is_some_and(|not_before| {
+                call.clock.wall_now().map_or(true, |now| {
+                    not_before > now.as_micros().div_euclid(1_000_000).saturating_add(3_600)
+                })
+            })
         {
             return Err(RunError::Validation("policy retry bounds"));
         }
@@ -214,7 +238,7 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == old.task_id)
             .ok_or(RunError::Validation("policy retry task missing"))?;
-        if !retry_within_authority(&retry, task) {
+        if !retry_within_authority(&retry, task, old) {
             return Err(RunError::Validation(
                 "policy fallback to another route requires read-only authority",
             ));
@@ -373,7 +397,7 @@ mod tests {
             resume: false,
             max_attempts: 2,
             instruction: "Complete the original task.".into(),
-            backoff_seconds: 0,
+            not_before_unix_seconds: None,
         };
         store.stage_policy_retry(&old, &retry, &call)?;
         let mut changed_policy = retry.clone();
@@ -446,7 +470,7 @@ mod tests {
             resume: false,
             max_attempts: 2,
             instruction: "Retry.".into(),
-            backoff_seconds: 0,
+            not_before_unix_seconds: None,
         };
         let child_store = store.with_sealed_requester(provenant_core::ActorId::from_bytes([8; 16]));
         assert!(!child_store.stage_policy_retry(&old, &retry, &call)?);
@@ -466,6 +490,27 @@ mod tests {
         assert_ne!(elsewhere.route, old.requested_route);
         assert!(matches!(
             store.stage_policy_retry(&old, &elsewhere, &call),
+            Err(RunError::Validation("policy retry bounds"))
+        ));
+        // The exact model the granted route applied is also within authority.
+        let task = &input.request.tasks[0];
+        let mut applied = old.clone();
+        applied.applied_route = Some(RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-sol".into()),
+            ..Default::default()
+        });
+        assert!(super::retry_within_authority(&elsewhere, task, &applied));
+        assert!(!super::retry_within_authority(&elsewhere, task, &old));
+        // A launch time more than an hour out is refused.
+        let late = PolicyRetry {
+            not_before_unix_seconds: Some(
+                provenant_core::Clock::wall_now(&clock)?.as_micros() / 1_000_000 + 7_200,
+            ),
+            ..retry.clone()
+        };
+        assert!(matches!(
+            store.stage_policy_retry(&old, &late, &call),
             Err(RunError::Validation("policy retry bounds"))
         ));
         assert!(store.stage_policy_retry(&old, &retry, &call)?);
@@ -504,7 +549,7 @@ mod tests {
             resume: false,
             max_attempts: 2,
             instruction: "Retry the new task.".into(),
-            backoff_seconds: 0,
+            not_before_unix_seconds: None,
         };
         store.stage_policy_retry(&old, &retry, &call)?;
         let directory = store.attempt_dir(old.run_id, old.attempt_id, false)?;
@@ -533,7 +578,7 @@ mod tests {
                 resume: false,
                 max_attempts: 2,
                 instruction: "Retry.".into(),
-                backoff_seconds: 0,
+                not_before_unix_seconds: None,
             },
             &call,
         )?;
