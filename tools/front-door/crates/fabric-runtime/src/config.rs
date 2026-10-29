@@ -1184,11 +1184,13 @@ mod tests {
             let error =
                 provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
                     .err()
-                    .unwrap()
-                    .to_string();
-            assert!(error.contains(key), "{error}");
-            assert_eq!(error.contains(rejected), should_echo, "{error}");
-            assert!(error.contains(rule), "{error}");
+                    .unwrap();
+            let provenant_config::ConfigError::Domain { source, .. } = &error else {
+                panic!("unexpected refusal: {error:?}");
+            };
+            assert_eq!(source.field, format!("domains.fabric.{key}"), "{error}");
+            assert_eq!(source.code, rule, "{error}");
+            assert_eq!(error.to_string().contains(rejected), should_echo, "{error}");
         }
 
         // Lane tuning is not a boundary: it recovers with a warning that names

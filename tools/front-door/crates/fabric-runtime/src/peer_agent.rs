@@ -70,6 +70,23 @@ pub enum AgentError {
     Io(#[from] io::Error),
 }
 
+impl AgentError {
+    /// Stable identifier independent of the displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotPrivate(_) => "not_private",
+            Self::Running(_) => "running",
+            Self::NoReply(_) => "no_reply",
+            Self::Frame => "frame",
+            Self::Path(_) => "path",
+            Self::Launchctl(..) => "launchctl",
+            Self::Systemctl(..) => "systemctl",
+            Self::Exec(_) => "exec",
+            Self::Io(_) => "io",
+        }
+    }
+}
+
 fn directory(state: &Path) -> PathBuf {
     state.join("peer-agent")
 }

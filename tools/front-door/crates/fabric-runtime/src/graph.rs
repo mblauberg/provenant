@@ -1111,6 +1111,24 @@ pub enum JournalError {
     BadDigest,
 }
 
+impl JournalError {
+    /// Stable identifier independent of the displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidGraphId => "invalid_graph_id",
+            Self::GraphMismatch => "graph_mismatch",
+            Self::TooLarge => "too_large",
+            Self::DurabilityUnconfirmed(_) => "durability_unconfirmed",
+            Self::Filesystem(_) => "filesystem",
+            Self::Canonical(_) => "canonical",
+            Self::Decode(_) => "decode",
+            Self::Io(_) => "io",
+            Self::BadEnvelope => "bad_envelope",
+            Self::BadDigest => "bad_digest",
+        }
+    }
+}
+
 /// Safe, atomic checkpoint file journal. The held owner lock fences concurrent
 /// graph writers; all filesystem access after open is descriptor-relative.
 pub struct FileJournal {
