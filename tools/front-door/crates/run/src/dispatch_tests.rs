@@ -2721,11 +2721,22 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
             }
         }
         match last.ok_or("a fourth writer")? {
-            Err(error @ RunError::LaneCap { limit: 3, .. }) => {
-                let text = error.to_string();
-                assert!(text.contains("writer lane cap reached"), "{text}");
-                assert!(text.contains(scope), "{text}");
-                assert!(text.contains("max_"), "{text}");
+            Err(
+                error @ RunError::LaneCap {
+                    limit: 3,
+                    scope: refused,
+                    ..
+                },
+            ) => {
+                assert_eq!(error.code(), "LANE_CAP");
+                assert_eq!(refused, scope);
+                // The message names the configuration key to raise.
+                let key = if scope == "project" {
+                    "max_project_writer_lanes"
+                } else {
+                    "max_writer_lanes"
+                };
+                assert!(error.to_string().contains(key), "{error}");
             }
             other => return Err(format!("the fourth writer is refused: {other:?}").into()),
         }
@@ -3521,11 +3532,8 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
             "an unreadable {name} refuses, with no wall-clock fallback"
         );
         let admitted = store.admit(lane_id, &attempt, &Host { available: 100 }, &host, &cancel);
-        let reason = admitted.err().ok_or("admit must refuse")?.to_string();
-        assert!(
-            reason.contains("startup spacing cannot be judged"),
-            "{name}: {reason}"
-        );
+        let refused = admitted.err().ok_or("admit must refuse")?;
+        assert_eq!(refused.code(), "HOST_CLOCK", "{name}: {refused}");
         assert_eq!(
             store.record(lane_id, &call)?.state,
             AttemptState::Starting {
@@ -7190,6 +7198,79 @@ fn lane_waits_report_only_the_running_lanes_own_disk_pause() -> TestResult {
 }
 
 #[test]
+fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
+    use provenant_os::build_slots::WAIT_MARKER;
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let id = starting(&store, &lane(120, true), &call)?;
+    let running = store.claim(id, &at(0), &call)?.ok_or("lane starts")?;
+    let other_id = starting(&store, &lane(121, true), &call)?;
+    let other = store
+        .claim(other_id, &at(20_000), &call)?
+        .ok_or("other starts")?;
+    let attempt = |id: AttemptId, run: RunId| {
+        store
+            .context
+            .state_root
+            .as_path()
+            .join("runs")
+            .join(run.to_string())
+            .join("attempts")
+            .join(id.to_string())
+    };
+    // The shim's marker lives in the lane's scratch, `tmp/candidate-N`.
+    let tmp = attempt(id, running.run_id).join("tmp/candidate-0");
+    std::fs::create_dir_all(&tmp)?;
+    let marker = tmp.join(format!("{WAIT_MARKER}.100"));
+    let records = [running.clone(), other];
+    assert!(store.lane_waits(&records, &call).is_empty());
+    std::fs::write(&marker, "slot 0")?;
+    let waits = store.lane_waits(&records, &call);
+    assert_eq!(waits.len(), 1, "only the lane that waits is reported");
+    assert_eq!(waits[0].attempt_id, id);
+    assert!(waits[0].waiting_for.starts_with("build slot:"));
+    assert!(waits[0].waiting_for.contains("build slots"));
+    std::fs::write(&marker, "lock 0")?;
+    assert!(
+        store.lane_waits(&records, &call)[0]
+            .waiting_for
+            .contains("lock")
+    );
+    // Text the lane invents is ignored, and so is a marker that is not a file.
+    for forged in ["disk 0", "slot", "slot x", "slot 0 and more words"] {
+        std::fs::write(&marker, forged)?;
+        assert!(store.lane_waits(&records, &call).is_empty(), "{forged}");
+    }
+    // One marker per command: a sibling's marker going away leaves the wait.
+    let sibling = tmp.join(format!("{WAIT_MARKER}.101"));
+    std::fs::write(&sibling, "slot 0")?;
+    std::fs::write(&marker, "disk 0")?;
+    assert_eq!(store.lane_waits(&records, &call).len(), 1);
+    std::fs::remove_file(&sibling)?;
+    assert!(store.lane_waits(&records, &call).is_empty());
+    std::fs::remove_file(&marker)?;
+    std::os::unix::fs::symlink(temp.path().join("elsewhere"), &marker)?;
+    std::fs::write(temp.path().join("elsewhere"), "slot 0")?;
+    assert!(store.lane_waits(&records, &call).is_empty());
+    std::fs::remove_file(&marker)?;
+    // A marker the build stopped refreshing goes stale, and an exited
+    // provider cannot be waiting.
+    std::fs::write(&marker, "slot 0")?;
+    assert_eq!(store.lane_waits(&records, &call).len(), 1);
+    std::fs::write(
+        attempt(id, running.run_id).join("process-exit.json"),
+        br#"{"unresolved_cleanup":true}"#,
+    )?;
+    assert!(store.lane_waits(&records, &call).is_empty());
+    std::fs::remove_file(attempt(id, running.run_id).join("process-exit.json"))?;
+    clock.wait_until(MonoTime::from_micros(400_000_000))?;
+    assert!(store.lane_waits(&records, &call).is_empty());
+    Ok(())
+}
+
+#[test]
 fn disk_pause_wait_ignores_false_missing_symlinked_and_oversized_observations() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -7277,9 +7358,10 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
                     floor: 100
                 }
             ));
+            assert_eq!(error.code(), "DISK_FLOOR");
+            // The message names the floor's key and the repair command.
             let message = error.to_string();
-            assert!(message.contains("99 bytes available"), "{message}");
-            assert!(message.contains("gc.free_floor 100 bytes"), "{message}");
+            assert!(message.contains("gc.free_floor"), "{message}");
             assert!(message.contains("provenant gc --apply"), "{message}");
         }
     }

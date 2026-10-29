@@ -680,6 +680,24 @@ fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
+    let worktree = ["--set", "parameters.worktree=\".\""];
+    let batch = ["--set", "parameters.batch_worktree=\".\""];
+    for (name, extra) in [
+        ("single", &[][..]),
+        ("chain", &[]),
+        ("fan-out", &[]),
+        ("fan-out-synthesise", &[]),
+        ("big-batch", &batch[..]),
+        ("scope-then-run", &worktree[..]),
+        ("deliver", &worktree[..]),
+    ] {
+        golden(&format!("{name}.explain.txt"), &explain_text(name, extra)?)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn preset_show_roles_lists_the_library_with_origins() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(".provenant");

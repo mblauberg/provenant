@@ -116,12 +116,22 @@ Policy rules and pacing overrides use the same `Schedule` shape:
 `starts`, `expires`, an optional IANA `tz` (UTC by default) and zero or more hour windows. Windows may list
 Monday-based weekday indexes (Monday `0` through Sunday `6`); an empty list matches every day.
 Start is inclusive, expiry and window end are exclusive, and overnight windows
-wrap midnight. `provenant route override list` displays both policy rules and
-pacing overrides, including active state and remaining expiry time.
-During the transition, the loader converts persisted `starts_unix_seconds`,
-`expires_unix_seconds` and top-level `windows` into `schedule` once. Expired
-legacy records are discarded. Rewrite the configuration so subsequent writes
-use the `schedule` form. An unknown time zone is reported and evaluated as UTC.
+wrap midnight. `Schedule::valid` is the single load-time check for both: it
+refuses `starts` at or after `expires`, an unknown time zone, more than 16
+windows, out-of-range or equal hours and duplicate or out-of-range weekdays.
+An invalid policy rule is dropped (a boundary when it restricts a lane); an
+invalid pacing override is dropped with a warning, reported at
+`pacing_overrides.N`. A selector or schedule of the wrong type invalidates its
+whole record in the same way, never just the field. A pacing override needs no
+expiry. `provenant route override set|list|clear` records, displays and
+removes pacing overrides; `list` also shows scheduled policy rules, each with
+its active state and remaining expiry time, and `set` echoes the recorded rule
+and any it replaced. The retired keys `starts_unix_seconds`,
+`expires_unix_seconds` and a record's top-level `windows` are not converted:
+the section validator reports the record with code `moved_to_schedule.starts`,
+`.expires` or `.windows`, and recovery drops only that record with a located
+warning carrying the code. In a rule that enforces a lane restriction the
+error is reported at the key and refuses the configuration.
 
 ### Go monthly allowance floor
 

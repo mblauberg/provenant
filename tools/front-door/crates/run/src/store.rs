@@ -847,6 +847,14 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
     {
         return Err(RunError::Validation("task/concurrency bounds"));
     }
+    if input
+        .request
+        .tasks
+        .iter()
+        .any(|task| task.context.as_ref().is_some_and(|c| !c.accepted()))
+    {
+        return Err(RunError::Validation("work context"));
+    }
     bytes(&input.request)?;
     let mut tasks = std::collections::BTreeSet::new();
     let mut attempts = std::collections::BTreeSet::new();

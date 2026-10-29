@@ -20,14 +20,17 @@ The header requires `schema_version = 1`. `profile` selects `balanced`,
 and invalid optional values warn and use defaults; invalid optional rows are
 isolated so valid rows still apply. Effective values retain their source in
 `config show`. Each warning names the offending key, so an invalid value
-inside a table drops only that value and its valid siblings still apply.
+inside a table drops only that value and its valid siblings still apply. A
+model policy rule or pacing override whose selector or schedule is malformed
+is dropped whole, since without it the record would apply more widely.
 Syntax, file size and schema-version errors remain hard failures, as do
 invalid known credentials, authority, confinement and Git-boundary settings.
 Recovery never widens an enforced restriction, so these also refuse the file:
 
 - knobs marked `strict` in the registry (`lanes.publish`,
   `fabric.accept_handoff`, `chair.auto_switch`, `chair.switch_accounts` and
-  `lanes.max_depth`), whose defaults could grant what the user withheld;
+  `lanes.max_depth`), whose defaults could grant what the user withheld, and a
+  `knobs` or `domains` value that is not a table;
 - enforced model policy (`lane.read_only`, `lane.max_context`,
   `lane.max_turns`), and a malformed rule that carries one;
 - Fabric protocol caps (`limits.*`, which may only be lowered), graph limits
@@ -109,7 +112,11 @@ the slot its own parent holds and waits until it times out; keep
 
 A command that finds every slot taken waits, prints
 `provenant: waiting for a build slot (n of m in use)` on its own stderr, and
-repeats the message about every 60 seconds. It gives up after
+repeats the message about every 60 seconds. While it waits it also writes
+`build-slot-wait.PID` (one per command) in the lane's scratch directory, and `lanes` and
+`status` show the lane as waiting (`build slot: ...`) the way they show an
+admission wait. The host trusts only which of two fixed waits the file names
+and that it was refreshed in the last 150 seconds. It gives up after
 `build_wait_minutes` (default 30) with an error that names the slot count and
 suggests `provenant lanes` to find the holders. The same bounded wait and
 progress message apply while the command waits for another build's
@@ -155,6 +162,9 @@ cargo_build_jobs = 5
 build_wait_minutes = 30
 max_writer_lanes = 40
 max_project_writer_lanes = 30
+lane_port_base = 30000
+lane_port_block = 16
+lane_port_blocks = 64
 ```
 
 Omit a key from `config.toml` to select its default. The host settings are
@@ -164,8 +174,10 @@ behaviour. `max_concurrent_builds` is 1 to 64, `cargo_build_jobs` 1 to 1024,
 `build_wait_minutes` 1 to 1440, `max_writer_lanes` 1 to 64 and
 `max_project_writer_lanes` 1 to 32 and, when set, at most `max_writer_lanes`
 (left unset it follows the host cap down, as the smaller of 30 and the host
-cap). An
-out-of-range value is rejected when configuration loads, so it never blocks
+cap). `lane_port_base` is 1024 to 65535, `lane_port_block` 1 to 1024 and
+`lane_port_blocks` 0 to 1024 (0 turns off the per-lane port blocks described in
+[providers](providers.md#writer-lanes)); the range must end at or below 65536.
+An out-of-range value is rejected when configuration loads, so it never blocks
 lane admission. A lane keeps the slot count and wait it was launched with; a
 change applies to lanes launched afterwards.
 

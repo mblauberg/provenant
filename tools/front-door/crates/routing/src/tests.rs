@@ -339,36 +339,29 @@ fn pacing_evaluator_applies_overnight_weekday_and_sunday_windows()
 }
 
 #[test]
-fn legacy_pacing_override_loads_and_evaluates_like_schedule_form()
+fn pacing_override_schedules_validate_at_load_and_need_no_expiry()
 -> Result<(), Box<dyn std::error::Error>> {
-    let catalogue = Catalogue::bundled()?;
-    let now = jiff::Timestamp::now().as_second();
-    let expires = now + 3600;
-    let legacy: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing_overrides": [{"provider":"codex", "policy":"spend", "starts_unix_seconds":now-60, "expires_unix_seconds":expires, "windows":[]}]
+    use provenant_config::DomainConfig;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing_overrides": [
+            {"provider":"codex", "policy":"spend", "schedule":{"windows":[{"weekdays":[0,1,2,3,4],"start_hour":23,"end_hour":7}]}},
+            {"provider":"claude", "policy":"max"},
+            {"provider":"agy", "policy":"off", "schedule":{"tz":"Mars/Olympus_Mons"}},
+            {"provider":"cursor", "policy":"pace", "schedule":{"starts":5,"expires":5}}
+        ]
     }))?;
-    let canonical: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing_overrides": [{"provider":"codex", "policy":"spend", "schedule":{"starts":now-60,"expires":expires,"windows":[]}}]
-    }))?;
-    let time = provenant_core::WallTime::from_micros(now * 1_000_000)?;
-    let old_context = context(&catalogue, &legacy, time);
-    let new_context = context(&catalogue, &canonical, time);
-    let model = ModelId::parse("codex/gpt-6.1-terra")?;
+    let errors: Vec<_> = config
+        .validate()
+        .into_iter()
+        .map(|error| (error.field, error.code))
+        .collect();
     assert_eq!(
-        pacing_preview(&model, &old_context)[0].policy,
-        PacingPolicy::Spend
+        errors,
+        [
+            ("pacing_overrides.2".to_owned(), "schedule"),
+            ("pacing_overrides.3".to_owned(), "schedule"),
+        ]
     );
-    assert_eq!(
-        pacing_preview(&model, &old_context)[0].policy,
-        pacing_preview(&model, &new_context)[0].policy
-    );
-    assert!(
-        serde_json::to_value(&legacy)?["pacing_overrides"][0]["schedule"]["expires"].is_number()
-    );
-    let expired: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing_overrides": [{"provider":"codex", "policy":"spend", "expires_unix_seconds":now-1}]
-    }))?;
-    assert!(expired.pacing_overrides.is_empty());
     Ok(())
 }
 #[test]
@@ -3854,5 +3847,112 @@ fn malformed_duplicate_or_excess_pool_efforts_still_fail() -> Result<(), Box<dyn
     assert!(fails(
         serde_json::json!({"model": "codex/gpt-6-luna", "efforts": many})
     )?);
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoutingDomains {
+    routing: RoutingConfig,
+}
+/// Load `text` through the config loader with only the routing section.
+fn load_routing(
+    text: &str,
+) -> Result<
+    Result<provenant_config::ResolvedConfig<RoutingDomains>, provenant_config::ConfigError>,
+    Box<dyn std::error::Error>,
+> {
+    static ENTRIES: [provenant_config::DomainSection; 1] = [SECTION];
+    struct Resolver;
+    impl provenant_core::PathResolver for Resolver {
+        fn resolve_existing_ancestor(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<std::path::PathBuf> {
+            Ok(path.into())
+        }
+    }
+    let mut inputs =
+        provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/assets".into());
+    inputs.state_dir = Some("/fixture/state".into());
+    let roots = inputs.resolve(&Resolver)?;
+    Ok(provenant_config::load_with_domains(
+        &roots,
+        Some(text.as_bytes()),
+        &DomainSections::<RoutingDomains>::new(&ENTRIES),
+    ))
+}
+#[test]
+fn malformed_scope_types_drop_or_refuse_the_whole_record() -> Result<(), Box<dyn std::error::Error>>
+{
+    let rule = "schema_version=1\n[[domains.routing.model_policy.rules]]\n";
+    let lane = "[domains.routing.model_policy.rules.policy.lane]\n";
+    // A rule that grants writes loses neither its expiry nor its selector:
+    // the whole rule is dropped, with a warning at the rule.
+    for scope in [
+        "schedule={expires='bad'}\n",
+        "schedule={windows=[{start_hour='x',end_hour=4}]}\n",
+        "schedule={expirse=10}\n",
+        "model=5\n",
+        "account=7\n",
+    ] {
+        let text = format!("{rule}{scope}{lane}read_only=false\n");
+        let config = load_routing(&text)??;
+        assert!(
+            config.domains.routing.model_policy.rules.is_empty(),
+            "{text}"
+        );
+        assert!(
+            config.warnings.iter().any(|w| w
+                .message
+                .starts_with("domains.routing.model_policy.rules.0:")),
+            "{text}: {:?}",
+            config.warnings
+        );
+    }
+    // Dropping a restricting rule would lift its restriction, so it refuses.
+    let text = format!("{rule}schedule={{expires='bad'}}\n{lane}read_only=true\n");
+    let error = load_routing(&text)?
+        .err()
+        .ok_or("restricting rule loaded")?;
+    assert!(
+        error.to_string().contains("model_policy.rules.0"),
+        "{error}"
+    );
+    // An override loses its provider or schedule only with the whole row.
+    for row in [
+        "provider=5\npolicy='off'\n",
+        "provider='codex'\npolicy='off'\nschedule={expires='bad'}\n",
+    ] {
+        let text = format!(
+            "schema_version=1\n[[domains.routing.pacing_overrides]]\n{row}[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n"
+        );
+        let config = load_routing(&text)??;
+        let rows = &config.domains.routing.pacing_overrides;
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(rows[0].provider.as_deref(), Some("claude"), "{text}");
+    }
+    Ok(())
+}
+#[test]
+fn invalid_override_schedules_drop_their_override_at_load() -> Result<(), Box<dyn std::error::Error>>
+{
+    for schedule in ["{starts=20,expires=10}", "{tz='Mars/Olympus_Mons'}"] {
+        let text = format!(
+            "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='off'\nschedule={schedule}\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n"
+        );
+        let config = load_routing(&text)??;
+        let rows = &config.domains.routing.pacing_overrides;
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(rows[0].provider.as_deref(), Some("claude"), "{text}");
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|w| w.message.starts_with("domains.routing.pacing_overrides.0:")),
+            "{text}: {:?}",
+            config.warnings
+        );
+    }
     Ok(())
 }

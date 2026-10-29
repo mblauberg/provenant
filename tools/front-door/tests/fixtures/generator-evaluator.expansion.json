@@ -1,0 +1,264 @@
+{
+  "context": {
+    "pattern": "generator-evaluator",
+    "preset": "generator-evaluator"
+  },
+  "graph_id": "preset-40699f087919768f571aa1793d8c53e1",
+  "nodes": [
+    {
+      "acceptance_checks": [
+        "Run targeted tests and required static checks",
+        "Commit the completed slice"
+      ],
+      "access": "worktree_write",
+      "delivery": "none",
+      "depends_on": [],
+      "id": "implement",
+      "prompt": "You implement one bounded slice inside the write scope, within the authority envelope below.\n\nImplement one bounded slice: brief\nSpec (acceptance criteria): \nKeep changes within the supplied write scope. Run targeted checks and commit.\n\nAuthority envelope. The objective above and the acceptance criteria are\napproved. You hold authority to make any engineering decision that serves them\nand is reversible: names, structure, tests, helper code and the order of work.\nDo not stop to ask about those. Make the call, state it as an assumption and\nrecord it in your final report under DECISIONS (decision, reason, how to\nreverse). Ask only when the decision belongs to the owner (product direction,\nscope, cost, irreversible or externally visible effects) or when the work needs\nauthority beyond the write scope and this envelope; then report NEEDS-USER\nwith the specific question and the option you would take.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Run targeted tests and required static checks\n- Commit the completed slice",
+      "role": "write.implement",
+      "role_digest": "sha256:065a17b832ac8f6726b3829edb9f465f44b8f887cdeed85f4815bd59f4b803c5",
+      "route": {
+        "alias": "senior"
+      },
+      "source": {
+        "commit": "HEAD",
+        "type": "commit"
+      },
+      "title": "write.implement",
+      "write_scope": [
+        "."
+      ]
+    },
+    {
+      "access": "read_only",
+      "composite": {
+        "exports": [
+          {
+            "node": "lens-correctness-spec",
+            "outputs": [
+              "result",
+              "findings"
+            ]
+          },
+          {
+            "node": "lens-simplicity",
+            "outputs": [
+              "result",
+              "findings"
+            ]
+          }
+        ],
+        "nodes": [
+          {
+            "access": "read_only",
+            "depends_on": [],
+            "distinct_from": "writer",
+            "id": "lens-correctness-spec",
+            "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, whether the lens runs in a\nFabric preset or in a manual council.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have reused,\n  and the surrounding architecture. A review that sees only the diff cannot\n  judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file that states the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree.\n  The checkout can hold older files, so read files with `git show\n  <commit>:<path>` and compute the diff with `git diff <base> <commit>`.\n- Report findings under the [finding contract](finding-contract.md), with\n  evidence, and end with one exact `VERDICT: PASS` or `VERDICT: FAIL` line. Do\n  not edit files.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n",
+            "references": [
+              {
+                "digest": "sha256:b8829331283679da44d32d5b60cfd98cd05ab822fbbf6b6a1d1cc235a0f7aa09",
+                "ref": "skill:code-review/references/reviewer-context.md",
+                "when": "always"
+              },
+              {
+                "digest": "sha256:eed92bd4b886f327c37d1ede6084ad87266bc3e25b8a40f576ae7c59fdedcd5b",
+                "ref": "skill:code-review/references/lenses/correctness-spec.md",
+                "when": "always"
+              }
+            ],
+            "role": "lens.correctness-spec",
+            "role_digest": "sha256:a1829521a08a5a21b156e710d1dd7e51018974f7d213e66146212489c15a9f8d",
+            "route": {
+              "alias": "senior"
+            },
+            "title": "lens.correctness-spec"
+          },
+          {
+            "access": "read_only",
+            "depends_on": [],
+            "id": "lens-simplicity",
+            "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, whether the lens runs in a\nFabric preset or in a manual council.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have reused,\n  and the surrounding architecture. A review that sees only the diff cannot\n  judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file that states the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree.\n  The checkout can hold older files, so read files with `git show\n  <commit>:<path>` and compute the diff with `git diff <base> <commit>`.\n- Report findings under the [finding contract](finding-contract.md), with\n  evidence, and end with one exact `VERDICT: PASS` or `VERDICT: FAIL` line. Do\n  not edit files.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
+            "references": [
+              {
+                "digest": "sha256:b8829331283679da44d32d5b60cfd98cd05ab822fbbf6b6a1d1cc235a0f7aa09",
+                "ref": "skill:code-review/references/reviewer-context.md",
+                "when": "always"
+              },
+              {
+                "digest": "sha256:ad1479a3d8094bebc0ec133d6281ae45543f776a505ca64c41562c9b0efa70d7",
+                "ref": "skill:code-review/references/lenses/simplicity.md",
+                "when": "always"
+              }
+            ],
+            "role": "lens.simplicity",
+            "role_digest": "sha256:2657943e2a3702bab961dc56ff450bf0dbf90fdaae865e5cd849bd37eb3fc41c",
+            "route": {
+              "alias": "senior"
+            },
+            "title": "lens.simplicity"
+          }
+        ]
+      },
+      "depends_on": [
+        "implement"
+      ],
+      "id": "lens",
+      "inputs": [
+        {
+          "node": "implement",
+          "outputs": [
+            "result"
+          ]
+        }
+      ],
+      "kind": "composite",
+      "source": {
+        "node": "implement",
+        "type": "node"
+      }
+    },
+    {
+      "access": "read_only",
+      "depends_on": [
+        "lens",
+        "implement"
+      ],
+      "dispositions": [
+        "accepted",
+        "rejected",
+        "deferred"
+      ],
+      "id": "evaluate",
+      "inputs": [
+        {
+          "node": "lens",
+          "outputs": [
+            "result"
+          ]
+        }
+      ],
+      "kind": "synthesise",
+      "prompt": "You evaluate a writer's commit from its lens findings and decide whether it is accepted.\n\nEvaluate the implementation of: brief\nSpec (acceptance criteria): \nWeigh the lens findings against the evidence. Give every finding exactly one\ndisposition with a one-line reason: accepted, rejected or deferred. End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" and \"reason\". Emit one\nexact VERDICT: PASS only when no accepted finding remains, otherwise\nVERDICT: FAIL.\n",
+      "role": "review.evaluator",
+      "role_digest": "sha256:8bf23a83b0b87661cf925300b45475434805c87d7d58c13803c6413a756c36d0",
+      "route": {
+        "alias": "senior"
+      },
+      "source": {
+        "node": "implement",
+        "type": "node"
+      },
+      "title": "review.evaluator"
+    }
+  ],
+  "provenance": {
+    "origins": {
+      "exports": "bundled",
+      "parameters.base.default": "bundled",
+      "parameters.base.doc": "bundled",
+      "parameters.base.type": "bundled",
+      "parameters.delivery.default": "bundled",
+      "parameters.delivery.doc": "bundled",
+      "parameters.delivery.type": "bundled",
+      "parameters.evaluator.default": "bundled",
+      "parameters.evaluator.doc": "bundled",
+      "parameters.evaluator.type": "bundled",
+      "parameters.lenses": "bundled",
+      "parameters.review_shape.default": "bundled",
+      "parameters.review_shape.doc": "bundled",
+      "parameters.review_shape.type": "bundled",
+      "parameters.risk_tags.default": "bundled",
+      "parameters.risk_tags.doc": "bundled",
+      "parameters.risk_tags.type": "bundled",
+      "parameters.risk_tier.default": "bundled",
+      "parameters.risk_tier.doc": "bundled",
+      "parameters.risk_tier.type": "bundled",
+      "parameters.scope.default": "bundled",
+      "parameters.scope.doc": "bundled",
+      "parameters.scope.type": "bundled",
+      "parameters.spec.default": "bundled",
+      "parameters.spec.doc": "bundled",
+      "parameters.spec.type": "bundled",
+      "parameters.subject.default.commit": "bundled",
+      "parameters.subject.default.type": "bundled",
+      "parameters.subject.doc": "bundled",
+      "parameters.subject.type": "bundled",
+      "parameters.worktree.default": "bundled",
+      "parameters.worktree.doc": "bundled",
+      "parameters.worktree.type": "bundled",
+      "pattern.citations": "bundled",
+      "pattern.cost": "bundled",
+      "pattern.level": "bundled",
+      "pattern.select_when": "bundled",
+      "pattern.summary": "bundled",
+      "pattern.tags": "bundled",
+      "roles.lens.correctness-spec": "bundled",
+      "roles.lens.simplicity": "bundled",
+      "roles.review.evaluator": "bundled",
+      "roles.write.implement": "bundled",
+      "stages": "bundled"
+    },
+    "preset": "generator-evaluator",
+    "roles": {
+      "lens.correctness-spec": {
+        "digest": "sha256:a1829521a08a5a21b156e710d1dd7e51018974f7d213e66146212489c15a9f8d",
+        "extends": [
+          "lens.correctness-spec",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:b8829331283679da44d32d5b60cfd98cd05ab822fbbf6b6a1d1cc235a0f7aa09",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:eed92bd4b886f327c37d1ede6084ad87266bc3e25b8a40f576ae7c59fdedcd5b",
+            "ref": "skill:code-review/references/lenses/correctness-spec.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.simplicity": {
+        "digest": "sha256:2657943e2a3702bab961dc56ff450bf0dbf90fdaae865e5cd849bd37eb3fc41c",
+        "extends": [
+          "lens.simplicity",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:b8829331283679da44d32d5b60cfd98cd05ab822fbbf6b6a1d1cc235a0f7aa09",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:ad1479a3d8094bebc0ec133d6281ae45543f776a505ca64c41562c9b0efa70d7",
+            "ref": "skill:code-review/references/lenses/simplicity.md",
+            "when": "always"
+          }
+        ]
+      },
+      "review.evaluator": {
+        "digest": "sha256:8bf23a83b0b87661cf925300b45475434805c87d7d58c13803c6413a756c36d0",
+        "extends": [
+          "review.evaluator"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "write.implement": {
+        "digest": "sha256:065a17b832ac8f6726b3829edb9f465f44b8f887cdeed85f4815bd59f4b803c5",
+        "extends": [
+          "write.implement"
+        ],
+        "origin": "bundled",
+        "references": []
+      }
+    },
+    "substitutions": []
+  },
+  "schema_version": 1
+}

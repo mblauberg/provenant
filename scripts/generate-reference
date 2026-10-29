@@ -104,6 +104,17 @@ def cli_reference(data):
                      if key not in ("command", "arguments") and value}
         if remainder:
             text += fenced(remainder) + "\n"
+    codes = data.get("error_codes")
+    if codes:
+        text += ("## Error codes\n\n"
+                 "Commands the run owner serves put one of these stable codes in the JSON\n"
+                 "envelope's `error.code`; `status` and the exit code give its category. Other\n"
+                 "owners' codes are not listed yet. Match on the code, never on `error.message`,\n"
+                 "which may be reworded.\n\n"
+                 "| Code | Meaning |\n|---|---|\n")
+        for entry in codes:
+            text += f"| `{entry['code']}` | {entry['summary'].replace('|', '&#124;')} |\n"
+        text += "\n"
     return text.rstrip() + "\n"
 
 

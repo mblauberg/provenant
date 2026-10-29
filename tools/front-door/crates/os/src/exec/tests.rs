@@ -50,6 +50,7 @@ fn inherited_lane_lease_survives_the_callers_handle() -> Result<(), Box<dyn std:
             input: true,
             secret_input: None,
             inherited_lease: Some(&lease),
+            inherited_ports: None,
             process_group: false,
             capture_stdout: false,
             capture_stderr: false,
@@ -78,6 +79,55 @@ fn inherited_lane_lease_survives_the_callers_handle() -> Result<(), Box<dyn std:
     )?;
     let _ = child.observe()?;
     Ok(())
+}
+#[test]
+fn inherited_port_block_outlives_the_callers_handle() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let plan = crate::lane_ports::Plan {
+        state: temp.path().to_owned(),
+        base: 30000,
+        size: 16,
+        blocks: 1,
+    };
+    let lease = plan.try_acquire()?.ok_or("no block")?;
+    let reaper = Reaper::new(1)?;
+    let permit = reaper.reserve().ok_or("missing executor permit")?;
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("read reply"),
+    ];
+    let mut child = RawChild::spawn(
+        permit,
+        crate::sys::raw_exec::SpawnSpec {
+            argv: &argv,
+            env: None,
+            cwd: temp.path(),
+            input: true,
+            secret_input: None,
+            inherited_lease: None,
+            inherited_ports: Some(lease.guard()),
+            process_group: false,
+            capture_stdout: false,
+            capture_stderr: false,
+        },
+    )?;
+    // The guardian dying drops its handle; the running process keeps the block.
+    drop(lease);
+    assert!(plan.try_acquire()?.is_none());
+    child
+        .stdin
+        .take()
+        .ok_or("missing child stdin")?
+        .write_all(b"finish\n")?;
+    let _ = child.observe()?;
+    for _ in 0..500 {
+        if plan.try_acquire()?.is_some() {
+            return Ok(());
+        }
+        crate::sys::fs::wait(std::time::Duration::from_millis(10));
+    }
+    Err("block never released after the process exited".into())
 }
 impl FrameSink for Decoder {
     fn try_frame(&self, bytes: &[u8]) -> Result<(), QueueLoss> {
@@ -146,6 +196,7 @@ fn post_spawn_setup_failure_kills_child_and_releases_unknown_wait_slot() {
             input: false,
             secret_input: None,
             inherited_lease: None,
+            inherited_ports: None,
             process_group: false,
             capture_stdout: false,
             capture_stderr: false,

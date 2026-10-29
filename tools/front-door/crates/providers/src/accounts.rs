@@ -682,6 +682,22 @@ mod config_tests {
     }
 
     #[test]
+    fn invalid_metadata_on_a_dotted_account_id_keeps_every_registration() {
+        let text = format!(
+            "{}display_name=''\n[domains.accounts.entries.home]\nadapter='codex'\nlabel='home'\nkey='home-key'\ndirectory='/fixture/codex-home'\n",
+            ENTRY.replace("entries.work", "entries.'work.alias'")
+        );
+        let config =
+            provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
+                .unwrap();
+        let entries = &config.domains.accounts.entries;
+        assert_eq!(entries["work.alias"].key, "work-key");
+        assert!(entries["work.alias"].display_name.is_none());
+        assert_eq!(entries["home"].key, "home-key");
+        assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+    }
+
+    #[test]
     fn optional_metadata_wrong_container_types_keep_identity() {
         for field in ["limits=42", "priority=[]", "display_name={}"] {
             let text = format!("{ENTRY}{field}");

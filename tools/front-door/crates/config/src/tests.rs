@@ -344,7 +344,6 @@ fn config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoin
             "unknown_key",
         ),
         ("schema_version=1\n[knobs]\nnope=1", "unknown_key"),
-        ("schema_version=1\nknobs=42", "type"),
         ("schema_version=1\n[domains.unknown]", "unknown_key"),
         ("schema_version=1\n[task_classes]", "unknown_key"),
         ("schema_version=1\n[knobs]\n'effort.shift'=1", "unknown_key"),
@@ -1349,25 +1348,25 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     );
 }
 #[test]
-fn writer_publishing_knob_defaults_on_and_can_be_disabled_per_dispatch() {
+fn writer_publishing_knob_defaults_off_and_can_be_enabled_per_dispatch() {
     let config = load::<&[u8]>(&roots(), None).unwrap();
     let profile = config.dispatch_profile(&[]).unwrap();
     assert_eq!(
         profile.knobs.get("lanes.publish"),
-        Some(&serde_json::json!(true))
+        Some(&serde_json::json!(false))
     );
-    let disabled = config
-        .dispatch_profile(&["lanes.publish=false".into()])
+    let enabled = config
+        .dispatch_profile(&["lanes.publish=true".into()])
         .unwrap();
-    assert_eq!(disabled.knobs["lanes.publish"], false);
+    assert_eq!(enabled.knobs["lanes.publish"], true);
     let config = load(
         &roots(),
-        Some(b"schema_version=1\n[knobs]\n'lanes.publish'=false".as_slice()),
+        Some(b"schema_version=1\n[knobs]\n'lanes.publish'=true".as_slice()),
     )
     .unwrap();
     assert_eq!(
         config.dispatch_profile(&[]).unwrap().knobs["lanes.publish"],
-        false
+        true
     );
 }
 

@@ -27,6 +27,10 @@ for heading in '## Fixes' '## Unexpected'; do
   printf '## Additions\n\n- First section.\n%s\n- Second section.\n' "$heading" > "$dir/invalid.md"
   "$script" --check > "$tmp/out" 2> "$tmp/err"
   grep -F 'later section heading ignored' "$tmp/err" > /dev/null
+  # The ignored heading is left out of the rendered notes; its bullets stay.
+  "$script" > "$tmp/out"
+  if grep -xF -- "$heading" "$tmp/out" > /dev/null; then exit 1; fi
+  grep -xF -- '- Second section.' "$tmp/out" > /dev/null
 done
 rm -f "$dir/invalid.md"
 printf 'See [policy](../../release-notes/README.md).\n' > "$dir/_intro.md"

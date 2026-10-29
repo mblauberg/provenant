@@ -1,0 +1,6 @@
+Graph <id>
+Preset selection: chain (override)
+first  role=- tier=senior family=any kind=- access=read_only worktree=-
+second  role=- tier=senior family=any kind=- access=read_only worktree=-
+  inputs: [{"node":"first","outputs":["result"]}]
+

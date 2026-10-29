@@ -279,15 +279,15 @@ fn inspect<T: DeserializeOwned + Serialize>(
         .and_then(Profile::from_name)
         .unwrap_or_default();
     let mut valid_knobs = knobs_item.clone().and_then(|item| item.into_table().ok());
+    let mut knob_boundary = None;
+    // The knobs table holds capability and authority knobs, so a malformed
+    // container refuses like a malformed strict knob.
     if knobs_item.is_some() && valid_knobs.is_none() {
-        issues.push(Issue {
+        knob_boundary = Some(ConfigError::Schema {
             location: site(&user_sites, "knobs", &user_origin, false),
             rule: "type",
-            source: None,
-            rejected: String::new(),
         });
     }
-    let mut knob_boundary = None;
     let knobs = loop {
         match crate::knobs::resolve(
             profile,
@@ -599,7 +599,8 @@ fn boundary_issue<T>(issue: &Issue, sections: &DomainSections<T>) -> bool {
     }
     sections.entries.iter().any(|entry| {
         let prefix = format!("domains.{}", entry.name);
-        let field = if issue.location.key_path == prefix {
+        // A malformed `domains` container is malformed input for every section.
+        let field = if issue.location.key_path == prefix || issue.location.key_path == "domains" {
             Some("")
         } else {
             issue.location.key_path.strip_prefix(&format!("{prefix}."))
@@ -898,10 +899,20 @@ fn replace_origins(
         });
     }
 }
+/// Split `path` after the longest leading key present in `table`, as removal
+/// does, since map keys such as account IDs may contain dots.
+fn split_key<'a>(table: &Table, path: &'a [String]) -> Option<(String, &'a [String])> {
+    let length = (1..=path.len())
+        .rev()
+        .find(|length| table.contains_key(&path[..*length].join(".")))
+        .unwrap_or(1);
+    (!path.is_empty()).then(|| (path[..length].join("."), &path[length..]))
+}
 fn semantic_repair_path(table: &Table, defaults: Option<&Table>, path: &[String]) -> Vec<String> {
-    let Some((first, tail)) = path.split_first() else {
+    let Some((first, tail)) = split_key(table, path) else {
         return Vec::new();
     };
+    let first = &first;
     let mut result = vec![first.clone()];
     let default = defaults.and_then(|table| table.get(first));
     if default.is_none() {
@@ -932,11 +943,12 @@ fn repair_semantic(
     origins: &mut BTreeMap<String, Origin>,
     compiled: &Origin,
 ) {
-    let Some((first, tail)) = path.split_first() else {
+    let Some((first, tail)) = split_key(table, path) else {
         *table = defaults.cloned().unwrap_or_default();
         replace_origins(prefix, Some(&Item::Table(table.clone())), origins, compiled);
         return;
     };
+    let first = &first;
     let dotted = join(prefix, first);
     if let Some(item) = table.get_mut(first) {
         // A field inside a row: drop only that field, keeping its siblings.
@@ -1027,7 +1039,13 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
         rule: issue.rule.into(),
         path: user_path()?,
         line: issue.location.line,
-        message: format!("{key}: ignored invalid configuration ({})", issue.rule),
+        message: match &issue.source {
+            Some(source) => format!(
+                "{key}: ignored invalid configuration ({}: {})",
+                issue.rule, source.code
+            ),
+            None => format!("{key}: ignored invalid configuration ({})", issue.rule),
+        },
     })
 }
 fn qualify(name: &str, field: &str) -> String {

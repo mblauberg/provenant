@@ -223,7 +223,12 @@ fn fixture() -> Result {
         )?;
         return Ok(());
     }
-    let answer = if prompt.contains("fixture policy continuation") {
+    let answer = if prompt.contains("fixture partial stop") {
+        format!(
+            "```handoff\n{}\n```",
+            json!({"schema_version":2,"status":"stopped_early","note":"Fixture stopped partway.","remaining":["rest"],"decisions":[],"verify":[]})
+        )
+    } else if prompt.contains("fixture policy continuation") {
         let status = if args.iter().any(|arg| arg == "resume") {
             "done"
         } else {
@@ -492,6 +497,55 @@ fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
     assert_eq!(second["state"], "succeeded", "{lanes}");
     assert_eq!(second["applied_route"]["model"], "codex/gpt-6.1-terra");
     assert_eq!(second["continuation"], "policy_fallback");
+    cleanup.disarm();
+    Ok(())
+}
+fn stats_reports_partial_signals_outside_graph_groups() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    fs::create_dir_all(rig.project.join("config"))?;
+    fs::write(
+        rig.project.join("config/telemetry-prices.toml"),
+        include_str!("../../../config/telemetry-prices.toml"),
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "fixture partial stop")?;
+    let output = rig.command(&[
+        "run",
+        "--model",
+        "codex/gpt-6-luna",
+        "--effort",
+        "low",
+        "--operation-id",
+        "partial-stop",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt path")?,
+        "--wait",
+        "3s",
+        "--json",
+    ])?;
+    let lanes = settled_policy_lanes(&rig, output, 0)?;
+    assert_eq!(
+        lanes["data"]["lanes"][0]["partial_signals"],
+        json!(["declared_stop"]),
+        "{lanes}"
+    );
+    for args in [
+        &["telemetry", "stats", "--json"][..],
+        &["telemetry", "stats", "--by", "graph", "--json"],
+    ] {
+        let stats = rig.command(args)?;
+        assert_eq!(code(&stats), 0, "{stats:?}");
+        let stats: Value = serde_json::from_slice(&stats.stdout.bytes)?;
+        assert_eq!(
+            stats["data"]["partial_signals"],
+            json!({"declared_stop": 1}),
+            "{stats}"
+        );
+    }
     cleanup.disarm();
     Ok(())
 }
@@ -2960,6 +3014,7 @@ fn main() -> ExitCode {
                 "codex_dispatch_observes_rollout",
                 "policy_empty_result_falls_back_without_a_chair_turn",
                 "policy_incomplete_result_continues_the_retained_session",
+                "stats_reports_partial_signals_outside_graph_groups",
                 "interrupted_progress_recovers_on_another_account_in_the_same_worktree",
                 "capacity_settlement_resumes_the_same_session",
                 "review_fans_out_and_collects_fake_provider",
@@ -2996,6 +3051,7 @@ fn main() -> ExitCode {
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),
                     "policy_incomplete_result_continues_the_retained_session" => policy_incomplete_result_continues_the_retained_session(),
+                    "stats_reports_partial_signals_outside_graph_groups" => stats_reports_partial_signals_outside_graph_groups(),
                     "interrupted_progress_recovers_on_another_account_in_the_same_worktree" => interrupted_progress_recovers_on_another_account_in_the_same_worktree(),
                     "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),

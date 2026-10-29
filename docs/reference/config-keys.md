@@ -13,6 +13,9 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 | `memory_pressure_threshold` | critical | Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The memory and disk floors still apply. (critical, warning or never). |
 | `max_concurrent_builds` | max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) | A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated. (1 to 64 or -1 for auto). |
 | `build_wait_minutes` | 30 | Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error. (1 to 1440 or -1 for auto). |
+| `lane_port_base` | 30000 | First port of the range split into per-writer-lane blocks. Each writer lane holds one block for its lifetime and sees it as PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. (1024 to 65535 or -1 for auto). |
+| `lane_port_block` | 16 | Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT). (1 to 1024 or -1 for auto). |
+| `lane_port_blocks` | 64 | Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block. (0 to 1024 or -1 for auto). |
 | `max_writer_lanes` | 40 | Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap. (1 to 64 or -1 for auto). |
 | `max_project_writer_lanes` | 30 | Most writer lanes live at once for one project; at most max_writer_lanes. (1 to 32 or -1 for auto). |
 | `cargo_build_jobs` | Half the available cores, at least 1 | Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence. (1 to 1024 or -1 for auto). |
@@ -283,12 +286,12 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 
 | Field | Value |
 |---|---|
-| `default` | `true` |
-| `effect` | `"Let worktree-write lanes with open network read gh configuration, push branches and open pull requests."` |
+| `default` | `false` |
+| `effect` | `"Opt-in. Let worktree-write lanes with open network read gh configuration, use a git credential helper, push branches and open pull requests."` |
 | `reader` | `"tools/front-door/crates/cli/src/run/provider.rs"` |
 | `status` | `"wired"` |
 | `strict` | `true` |
-| `trade_off` | `"Off keeps publishing with the chair; on exposes the existing gh login read-only to the writer lane."` |
+| `trade_off` | `"Off (default) keeps publishing with the chair through host-side delivery. On gives every networked writer lane your GitHub credential, so a malicious lane can extract the token and act outside the wrapper."` |
 | `type` | `"bool"` |
 
 ## `lanes.silence_seconds`

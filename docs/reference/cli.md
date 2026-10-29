@@ -1786,13 +1786,8 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `target` | `{"name": "target", "positional": true, "required": true}` |
-| `value` | `{"name": "value", "positional": true}` |
-| `--account` | `{"conflicts": ["provider", "all"], "name": "account"}` |
-| `--provider` | `{"conflicts": ["account", "all"], "name": "provider"}` |
-| `--all` | `{"conflicts": ["account", "provider"], "defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
-| `--policy` | `{"name": "policy", "values": ["pace", "spend", "max", "off"]}` |
-| `--until` | `{"name": "until"}` |
+| `provider` | `{"name": "provider", "positional": true, "required": true}` |
+| `policy` | `{"name": "policy", "positional": true, "required": true, "values": ["pace", "spend", "max", "off"]}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1801,13 +1796,8 @@ Accepted by every command, before or after the subcommand.
   "groups": [
     {
       "arguments": [
-        "target",
-        "value",
-        "account",
         "provider",
-        "all",
-        "policy",
-        "until"
+        "policy"
       ],
       "multiple": true,
       "name": "RoutePacing",
@@ -1837,12 +1827,84 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant route override set`
+
+| Argument | Contract |
+|---|---|
+| `--account` | `{"name": "account"}` |
+| `--provider` | `{"name": "provider"}` |
+| `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
+| `--policy` | `{"name": "policy", "required": true, "values": ["pace", "spend", "max", "off"]}` |
+| `--starts` | `{"name": "starts"}` |
+| `--until` | `{"name": "until"}` |
+| `--window` | `{"name": "window", "repeatable": true}` |
+| `--tz` | `{"name": "tz"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "account",
+        "provider",
+        "all",
+        "policy",
+        "starts",
+        "until",
+        "window",
+        "tz"
+      ],
+      "multiple": true,
+      "name": "OverrideSet",
+      "required": false
+    },
+    {
+      "arguments": [
+        "account",
+        "provider",
+        "all"
+      ],
+      "multiple": false,
+      "name": "scope",
+      "required": true
+    }
+  ]
+}
+```
+
 ## `provenant route override list`
 
 | Argument | Contract |
 |---|---|
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
+
+## `provenant route override clear`
+
+| Argument | Contract |
+|---|---|
+| `--account` | `{"conflicts": ["provider"], "name": "account"}` |
+| `--provider` | `{"conflicts": ["account"], "name": "provider"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "account",
+        "provider"
+      ],
+      "multiple": true,
+      "name": "OverrideClear",
+      "required": false
+    }
+  ]
+}
+```
 
 ## `provenant preset`
 
@@ -1960,7 +2022,7 @@ Accepted by every command, before or after the subcommand.
 | `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability"], "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "name": "manifest"}` |
 | `--worktree` | `{"name": "worktree"}` |
 | `--wait` | `{"bounds": [1, 14400], "defaults": ["240"], "name": "wait"}` |
 | `--branch` | `{"name": "branch"}` |
@@ -2178,7 +2240,7 @@ Accepted by every command, before or after the subcommand.
 | `--base` | `{"name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability"], "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "name": "manifest"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -3972,3 +4034,66 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
   ]
 }
 ```
+
+## Error codes
+
+Commands the run owner serves put one of these stable codes in the JSON
+envelope's `error.code`; `status` and the exit code give its category. Other
+owners' codes are not listed yet. Match on the code, never on `error.message`,
+which may be reworded.
+
+| Code | Meaning |
+|---|---|
+| `INVALID` | The request or a stored run record is invalid. |
+| `REFUSED` | The execution context or a policy refused the operation. |
+| `WORKTREE_MISSING` | The named local worktree does not exist. |
+| `WORKTREE_UNREGISTERED` | The worktree is not registered with Provenant. |
+| `OPERATION_CONFLICT` | The operation ID was already used for a different request. |
+| `NOT_FOUND` | No run record matches in this scope. |
+| `NONTERMINAL` | The attempt has not finished. |
+| `PROVIDER_STATE_EXPIRED` | Retention removed the provider state this attempt needs to resume. |
+| `CONFLICT` | The run record changed concurrently or is immutable. |
+| `CANCELLED` | The call was cancelled. |
+| `LANE_DEPTH` | Nested lane depth exceeds the configured maximum. |
+| `QUEUE_FULL` | The host queue is full. |
+| `CONTENTION` | The run store is contended or the call budget expired. |
+| `IO` | Filesystem, database or other I/O failed. |
+| `UNSUPPORTED` | The route or adapter does not support the requested launch. |
+| `CONTINUATION_UNSUPPORTED` | The attempt's provider session cannot be continued. |
+| `TIME` | The host clock could not be read. |
+| `ENTROPY` | The host could not supply random identifiers. |
+| `LANE_CONTEXT` | The lane environment is missing or inconsistent. |
+| `IDENTITY` | The project or actor identity could not be resolved. |
+| `CONFIG` | Configuration could not be loaded or is invalid. |
+| `GIT` | Git is unavailable or a Git query failed. |
+| `SECRET_INPUT` | The prompt or input appears to contain a secret. |
+| `WORKTREE_REQUIRED` | The requested mode needs a worktree. |
+| `WORKTREE_NOT_APPLICABLE` | A worktree was given for a mode that does not use one. |
+| `PARENT_ATTEMPT` | The parent attempt is missing or cannot start children. |
+| `INTERNAL` | An internal invariant failed. |
+| `LIMIT` | A requested size or count exceeds its bound. |
+| `PRICES` | Plan prices could not be read or are invalid. |
+| `FABRIC` | A Fabric operation failed. |
+| `STATE_CORRUPT` | A stored record or artifact is corrupt. |
+| `LAUNCH_UNKNOWN` | The launch handoff was not confirmed; reconcile the run. |
+| `UNKNOWN_HOST` | No configured peer has this host label. |
+| `PEER_UNAVAILABLE` | The peer host could not be reached. |
+| `PEER_VERSION` | The peer host runs an incompatible version. |
+| `OWNER_UNAVAILABLE` | The run owner is unavailable in this build or host. |
+| `BASE_UNREACHABLE` | The Git base cannot be resolved or fetched. |
+| `BRANCH_EXISTS` | The branch already exists. |
+| `lane_coordination_refused` | Lane coordination policy refused the operation. |
+| `UPGRADE_REFUSED` | The upgrade was refused. |
+| `upgrade_required` | A record needs a newer Provenant to read it. |
+| `TIMEOUT` | The wait budget expired. |
+| `PEER` | The peer host returned an error. |
+| `WRITER_SCOPE` | The writer worktree scope was refused. |
+| `CONFINEMENT` | Confinement refused the requested access. |
+| `DISK_FLOOR` | Free disk space is below gc.free_floor; run `provenant gc --apply`. |
+| `MEMORY_PRESSURE` | Host memory pressure is too high to admit a lane. |
+| `LANE_CAP` | The host or project writer lane cap is reached. |
+| `BUILD_SETTINGS` | The host lane build settings are invalid. |
+| `GUARDIAN_IDENTITY` | The guardian process identity could not be observed. |
+| `HOST_CLOCK` | Startup spacing cannot be judged: the monotonic clock or boot identity is unreadable. |
+| `WRITER_REF_LOCKED` | A writer Git ref lock already exists. |
+| `OBJECT_IMPORT_LIMIT` | A lane's Git object import exceeded its limits. |

@@ -150,6 +150,10 @@ pub struct WorkContext {
     pub selection_source: Option<String>,
 }
 impl WorkContext {
+    /// A new request names only the fixed fields; stored records keep unknown ones for forward compatibility.
+    pub fn accepted(&self) -> bool {
+        self.extra.is_empty() && self.valid()
+    }
     pub fn valid(&self) -> bool {
         [
             &self.work_item,

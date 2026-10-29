@@ -11,6 +11,9 @@ memory_pressure_threshold = "critical"
 max_concurrent_builds = -1 # host-wide builds at once, 1-64; automatic: max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))
 build_wait_minutes = -1 # minutes a build waits for a slot or Cargo lock before giving up, 1-1440; automatic: 30
 max_writer_lanes = -1 # writer lanes live at once across the host, 1-64; automatic: 40
+lane_port_base = -1 # first port of the range split into per-writer-lane blocks, 1024-65535; automatic: 30000
+lane_port_block = -1 # ports in each writer lane's block, 1-1024; automatic: 16
+lane_port_blocks = -1 # blocks in the range, 0-1024, the base plus blocks times block size at most 65536; 0 turns allocation off; automatic: 64
 max_project_writer_lanes = -1 # writer lanes live at once per project, 1-32 and at most max_writer_lanes; automatic: 30
 cargo_build_jobs = -1 # automatic: half the available cores, at least 1
 [lanes.cargo_seed]

@@ -265,16 +265,24 @@ windows = ["rolling", "seven_day", "monthly"]
 policy = "max"
 ```
 
-For a temporary change, use for example
-`provenant route pacing override --all --policy spend --until 1d`. Select a
+`provenant route pacing PROVIDER POLICY` sets a provider's default policy.
+For a temporary or scheduled change, use for example
+`provenant route override set --all --policy spend --until 1d`. Select a
 single account with `--account` or a provider with `--provider` instead of
 `--all`. Account selectors accept the same keys, entry IDs, labels and
-`adapter/key` references as profiles; ambiguous references are rejected. The
-expiry accepts a duration in seconds, minutes, hours or days, or
-an RFC 3339 timestamp. `provenant route pacing override clear` removes the
-overrides early. Overrides are stored with their expiry in the same routing
-configuration using atomic writes, and stop applying automatically when they
-expire. Inspect the effective profile and active overrides with `route list`;
+`adapter/key` references as profiles; ambiguous references are rejected.
+`--starts` and `--until` accept a duration in seconds, minutes, hours or days
+from now, or an RFC 3339 timestamp; without `--until` the override stays until
+cleared. `--window [DAYS@]START-END` (repeatable) limits it to hour windows,
+such as `--window mon-fri@23-7`, in UTC or the IANA zone given by `--tz`. The
+command echoes the rule it recorded and any rule it replaced, since each scope
+holds one override. `provenant route override list` shows every override and
+scheduled model policy rule, whether it is active now and the time remaining.
+`provenant route override clear` removes every pacing override, or one scope's
+with `--account` or `--provider`. Overrides are stored under `schedule` in the
+same routing configuration using atomic writes, stop applying when they
+expire, and expired rows are pruned on the next `set` or `clear`. Inspect the
+effective profile and active overrides with `route list`;
 its JSON `configured_accounts` keys and `reset_of` references use `adapter/key`.
 `route resolve` names the governing source, window and deadline for each
 pacing factor or exclusion. The console settings editor uses the same

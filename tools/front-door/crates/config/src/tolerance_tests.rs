@@ -147,6 +147,12 @@ fn boundary_sections_keep_invalid_known_input_as_hard_errors() {
         let text = format!("schema_version=1\n[domains.sample]\n{value}");
         assert!(load_with_domains(&roots, Some(text.as_bytes()), &STRICT).is_err());
     }
+    // A malformed container of a boundary section refuses too; it recovers
+    // only when no section under it controls a boundary.
+    let text = b"schema_version=1\ndomains=false\n";
+    assert!(load_with_domains(&roots, Some(&text[..]), &STRICT).is_err());
+    let config = load_with_domains(&roots, Some(&text[..]), &SECTIONS).unwrap();
+    assert_eq!(config.warnings.len(), 1);
     let config = load_with_domains(
         &roots,
         Some(&b"schema_version=1\n[domains.sample]\nfuture=true"[..]),
@@ -202,8 +208,8 @@ fn inspection_keeps_warnings_alongside_a_boundary_error() {
 fn malformed_authority_knobs_refuse_instead_of_granting_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let roots = roots(dir.path());
-    // `lanes.publish` defaults to true: recovering a malformed `false` would
-    // hand an open-network writer the gh login the user withheld.
+    // `lanes.publish` hands an open-network writer the gh login: a malformed
+    // value must refuse rather than recover to either side.
     for value in [
         "'lanes.publish'='false'",
         "'lanes.publish'=0",
@@ -224,12 +230,20 @@ fn malformed_authority_knobs_refuse_instead_of_granting_defaults() {
                 .is_some()
         );
     }
+    // A malformed knobs container holds authority knobs, so it refuses too.
+    for text in [
+        "schema_version=1\nknobs=false\n",
+        "schema_version=1\nknobs='strict'\n",
+    ] {
+        let error = load(&roots, Some(text.as_bytes())).unwrap_err();
+        assert!(error.to_string().contains("knobs"), "{text}: {error}");
+    }
     let config = load(
         &roots,
-        Some(&b"schema_version=1\n[knobs]\n'lanes.publish'=false\n"[..]),
+        Some(&b"schema_version=1\n[knobs]\n'lanes.publish'=true\n"[..]),
     )
     .unwrap();
-    assert_eq!(config.knobs["lanes.publish"].value, false);
+    assert_eq!(config.knobs["lanes.publish"].value, true);
     // A non-authority knob still recovers with a warning naming it.
     let config = load(
         &roots,

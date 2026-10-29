@@ -546,6 +546,39 @@ fn bundled_expansions_match_golden_graphs() {
     }
 }
 
+/// Compare a bundled expansion with its checked-in graph document.
+/// `UPDATE_GOLDEN=1` rewrites the fixture.
+fn expansion_golden(name: &str) {
+    let expanded = expand(&Layers::empty(), name, "brief", &[]).unwrap();
+    let mut actual = serde_json::to_string_pretty(&expanded.document).unwrap();
+    actual.push('\n');
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(format!("{name}.expansion.json"));
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(
+        actual, expected,
+        "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
+    );
+}
+
+#[test]
+fn composite_bundled_expansions_match_golden_graphs() {
+    for name in [
+        "scout-swarm",
+        "generator-evaluator",
+        "review-council",
+        "big-batch",
+        "scope-then-run",
+        "deliver",
+    ] {
+        expansion_golden(name);
+    }
+}
+
 #[test]
 fn layering_composition_and_refusals() {
     let mut layers = Layers::empty();

@@ -498,7 +498,8 @@ pub enum Mode {
     ReadOnly,
     WorktreeWrite,
 }
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Switch {
     On,
     Off,

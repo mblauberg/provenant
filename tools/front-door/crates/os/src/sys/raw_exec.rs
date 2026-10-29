@@ -47,6 +47,9 @@ pub struct SpawnSpec<'a> {
     pub input: bool,
     pub secret_input: Option<&'a crate::exec::SecretInput>,
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
+    /// A second descriptor the child and its descendants keep open; the lane
+    /// port block, so it lasts as long as the process tree does.
+    pub inherited_ports: Option<&'a crate::fs::LockGuard>,
     pub process_group: bool,
     pub capture_stdout: bool,
     pub capture_stderr: bool,
@@ -120,7 +123,10 @@ impl OwnedPid {
             .map(<[_]>::to_vec)
             .unwrap_or_else(|| std::env::vars_os().collect());
         let mut pass = Vec::new();
-        if let Some(lease) = spec.inherited_lease {
+        for lease in [spec.inherited_lease, spec.inherited_ports]
+            .into_iter()
+            .flatten()
+        {
             pass.push(lease.handoff_file().as_fd());
         }
         if let (Some(pipe), Some(input)) = (&secret, spec.secret_input) {

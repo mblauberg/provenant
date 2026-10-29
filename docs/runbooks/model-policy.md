@@ -58,11 +58,23 @@ fallback_effort = "high"
 
 Schedules may set `tz` to an IANA time zone; omitted `tz` uses UTC. Weekdays use Monday-based indexes, Monday `0` through Sunday `6`;
 an empty `weekdays` list matches every day. Window end hours are exclusive and
-overnight windows wrap midnight. `provenant route override list` shows policy
-and pacing schedules, whether each is active and the time remaining to expiry.
-Legacy `starts_unix_seconds`, `expires_unix_seconds` and top-level `windows`
-are converted to `schedule` during load. Rewrite the file to keep the new form;
-expired legacy records are dropped. Unknown time zones warn and use UTC.
+overnight windows wrap midnight. Schedules are validated at load: `starts`
+must precede `expires`, `tz` must name an IANA zone, and each window needs
+distinct start and end hours and distinct weekdays, with at most 16 windows. A
+rule with a malformed schedule or selector, including a value of the wrong
+type, is dropped with a warning, or refuses the configuration when it carries
+an enforced lane restriction.
+`provenant route override list` shows policy and pacing schedules, whether
+each is active and the time remaining to expiry.
+
+The timing keys that predate `schedule` are not converted. A pacing override or
+policy rule that still carries one is dropped with a located warning that names
+the replacement, such as
+`domains.routing.pacing_overrides.0: ignored invalid configuration (domain: moved_to_schedule.expires)`;
+other records still load. A rule that enforces a lane restriction refuses the
+configuration instead, at the retired key. Move `starts_unix_seconds` to
+`schedule.starts`, `expires_unix_seconds` to `schedule.expires` and a
+top-level `windows` to `schedule.windows`.
 
 The bundled policy follows issues #2177 and #2185 and the repository's price
 table. These are adjustable operating defaults:

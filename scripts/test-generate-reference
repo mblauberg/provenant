@@ -43,6 +43,14 @@ class ReferenceTests(unittest.TestCase):
         }})
         self.assertIn('| `example` | dynamic fixture | fixture effect (2 to 9). |', text)
 
+    def test_cli_reference_lists_error_codes_with_their_meaning(self):
+        text = GEN['cli_reference']({'commands': [], 'error_codes': [
+            {'code': 'LANE_CAP', 'summary': 'The cap | is reached.'},
+        ]})
+        self.assertIn('## Error codes', text)
+        self.assertIn('| `LANE_CAP` | The cap &#124; is reached. |', text)
+        self.assertNotIn('## Error codes', GEN['cli_reference']({'commands': []}))
+
     def test_cli_contract_keeps_constraints_groups_and_argument_metadata(self):
         contract = {'name': 'mode', 'long': 'mode', 'required': True,
                     'repeatable': False, 'defaults': ['read-only'],

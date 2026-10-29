@@ -167,16 +167,14 @@ fn prepare_candidates(
             .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
             .map_err(|error| error.to_string())?;
     }
-    // Publishing is optional. Missing gh tools or configuration leave the
+    // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
+    // credential. Missing gh tools or configuration leave the
     // writer able to do local work without publishing credential access.
-    let publishing_gh = (writer.is_some()
-        && task.access.network(true) == NetworkAccess::Open
-        && task
-            .profile
-            .knobs
-            .get("lanes.publish")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true))
+    let publishing_gh = publishing_requested(
+        writer.is_some(),
+        task.access.network(true) == NetworkAccess::Open,
+        &task.profile.knobs,
+    )
     .then(|| publishing_executable(&home, &locate))
     .flatten();
     let git_context = task
@@ -1173,6 +1171,9 @@ fn configure_build_slots(
                         slots,
                         wait_seconds: settings.build_wait().as_secs(),
                         cargo: &cargo,
+                        // Inside the lane's writable scratch (its $TMPDIR), where
+                        // the host finds it; each waiting build adds its pid.
+                        wait_marker: &scratch.join(provenant_os::build_slots::WAIT_MARKER),
                     },
                 )
                 .map_err(|error| error.to_string())?,
@@ -2409,6 +2410,21 @@ fn read_only_plan(
     }
 }
 
+/// Publishing hands the lane the GitHub credential, so it needs the explicit
+/// `lanes.publish=true` opt-in as well as a networked writer.
+fn publishing_requested(
+    writer: bool,
+    open_network: bool,
+    knobs: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    writer
+        && open_network
+        && knobs
+            .get("lanes.publish")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn publishing_executable(
     home: &Path,
     locate: &impl Fn(&str) -> Result<PathBuf, String>,
@@ -2743,6 +2759,16 @@ mod tests {
         Ok(())
     }
     use super::*;
+
+    #[test]
+    fn default_writer_launch_does_not_request_publishing() {
+        let mut knobs = std::collections::BTreeMap::new();
+        assert!(!publishing_requested(true, true, &knobs));
+        knobs.insert("lanes.publish".into(), serde_json::json!(true));
+        assert!(publishing_requested(true, true, &knobs));
+        assert!(!publishing_requested(false, true, &knobs));
+        assert!(!publishing_requested(true, false, &knobs));
+    }
 
     #[test]
     fn publishing_is_optional_without_gh_configuration() -> Result<(), Box<dyn std::error::Error>> {
@@ -3590,18 +3616,133 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
         );
-        // The writer plan the CLI prepares, with its grant list, must leave the
-        // build slot directory out of reach: a lane cannot create, unlink or
-        // replace a slot file.
+        // The writer plan the CLI prepares must leave the build slot directory
+        // out of reach once an adapter adds its grants: a lane cannot create,
+        // unlink or replace a slot file. Cursor never runs `LaneRuntime::grant`
+        // or sets up build slots, so Codex, which does both, takes the plan.
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
-        let slots = confinement
-            .state_root
-            .join(provenant_os::build_slots::DIRECTORY.join("/"));
-        let grants = provenant_confinement::write_grants(
-            confinement.plan.permissions(),
-            &confinement.profile,
+        let cargo = home.join(".cargo/bin/cargo");
+        for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+            std::fs::create_dir_all(home.join(path))?;
+        }
+        std::fs::write(home.join(".rustup/settings.toml"), "")?;
+        std::fs::write(&cargo, b"#!/bin/sh\n")?;
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o700))?;
+        let codex_route = provenant_records::ResolvedRoute {
+            extra: Default::default(),
+            adapter: "codex".into(),
+            model: "fixture-model".into(),
+            effort: None,
+            catalogue_revision: "fixture".into(),
+            account_key: Some("local".into()),
+            host: "fixture".into(),
+            alternatives: Default::default(),
+            exclusions: Vec::new(),
+            eligibility: provenant_records::RouteEligibility::Eligible,
+            readiness: provenant_records::RouteReadiness::Ready {
+                extra: Default::default(),
+                availability_ref: "fixture".into(),
+                expires_unix_seconds: 100,
+            },
+            confidentiality: provenant_records::RouteConfidentiality {
+                extra: Default::default(),
+                evidence_ref: "fixture".into(),
+            },
+            pool_selection: None,
+        };
+        let codex_account = provenant_providers::identity::RegisteredAccount::new(
+            "codex",
+            "local",
+            home.join(".codex"),
+        )?;
+        let codex_prompt = provenant_providers::Prompt::new("grants".into());
+        let codex_runtime = assets.join("provenant");
+        let mut codex = provenant_providers::Adapter::prepare(
+            &provenant_providers::codex::Codex,
+            provenant_providers::PrepareInput {
+                command: None,
+                route: &codex_route,
+                confined: &confinement.plan,
+                prompt: &codex_prompt,
+                continuation: None,
+                grant_digest: "fixture",
+                executable: &executable,
+                home: &home,
+                user: "fixture".as_ref(),
+                host_var: &|_| None,
+                account: Some(&codex_account),
+                token: None,
+                cwd: &project.join(".worktrees/writer"),
+                git_context: false,
+                nonce: [9; 16],
+                provenant: provenant_providers::LaneRuntime {
+                    executable: &codex_runtime,
+                    git: &git,
+                    state: &state,
+                    child_state: &state.join("children"),
+                    home: &home,
+                    depth: 1,
+                    attempt: attempt_id,
+                    assets: &assets,
+                },
+            },
+        )?;
+        assert!(
+            codex.env.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"),
+            "the lane builds into its own target"
         );
+        configure_build_slots(
+            &mut codex,
+            &provenant_config::LaneBuildSettings::default(),
+            &home,
+            &confinement.plan.permissions().scratch.path,
+            &codex_runtime,
+            &state,
+        )?;
+        let slots = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
+        assert!(
+            codex
+                .profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|grant| grant.path == slots && grant.scope == PathScope::Subtree),
+            "build slots were set up for this lane"
+        );
+        let grants =
+            provenant_confinement::write_grants(confinement.plan.permissions(), &codex.profile);
         assert!(!grants.is_empty(), "the profile lists its write grants");
+        // The shim's wait marker must be writable by the lane, or a sandboxed
+        // wait is never shown.
+        let shim = codex
+            .setup
+            .iter()
+            .find_map(|step| match step {
+                provenant_providers::SetupStep::WriteExecutable { path, bytes }
+                    if path.ends_with("bin/cargo") =>
+                {
+                    String::from_utf8(bytes.clone()).ok()
+                }
+                _ => None,
+            })
+            .ok_or("cargo shim")?;
+        let marker = confinement
+            .plan
+            .permissions()
+            .scratch
+            .path
+            .join(provenant_os::build_slots::WAIT_MARKER);
+        assert!(
+            shim.contains(&marker.to_string_lossy().into_owned()),
+            "{shim}"
+        );
+        assert!(
+            grants
+                .iter()
+                .any(|grant| grant.scope == PathScope::Subtree && marker.starts_with(&grant.path)),
+            "no write grant covers the wait marker {}",
+            marker.display()
+        );
         for grant in &grants {
             let reaches = match grant.scope {
                 PathScope::Exact => grant.path == slots,
@@ -3645,7 +3786,10 @@ mod tests {
             std::fs::DirBuilder::new().mode(0o700).create(path)?;
         }
         let mut publishing_task = task.clone();
-        publishing_task.profile.knobs.remove("lanes.publish");
+        publishing_task
+            .profile
+            .knobs
+            .insert("lanes.publish".into(), serde_json::json!(true));
         let _publishing = prepare_with(
             &registry,
             &publishing_task,

@@ -388,7 +388,8 @@ composite `ci` holding a CI gate bound to the writer's pushed head and a
 repair loop the gate routes to on failure. Each loop round runs a fresh
 `repairer` that `continues` the writer's branch, whose inputs are the failed
 gate's findings (check names with log excerpts), the writer's `result` and
-`remaining` in every round and the previous repair's, never a transcript,
+`remaining` handoff items in every round and the previous repair's, never a
+transcript,
 followed by the CI gate again. The composite
 succeeds on either path. A `review-council` then reviews a `head` source
 binding to the writer, so it judges the newest repaired head; a verdict gate
@@ -396,8 +397,13 @@ and a `land` node merge that head under the host's tier policy. No model runs
 while a gate is pending. `max_iterations` bounds the rounds; exhaustion raises
 the loop ask when `decision_session` is set and otherwise pauses the graph.
 The same session is bound to the land node's `session`, so a nested `deliver`
-still asks it; with none, a tier that asks fails the land node with guidance
-to land by hand. Preset leaves may set `continues`, `land` and
+still asks it, and the chair lands by hand; with none, a tier that asks fails
+the land node with guidance to land by hand. A repository preset layer never
+lowers a land tier: when repository layers take part, the expansion is
+repeated without them, and each land node takes the stricter tier of the two.
+A land node with no counterpart there, or any land node when the preset has
+no non-repository layers, takes `terminal`. Command-line values take part in
+both expansions, so `--set` and `--params-file` still set the tier. Preset leaves may set `continues`, `land` and
 `kind = "land"`. A preset's top-level `decision_session` sets the graph's
 decision session; an empty value, here, on a loop or as a land session, leaves
 it unset.
@@ -928,7 +934,9 @@ each follow the writer. Land nodes are refused in loop bodies.
 
 When ready, the node pins the branch and newest commit delivered by the
 writer and the writers that continue it. A passing verdict gate after the
-writer must have reviewed that head: each of its inputs judged the head
+writer must have reviewed that head: each of its inputs is an agent attempt
+outside the writer's chain, never a gate, loop, decision or land output such
+as CI's `PASS`, and judged the head
 through its pinned `source` commit or, without one, as the newest head of the
 writer's chain upstream of it. A composite input has no subject of its own, so
 it resolves to the member that exported its verdict, recursively: a council
@@ -939,16 +947,21 @@ reaches the land, or a review that predates a continuation, never lands. It
 then resolves the host's tier policy
 and saves both in the node's `land` record with the layer the policy came
 from (`default`, `config` or `project`). With policy `auto` the record says
-the policy authorised the land. With `ask` it raises ask `NODE.ask-N` with
-options `land` and `hold`; an answer of `land` records the ask ID and the
-answering actor, `hold` fails the node, and any other answer asks again as a
-decide node does. A tier that asks with no session fails the node and names
-`provenant land` for a manual land. Once authorised, the host lands through
-the same path as `provenant land N --head HEAD`: it finds the open PR for the
-branch, checks CI once, merges with `--match-head-commit` and runs the usual
-cleanup, so the repository's own merge requirements still apply. A merged PR
-succeeds the node with verdict `LANDED`, the branch and head as outputs and an
-excerpt that names who or what authorised it. Pending checks, an unknown merge
+the policy authorised the land, and the host lands through the same path as
+`provenant land N --head HEAD`: it finds the PR for the branch, checks CI
+once, merges with `--match-head-commit` and runs the usual cleanup, so the
+repository's own merge requirements still apply. With `ask` it raises ask
+`NODE.ask-1` with the single option `hold`, naming `provenant land N --head
+HEAD`, and only observes the PR: it never merges. Once the chair has merged
+the PR at the pinned head, the node records the ask ID as the chair's
+authority. An inbox answer never approves a land, because lanes can write the
+Fabric store and configured peers can answer: `hold`, or any other answer,
+fails the node. A tier that asks with no session fails the node and names
+`provenant land` for a manual land. The host finds the PR by head branch,
+never by `gh pr view BRANCH`, which reads a numeric branch as a PR number: it
+needs exactly one same-repository PR that is open or already at the pinned
+head. A merged PR succeeds the node with verdict `LANDED`, the branch and head
+as outputs and an excerpt that names who or what authorised it. Pending checks, an unknown merge
 state or an unavailable PR keep the node running and save a retry deadline,
 spaced by the node's CI poll backoff, that host tick wake discovery includes; a
 moved head, failed checks, a closed PR or a refused merge fail it. A waiting
@@ -956,10 +969,14 @@ land node does not count toward `concurrency`, and a paused graph does not
 land.
 
 - Why: delivery should finish without a chair for routine work while crucial
-  work still waits for a person, under one policy the host owns.
+  work still waits for a person, under one policy the host owns. Inbox
+  records and CI output are writable or deterministic, so neither is landing
+  authority or review evidence.
 - Test: `crates/fabric-runtime/src/graph/land_tests.rs::an_auto_tier_lands_the_newest_delivered_head_through_the_host`;
-  `::a_crucial_tier_raises_a_land_ask_and_lands_on_its_answer`;
+  `::a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand`;
+  `::an_inbox_answer_of_land_never_approves_a_land`;
   `::a_hold_answer_fails_the_land_without_merging`;
+  `::ci_output_never_substitutes_for_review`;
   `::a_configured_policy_overrides_the_default_and_records_its_source`;
   `::an_ask_tier_without_a_session_fails_with_guidance`;
   `::a_pending_land_is_observed_again_and_a_refusal_fails_the_node`;
@@ -969,7 +986,9 @@ land.
   `::a_composite_verdict_binds_to_the_head_its_producer_reviewed`;
   `::a_loop_body_cannot_land`;
   `crates/fabric-runtime/src/config.rs::land_policy_layers_project_then_host_then_default`;
-  `src/pr/land.rs::graph_land_tests::a_land_report_maps_to_a_graph_observation`.
+  `src/pr/land.rs::graph_land_tests::a_land_report_maps_to_a_graph_observation`;
+  `src/pr.rs::branch_pull_tests::a_numeric_branch_resolves_to_its_unique_same_repository_pull_request`;
+  `src/preset_deliver_tests.rs::repository_layers_never_lower_the_land_tier_or_add_a_land`.
 - Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/pr/land.rs`,
   `src/fabric.rs`
 
@@ -1004,7 +1023,9 @@ Disjoint scoped writers in separate registered checkouts may run concurrently.
 Planner-emitted overlapping scopes, including transitive overlaps and identical
 checkouts, must share one checkout and serial admission. Such components require
 a graph integration branch; their writers use existing integrate delivery and the
-graph owns at most one final PR. Write scope is a scheduling declaration and
+graph owns at most one final PR. A planner never chooses a destination: a
+fragment node with integrate delivery is refused unless the document names an
+`integration_branch`, and its destination is always that branch. Write scope is a scheduling declaration and
 part of the brief; existing worktree confinement remains the write boundary.
 The admission fence checks every writer, including original document nodes;
 an unspecified or noncanonical scope overlaps all scopes. Skipped or blocked
@@ -1036,6 +1057,7 @@ edge and continuation slots, including when every current attempt has settled.
   `crates/fabric-runtime/src/graph/plan_tests.rs::plan_validates_effective_limits_and_ceiling_before_saving`;
   `::plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once`;
   `::plan_disjoint_writers_are_admitted_while_a_peer_is_running`;
+  `::planner_integrate_delivery_needs_the_documents_integration_branch`;
   `::honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract`;
   `::continuation_budget_pauses_then_extends_without_duplicating_prior_work`;
   `::expansion_at_node_budget_reads_journal_once`;
@@ -1059,12 +1081,17 @@ have a run-file path. The runtime retains only the excerpt and a 16 KiB tail
 of the redacted text for parsing.
 
 The optional typed verdict must be the final non-empty standalone line of the
-complete redacted stream. Its syntax is `VERDICT: TOKEN`, with an uppercase
+complete redacted stream, ignoring a closed `handoff` fence (and blank lines)
+that follows it. Its syntax is `VERDICT: TOKEN`, with an uppercase
 ASCII token containing only letters, digits, underscores or hyphens. The line
-must fit within 1024 bytes, including surrounding whitespace. Repeated verdict
-markers anywhere in the stream, even in quotations or outside the retained
-windows, invalidate the evidence. Case differences, trailing text or an overlong
-line also invalidate it. Invalid evidence is recorded
+must fit within 1024 bytes, including surrounding whitespace. A declaration is a
+line that starts with `verdict:` (any case) after optional whitespace, markdown
+emphasis, list markers (`-`, `*`, `+`, `1.`, `1)`) or heading marks, judged from
+the start of the line even when it is overlong. Mentions in prose, and
+blockquoted lines, are not declarations. More than one declaration anywhere in
+the stream, even outside the retained windows, invalidates the evidence. Case
+differences, trailing text, an overlong line or an unterminated trailing
+`handoff` fence also invalidate it. Invalid evidence is recorded
 in `verdict_error` and must fail any consuming verdict gate. A missing verdict
 is a non-match; a matched `required_verdict` contract must not override invalid
 typed evidence.
@@ -1088,10 +1115,13 @@ complete redacted stream. Writers can also provide a branch or commit.
 
 A node's `inputs` list selects `result`, `verdict`, `findings`, `branch`,
 `commit` or `remaining` from named direct dependencies. `remaining` is the
-closing window, at most 2048 canonical bytes starting on a line boundary, of a
-report whose `result` excerpt was cut short, so remaining work a final report
-states last survives; it is null when the excerpt holds the whole report, so
-select it with `result`. Each dependency and output selector
+`remaining[]` list of the handoff v2 block the node declared, in any status,
+rendered as a JSON array of at most 4096 canonical bytes (leading items kept, with a warning when cut); it is null when no valid
+handoff was declared or it lists no items. It is the only carrier of
+unfinished work across a clipped `result` excerpt. Decision (#2279): the
+earlier closing-window selector is removed rather than kept as a fallback,
+because handoff v2 is bounded, structured and parsed from the complete stream;
+a provider that emits no handoff gets the head excerpt and digest only. Each dependency and output selector
 may occur only once. The selected data is rendered into its brief, which is
 bounded by the effective per-node prompt byte limit. If the node prompt leaves
 no room for the block, or the selected outputs do not fit, the node fails

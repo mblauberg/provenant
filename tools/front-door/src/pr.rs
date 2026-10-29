@@ -105,18 +105,66 @@ fn head(project: &Path, number: &str) -> Result<GitOid> {
     )?)?;
     Ok(serde_json::from_slice::<PullRequest>(&bytes)?.head)
 }
-/// The pull request whose head is `branch`, as `gh pr view` selects it.
-fn number_for_branch(project: &Path, branch: &str) -> Result<u64> {
+/// The pull request a graph lands: found by head branch, never by `gh pr
+/// view BRANCH`, which reads a numeric branch as a pull request number.
+#[derive(Debug, PartialEq, Eq)]
+struct BranchPull {
+    number: u64,
+    state: String,
+    head: GitOid,
+}
+fn pull_for_branch(project: &Path, branch: &str, head: GitOid) -> Result<BranchPull> {
+    pull_for_branch_with(branch, head, &|argv| {
+        successful(execute(project, argv, false)?)
+    })
+}
+/// The one same-repository pull request whose head branch is `branch` and
+/// that is open or already at `head`. A fork's namesake, or an earlier pull
+/// request from a reused branch name, never matches.
+fn pull_for_branch_with(
+    branch: &str,
+    head: GitOid,
+    read: &dyn Fn(&[&str]) -> Result<Vec<u8>>,
+) -> Result<BranchPull> {
     #[derive(Deserialize)]
     struct PullRequest {
         number: u64,
+        state: String,
+        #[serde(rename = "headRefOid")]
+        head: GitOid,
+        #[serde(rename = "isCrossRepository")]
+        cross_repository: bool,
     }
-    let bytes = successful(execute(
-        project,
-        &["gh", "pr", "view", branch, "--json", "number"],
-        false,
-    )?)?;
-    Ok(serde_json::from_slice::<PullRequest>(&bytes)?.number)
+    let bytes = read(&[
+        "gh",
+        "pr",
+        "list",
+        "--head",
+        branch,
+        "--state",
+        "all",
+        "--json",
+        "number,state,headRefOid,isCrossRepository",
+    ])?;
+    let mut matching: Vec<PullRequest> = serde_json::from_slice::<Vec<PullRequest>>(&bytes)?
+        .into_iter()
+        .filter(|pull| !pull.cross_repository && (pull.state == "OPEN" || pull.head == head))
+        .collect();
+    match matching.len() {
+        1 => {
+            let pull = matching.remove(0);
+            Ok(BranchPull {
+                number: pull.number,
+                state: pull.state,
+                head: pull.head,
+            })
+        }
+        0 => Err(format!("no same-repository pull request has head branch {branch}").into()),
+        count => Err(format!(
+            "{count} same-repository pull requests have head branch {branch}; land one by number"
+        )
+        .into()),
+    }
 }
 fn checks(project: &Path, number: &str, head: GitOid, watch: bool) -> Result<()> {
     if watch {
@@ -229,4 +277,52 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
         &format!("{status} #{number} {head}\n"),
         true,
     )
+}
+
+#[cfg(test)]
+#[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
+mod branch_pull_tests {
+    use super::*;
+
+    const HEAD: &str = "1111111111111111111111111111111111111111";
+    const OTHER: &str = "2222222222222222222222222222222222222222";
+
+    fn select(pulls: serde_json::Value) -> Result<BranchPull> {
+        pull_for_branch_with("123", HEAD.parse().unwrap(), &|argv| {
+            // `gh pr view 123` would select pull request #123, not branch 123.
+            assert_eq!(&argv[..5], ["gh", "pr", "list", "--head", "123"]);
+            Ok(serde_json::to_vec(&pulls)?)
+        })
+    }
+
+    fn pull(number: u64, state: &str, head: &str, cross: bool) -> serde_json::Value {
+        serde_json::json!({"number":number, "state":state, "headRefOid":head, "isCrossRepository":cross})
+    }
+
+    #[test]
+    fn a_numeric_branch_resolves_to_its_unique_same_repository_pull_request() {
+        let found = select(serde_json::json!([
+            pull(9, "OPEN", HEAD, true),
+            pull(456, "OPEN", HEAD, false),
+            pull(12, "MERGED", OTHER, false),
+        ]))
+        .unwrap();
+        assert_eq!((found.number, found.state.as_str()), (456, "OPEN"));
+        assert_eq!(
+            select(serde_json::json!([pull(456, "MERGED", HEAD, false)]))
+                .unwrap()
+                .number,
+            456
+        );
+        let ambiguous = select(serde_json::json!([
+            pull(456, "OPEN", HEAD, false),
+            pull(457, "OPEN", OTHER, false),
+        ]))
+        .unwrap_err();
+        assert!(
+            ambiguous.to_string().contains("2 same-repository"),
+            "{ambiguous}"
+        );
+        assert!(select(serde_json::json!([pull(9, "OPEN", HEAD, true)])).is_err());
+    }
 }

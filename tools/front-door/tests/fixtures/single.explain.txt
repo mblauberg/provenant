@@ -1,0 +1,4 @@
+Graph <id>
+Preset selection: single (override)
+task  role=- tier=senior family=any kind=- access=read_only worktree=-
+

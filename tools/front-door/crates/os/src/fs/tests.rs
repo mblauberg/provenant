@@ -1238,6 +1238,7 @@ fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
                 input: false,
                 secret_input: None,
                 inherited_lease: None,
+                inherited_ports: None,
                 process_group: false,
                 capture_stdout: false,
                 capture_stderr: false,
