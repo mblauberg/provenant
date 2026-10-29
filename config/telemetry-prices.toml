@@ -4,6 +4,10 @@ schema_version = 1
 id = "reviewed-2026-10-27"
 reviewed_at = "2026-10-27"
 units = "usd_microdollars_per_million_tokens"
+# `telemetry stats` flags the sheet once the review is older than this.
+max_review_age_days = 90
+# `telemetry prices refresh` reports sources that differ by more than this (10%).
+discrepancy_threshold_bps = 1000
 
 [[models]]
 provider = "agy"
@@ -52,6 +56,9 @@ output_excluding_reasoning = 50000000
 provider = "claude"
 model = "claude/claude-haiku-4-5"
 billing = "subscription"
+effective_from = "2026-10-27"
+openrouter_id = "anthropic/claude-haiku-4.5"
+litellm_id = "claude-haiku-4-5"
 sources = ["https://platform.claude.com/docs/en/models/haiku-4-5/overview"]
 [models.rates]
 uncached_input = 1000000

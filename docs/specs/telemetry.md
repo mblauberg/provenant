@@ -73,6 +73,12 @@ malformed interior records. Native model costs use the same money object as
 other telemetry costs and identify the reviewed price table. Pricing uses
 exact model identities, including dated snapshots present in the table;
 unknown or incomplete prices remain unknown.
+- Price sheet: `telemetry prices refresh` proposes a diff from OpenRouter and
+  LiteLLM and never applies it; a cross-source discrepancy above
+  `discrepancy_threshold_bps` is reported, not resolved. Test:
+  `crates/telemetry/src/refresh.rs::tests::converts_per_token_to_exact_microdollars_per_million`;
+  `tests/telemetry_native.rs::prices_refresh_proposes_a_deterministic_diff_and_never_edits_the_sheet`;
+  `crates/telemetry/src/tests.rs::review_older_than_the_configured_age_is_stale`
 - Why: native sub-agent usage should be visible without counting it as a
   Provenant attempt or collecting conversation content.
 - Test: `crates/telemetry/src/native.rs::tests::imports_metadata_once_per_message_and_prices_exact_model`;
