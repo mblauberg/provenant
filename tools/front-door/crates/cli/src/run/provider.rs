@@ -4364,6 +4364,7 @@ mod tests {
     fn host_write_paths_reach_writers_only() {
         let host = provenant_confinement::run_config::RunConfig {
             writer_writes: vec!["/p/.agent-run/locks".into()],
+            ..Default::default()
         };
         let access = run::LaneAccess {
             write_roots: vec!["/p/extra".into()],
