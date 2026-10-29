@@ -375,9 +375,9 @@ fn a_red_gate_repairs_from_the_failure_excerpt_and_the_repaired_head_is_reviewed
     );
     // A fresh agent: the writer's brief is not carried, only its final report.
     let (_, writer_brief) = host.prompts.iter().find(|(id, _)| id == "write").unwrap();
-    assert!(writer_brief.contains("Implement one bounded approved slice"));
+    assert!(writer_brief.contains("Implement one bounded slice"));
     assert!(
-        !prompt.contains("Implement one bounded approved slice"),
+        !prompt.contains("Implement one bounded slice"),
         "{prompt}"
     );
     assert!(prompt.contains("no earlier transcript"), "{prompt}");
