@@ -186,7 +186,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                 || request.worktree_branch.is_some()
                 || request.branch.is_some())
         {
-            request.access.mode = Mode::WorktreeWrite;
+            request.access.mode = Some(Mode::WorktreeWrite);
         }
     }
     match validate(&invocation) {
@@ -706,7 +706,7 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             let access = &dispatch.access;
             route_valid(&dispatch.route)?;
             if dispatch.preset.is_none()
-                && (access.mode == Mode::WorktreeWrite)
+                && (access.mode() == Mode::WorktreeWrite)
                     != (access.worktree.is_some()
                         || dispatch.branch.is_some()
                         || dispatch.worktree_branch.is_some())
@@ -716,7 +716,7 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
                      for, --mode worktree-write",
                 );
             }
-            if access.mode == Mode::WorktreeWrite && !dispatch.route.fallback.is_empty() {
+            if access.mode() == Mode::WorktreeWrite && !dispatch.route.fallback.is_empty() {
                 return invalid("writers cannot use fallback models");
             }
             if dispatch.concurrency.is_some()
@@ -1577,7 +1577,7 @@ mod tests {
         };
         assert_eq!(request.wait, Some(1800));
         assert_eq!(request.concurrency, Some(3));
-        assert_eq!(request.access.mode, Mode::ReadOnly);
+        assert_eq!(request.access.mode(), Mode::ReadOnly);
         assert_eq!(
             request.access.worktree,
             Some(std::path::PathBuf::from("/fixture/writer"))

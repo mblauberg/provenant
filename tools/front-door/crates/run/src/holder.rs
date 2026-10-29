@@ -1053,6 +1053,9 @@ impl RunStore {
                 });
             }
         }
+        // Delivery keys off the outcome before a declared stop, so partial work
+        // is still delivered. The stop changes only the settled state.
+        let succeeded_before_stop = decoded.outcome == Outcome::Succeeded;
         // A declared stop requires review even when the provider succeeded.
         let mut partial = std::mem::take(&mut decoded.partial_signals);
         if matches!(
@@ -1092,7 +1095,7 @@ impl RunStore {
         // the sealed stdout, so no live frame observation is required.
         let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
         if !result_orphan
-            && decoded.outcome == Outcome::Succeeded
+            && succeeded_before_stop
             && !cancelled
             && exit.stop_reason.is_none()
             && !exit.unresolved_cleanup

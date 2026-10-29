@@ -506,9 +506,9 @@ pub enum Switch {
 }
 #[derive(Debug, Args)]
 pub struct Access {
-    /// Access mode: read-only or worktree-write
-    #[arg(long, value_enum, default_value = "read-only")]
-    pub mode: Mode,
+    /// Access mode: read-only or worktree-write [default: read-only]
+    #[arg(long, value_enum)]
+    pub mode: Option<Mode>,
     /// Writer worktree; local run creates an owned worktree for a missing branch name
     #[arg(long)]
     pub worktree: Option<PathBuf>,
@@ -524,6 +524,12 @@ pub struct Access {
     /// Grant a named capability: postgres (repeatable)
     #[arg(long)]
     pub capability: Vec<String>,
+}
+impl Access {
+    /// The effective mode. An omitted `--mode` is read-only.
+    pub fn mode(&self) -> Mode {
+        self.mode.unwrap_or(Mode::ReadOnly)
+    }
 }
 #[derive(Debug, Args)]
 #[group(id = "dispatch_input", required = true, multiple = false)]

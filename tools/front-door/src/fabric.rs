@@ -4834,7 +4834,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             );
             let grants = provenant_cli::run::lane_access(
                 &provenant_cli::Access {
-                    mode: provenant_cli::Mode::ReadOnly,
+                    mode: Some(provenant_cli::Mode::ReadOnly),
                     worktree: None,
                     read_root: node
                         .read_roots

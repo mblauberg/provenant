@@ -43,9 +43,10 @@ If the guardian already has a higher nice value, the provider inherits that
 lower scheduling priority. If changing priority fails, the provider still
 launches at its inherited priority and the reason is recorded as a warning.
 
-When run from a registered linked worktree without `--worktree` or `--branch`,
-`run` refuses with `REFUSED` and names `--worktree <path>` as the repair. Pass
-that option to bind the checkout as a writer.
+When run from a registered linked worktree with no `--mode` and no target
+(`--worktree`, `--branch` or `--worktree-branch`), `run` refuses with `REFUSED`
+and names both repairs: `--worktree <path>` for a writer, or `--mode read-only`
+for a reader.
 
 The receipt names the worktree. `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned

@@ -611,10 +611,15 @@ schema v2 block with status `stopped_early` or `blocked`, and nothing after it),
 than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
 `terminal_reason` other than `completed`) and `uncommitted_work`. Prose is never
 read, and a quoted, repeated or trailing-text block is no flag. A declared stop
-changes an otherwise `succeeded` outcome to `review_required`; other outcomes
-remain unchanged. The reason carries a `partial finish (...)` note, and `lanes`
-shows `(partial)` beside the state,
-the signals, and a `provenant resume` hint. A failed lane carries no flag. Every
+(`stopped_early` or `blocked`) changes an otherwise `succeeded` outcome to
+`review_required`; other outcomes remain unchanged. The settled outcome is what
+the graph reads: `tools/front-door/src/fabric.rs` maps any outcome other than
+`succeeded`, including `review_required`, to a failed graph node attempt.
+Delivery is gated on the outcome before the stop, so a lane that succeeded
+before stopping still delivers its partial work once its publication is
+durable. The reason carries a `partial finish (...)` note, and `lanes` shows
+`(partial)` beside the state, the signals, and a `provenant resume` hint. A
+failed lane carries no flag. Every
 launch prompt asks for the same final `handoff` block on every finish. Its JSON
 has `schema_version: 2`, `status` (`done`, `stopped_early`, `blocked`), `note`,
 `remaining[]`, `decisions[]` and `verify[]`. Unknown fields are retained. The
@@ -911,10 +916,13 @@ in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
 
 ## Lane-owned worktrees and adoption
 
-A `run` submitted from a registered linked worktree without `--worktree` or
-`--branch` is refused with code `REFUSED` and a repair naming `--worktree
-<path>`. This prevents an intended writer from silently starting read-only; an
-explicit worktree binds the writer normally.
+A `run` submitted from a registered linked worktree with neither `--mode` nor a
+target (`--worktree`, `--branch` or `--worktree-branch`) is refused with code
+`REFUSED`. The repair names both choices: `--worktree <path>` for a writer, or
+`--mode read-only` for a reader. This prevents an intended writer from silently
+starting read-only. An explicit `--mode read-only` or an explicit worktree
+dispatches normally. A submodule's gitfile names `.git/modules/`, not a
+`worktrees/` entry, so a run inside a submodule is not refused.
 
 Dispatch may opt into local lifecycle ownership with `--worktree-branch BRANCH
 [--base REF]`, exclusive with `--worktree` and peer `--branch`. Creation uses
@@ -963,6 +971,9 @@ or change an adopted worktree's receipt. Concurrent refreshes of the same
 branch may race and produce a warning.
 - Why: a lane may reclaim only work it owns and commits proven retained elsewhere.
 - Test: `crates/cli/src/run.rs::tests::run_in_linked_worktree_requires_explicit_target`;
+  `::explicit_target_or_mode_passes_the_linked_worktree_guard`;
+  `::explicit_read_only_from_a_linked_worktree_dispatches`;
+  `::submodule_gitfile_is_not_a_linked_worktree`;
   `crates/confinement/src/worktrees.rs::adopted_owner_proves_membership_and_enables_custody`;
   `::owned_cleanup_refuses_dirty_unmerged_and_adopted_trees`;
   `tests/dispatch_provider.rs::owned_dispatch_creates_and_replays_after_pruning`;
