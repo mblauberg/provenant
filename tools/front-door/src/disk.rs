@@ -69,7 +69,14 @@ fn render(
 ) -> u8 {
     let json = globals.json;
     let mode = globals.render_mode(human, true, None);
-    let rendered = if !json && result.error.is_some() {
+    // The result's size is a bound on the result, not on how it is presented:
+    // a compact view of an oversized result is still an oversized result.
+    let oversized = !json
+        && serde_json::to_vec(result)
+            .is_ok_and(|bytes| bytes.len() > provenant_cli::MAX_RESULT_BYTES);
+    let rendered = if oversized {
+        Err(RenderError::TooLarge)
+    } else if !json && result.error.is_some() {
         provenant_cli::render(result, mode, stderr)
     } else {
         provenant_cli::render(result, mode, stdout)

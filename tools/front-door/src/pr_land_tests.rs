@@ -777,7 +777,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             let head: serde_json::Value =
                 serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
             io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([{"check_runs":[{
-                "name":"build","head_sha":head["headRefOid"],"status":"completed","conclusion":"success"
+                "name":"build","head_sha":head["headRefOid"],"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"
             }]}]))?)?;
         }
         "pr checks 1668 --json bucket" | "pr checks 1668 --json name,bucket" => {

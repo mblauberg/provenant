@@ -3343,8 +3343,13 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     }
     let status_of_stderr = status;
     let (status, tail) = json_command(&rig, &["output", &target, "--tail", "5", "--json"])?;
-    assert_ne!(status, 0);
-    assert_eq!(tail["error"]["code"], "UNSUPPORTED", "{tail}");
+    // Peer artifacts support `--tail` too; it reads as the whole-part read does.
+    assert_eq!(status, status_of_stderr, "{tail}");
+    if backend.is_ok() {
+        assert_eq!(tail["data"]["host"], peer_text, "{tail}");
+    } else {
+        assert_eq!(tail["error"]["code"], "NOT_FOUND", "{tail}");
+    }
     // The peer's own attempt is reachable without a placement: `--host`, and
     // the `HOST/ATTEMPT` form of a graph `attempt_ref` (#1837).
     let by_host = format!("{peer}/{attempt}");
