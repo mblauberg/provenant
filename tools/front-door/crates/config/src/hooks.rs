@@ -137,10 +137,13 @@ pub(crate) struct Registration {
     pub owned: Vec<(String, Value)>,
     pub relinquished_modified: bool,
 }
+/// `follows_siblings` adds every registration to a target that owns none yet
+/// while its sibling targets do, without an explicit `--hooks on`.
 pub(crate) fn register(
     bytes: &[u8],
     targets: &Targets,
     inherited: &BTreeSet<String>,
+    follows_siblings: bool,
 ) -> Result<Registration, InstallError> {
     let mut out = bytes.to_vec();
     let mut changes = Vec::new();
@@ -159,16 +162,17 @@ pub(crate) fn register(
         let sel = selector(spec.event, spec.matcher, command)?;
         // Inheritance refreshes recorded registrations, including changes to
         // their command path or event. It must not recreate relinquished leaves.
-        let was_owned = inherited.iter().any(|selector| {
-            selector.strip_prefix("hook:").is_some_and(|identity| {
-                serde_json::from_str::<(String, Option<String>, String)>(identity).is_ok_and(
-                    |(event, matcher, old_command)| {
-                        (event == spec.event && matcher.as_deref() == spec.matcher)
-                            || old_command == command
-                    },
-                )
-            })
-        });
+        let was_owned = follows_siblings
+            || inherited.iter().any(|selector| {
+                selector.strip_prefix("hook:").is_some_and(|identity| {
+                    serde_json::from_str::<(String, Option<String>, String)>(identity).is_ok_and(
+                        |(event, matcher, old_command)| {
+                            (event == spec.event && matcher.as_deref() == spec.matcher)
+                                || old_command == command
+                        },
+                    )
+                })
+            });
         if !targets.hooks && !was_owned {
             continue;
         }

@@ -96,12 +96,15 @@ impl Error {
             | Self::InvalidScope
             | Self::Worktree(
                 WorktreeError::InvalidRequest
+                | WorktreeError::AmbiguousName { .. }
                 | WorktreeError::NotFound
                 | WorktreeError::CheckedOut
                 | WorktreeError::BranchCollision { .. },
             ) => Outcome::Invalid,
             Self::Worktree(
                 WorktreeError::Dirty
+                | WorktreeError::DetachedPrimary
+                | WorktreeError::DetachedUnmerged { .. }
                 | WorktreeError::IgnoredPaths(_)
                 | WorktreeError::GitOperationInProgress
                 | WorktreeError::LiveWriter

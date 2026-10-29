@@ -396,7 +396,10 @@ preserved and conflicts are refused.
 
 The CLI wires `install`, `check install` and `uninstall` to these library
 entrypoints. It handles explicit harness selection and client MCP, hook and
-skill edits. Operators follow the [install runbook](runbooks/install.md).
+skill edits. Every registered account directory is an install target, so
+`install`, `accounts register` and `accounts sync` keep their managed content
+identical, and `check install`, `accounts list` and `hosts doctor` report drift
+per account. Operators follow the [install runbook](runbooks/install.md).
 Product files, instance-owned files and machine-local derived state retain
 separate ownership under [ADR 0019](adr/0019-installed-file-class-ownership.md).
 

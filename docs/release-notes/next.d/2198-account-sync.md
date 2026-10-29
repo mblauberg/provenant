@@ -1,0 +1,8 @@
+## Behaviour changes
+
+- `install`, upgrades and `accounts register` now keep Provenant's managed hooks, skills, MCP entry and shared Claude settings identical in every registered Claude and Codex account directory. Registration installs into the new account straight away when an install exists.
+- Shared settings: `[domains.accounts.shared_settings]` (`source`, `keys`) and per-account `[domains.accounts.entries.<id>.settings]` keep an allow-list of `settings.json` keys in step. The default keys are `permissions`, `env`, `statusLine`, `enabledPlugins`, `outputStyle`, `includeCoAuthoredBy` and `cleanupPeriodDays`. Identity and credential keys, `hooks` and anything else outside the list are never synced, and configuring one is refused. A value edited in an account is reported as `settings_conflict` and kept; `provenant accounts sync --adopt <account>` pulls it into the source and `--force-settings` overwrites it.
+- Hooks are one choice per harness: a target with none yet, such as a new account, takes the hooks that another target of the harness owns. An account that removes every managed hook keeps them removed; edited hooks are never overwritten.
+- `provenant accounts sync [--dry-run] [--adopt ACCOUNT] [--force-settings] [--prune-orphans]` repairs drift in every registered account. Recorded targets whose account was unregistered are reported as `orphaned_account` and not synced.
+- `check install` names the drifted account and adds `unsynced_account`, `missing_account_directory`, `unusable_account_directory`, `account_missing_entry`, `settings_drift` and `settings_conflict` findings. `accounts list` and `hosts doctor` report a sync state per account.
+- `uninstall` no longer fails on a configuration defect; it warns and removes the recorded targets.
