@@ -402,6 +402,31 @@ Accepted by every command, before or after the subcommand.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant config check`
+
+| Argument | Contract |
+|---|---|
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--cursor` | `{"name": "cursor"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "limit",
+        "cursor"
+      ],
+      "multiple": true,
+      "name": "Page",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant config show`
 
 | Argument | Contract |

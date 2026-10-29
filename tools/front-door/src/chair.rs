@@ -16,7 +16,7 @@ use provenant_workflow::{
     chair::{Handoff, HandoffStore},
     session::{HostSessionId, SessionStore},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     ffi::{OsStr, OsString},
@@ -727,8 +727,7 @@ fn viewer_run(command: ChairViewer, globals: &Globals) -> u8 {
         }
     }
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Serialize)]
 struct LogInput {
     kind: String,
     markdown: String,
@@ -748,6 +747,15 @@ struct LogInput {
 // The standard input transport has a real deadline.
 #[allow(clippy::disallowed_methods)]
 fn log_input<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Error> {
+    Ok(serde_json::from_slice(&log_bytes(path)?)?)
+}
+
+fn log_request(path: &str) -> Result<(LogInput, Vec<provenant_records::InputWarning>), Error> {
+    Ok(provenant_records::decode_input(path, &log_bytes(path)?)?)
+}
+
+#[allow(clippy::disallowed_methods)]
+fn log_bytes(path: &str) -> Result<Vec<u8>, Error> {
     const LIMIT: usize = 256 * 1024;
     let bytes = if path == "-" {
         hook_io::read_stdin(LIMIT, Instant::now() + Duration::from_secs(30))?
@@ -761,7 +769,7 @@ fn log_input<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Error> {
         }
         bytes
     };
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(bytes)
 }
 
 fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
@@ -966,7 +974,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 if context.in_lane {
                     return Err("a lane cannot append a chair log".into());
                 }
-                let input: LogInput = log_input(&file)?;
+                let (input, warnings) = log_request(&file)?;
                 let config = provenant_config::read_with_domains(
                     &context.roots,
                     &provenant_cli::domains::SECTIONS,
@@ -1000,7 +1008,12 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                     retention,
                     created_at,
                 )?;
-                Ok(serde_json::to_value(entry)?)
+                let mut data = serde_json::to_value(entry)?;
+                if !warnings.is_empty() {
+                    data["warnings"] =
+                        json!(warnings.iter().map(ToString::to_string).collect::<Vec<_>>());
+                }
+                Ok(data)
             }
             ChairLog::List {
                 session,
@@ -1237,6 +1250,21 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
 mod tests {
     // The hook timing test measures real monotonic time.
     #![allow(clippy::disallowed_methods)]
+
+    #[test]
+    fn chair_log_request_warns_with_the_source_file_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.json");
+        std::fs::write(
+            &path,
+            br#"{"kind":"update","markdown":"kept","channel":"chat","future":true}"#,
+        )
+        .unwrap();
+        let (input, warnings) = super::log_request(path.to_str().unwrap()).unwrap();
+        assert_eq!(input.markdown, "kept");
+        assert_eq!(warnings[0].source, path.to_str().unwrap());
+        assert_eq!(warnings[0].key, "future");
+    }
 
     #[test]
     fn chair_command_and_hook_run_the_same_in_every_shell() -> Result<(), super::Error> {

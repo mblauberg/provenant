@@ -212,21 +212,18 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::Invalid(message.into())
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Serialize)]
 struct ReviewInput {
     attempt_id: AttemptId,
     #[serde(flatten)]
     claim: ReviewClaim,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Serialize)]
 struct BlockerInput {
     reference: EvidenceRef,
     expires_at: UtcMicros,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Serialize)]
 struct ApprovalInput {
     actor_id: ActorId,
     evidence: EvidenceRef,
@@ -239,8 +236,7 @@ impl From<ApprovalInput> for UserApproval {
         }
     }
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Serialize)]
 struct ReviewRequest {
     /// Delivery ID
     delivery_id: DeliveryId,
@@ -249,15 +245,14 @@ struct ReviewRequest {
     #[serde(default)]
     blockers: Vec<BlockerInput>,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Serialize)]
 struct RiskInput {
     factors: RiskFactors,
     tier: RiskTier,
     downgrade_approval: Option<ApprovalInput>,
 }
-#[derive(Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 enum DecisionInput {
     Pending {},
     Accepted {
@@ -269,8 +264,7 @@ enum DecisionInput {
         user_approval: Option<ApprovalInput>,
     },
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize, Serialize)]
 struct SaveRequest {
     subject: Subject,
     authors: Vec<Author>,
@@ -299,9 +293,18 @@ fn read_input(source: &str) -> Result<Vec<u8>, Error> {
     }
     Ok(bytes)
 }
-fn request<T: serde::de::DeserializeOwned>(source: &str) -> Result<T, Error> {
-    serde_json::from_slice(&read_input(source)?)
+fn request<T: serde::de::DeserializeOwned + Serialize>(
+    source: &str,
+) -> Result<(T, Vec<provenant_records::InputWarning>), Error> {
+    provenant_records::decode_input(source, &read_input(source)?)
         .map_err(|e| invalid(format!("invalid request: {e}")))
+}
+
+fn input_warnings(data: &mut Value, warnings: Vec<provenant_records::InputWarning>) {
+    if !warnings.is_empty() {
+        data["warnings"] =
+            serde_json::json!(warnings.iter().map(ToString::to_string).collect::<Vec<_>>());
+    }
 }
 
 struct Edge {
@@ -472,13 +475,15 @@ fn execute(
     };
     match cmd {
         Workflow::Review(input) => {
-            let req: ReviewRequest = request(&input.request)?;
+            let (req, warnings): (ReviewRequest, _) = request(&input.request)?;
             let stored = ReceiptStore::new(edge.roots.state.clone(), project, req.delivery_id)
                 .read()?
                 .ok_or(Error::Missing)?;
             let facts = edge.bind(&req.reviews, stored.subject(), req.delivery_id)?;
             let report = edge.report(&stored, &facts, req.blockers)?;
-            Ok(serde_json::to_value(report).map_err(|e| invalid(e.to_string()))?)
+            let mut data = serde_json::to_value(report).map_err(|e| invalid(e.to_string()))?;
+            input_warnings(&mut data, warnings);
+            Ok(data)
         }
         Workflow::Receipt(Receipt::Show { delivery_id }) => {
             let stored = ReceiptStore::new(edge.roots.state.clone(), project, delivery_id)
@@ -490,12 +495,12 @@ fn execute(
             delivery_id,
             expected_revision,
             input,
-        }) => save(
-            &edge,
-            delivery_id,
-            expected_revision,
-            request(&input.request)?,
-        ),
+        }) => {
+            let (request, warnings) = request(&input.request)?;
+            let mut data = save(&edge, delivery_id, expected_revision, request)?;
+            input_warnings(&mut data, warnings);
+            Ok(data)
+        }
         Workflow::Session(Session::Save {
             session_id,
             file,
@@ -1015,6 +1020,34 @@ mod tests {
     }
     use super::catalogue_family;
     use provenant_routing::Catalogue;
+
+    #[test]
+    fn request_warnings_name_the_source_and_flattened_review_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("review.json");
+        let delivery = provenant_core::DeliveryId::from_bytes([1; 16]);
+        let attempt = provenant_core::AttemptId::from_bytes([2; 16]);
+        let value = serde_json::json!({
+            "delivery_id": delivery,
+            "reviews": [{"attempt_id":attempt,"lens":"correctness","verdict":"approve","tier":"senior","future":true}],
+            "typo":false
+        });
+        std::fs::write(&source, serde_json::to_vec(&value).unwrap()).unwrap();
+        let (input, warnings): (super::ReviewRequest, _) =
+            super::request(source.to_str().unwrap()).unwrap();
+        assert_eq!(input.reviews[0].claim.lens, "correctness");
+        assert_eq!(
+            warnings.iter().map(|w| w.key.as_str()).collect::<Vec<_>>(),
+            ["reviews[0].future", "typo"]
+        );
+        assert!(
+            warnings
+                .iter()
+                .all(|w| w.source == source.to_str().unwrap())
+        );
+        let invalid = serde_json::json!({"status":"accepted","reason":"ok","user_approval":false});
+        assert!(serde_json::from_value::<super::DecisionInput>(invalid).is_err());
+    }
 
     #[test]
     fn human_save_output_includes_discovery_warnings() {

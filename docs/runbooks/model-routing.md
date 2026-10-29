@@ -204,8 +204,9 @@ Pacing targets the earlier of the deadline and the window's own reset. After
 that deadline, `standby` (the default) gives the account weight zero while
 another candidate in the pool can serve; `continue` instead paces to the reset.
 Removing `deadline` switches an account back to its own resets. Policies,
-window selectors and deadline forms are validated together; unknown keys are
-rejected with the valid options.
+window selectors and deadline forms are validated together. Unknown configuration
+keys warn and are ignored; invalid optional policy rows use defaults or are
+omitted while valid rows remain active.
 
 These profiles illustrate how different accounts can share a provider:
 

@@ -233,6 +233,7 @@ fn install_receipt() -> Value {
 }
 
 cases! {
+    work_context_preserves_digest: run::WorkContext => json!({"work_item":"issue-2268","role":"reviewer"});
     chair_binding_preserves_digest: run::ChairBinding => json!({"host":ID,"actor":ID});
     canonical_request_preserves_digest: run::CanonicalRequest => request();
     harness_profile_preserves_digest: run::HarnessProfile => profile();

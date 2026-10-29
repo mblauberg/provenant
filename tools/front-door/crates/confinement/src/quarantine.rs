@@ -350,13 +350,11 @@ impl InstructionSnapshot {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SnapshotFile {
     class: InstructionClass,
     fingerprint: TrackedFingerprint,
 }
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SnapshotRecord {
     schema_version: u64,
     scope: Scope,
@@ -369,7 +367,6 @@ struct SnapshotRecord {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(deny_unknown_fields)]
 struct ArchivedPath {
     path: PathWire,
     class: InstructionClass,
@@ -383,7 +380,6 @@ struct ArchivedPath {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(deny_unknown_fields)]
 struct ArchivedUnaccountedPath {
     path: PathWire,
     status: StatusKind,
@@ -400,7 +396,6 @@ struct UnaccountedSnapshot {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(deny_unknown_fields)]
 struct EvidenceManifest {
     schema_version: u64,
     scope: Scope,
@@ -1149,7 +1144,6 @@ fn quarantine_instruction_changes(
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct QuarantineResultRecord {
     schema_version: u64,
     scope: Scope,
@@ -1529,6 +1523,29 @@ mod tests {
     use super::{InstructionClass, ProtectedPath, parse_tree_entries};
     use crate::status::parse_index_entries;
     use std::error::Error;
+
+    #[test]
+    fn quarantine_result_accepts_future_fields() -> Result<(), Box<dyn Error>> {
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "scope": {
+                "run": "11111111111111111111111111111111",
+                "attempt": "22222222222222222222222222222222",
+                "generation": 1,
+                "future_scope": true
+            },
+            "kind": "instruction_quarantine_result",
+            "evidence_digest": format!("sha256:{}", "ab".repeat(32)),
+            "restored": [],
+            "review_required": false,
+            "review_paths": [],
+            "future_evidence": {"value": [1, 2]}
+        });
+        let record: super::QuarantineResultRecord = serde_json::from_value(value)?;
+        assert_eq!(record.schema_version, 1);
+        assert!(!record.review_required);
+        Ok(())
+    }
 
     #[test]
     fn provider_control_roots_are_protected_case_insensitively() {

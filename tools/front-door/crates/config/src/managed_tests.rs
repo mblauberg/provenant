@@ -3190,23 +3190,24 @@ fn claude_settings_fixture_is_pretty_and_keeps_existing_key_order() {
 }
 
 #[test]
-fn install_uses_strict_configuration_before_planning() {
+fn install_ignores_unknown_config_fields_without_rewriting_the_source() {
     let mut f = Fixture::new();
     let state = f.targets.roots.state.as_path();
     fs::create_dir_all(state).unwrap();
     let bytes = b"schema_version=1\nforeign_key='private sentinel'\n";
     fs::write(state.join("config.toml"), bytes).unwrap();
-    let error =
-        crate::apply_install_config_with_domains(&mut f.targets, &crate::domains::NO_DOMAINS)
-            .unwrap_err();
-    assert!(matches!(
-        error,
-        InstallError::Config(crate::ConfigError::Schema {
-            rule: "unknown_key",
-            ..
-        })
-    ));
-    assert!(!error.to_string().contains("private sentinel"));
+    crate::apply_install_config_with_domains(&mut f.targets, &crate::domains::NO_DOMAINS).unwrap();
+    let config = crate::config_show(&f.targets.roots, &crate::domains::NO_DOMAINS).unwrap();
+    assert_eq!(config.warnings.len(), 1);
+    let warning = &config.warnings[0];
+    assert_eq!(warning.rule, "unknown_key");
+    assert_eq!(warning.line, 2);
+    assert_eq!(
+        warning.path.to_relative_path().unwrap().as_path(),
+        Path::new("config.toml")
+    );
+    assert!(warning.message.starts_with("foreign_key:"));
+    assert!(!warning.message.contains("private sentinel"));
     assert_eq!(
         fs::read(f.targets.roots.state.as_path().join("config.toml")).unwrap(),
         bytes

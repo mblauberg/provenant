@@ -2392,7 +2392,7 @@ struct Host {
 }
 
 #[test]
-fn memory_pressure_defers_even_when_available_memory_is_high() -> TestResult {
+fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
     use provenant_os::sys::resources::MemoryPressure;
     struct Pressured(MemoryPressure);
     impl Resources for Pressured {
@@ -2408,15 +2408,28 @@ fn memory_pressure_defers_even_when_available_memory_is_high() -> TestResult {
             Ok(u64::MAX)
         }
     }
-    for (level, writer) in [
-        (MemoryPressure::Warning, true),
-        (MemoryPressure::Critical, false),
-        (MemoryPressure::Normal, true),
+    for (threshold, level, writer, defers) in [
+        (None, MemoryPressure::Warning, true, false),
+        (None, MemoryPressure::Critical, false, true),
+        (None, MemoryPressure::Normal, true, false),
+        (Some("warning"), MemoryPressure::Warning, false, true),
+        (Some("warning"), MemoryPressure::Critical, true, true),
+        (Some("warning"), MemoryPressure::Normal, false, false),
+        (Some("never"), MemoryPressure::Critical, true, false),
     ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        if let Some(threshold) = threshold {
+            std::fs::create_dir_all(&store.writer_registry)?;
+            std::fs::write(
+                store.writer_registry.join("config.toml"),
+                format!(
+                    "schema_version = 1\n[domains.fabric.lanes]\nmemory_pressure_threshold = '{threshold}'\n"
+                ),
+            )?;
+        }
         store.set_admission_policy(AdmissionPolicy {
             admission_seconds: 1,
             ..AdmissionPolicy::default()
@@ -2424,20 +2437,16 @@ fn memory_pressure_defers_even_when_available_memory_is_high() -> TestResult {
         let run = lane(54, writer);
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
-        if level != MemoryPressure::Normal {
-            let waits = store.lane_waits_with_resources(
-                &[store.record(id, &call)?],
-                &call,
-                &Pressured(level),
-            );
-            assert!(
-                waits[0]
-                    .waiting_for
-                    .contains(&format!("memory pressure {level:?}"))
-            );
-        }
+        let waits =
+            store.lane_waits_with_resources(&[store.record(id, &call)?], &call, &Pressured(level));
+        assert_eq!(
+            waits[0]
+                .waiting_for
+                .contains(&format!("memory pressure {level:?}")),
+            defers
+        );
         let result = store.admit(id, &attempt, &Pressured(level), &clock, &cancel);
-        if level == MemoryPressure::Normal {
+        if !defers {
             assert_eq!(
                 result?.state,
                 AttemptState::Running {
@@ -2455,9 +2464,11 @@ fn memory_pressure_defers_even_when_available_memory_is_high() -> TestResult {
 
 #[test]
 fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
+    use provenant_os::sys::resources::MemoryPressure;
     struct Probe {
         available: u64,
         error: bool,
+        pressure: MemoryPressure,
     }
     impl Resources for Probe {
         fn memory(&self) -> std::io::Result<MemorySample> {
@@ -2472,18 +2483,31 @@ fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
             if self.error {
                 Err(std::io::Error::other("unavailable"))
             } else {
-                Ok(Some(provenant_os::sys::resources::MemoryPressure::Normal))
+                Ok(Some(self.pressure))
             }
         }
         fn disk(&self, _: &Directory) -> std::io::Result<u64> {
             Ok(u64::MAX)
         }
     }
-    for (available, error, admitted) in [(100, true, true), (4, false, false)] {
+    for (available, error, threshold, pressure, admitted) in [
+        (100, true, None, MemoryPressure::Normal, true),
+        (4, false, None, MemoryPressure::Normal, false),
+        (4, false, Some("never"), MemoryPressure::Critical, false),
+    ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
         let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        if let Some(threshold) = threshold {
+            std::fs::create_dir_all(&store.writer_registry)?;
+            std::fs::write(
+                store.writer_registry.join("config.toml"),
+                format!(
+                    "schema_version = 1\n[domains.fabric.lanes]\nmemory_pressure_threshold = '{threshold}'\n"
+                ),
+            )?;
+        }
         store.set_admission_policy(AdmissionPolicy {
             admission_seconds: 1,
             ..AdmissionPolicy::default()
@@ -2491,35 +2515,42 @@ fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
         let run = lane(58, true);
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
-        let result = store.admit(id, &attempt, &Probe { available, error }, &clock, &cancel);
+        let result = store.admit(
+            id,
+            &attempt,
+            &Probe {
+                available,
+                error,
+                pressure,
+            },
+            &clock,
+            &cancel,
+        );
         assert_eq!(result.is_ok(), admitted);
     }
     Ok(())
 }
 
 #[test]
-fn invalid_build_settings_refuse_without_waiting() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
-    let run = lane(69, true);
-    let id = starting(&store, &run, &call)?;
-    let attempt = store.attempt_dir(run.run_id, id, false)?;
+fn invalid_optional_build_settings_use_defaults_without_blocking_admission() -> TestResult {
     for assignment in ["cargo_build_jobs = -2", "cargo_build_jobs = 'invalid'"] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = lane(69, true);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
         std::fs::write(
             store.writer_registry.join("config.toml"),
-            format!("[domains.fabric.lanes]\n{assignment}\n"),
+            format!("schema_version=1\n[domains.fabric.lanes]\n{assignment}\n"),
         )?;
-        let now = clock.wall_now()?;
         assert!(
-            matches!(
-                store.admit(id, &attempt, &Host { available: 100 }, &clock, &cancel),
-                Err(RunError::BuildSettings)
-            ),
+            store
+                .admit(id, &attempt, &Host { available: 100 }, &clock, &cancel)
+                .is_ok(),
             "{assignment}"
         );
-        assert_eq!(clock.wall_now()?, now);
     }
     Ok(())
 }
@@ -2598,7 +2629,9 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
         if let Some(limit) = limit {
             std::fs::write(
                 store.writer_registry.join("config.toml"),
-                format!("[domains.fabric.lanes]\nmax_concurrent_builds = {limit}\n"),
+                format!(
+                    "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds = {limit}\n"
+                ),
             )?;
         }
         for seed in 60..65 {
@@ -2633,7 +2666,7 @@ fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
     });
     std::fs::write(
         store.writer_registry.join("config.toml"),
-        "[domains.fabric.lanes]\nmax_concurrent_builds = 0\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds = 0\n",
     )?;
     let run = lane(71, true);
     let id = starting(&store, &run, &call)?;
@@ -2669,7 +2702,7 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
         });
         std::fs::write(
             store.writer_registry.join("config.toml"),
-            format!("[domains.fabric.lanes]\n{config}\n"),
+            format!("schema_version=1\n[domains.fabric.lanes]\n{config}\n"),
         )?;
         let mut last = None;
         for seed in 80..84 {
@@ -3800,7 +3833,7 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
     // Keep the writer slot limit from masking the startup-spacing behaviour.
     std::fs::write(
         store.writer_registry.join("config.toml"),
-        "[domains.fabric.lanes]\nmax_concurrent_builds = 2\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds = 2\n",
     )?;
     store.set_admission_policy(AdmissionPolicy {
         admission_seconds: 1,
@@ -7211,7 +7244,10 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
         let context = context(temp.path())?;
         let registry = temp.path().canonicalize()?.join("registry");
         std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
-        std::fs::write(registry.join("config.toml"), "[gc]\nfree_floor='100B'\n")?;
+        std::fs::write(
+            registry.join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='100B'\n",
+        )?;
         let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
         std::fs::write(
             context.state_root.as_path().join("config.toml"),
@@ -7282,7 +7318,10 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
         let context = context(temp.path())?;
         let registry = temp.path().canonicalize()?.join("registry");
         std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
-        std::fs::write(registry.join("config.toml"), "[gc]\nfree_floor='100B'\n")?;
+        std::fs::write(
+            registry.join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='100B'\n",
+        )?;
         let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
         store.set_admission_policy(AdmissionPolicy {
             admission_seconds: 1,
@@ -7337,7 +7376,7 @@ fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
         let registry = temp.path().canonicalize()?.join("registry");
         std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
         let config = registry.join("config.toml");
-        std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+        std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='1B'\n")?;
         let mut store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
         store.set_admission_policy(AdmissionPolicy {
             admission_seconds: 1,
@@ -7383,7 +7422,7 @@ fn admission_rereads_gc_floor_after_submission_and_while_waiting() -> TestResult
         }
         fn disk(&self, _: &Directory) -> std::io::Result<u64> {
             self.samples.set(self.samples.get() + 1);
-            std::fs::write(self.config, "[gc]\nfree_floor='100B'\n")?;
+            std::fs::write(self.config, "schema_version=1\n[gc]\nfree_floor='100B'\n")?;
             Ok(100)
         }
     }
@@ -7393,7 +7432,7 @@ fn admission_rereads_gc_floor_after_submission_and_while_waiting() -> TestResult
     let context = context(temp.path())?;
     let mut store = RunStore::open(&context, &call)?;
     let config = context.state_root.as_path().join("config.toml");
-    std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+    std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='1B'\n")?;
     store.set_admission_policy(AdmissionPolicy {
         admission_seconds: 1,
         ..Default::default()
@@ -7401,7 +7440,7 @@ fn admission_rereads_gc_floor_after_submission_and_while_waiting() -> TestResult
     let run = lane(99, true);
     let id = starting(&store, &run, &call)?;
     let attempt = store.attempt_dir(run.run_id, id, false)?;
-    std::fs::write(&config, "[gc]\nfree_floor='101B'\n")?;
+    std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='101B'\n")?;
     let disk = Disk {
         config: &config,
         samples: Cell::new(0),
@@ -7435,7 +7474,7 @@ fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
         }
         fn disk(&self, _: &Directory) -> std::io::Result<u64> {
             self.samples.set(self.samples.get() + 1);
-            std::fs::write(self.config, "[gc]\nfree_floor='100B'\n")?;
+            std::fs::write(self.config, "schema_version=1\n[gc]\nfree_floor='100B'\n")?;
             Ok(100)
         }
     }
@@ -7445,7 +7484,7 @@ fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
     let context = context(temp.path())?;
     let mut store = RunStore::open(&context, &call)?;
     let config = context.state_root.as_path().join("config.toml");
-    std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+    std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='1B'\n")?;
     store.set_admission_policy(AdmissionPolicy {
         admission_seconds: 1,
         ..Default::default()
@@ -7453,7 +7492,7 @@ fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
     let run = lane(100, true);
     let id = starting(&store, &run, &call)?;
     let attempt = store.attempt_dir(run.run_id, id, false)?;
-    std::fs::write(&config, "[gc]\nfree_floor='")?;
+    std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='")?;
     let disk = Disk {
         config: &config,
         samples: Cell::new(0),

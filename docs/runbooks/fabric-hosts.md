@@ -557,7 +557,8 @@ bounds frames to 1 MiB and refuses identity or version mismatches.
 Tasks and messages no longer use `legacy` or `legacy_output_path` members.
 Stored and peer records tolerate additional fields. Records included in a
 canonical digest retain those fields when read and written again. MCP tool
-arguments and user-authored configuration still reject unknown fields.
+arguments remain strict. User configuration warns on unknown keys and invalid
+optional input; `provenant config check` lists the source file and key.
 
 Every request and reply envelope carries integer `protocol`, currently 6.
 Ingress refuses a different protocol before decoding or executing the action,

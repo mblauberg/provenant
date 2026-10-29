@@ -707,6 +707,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             "help must be resolved by the parser",
             globals,
         ),
+        Command::Config(provenant_cli::Config::Check(page)) => checks::config(page, globals),
         Command::Config(provenant_cli::Config::Show) => {
             config_command("config show", None, globals)
         }

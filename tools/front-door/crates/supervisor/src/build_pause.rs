@@ -13,7 +13,6 @@ use std::io;
 pub(crate) const PAUSE_FILE: &str = "disk-paused.json";
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct PauseJournal {
     pub schema_version: u64,
     pub scope: Scope,

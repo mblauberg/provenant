@@ -6,7 +6,6 @@ use thiserror::Error;
 
 /// Chair-authored summary in checkpoint frontmatter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Summary {
     pub schema_version: u64,
     pub revision: u64,
@@ -352,7 +351,6 @@ const RECEIPTS: &str = "summary-receipts.json";
 const RECEIPTS_KEPT: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct SummaryReceipt {
     operation_id: provenant_core::OperationId,
     digest: provenant_records::FileDigest,
@@ -369,12 +367,10 @@ impl SummaryReceipt {
     }
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Receipts {
     entries: Vec<SummaryReceipt>,
 }
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct Pending {
     pub(super) plan: super::PublishPlan,
     receipt: SummaryReceipt,
@@ -654,7 +650,7 @@ pub fn parse_summary(markdown: &str) -> Result<Option<Summary>, SummaryError> {
             .collect::<Result<Vec<_>, _>>()?,
         _ => return Err(SummaryError),
     };
-    if schema_version != 1 || revision == 0 || !fields.is_empty() {
+    if schema_version != 1 || revision == 0 {
         return Err(SummaryError);
     }
     Ok(Some(Summary {
@@ -678,6 +674,14 @@ mod tests {
         let summary = parse_summary(source).unwrap().unwrap();
         assert_eq!(summary.revision, 12);
         assert_eq!(summary.needs_you, ["request-id"]);
+        assert_eq!(
+            parse_summary(&source.replace(
+                "  revision: 12",
+                "  future_field: {value: [1, 2]}\n  revision: 12"
+            ))
+            .unwrap(),
+            Some(summary.clone())
+        );
         assert!(parse_summary(&source.replace("2026-10-28T03:00:00Z", "yesterday")).is_err());
         assert!(parse_summary(&source.replace("schema_version: 1", "schema_version: 2")).is_err());
         assert!(

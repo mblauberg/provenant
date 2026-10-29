@@ -200,21 +200,35 @@ impl DomainConfig for Settings {
                 code: "registration",
             });
         }
-        if self
-            .entries
-            .values()
-            .any(|e| !provenant_quota::valid_plans(&e.plans))
-        {
-            errors.push(SectionError {
-                field: "entries".into(),
-                code: "plans",
-            });
-        }
-        if self.entries.iter().any(|(id, e)| !valid_display(id, e)) {
-            errors.push(SectionError {
-                field: "entries".into(),
-                code: "display",
-            });
+        for (id, entry) in &self.entries {
+            for index in provenant_quota::invalid_plan_rows(&entry.plans) {
+                errors.push(SectionError {
+                    field: format!("entries.{id}.plans.{index}"),
+                    code: "plans",
+                });
+            }
+            if !provenant_quota::valid_icon(id) {
+                errors.push(SectionError {
+                    field: format!("entries.{id}"),
+                    code: "display",
+                });
+            }
+            if entry
+                .display_name
+                .as_deref()
+                .is_some_and(|name| !valid_display_name(name))
+            {
+                errors.push(SectionError {
+                    field: format!("entries.{id}.display_name"),
+                    code: "display",
+                });
+            }
+            if entry.order.is_some_and(|order| !(1..=999).contains(&order)) {
+                errors.push(SectionError {
+                    field: format!("entries.{id}.order"),
+                    code: "display",
+                });
+            }
         }
         if let Some(code) = self.settings_error() {
             errors.push(SectionError {
@@ -252,12 +266,6 @@ fn valid_entry(entry: &Registration) -> bool {
             )
         })
 }
-/// Display fields only; the entry id must also be usable as a quota icon reference.
-fn valid_display(id: &str, entry: &Registration) -> bool {
-    provenant_quota::valid_icon(id)
-        && entry.display_name.as_deref().is_none_or(valid_display_name)
-        && entry.order.is_none_or(|o| (1..=999).contains(&o))
-}
 pub fn valid_display_name(s: &str) -> bool {
     !s.is_empty() && s.trim() == s && s.chars().count() <= 64 && !s.chars().any(char::is_control)
 }
@@ -270,7 +278,50 @@ pub fn label(s: &str) -> bool {
 fn defaults(_: Profile) -> &'static str {
     "[entries]\n"
 }
-pub const SECTION: DomainSection = DomainSection::new::<Settings>("accounts", defaults);
+fn boundary_error(error: &SectionError) -> bool {
+    if error.code == "unknown_key" {
+        return false;
+    }
+    if matches!(error.code, "registration" | "row_type")
+        || error.field == "shared_settings"
+        || error.field.starts_with("shared_settings.")
+    {
+        return true;
+    }
+    if !matches!(error.code, "type" | "range" | "schema") {
+        return false;
+    }
+    let Some(path) = error.field.strip_prefix("entries.") else {
+        return true;
+    };
+    // Account IDs may contain dots. Decode diagnostics identify the leaf, so
+    // classify from its end instead of assuming an ID has one path segment.
+    let field = path.rsplit('.').find(|part| part.parse::<usize>().is_err());
+    !matches!(
+        field,
+        Some(
+            "plan"
+                | "plans"
+                | "priority"
+                | "billing_anchor"
+                | "limits"
+                | "monthly_usd"
+                | "cycle_anchor"
+                | "weekly_anchor"
+                | "display_name"
+                | "hidden"
+                | "order"
+                | "headline"
+                | "name"
+                | "price"
+                | "currency"
+                | "effective_from"
+                | "notional_usd"
+        )
+    )
+}
+pub const SECTION: DomainSection =
+    DomainSection::new::<Settings>("accounts", defaults).with_boundary_check(boundary_error);
 
 fn exec_error(error: ExecError) -> ProviderError {
     match error {
@@ -482,4 +533,163 @@ fn detect_agy(
     crate::identity::agy_fingerprint(&bytes)
         .map(|fingerprint| format!("agy-{fingerprint}"))
         .ok_or(ProviderError::UnknownIdentity)
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use provenant_config::{DomainSections, Origin};
+
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Domains {
+        accounts: Settings,
+    }
+    const SECTIONS: DomainSections<Domains> = DomainSections::new(&[SECTION]);
+    const ENTRY: &str = "schema_version=1\n[domains.accounts.entries.work]\nadapter='claude'\nlabel='work'\nkey='work-key'\ndirectory='/fixture/claude-work'\n";
+
+    fn roots() -> provenant_core::Roots {
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
+                Ok(path.to_owned())
+            }
+        }
+        let mut input =
+            provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/repo".into());
+        input.state_dir = Some("/fixture/state".into());
+        input.resolve(&Resolver).unwrap()
+    }
+
+    #[test]
+    fn optional_account_metadata_warns_without_losing_registration() {
+        for extra in [
+            "display_name=''\norder=0\nplans=[{name='plan',price=-1,currency='USD',effective_from='2026-01-01'}]",
+            "display_name=42\norder='first'\nplans=false",
+        ] {
+            let text = format!("{ENTRY}priority=2\nhidden=true\n{extra}");
+            let config =
+                provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
+                    .unwrap();
+            let entry = &config.domains.accounts.entries["work"];
+            assert_eq!(entry.key, "work-key");
+            assert_eq!(entry.priority, Some(2));
+            assert!(entry.hidden);
+            assert!(entry.display_name.is_none());
+            assert!(entry.order.is_none());
+            assert!(entry.plans.is_empty());
+            assert_eq!(config.warnings.len(), 3, "{:?}", config.warnings);
+            assert!(matches!(
+                config.origins["domains.accounts.entries.work.priority"],
+                Origin::User { .. }
+            ));
+            assert!(
+                config
+                    .origins
+                    .get("domains.accounts.entries.work.display_name")
+                    .is_none_or(|origin| matches!(origin, Origin::Compiled { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn account_identity_and_shared_settings_errors_remain_hard() {
+        for (before, after) in [
+            ("adapter='claude'", "adapter=42"),
+            ("label='work'", "label=42"),
+            ("key='work-key'", "key=42"),
+            ("directory='/fixture/claude-work'", "directory=42"),
+            ("directory='/fixture/claude-work'", "directory='relative'"),
+            ("adapter='claude'\n", ""),
+        ] {
+            let text = ENTRY.replace(before, after);
+            assert!(
+                provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
+                    .is_err(),
+                "{text}"
+            );
+        }
+        for extra in [
+            "directories=42",
+            "org_fingerprint=42",
+            "settings=42",
+            "[domains.accounts.shared_settings]\nsource=42",
+            "[domains.accounts.shared_settings]\nkeys=['env.ANTHROPIC_AUTH_TOKEN']",
+        ] {
+            let text = format!("{ENTRY}{extra}");
+            assert!(
+                provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
+                    .is_err(),
+                "{text}"
+            );
+        }
+        let incomplete = ENTRY
+            .replace("entries.work", "entries.'work.alias.plan'")
+            .replace("adapter='claude'\n", "");
+        assert!(
+            provenant_config::load_with_domains(&roots(), Some(incomplete.as_bytes()), &SECTIONS)
+                .is_err(),
+            "{incomplete}"
+        );
+        for row in ["plan=42", "'my.plan'=42", "'my.plan'=[]"] {
+            let text = format!("schema_version=1\n[domains.accounts.entries]\n{row}");
+            assert!(
+                provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
+                    .is_err(),
+                "{text}"
+            );
+        }
+        assert!((SECTION.boundary)(&SectionError {
+            field: "entries.work.alias.directory".into(),
+            code: "type"
+        }));
+        assert!(!(SECTION.boundary)(&SectionError {
+            field: "entries.work.alias.display_name".into(),
+            code: "type"
+        }));
+    }
+
+    #[test]
+    fn invalid_optional_plan_rows_preserve_valid_siblings_and_identity() {
+        for invalid in [
+            "{name='bad',price=-1,effective_from='2026-02-01'}",
+            "{name='bad',price='bad',effective_from='2026-02-01'}",
+            "{name='bad',effective_from='2026-02-01'}",
+        ] {
+            let text = format!(
+                "{ENTRY}plans=[{{name='first',price=1,effective_from='2026-01-01'}},{invalid},{{name='third',price=3,effective_from='2026-03-01'}}]"
+            );
+            let config =
+                provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
+                    .unwrap();
+            let entry = &config.domains.accounts.entries["work"];
+            assert_eq!(entry.key, "work-key");
+            assert_eq!(
+                entry
+                    .plans
+                    .iter()
+                    .map(|plan| plan.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["first", "third"]
+            );
+            assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+            assert!(config.warnings[0].message.contains("entries.work.plans.1"));
+            assert!(matches!(
+                config.origins["domains.accounts.entries.work.plans.1.name"],
+                Origin::User { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn optional_metadata_wrong_container_types_keep_identity() {
+        for field in ["limits=42", "priority=[]", "display_name={}"] {
+            let text = format!("{ENTRY}{field}");
+            let config =
+                provenant_config::load_with_domains(&roots(), Some(text.as_bytes()), &SECTIONS)
+                    .unwrap();
+            assert_eq!(config.domains.accounts.entries["work"].key, "work-key");
+            assert_eq!(config.warnings.len(), 1);
+        }
+    }
 }

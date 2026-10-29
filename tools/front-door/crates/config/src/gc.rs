@@ -5,10 +5,34 @@ use std::{
     path::{Component, Path},
 };
 
+/// Kernel pressure level at which new lanes wait. The memory floor still applies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryPressureThreshold {
+    Warning,
+    #[default]
+    Critical,
+    Never,
+}
+impl MemoryPressureThreshold {
+    pub fn defers(self, pressure: provenant_os::sys::resources::MemoryPressure) -> bool {
+        use provenant_os::sys::resources::MemoryPressure;
+        matches!(
+            (self, pressure),
+            (
+                Self::Warning,
+                MemoryPressure::Warning | MemoryPressure::Critical
+            ) | (Self::Critical, MemoryPressure::Critical)
+        )
+    }
+}
+
 /// Host-wide build limits, read independently by admission guardians.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaneBuildSettings {
+    /// Kernel pressure threshold for admission; Critical unless set.
+    pub memory_pressure_threshold: MemoryPressureThreshold,
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_auto")]
@@ -83,44 +107,13 @@ pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
 }
 impl LaneBuildSettings {
     pub fn read(state: &Path) -> std::io::Result<Self> {
-        #[derive(Default, Deserialize)]
-        #[serde(default)]
-        struct Root {
-            domains: Domains,
-        }
-        #[derive(Default, Deserialize)]
-        #[serde(default)]
-        struct Domains {
-            fabric: Fabric,
-        }
-        #[derive(Default, Deserialize)]
-        #[serde(default)]
-        struct Fabric {
-            lanes: LaneBuildSettings,
-        }
-        let read = provenant_os::fs::Directory::open_anchor(state).and_then(|directory| {
-            directory.read_bounded(
-                "config.toml".as_ref(),
-                provenant_records::Limits::CONFIG.max_bytes,
-            )
-        });
-        let settings = match read {
-            Ok(bytes) => {
-                let text = std::str::from_utf8(&bytes)
-                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-                let document = text
-                    .parse::<toml_edit::DocumentMut>()
-                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-                toml_edit::de::from_document::<Root>(document)
-                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
-                    .domains
-                    .fabric
-                    .lanes
+        crate::loader::read_settings(state, "domains.fabric.lanes", |settings: &Self| {
+            if settings.invalid_keys().is_empty() {
+                Ok(())
+            } else {
+                Err("invalid_value")
             }
-            Err(error) if error.is_not_found() => Self::default(),
-            Err(error) => return Err(std::io::Error::other(error)),
-        };
-        Ok(settings)
+        })
     }
     /// Out-of-range setting names, checked when configuration loads. Admission
     /// never re-validates them: it clamps through the accessors below.
@@ -245,31 +238,9 @@ impl Default for GcSettings {
 
 impl GcSettings {
     /// Read the owning section without resolving unrelated domain settings.
-    /// Missing configuration selects the compiled defaults; invalid input fails.
+    /// Invalid optional settings warn and fall back to compiled defaults.
     pub fn read(state: &Path) -> std::io::Result<Self> {
-        #[derive(Default, Deserialize)]
-        struct Settings {
-            #[serde(default)]
-            gc: GcSettings,
-        }
-        let read = provenant_os::fs::Directory::open_anchor(state).and_then(|directory| {
-            directory.read_bounded(
-                "config.toml".as_ref(),
-                provenant_records::Limits::CONFIG.max_bytes,
-            )
-        });
-        let settings = match read {
-            Ok(bytes) => {
-                let text = std::str::from_utf8(&bytes).map_err(std::io::Error::other)?;
-                toml_edit::de::from_str::<Settings>(text)
-                    .map_err(std::io::Error::other)?
-                    .gc
-            }
-            Err(error) if error.is_not_found() => Self::default(),
-            Err(error) => return Err(std::io::Error::other(error)),
-        };
-        settings.validate().map_err(std::io::Error::other)?;
-        Ok(settings)
+        crate::loader::read_settings(state, "gc", Self::validate)
     }
 
     /// The configured floor, or 10% of the state volume with a 50 GiB minimum.
@@ -387,6 +358,84 @@ pub fn parse_cache_size(text: &str) -> Result<u64, &'static str> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn direct_settings_reads_recover_invalid_optional_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "schema_version=1\n[gc]\nidle_days=0\nschedule=false\nfuture_option=true\n[domains.fabric.lanes]\ncargo_build_jobs=-2\nmax_concurrent_builds=3\nmemory_pressure_threshold='unknown'\n",
+        )?;
+        let gc = super::GcSettings::read(temp.path())?;
+        assert_eq!(gc.idle_days, super::GcSettings::default().idle_days);
+        assert!(!gc.schedule);
+        let lanes = super::LaneBuildSettings::read(temp.path())?;
+        assert_eq!(lanes.cargo_build_jobs, None);
+        assert_eq!(lanes.max_concurrent_builds, Some(3));
+        assert_eq!(
+            lanes.memory_pressure_threshold,
+            super::MemoryPressureThreshold::Critical
+        );
+        assert!(lanes.invalid_keys().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn direct_settings_reads_keep_syntax_size_and_version_errors_hard()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        for invalid in [
+            "schema_version=2",
+            "schema_version=1\n[gc",
+            "schema_version='1'",
+        ] {
+            std::fs::write(temp.path().join("config.toml"), invalid)?;
+            assert!(super::GcSettings::read(temp.path()).is_err());
+            assert!(super::LaneBuildSettings::read(temp.path()).is_err());
+        }
+        std::fs::write(
+            temp.path().join("config.toml"),
+            " ".repeat(provenant_records::Limits::CONFIG.max_bytes as usize + 1),
+        )?;
+        assert!(super::GcSettings::read(temp.path()).is_err());
+        assert!(super::LaneBuildSettings::read(temp.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn direct_settings_reads_isolate_quoted_keys_and_invalid_project_rows()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "schema_version=1\n[gc]\nschedule=false\n\"future.option\"=true\n[gc.projects.good]\nkeep=['cache']\n[gc.projects.bad]\nkeep=['../outside']\n",
+        )?;
+        let settings = super::GcSettings::read(temp.path())?;
+        assert!(!settings.schedule);
+        assert_eq!(settings.projects["good"].keep, ["cache"]);
+        assert!(
+            settings
+                .projects
+                .get("bad")
+                .is_none_or(|row| row.keep.is_empty())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn direct_settings_reads_preserve_siblings_of_nested_quoted_keys()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "schema_version=1\n[gc]\nschedule=false\n[gc.projects.'bad.row']\nfuture=true\n[gc.projects.good]\nkeep=['cache']\n",
+        )?;
+        let settings = super::GcSettings::read(temp.path())?;
+        assert!(!settings.schedule);
+        assert_eq!(settings.projects["good"].keep, ["cache"]);
+        Ok(())
+    }
+
+    #[test]
     fn foreign_collection_requires_the_explicit_merged_clean_value() {
         let defaults: super::ProjectGcSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(defaults.foreign_worktrees, super::ForeignWorktrees::Keep);
@@ -446,6 +495,49 @@ mod tests {
 #[cfg(test)]
 mod build_tests {
     use super::LaneBuildSettings;
+    #[test]
+    fn memory_pressure_defaults_to_critical_and_accepts_host_policy() {
+        use super::MemoryPressureThreshold;
+        use provenant_os::sys::resources::MemoryPressure;
+        let defaults = LaneBuildSettings::default();
+        assert_eq!(
+            defaults.memory_pressure_threshold,
+            MemoryPressureThreshold::Critical
+        );
+        assert!(
+            !defaults
+                .memory_pressure_threshold
+                .defers(MemoryPressure::Warning)
+        );
+        assert!(
+            defaults
+                .memory_pressure_threshold
+                .defers(MemoryPressure::Critical)
+        );
+        let warning: LaneBuildSettings =
+            toml_edit::de::from_str("memory_pressure_threshold = 'warning'").unwrap();
+        assert!(
+            warning
+                .memory_pressure_threshold
+                .defers(MemoryPressure::Warning)
+        );
+        assert!(
+            !warning
+                .memory_pressure_threshold
+                .defers(MemoryPressure::Normal)
+        );
+        let never: LaneBuildSettings =
+            toml_edit::de::from_str("memory_pressure_threshold = 'never'").unwrap();
+        assert!(
+            !never
+                .memory_pressure_threshold
+                .defers(MemoryPressure::Critical)
+        );
+        assert!(
+            toml_edit::de::from_str::<LaneBuildSettings>("memory_pressure_threshold = 'invalid'")
+                .is_err()
+        );
+    }
     #[test]
     fn automatic_and_invalid_build_values() {
         let automatic: LaneBuildSettings =

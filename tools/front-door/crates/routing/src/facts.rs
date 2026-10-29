@@ -46,7 +46,6 @@ pub struct QuotaObservation {
 
 /// Stored evidence is a projection only; it cannot construct a verified fact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FamilyEvidenceRecord {
     pub schema_version: u64,
     pub model: ModelId,

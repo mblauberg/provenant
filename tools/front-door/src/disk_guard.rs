@@ -207,7 +207,7 @@ mod tests {
         symlink(&state, &alias)?;
         assert_eq!(existing(&alias)?.1, existing(&state)?.1);
         assert_eq!(existing(&alias.join("missing"))?.1, existing(&state)?.1);
-        std::fs::write(state.join("config.toml"), "[gc]\nfree_floor='bad'\n")?;
+        std::fs::write(state.join("config.toml"), "schema_version=1\n[gc")?;
         assert!(session_warning(&alias, temp.path(), temp.path()).is_none());
         Ok(())
     }
@@ -232,11 +232,14 @@ mod tests {
         let raw = context.encode()?;
         let disk = LaneDisk::default();
         let config = temp.path().join("config.toml");
-        std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+        std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='1B'\n")?;
         assert!(!disk.below_floor(&raw)?);
-        std::fs::write(&config, "[gc]\nfree_floor='18446744073709551615B'\n")?;
+        std::fs::write(
+            &config,
+            "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+        )?;
         assert!(disk.below_floor(&raw)?);
-        std::fs::write(&config, "[gc]\nfree_floor='1B'\n")?;
+        std::fs::write(&config, "schema_version=1\n[gc]\nfree_floor='1B'\n")?;
         assert!(!disk.below_floor(&raw)?);
         Ok(())
     }
@@ -253,12 +256,15 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$2/event.args\"\n",
         )?;
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::write(state.join("config.toml"), "[gc]\nfree_floor='1B'\n")?;
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[gc]\nfree_floor='1B'\n",
+        )?;
         collect_if_low(&state, temp.path(), temp.path(), &program)?;
         assert!(!state.join("event.args").exists());
         std::fs::write(
             state.join("config.toml"),
-            "[gc]\nschedule=false\nfree_floor='18446744073709551615B'\n",
+            "schema_version=1\n[gc]\nschedule=false\nfree_floor='18446744073709551615B'\n",
         )?;
         collect_if_low(&state, temp.path(), temp.path(), &program)?;
         assert!(

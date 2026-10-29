@@ -15,6 +15,7 @@ pub fn assert_leaf_origins<T: Serialize>(snapshot: &ResolvedConfig<T>) {
         object.remove("origins");
         // Knobs carry their own source layer rather than a leaf origin.
         object.remove("knobs");
+        object.remove("warnings");
     }
     fn leaves(value: &Value, prefix: &str, output: &mut Vec<String>) {
         match value {

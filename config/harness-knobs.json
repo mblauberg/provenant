@@ -88,6 +88,7 @@
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {
+      "memory_pressure_threshold": {"type": "enum", "allowed": "critical, warning or never", "default": "critical", "effect": "Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The memory and disk floors still apply."},
       "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
       "build_wait_minutes": {"type": "int", "min": 1, "max": 1440, "auto_value": -1, "default": 30, "effect": "Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error."},
       "max_writer_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": 40, "effect": "Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap."},

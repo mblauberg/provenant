@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 pub const POLICY_ATTEMPT_CEILING: u64 = 33;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PolicyRetry {
     pub schema_version: u64,
     pub route: RequestedRoute,

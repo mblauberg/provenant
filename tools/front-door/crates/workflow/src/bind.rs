@@ -5,16 +5,23 @@
 use crate::review::{self, ReviewError};
 use provenant_core::{DeliveryId, Digest};
 use provenant_records::{AttemptFact, AttemptOutcome, ReviewerProvenance, workflow::*};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ReviewClaim {
     pub lens: String,
     pub verdict: ReviewVerdict,
     #[serde(default)]
     pub blocking_findings: Vec<String>,
     pub tier: ModelTier,
+}
+impl ReviewClaim {
+    pub fn from_json(
+        source: &str,
+        bytes: &[u8],
+    ) -> Result<(Self, Vec<provenant_records::InputWarning>), serde_json::Error> {
+        provenant_records::decode_input(source, bytes)
+    }
 }
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BindError {
@@ -210,6 +217,24 @@ mod tests {
             blocking_findings: vec![],
             tier: ModelTier::Senior,
         }
+    }
+    #[test]
+    fn review_claim_warns_on_unknown_fields_and_keeps_authority_types_strict() {
+        let (claim, warnings) = ReviewClaim::from_json(
+            "claim.json",
+            br#"{"lens":"correctness","verdict":"approve","tier":"senior","future":true}"#,
+        )
+        .unwrap();
+        assert_eq!(claim.tier, ModelTier::Senior);
+        assert_eq!(warnings[0].source, "claim.json");
+        assert_eq!(warnings[0].key, "future");
+        assert!(
+            ReviewClaim::from_json(
+                "claim.json",
+                br#"{"lens":"correctness","verdict":"approve","tier":"made_up"}"#
+            )
+            .is_err()
+        );
     }
     fn bind(a: &AttemptFact, s: &Subject) -> Result<ReviewFact, BindError> {
         review_fact(

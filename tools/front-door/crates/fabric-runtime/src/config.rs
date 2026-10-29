@@ -98,6 +98,7 @@ impl Default for GraphLimits {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Lanes {
+    pub memory_pressure_threshold: provenant_config::MemoryPressureThreshold,
     pub priority: LanePriority,
     pub cargo_seed: CargoSeed,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
@@ -152,6 +153,7 @@ impl Default for Settlement {
 impl Lanes {
     pub fn build_settings(&self) -> provenant_config::LaneBuildSettings {
         provenant_config::LaneBuildSettings {
+            memory_pressure_threshold: self.memory_pressure_threshold,
             max_concurrent_builds: self.max_concurrent_builds,
             cargo_build_jobs: self.cargo_build_jobs,
             cargo_incremental: self.cargo_incremental,

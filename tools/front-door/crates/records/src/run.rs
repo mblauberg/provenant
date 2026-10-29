@@ -88,9 +88,10 @@ impl HarnessProfile {
     }
 }
 /// Descriptive labels only. They do not grant authority. Each value is at most 256 UTF-8 bytes.
-#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkContext {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

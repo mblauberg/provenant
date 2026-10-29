@@ -1,7 +1,7 @@
 //! A pull request body built from receipts: the repository's template with its
 //! guidance comments removed and its sections filled from recorded facts.
 //! The template keeps owning the shape; only the sections named here are
-//! filled, and a template that lacks one is refused rather than guessed at.
+//! filled, and missing sections are appended from the bundled template.
 use crate::run::AttemptFacts;
 use provenant_core::GitOid;
 
@@ -105,14 +105,23 @@ pub fn fill(template: &str, body: &Body<'_>) -> Result<String, String> {
             lines.push(line);
         }
     }
+    let bundled = strip_comments(include_str!(
+        "../../../../../.github/pull_request_template.md"
+    ));
     for wanted in SECTIONS {
         if !sections
             .iter()
             .any(|(name, _)| name.as_deref() == Some(wanted))
         {
-            return Err(format!(
-                "the pull request template has no \"{wanted}\" section"
-            ));
+            let heading = format!("## {wanted}");
+            let lines = bundled
+                .lines()
+                .skip_while(|line| *line != heading)
+                .enumerate()
+                .take_while(|(index, line)| *index == 0 || !line.starts_with("## "))
+                .map(|(_, line)| line)
+                .collect();
+            sections.push((Some(wanted.to_owned()), lines));
         }
     }
     let mut out = String::new();
@@ -434,10 +443,33 @@ mod tests {
     }
 
     #[test]
-    fn a_template_missing_a_section_is_refused() {
+    fn a_template_missing_sections_appends_them_with_recorded_facts() {
         let author = facts(1, "a/b", HEAD);
-        let error = fill("## Summary\n\ntext\n", &body(&author, &[])).unwrap_err();
-        assert!(error.contains("Decision requested"), "{error}");
+        let text = fill(
+            "Custom intro\n\n## Summary\n\ntext\n\n## Project notes\n\nKeep me.\n",
+            &body(&author, &[]),
+        )
+        .unwrap();
+        for section in SECTIONS {
+            assert_eq!(
+                text.matches(&format!("## {section}\n")).count(),
+                1,
+                "{text}"
+            );
+        }
+        assert!(text.starts_with("Custom intro\n"), "{text}");
+        assert!(text.contains("## Project notes\n\nKeep me."), "{text}");
+        assert!(
+            text.contains(&format!("Approve merge of `{HEAD}`")),
+            "{text}"
+        );
+        assert!(text.contains("| Writer attempt |"), "{text}");
+        assert!(text.contains("- Author route: `a/b`"), "{text}");
+        assert!(
+            fill("", &body(&author, &[]))
+                .unwrap()
+                .contains("## Evidence")
+        );
     }
 
     #[test]
