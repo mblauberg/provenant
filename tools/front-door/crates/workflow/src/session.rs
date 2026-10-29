@@ -208,6 +208,11 @@ pub struct HostSessionId(String);
     "host session ID must be 1-128 lowercase ASCII letters/digits/._-, start alphanumeric and contain no '..'"
 )]
 pub struct HostSessionIdError;
+impl HostSessionIdError {
+    pub fn code(&self) -> &'static str {
+        "invalid_host_session_id"
+    }
+}
 impl HostSessionId {
     pub fn parse(text: &str) -> Result<Self, HostSessionIdError> {
         if text.is_empty()
@@ -2218,7 +2223,11 @@ mod tests {
             "ABC",
             "7C1E4B2A-93D5-4F0E-B6A8-2D4C9E1F5A37",
         ] {
-            assert!(HostSessionId::parse(id).is_err(), "{id:?}");
+            assert_eq!(
+                HostSessionId::parse(id).unwrap_err().code(),
+                "invalid_host_session_id",
+                "{id:?}"
+            );
             assert!(
                 serde_json::from_str::<HostSessionId>(&serde_json::to_string(id).unwrap()).is_err()
             );
