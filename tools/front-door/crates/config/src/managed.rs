@@ -524,6 +524,7 @@ impl Snapshots {
         if let Some(previous) = &receipt {
             for entry in &previous.entries {
                 if entry.selector == "binary"
+                    || entry.selector == "shared-instruction"
                     || scheduler_entry(&entry.selector)
                     || entry_owner(entry, previous, targets.roots.state.as_path())?
                         .is_some_and(|owner| selected.contains(&owner))
@@ -749,6 +750,19 @@ fn desired(
             }
         }
     }
+    // The shared global instructions file gets the same release link the
+    // harness instruction files do, so install and upgrade refresh it.
+    if release
+        .files
+        .contains_key(Path::new("instructions/AGENTS.md"))
+    {
+        insert(
+            targets.home.join(".agents/AGENTS.md"),
+            Value::Link(root.join("instructions/AGENTS.md")),
+            None,
+            "shared-instruction".into(),
+        )?;
+    }
     let paths: Vec<_> = result.keys().collect();
     for pair in paths.windows(2) {
         if let [a, b] = pair
@@ -906,6 +920,22 @@ pub fn plan_install(
                 let adopt_binary = targets.adopt_existing
                     && want.selector == "binary"
                     && matches!(current.value, Value::File { .. });
+                // The shared instructions file belongs to the release like the
+                // harness ones. Adopt anything provenant already pointed here
+                // or content that equals the release asset; everything else is
+                // user content only an explicit adoption may replace.
+                let adopt_shared = want.selector == "shared-instruction"
+                    && match &current.value {
+                        Value::Link(target) => shared_instructions_link(target),
+                        Value::File { bytes, .. } => {
+                            targets.adopt_existing
+                                || release
+                                    .files
+                                    .get(Path::new("instructions/AGENTS.md"))
+                                    .is_some_and(|(wanted, _)| bytes == wanted)
+                        }
+                        _ => false,
+                    };
                 if want.selector == "instruction"
                     && !was_owned
                     && matches!(current.value, Value::File { .. })
@@ -951,6 +981,7 @@ pub fn plan_install(
                 if !immutable
                     && !was_owned
                     && !adopt_binary
+                    && !adopt_shared
                     && !legacy_peer
                     && want.selector != "config"
                 {
@@ -1020,7 +1051,7 @@ pub fn plan_install(
             }
             if !matches!(
                 entry.selector.as_str(),
-                "binary" | "tick-agent" | "tick-service" | "gc-agent"
+                "binary" | "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
             ) {
                 let Some(owner) = owner else {
                     continue;
@@ -1038,7 +1069,11 @@ pub fn plan_install(
             if current
                 .as_ref()
                 .is_some_and(|before| matches_owned(&before.value, &entry.expected))
-                || (current.is_none() && scheduler_entry(&entry.selector))
+                || current.is_none()
+                    && matches!(
+                        entry.selector.as_str(),
+                        "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
+                    )
             {
                 actions.push(Action {
                     path: entry.path.clone(),
@@ -1049,7 +1084,10 @@ pub fn plan_install(
                     identity: identity(current),
                     edits: Vec::new(),
                 });
-            } else if scheduler_entry(&entry.selector) {
+            } else if matches!(
+                entry.selector.as_str(),
+                "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
+            ) {
                 snapshots.harness.findings.push(InstallFinding {
                     rule: "relinquished_modified_entry".into(),
                     detail: None,
@@ -1919,11 +1957,13 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         if !paths.insert((path.clone(), entry.selector.clone())) {
             return Err(InstallError::Manifest("duplicate receipt path"));
         }
-        let permitted = permitted_entry(entry, &receipt, state_root)?;
+        let shared = entry.selector == "shared-instruction";
+        let permitted = permitted_entry(entry, &receipt, state_root, &targets.home)?;
         if !permitted
+            && !shared
             && !moved
                 .as_deref()
-                .map(|root| permitted_entry(entry, &receipt, root))
+                .map(|root| permitted_entry(entry, &receipt, root, &targets.home))
                 .transpose()?
                 .unwrap_or(false)
         {
@@ -1931,6 +1971,7 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
                 "receipt entry outside resolved targets",
             ));
         }
+        // A shared path under a former home is stale, never a schema error.
         if !permitted
             || old_home.is_some_and(|old| path.starts_with(old) && !path.starts_with(&home))
         {
@@ -2002,10 +2043,21 @@ fn permitted_entry(
     entry: &OwnedEntry,
     receipt: &InstallReceipt,
     state_root: &Path,
+    home: &Path,
 ) -> Result<bool, InstallError> {
     let path = entry.path.to_path_buf()?;
     normal_absolute(&path)?;
     if entry.harness.is_none() {
+        if entry.selector == "shared-instruction" {
+            return Ok(path == home.join(".agents/AGENTS.md")
+                && matches!(
+                    &entry.expected,
+                    OwnedValue::Link { target, .. }
+                        if target.to_path_buf().is_ok_and(|link| {
+                            asset_target(&link, state_root, Path::new("instructions/AGENTS.md"))
+                        })
+                ));
+        }
         if matches!(
             entry.selector.as_str(),
             "peer-agent" | "tick-agent" | "tick-service" | "gc-agent"
@@ -2189,54 +2241,73 @@ fn check_install_inspected(
     let stale_targets = decoded.stale_targets;
     let receipt = decoded.receipt;
     let release_path = release_root(state_root, receipt.source_digest);
-    match Release::read_scoped_inspected(&release_path, target, state_root, Some(evidence)) {
-        Ok(release) => {
-            crate::release::verify_binary_identity(&release, smoke, cancel)?;
-            if release.manifest.source_digest == receipt.source_digest
-                && release.manifest.target == receipt.target
-                && release.manifest.toolchain == receipt.toolchain
-                && release.manifest.asset_digest == receipt.asset_digest
-                && CanonicalV1::file_digest(&release.manifest_bytes) == receipt.manifest_digest
-            {
-                let expected = OwnedValue::Link {
-                    extra: Default::default(),
-                    target: AbsolutePath::new(&release_path.join("bin/provenant"))?,
-                };
-                if !stale_binary
-                    && !receipt.entries.iter().any(|entry| {
-                        entry.selector == "binary"
-                            && entry.harness.is_none()
-                            && entry.expected == expected
-                    })
+    let release =
+        match Release::read_scoped_inspected(&release_path, target, state_root, Some(evidence)) {
+            Ok(release) => {
+                crate::release::verify_binary_identity(&release, smoke, cancel)?;
+                if release.manifest.source_digest == receipt.source_digest
+                    && release.manifest.target == receipt.target
+                    && release.manifest.toolchain == receipt.toolchain
+                    && release.manifest.asset_digest == receipt.asset_digest
+                    && CanonicalV1::file_digest(&release.manifest_bytes) == receipt.manifest_digest
                 {
-                    return Err(InstallError::Manifest(
-                        "receipt binary differs from release",
-                    ));
+                    let expected = OwnedValue::Link {
+                        extra: Default::default(),
+                        target: AbsolutePath::new(&release_path.join("bin/provenant"))?,
+                    };
+                    if !stale_binary
+                        && !receipt.entries.iter().any(|entry| {
+                            entry.selector == "binary"
+                                && entry.harness.is_none()
+                                && entry.expected == expected
+                        })
+                    {
+                        return Err(InstallError::Manifest(
+                            "receipt binary differs from release",
+                        ));
+                    }
+                } else {
+                    findings.push(InstallFinding {
+                        rule: "release_drift".into(),
+                        detail: None,
+                        path: AbsolutePath::new(&release_path)?,
+                    });
                 }
-            } else {
+                Some(release)
+            }
+            Err(InstallError::Tampered(_)) | Err(InstallError::Manifest(_)) => {
                 findings.push(InstallFinding {
                     rule: "release_drift".into(),
                     detail: None,
                     path: AbsolutePath::new(&release_path)?,
                 });
+                None
             }
-        }
-        Err(InstallError::Tampered(_)) | Err(InstallError::Manifest(_)) => {
-            findings.push(InstallFinding {
-                rule: "release_drift".into(),
-                detail: None,
-                path: AbsolutePath::new(&release_path)?,
-            });
-        }
-        Err(InstallError::Fs(error)) if error.is_not_found() => {
-            findings.push(InstallFinding {
-                rule: "missing_release".into(),
-                detail: None,
-                path: AbsolutePath::new(&release_path)?,
-            });
-        }
-        Err(error) => return Err(error),
+            Err(InstallError::Fs(error)) if error.is_not_found() => {
+                findings.push(InstallFinding {
+                    rule: "missing_release".into(),
+                    detail: None,
+                    path: AbsolutePath::new(&release_path)?,
+                });
+                None
+            }
+            Err(error) => return Err(error),
+        };
+    if let Some(release) = &release {
+        findings.extend(shared_instruction_findings(release, targets, evidence)?);
     }
+    let asset = Path::new("instructions/AGENTS.md");
+    let shared = release
+        .as_ref()
+        .filter(|release| release.files.contains_key(asset))
+        .map(|_| targets.home.join(".agents/AGENTS.md"));
+    findings.extend(owned_entry_drift(
+        &receipt,
+        state_root,
+        evidence,
+        &targets.home,
+        shared.as_deref(),
+    )?);
     if let Some(source) = source {
         crate::release::verify_binary_identity(source, smoke, cancel)?;
         if source.manifest.source_digest != receipt.source_digest
@@ -2252,7 +2323,6 @@ fn check_install_inspected(
             });
         }
     }
-    findings.extend(owned_entry_drift(&receipt, state_root, evidence)?);
     findings.extend(crate::account_sync::findings(
         &receipt,
         &stale_targets,
@@ -2266,13 +2336,20 @@ fn owned_entry_drift(
     receipt: &InstallReceipt,
     state_root: &Path,
     evidence: &mut InspectionEvidence,
+    home: &Path,
+    shared: Option<&Path>,
 ) -> Result<Vec<InstallFinding>, InstallError> {
     let mut findings = Vec::new();
     for entry in &receipt.entries {
-        if !permitted_entry(entry, receipt, state_root)? {
+        if !permitted_entry(entry, receipt, state_root, home)? {
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
+        // The shared instructions file is reported by its own rules, with the
+        // repair command in the message.
+        if shared.is_some_and(|shared| path == shared) {
+            continue;
+        }
         let current = snapshot_scoped_inspected(&path, state_root, Some(&mut *evidence))?;
         let matches = match &current {
             Some(current) => crate::harness::entry_matches(&current.value, entry)?,
@@ -2287,6 +2364,54 @@ fn owned_entry_drift(
         }
     }
     Ok(findings)
+}
+
+/// Whether a link target names any release's shared instructions asset,
+/// including one behind a relocated state root.
+fn shared_instructions_link(target: &Path) -> bool {
+    let Some(digest_directory) = target.parent().and_then(Path::parent) else {
+        return false;
+    };
+    let Some(releases_directory) = digest_directory.parent() else {
+        return false;
+    };
+    target.ends_with(Path::new("instructions/AGENTS.md"))
+        && releases_directory.file_name() == Some(OsStr::new("releases"))
+        && digest_directory
+            .file_name()
+            .is_some_and(|digest| !digest.is_empty())
+}
+
+/// The shared global instructions file: doctor reports anything that is not
+/// the current release's link or its equal bytes. A release without shared
+/// instructions shares nothing.
+fn shared_instruction_findings(
+    release: &Release,
+    targets: &Targets,
+    evidence: &mut InspectionEvidence,
+) -> Result<Vec<InstallFinding>, InstallError> {
+    let asset = Path::new("instructions/AGENTS.md");
+    let Some((bytes, _)) = release.files.get(asset) else {
+        return Ok(Vec::new());
+    };
+    let path = targets.home.join(".agents/AGENTS.md");
+    let current = snapshot_scoped_inspected(&path, targets.roots.state.as_path(), Some(evidence))?;
+    let Some(current) = current else {
+        return Ok(Vec::new());
+    };
+    let state_root = targets.roots.state.as_path();
+    let wanted = release_root(state_root, release.manifest.source_digest).join(asset);
+    let rule = match &current.value {
+        Value::Link(target) if target == &wanted => return Ok(Vec::new()),
+        Value::Link(target) if shared_instructions_link(target) => "stale_shared_instructions",
+        Value::File { bytes: file, .. } if file == bytes => return Ok(Vec::new()),
+        _ => "unmanaged_shared_instructions",
+    };
+    Ok(vec![InstallFinding {
+        rule: rule.into(),
+        detail: None,
+        path: AbsolutePath::new(&path)?,
+    }])
 }
 
 /// How one registered account directory compares with the installed release.
@@ -2319,7 +2444,13 @@ pub fn inspect_accounts(targets: &Targets) -> Result<Vec<AccountStatus>, Install
     let decoded = read_receipt_inspected(targets, Some(&mut evidence))?;
     let findings = match &decoded {
         Some(decoded) => {
-            let mut findings = owned_entry_drift(&decoded.receipt, state_root, &mut evidence)?;
+            let mut findings = owned_entry_drift(
+                &decoded.receipt,
+                state_root,
+                &mut evidence,
+                &targets.home,
+                None,
+            )?;
             findings.extend(crate::account_sync::findings(
                 &decoded.receipt,
                 &decoded.stale_targets,
@@ -2467,7 +2598,7 @@ pub fn uninstall(
         owner.as_ref().is_some_and(|id| selected.contains(id))
             || (matches!(
                 entry.selector.as_str(),
-                "peer-agent" | "tick-agent" | "tick-service" | "gc-agent"
+                "peer-agent" | "tick-agent" | "tick-service" | "gc-agent" | "shared-instruction"
             ) && selected == registered)
     };
 
@@ -2478,7 +2609,7 @@ pub fn uninstall(
         if !removed(entry, owner) {
             continue;
         }
-        if !permitted_entry(entry, &receipt, state_root)? {
+        if !permitted_entry(entry, &receipt, state_root, &targets.home)? {
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
