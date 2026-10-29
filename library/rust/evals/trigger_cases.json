@@ -3,7 +3,7 @@
   "target_skill": "rust",
   "cases": [
     {
-      "id": "rust-1",
+      "id": "q1",
       "relation": "positive",
       "prompt": "Review rust boundary behaviour.",
       "tags": [
@@ -15,7 +15,7 @@
       }
     },
     {
-      "id": "rust-2",
+      "id": "q2",
       "relation": "positive",
       "prompt": "Update the rust integration for its installed version.",
       "tags": [
@@ -29,7 +29,7 @@
       }
     },
     {
-      "id": "rust-3",
+      "id": "q3",
       "relation": "negative",
       "prompt": "Investigate the root cause of this rust failure without fixing it.",
       "tags": [
@@ -41,7 +41,7 @@
       }
     },
     {
-      "id": "rust-4",
+      "id": "q4",
       "relation": "negative",
       "prompt": "Restructure this rust code without changing behaviour.",
       "tags": [
@@ -53,7 +53,7 @@
       }
     },
     {
-      "id": "rust-5",
+      "id": "q5",
       "relation": "boundary",
       "prompt": "Implement the approved change using rust.",
       "tags": [
@@ -67,7 +67,7 @@
       }
     },
     {
-      "id": "rust-6",
+      "id": "q6",
       "relation": "boundary",
       "prompt": "Review the diff involving rust without edits.",
       "tags": [
@@ -81,7 +81,7 @@
       }
     },
     {
-      "id": "rust-7",
+      "id": "q7",
       "relation": "positive",
       "prompt": "Check a subtle rust migration behaviour.",
       "tags": [
@@ -93,7 +93,7 @@
       }
     },
     {
-      "id": "rust-8",
+      "id": "q8",
       "relation": "negative",
       "prompt": "Write visual design guidance for this page.",
       "tags": [

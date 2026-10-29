@@ -41,7 +41,7 @@
     {
       "id": "q256",
       "relation": "negative",
-      "prompt": "Choose between useState and useReducer for this local form wizard.",
+      "prompt": "Choose between useState and useReducer for this local React form wizard, without TanStack Form.",
       "tags": [
         "no-skill",
         "near-miss"
@@ -54,7 +54,7 @@
     {
       "id": "q257",
       "relation": "negative",
-      "prompt": "Profile this React subtree for render churn and poor interaction latency.",
+      "prompt": "Profile render churn in a React view that uses TanStack Query; the cache is correct.",
       "tags": [
         "adjacent",
         "near-miss"

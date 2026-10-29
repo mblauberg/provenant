@@ -56,7 +56,7 @@
     {
       "id": "q167",
       "relation": "negative",
-      "prompt": "Redesign the landing page and implement its new visual hierarchy.",
+      "prompt": "Redesign the landing page based on its browser screenshots and implement the new visual hierarchy; no browser automation is requested.",
       "tags": [
         "adjacent",
         "near-miss"

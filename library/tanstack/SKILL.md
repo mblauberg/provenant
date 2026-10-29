@@ -1,6 +1,6 @@
 ---
 name: tanstack
-description: "Use for TanStack Query v5, Router (file routes), Table v9, Virtual, Form, Store, Pacer, Hotkeys, Charts, Devtools and DB: keys, queryOptions, loaders, useTable, useForm, selectors. Not for ordinary component state (TanStack Store work stays here), render speed (react-performance) or backend caches."
+description: "Use for TanStack Query, Router (file routes), Table, Virtual, Form, Store, Pacer, Hotkeys, Charts, Devtools and DB: keys, queryOptions, loaders, useTable, useForm, selectors. Not for ordinary component state (TanStack Store work stays here), render speed (react-performance) or backend caches."
 ---
 
 # TanStack ecosystem: judgement layer
@@ -26,7 +26,8 @@ migration sites for implement or refactor.
   not pending); `isFetching` is a running request. List
   key changes use `placeholderData: keepPreviousData`.
 - **Freshness:** choose `staleTime` from the data; never disable focus
-  refetching to hide a bad value.
+  refetching to hide a bad value. In Query versions supporting `static`,
+  static observers do not refetch on invalidation; verify with a trace.
 - **Tracked results:** destructure only fields read; no rest-spread.
 - **Optimistic updates:** show `variables` before editing the cache; money is
   never optimistic. See [references/mutations.md](references/mutations.md).
@@ -37,6 +38,8 @@ migration sites for implement or refactor.
 
 ## Routing by library
 
+- Imperative Query migration: [query methods](references/imperative-queries.md).
+- Form and Store API migrations: [form](references/form.md) and [store](references/store.md).
 - Router loaders with Query: [router integration](references/router.md).
 - Tables and virtual rows: [table](references/table.md). Never ship
   `stockFeatures`. Server tables set the `manual*` options and hold state in
@@ -54,7 +57,6 @@ migration sites for implement or refactor.
 ## Verification
 
 Support cache freshness and invalidation claims with a request trace or a focused component test. Record the evidence path.
-
 
 Test public hooks/components with a fresh `QueryClient` and `retry: false`.
 Suggest missing Query ESLint rules; never add them unasked. See
