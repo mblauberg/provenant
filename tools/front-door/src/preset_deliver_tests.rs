@@ -150,7 +150,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
                 .clone()
                 .unwrap_or_else(|| WRITER_REPORT.to_owned())
         } else if writer {
-            format!("Repaired in {}.\n", key.node_id)
+            format!(
+                "Repaired in {0}.\n```handoff\n{{\"schema_version\":2,\"status\":\"done\",\"note\":\"Repaired.\",\"remaining\":[\"Left by {0}.\"],\"decisions\":[],\"verify\":[]}}\n```\n",
+                key.node_id
+            )
         } else {
             format!(
                 "Checked {}.\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: PASS\n",
@@ -646,9 +649,16 @@ fn remaining_work_at_the_end_of_a_long_report_reaches_every_repair_round() {
     };
     for round in ["ci--repair--r1--fix", "ci--repair--r2--fix"] {
         let prompt = brief(round);
-        assert!(prompt.contains("Wire the docs table."), "{round}: {prompt}");
+        assert!(
+            prompt.contains("write remaining: [\"Wire the docs table.\"]"),
+            "{round}: {prompt}"
+        );
     }
     let second = brief("ci--repair--r2--fix");
+    assert!(
+        second.contains("ci--repair--r1--fix remaining: [\"Left by ci--repair--r1--fix.\"]"),
+        "{second}"
+    );
     assert!(second.contains("second red"), "{second}");
     assert!(
         second.contains("Repaired in ci--repair--r1--fix."),
