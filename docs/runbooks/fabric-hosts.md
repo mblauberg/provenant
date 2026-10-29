@@ -30,7 +30,9 @@ sends a read-only doctor action over the same `provenant fabric peer` transport
 as the other peer reads. It uses the peer's `destination`,
 `domains.fabric.ssh_executable` and `remote_executable`, so a key restricted to
 the peer entrypoint still serves it. An unknown name is refused as
-`UNKNOWN_HOST`. Peer calls run `provenant fabric peer` through the peer's
+`UNKNOWN_HOST`. Remote doctor requires a project checkout with Fabric peer
+configuration; the peer must hold the same project key. Peer calls run
+`provenant fabric peer` through the peer's
 non-interactive `PATH`. The hidden `fabric peer` command is the fixed SSH
 protocol entrypoint; the hidden `fabric peer-agent` command is the macOS
 LaunchAgent that runs it in the login session (see below). Remote dispatch uses

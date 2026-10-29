@@ -334,6 +334,68 @@ fn hosts_doctor_unknown_peer_refuses_with_unknown_host() -> Result {
 }
 
 #[test]
+fn hosts_doctor_rejects_untrusted_peer_reports() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let local = identity["data"]["host"].as_str().ok_or("host")?;
+    let host = next_host(local.parse()?)?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    let ssh = rig.root.join("ssh");
+    let response_path = rig.root.join("ssh-response");
+    let good = json!({
+        "claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],
+        "peer_agent":"running","managed":[],"warnings":[]
+    });
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\ncat '{}'\n",
+            response_path.display()
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n
+             [domains.fabric.peers.workshop]\nhost='{}'\ndestination='workshop-fabric'\n",
+            ssh.to_string_lossy(),
+            host
+        ),
+    )?;
+
+    let invalid_replies = [
+        json!({"result":"doctor","data":{
+            "claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"valid"}}],
+            "peer_agent":"running","managed":[],"warnings":[]
+        }}),
+        {
+            let mut report = good.clone();
+            report["claude"][0]["label"] = json!("bad\u{0007}label");
+            json!({"result":"doctor","data":report})
+        },
+        {
+            let mut report = good.clone();
+            report["claude"] = json!(vec![report["claude"][0].clone(); 129]);
+            json!({"result":"doctor","data":report})
+        },
+        json!({"result":"health","data":{"host":host,"available":true,"execution":true}}),
+    ];
+    for result in invalid_replies {
+        let envelope = json!({
+            "version":1,"protocol":DOCTOR_PROTOCOL,"host":host,"project":key,"result":result
+        });
+        std::fs::write(&response_path, serde_json::to_vec(&envelope)?)?;
+        let (status, output) = json_command(&rig, &["hosts", "doctor", "workshop", "--json"])?;
+        assert_ne!(status, 0, "{output}");
+        assert_eq!(output["error"]["code"], "PEER", "{output}");
+    }
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn home_events_read_upgrades_after_dropping_legacy_import_data() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;

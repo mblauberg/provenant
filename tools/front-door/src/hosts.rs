@@ -287,6 +287,11 @@ fn valid_remote(report: &Report) -> bool {
             .managed_error
             .as_ref()
             .is_none_or(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
+        && report.warnings.len() <= 128
+        && report
+            .warnings
+            .iter()
+            .all(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
 }
 fn inspect(globals: &Globals, host: Option<&str>) -> Result<Report, DoctorError> {
     let Some(name) = host else {
@@ -420,5 +425,32 @@ mod tests {
             provenant_fabric_runtime::peer_agent::Status::Stopped
         );
         assert!(serde_json::from_str::<super::Report>(r#"{"claude":[]}"#).is_err());
+    }
+
+    #[test]
+    fn remote_doctor_report_requires_bounded_safe_fields() {
+        let report: super::Report = serde_json::from_str(
+            r#"{"claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],"peer_agent":"stopped","warnings":["check config"]}"#,
+        )
+        .unwrap();
+        assert!(super::valid_remote(&report));
+
+        let mut report: super::Report = serde_json::from_str(
+            r#"{"claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],"peer_agent":"stopped","warnings":[]}"#,
+        )
+        .unwrap();
+        report.warnings.push("x".repeat(1025));
+        assert!(!super::valid_remote(&report));
+
+        let mut report: super::Report =
+            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","warnings":[]}"#).unwrap();
+        report.warnings = vec!["ok".into(); 129];
+        assert!(!super::valid_remote(&report));
+
+        let mut report: super::Report =
+            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","warnings":["safe"]}"#)
+                .unwrap();
+        report.warnings[0] = "bad\nwarning".into();
+        assert!(!super::valid_remote(&report));
     }
 }

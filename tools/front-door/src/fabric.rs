@@ -1405,10 +1405,12 @@ pub fn peer(
                         data,
                         extra: Default::default(),
                     },
-                    Err(_) => PeerResult::Error {
+                    Err(error) => PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::io("build the local doctor report"),
+                            error: FacadeError::io(format!(
+                                "build the local doctor report: {error}"
+                            )),
                         },
                         extra: Default::default(),
                     },
