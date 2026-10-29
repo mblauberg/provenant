@@ -1244,15 +1244,19 @@ fn empty_compiled_closed_section_warns_on_unknown_keys() {
     assert_warning(&config, "unknown_key");
 }
 
-fn state_roots(dir: &Path) -> Roots {
+pub(crate) fn state_roots(dir: &Path) -> Roots {
     let mut inputs = RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
     inputs.state_dir = Some(dir.into());
     inputs.resolve(&Resolver).unwrap()
 }
 fn knob_edit(roots: &Roots, edit: KnobEdit) -> Result<ResolvedConfig, ConfigError> {
-    edit_config(roots, &crate::domains::NO_DOMAINS, |document| {
-        edit.apply(document)
-    })
+    edit_config(
+        roots,
+        &crate::domains::NO_DOMAINS,
+        &crate::EditOptions::new("test"),
+        |document, _| edit.apply(document),
+    )
+    .map(|edited| edited.config)
 }
 
 #[test]

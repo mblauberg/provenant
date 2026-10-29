@@ -3,7 +3,7 @@
 //! on; there are no user patterns. A rule only ever reads argv and the
 //! filesystem layout, so an unrecognised shape allows rather than denies.
 use crate::shell_command;
-use provenant_config::{DomainConfig, DomainSection, SectionError};
+use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
@@ -54,8 +54,13 @@ impl DomainConfig for GuardConfig {
         }
     }
 }
-pub const SECTION: DomainSection =
-    DomainSection::new::<GuardConfig>("guard", |_| DEFAULT_DENY).with_boundary_checks();
+pub const FIELD_METADATA: &[FieldMetadata] = &[FieldMetadata {
+    values: &["force-push", "rm-root", "rm-state"],
+    ..FieldMetadata::new("deny", "string_list")
+}];
+pub const SECTION: DomainSection = DomainSection::new::<GuardConfig>("guard", |_| DEFAULT_DENY)
+    .with_boundary_checks()
+    .with_fields(FIELD_METADATA);
 
 /// Where a command runs and the directories it must not remove. A rule whose
 /// directory is unknown allows.

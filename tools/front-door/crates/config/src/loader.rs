@@ -89,6 +89,61 @@ pub fn config_show<T: DeserializeOwned + Serialize>(
     read_with_domains(roots, sections)
 }
 
+/// Validate a proposed edit strictly through the owning domain validators.
+/// Reads stay tolerant and recover invalid optional values; a write refuses
+/// instead of publishing a document that the effective configuration repairs.
+pub(crate) fn validate_edit<T: DeserializeOwned + Serialize>(
+    text: &str,
+    sections: &DomainSections<T>,
+) -> Result<(), ConfigError> {
+    let origin = Origin::User { path: user_path()? };
+    let root = parse(text, &origin, "")?;
+    let sites = sites(&root, text, &origin, "");
+    let profile = root
+        .get("profile")
+        .and_then(Item::as_str)
+        .and_then(Profile::from_name)
+        .unwrap_or_default();
+    let mut domains = root
+        .get("domains")
+        .and_then(Item::as_table)
+        .cloned()
+        .unwrap_or_default();
+    normalise_tables(&mut domains);
+    for entry in sections.entries {
+        let Some(user) = domains.get(entry.name).and_then(Item::as_table) else {
+            continue;
+        };
+        // Complete the owner's compiled defaults before validating, so a
+        // partial patch is checked as the effective section it would become.
+        let mut table = parse((entry.defaults)(profile), &origin, "")?;
+        normalise_tables(&mut table);
+        merge_table(&mut table, user);
+        if let Some(error) = (entry.validate)(&table).into_iter().next() {
+            return Err(domain_issue(entry.name, error, &table, &sites, &origin).error());
+        }
+    }
+    Ok(())
+}
+
+fn merge_table(target: &mut dyn toml_edit::TableLike, source: &dyn toml_edit::TableLike) {
+    for (key, item) in source.iter() {
+        let nested = match (
+            target.get_mut(key).and_then(Item::as_table_like_mut),
+            item.as_table_like(),
+        ) {
+            (Some(target), Some(source)) => {
+                merge_table(target, source);
+                true
+            }
+            _ => false,
+        };
+        if !nested {
+            target.insert(key, item.clone());
+        }
+    }
+}
+
 /// Inspect every finding within the existing config bounds. The digest binds
 /// exact file bytes and presence, including edits that preserve every finding.
 pub fn inspect_config<T: DeserializeOwned + Serialize>(

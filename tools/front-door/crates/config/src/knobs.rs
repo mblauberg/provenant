@@ -11,34 +11,34 @@ use toml_edit::{DocumentMut, Item, TableLike};
 const REGISTRY: &str = include_str!("../../../../../config/harness-knobs.json");
 
 #[derive(Deserialize)]
-struct Registry {
-    knobs: BTreeMap<String, Spec>,
-    presets: BTreeMap<String, Preset>,
+pub(crate) struct Registry {
+    pub(crate) knobs: BTreeMap<String, Spec>,
+    pub(crate) presets: BTreeMap<String, Preset>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Kind {
+pub(crate) enum Kind {
     Bool,
     StringList,
     Enum,
     Int,
 }
 #[derive(Deserialize)]
-struct Spec {
+pub(crate) struct Spec {
     #[serde(rename = "type")]
-    kind: Kind,
-    min: Option<i64>,
-    max: Option<i64>,
+    pub(crate) kind: Kind,
+    pub(crate) min: Option<i64>,
+    pub(crate) max: Option<i64>,
     #[serde(default)]
-    values: Vec<String>,
-    default: Value,
+    pub(crate) values: Vec<String>,
+    pub(crate) default: Value,
     /// Grants or bounds capability or authority, so an invalid value refuses
     /// the whole configuration rather than recovering to the default.
     #[serde(default)]
     strict: bool,
 }
 #[derive(Deserialize)]
-struct Preset {
+pub(crate) struct Preset {
     #[serde(default)]
     knobs: BTreeMap<String, Value>,
 }
@@ -113,7 +113,7 @@ impl<D> crate::ResolvedConfig<D> {
 }
 
 /// Parsed once; the embedded text is immutable.
-fn registry() -> Result<&'static Registry, ConfigError> {
+pub(crate) fn registry() -> Result<&'static Registry, ConfigError> {
     static PARSED: OnceLock<Option<Registry>> = OnceLock::new();
     PARSED
         .get_or_init(|| serde_json::from_str(REGISTRY).ok())
@@ -329,72 +329,6 @@ fn apply(doc: &mut DocumentMut, edit: KnobEdit) -> Result<(), ConfigError> {
         }
     }
     Ok(())
-}
-
-/// The one config editor: edit the owned TOML document, validate the complete
-/// configuration, publish `<state>/config.toml` atomically (mode 0600), then
-/// read it back through the same registered domains. An absent file starts
-/// from the minimal valid header.
-pub fn edit_config<T>(
-    roots: &provenant_core::Roots,
-    sections: &crate::DomainSections<T>,
-    edit: impl FnOnce(&mut DocumentMut) -> Result<(), ConfigError>,
-) -> Result<crate::ResolvedConfig<T>, ConfigError>
-where
-    T: serde::de::DeserializeOwned + Serialize,
-{
-    use provenant_os::fs::PublishMode;
-    use std::{ffi::OsStr, io::Cursor};
-
-    let path = roots.state.as_path().join("config.toml");
-    let text = crate::loader::open(roots)?
-        .map(|reader| crate::loader::bounded_text(reader, &path))
-        .transpose()?;
-    crate::loader::load_with_domains(
-        roots,
-        text.as_deref().map(|source| Cursor::new(source.as_bytes())),
-        sections,
-    )?;
-    let mut document: DocumentMut = text
-        .as_deref()
-        .unwrap_or("schema_version = 1\n")
-        .parse()
-        .map_err(|_| ConfigError::Edit {
-            reason: "invalid TOML",
-        })?;
-    edit(&mut document)?;
-    let updated = document.to_string();
-    crate::loader::load_with_domains(roots, Some(Cursor::new(updated.as_bytes())), sections)?;
-
-    let state = match provenant_os::fs::Directory::open_anchor(roots.state.as_path()) {
-        Ok(state) => state,
-        Err(error) if error.is_not_found() => {
-            // Create only the state directory itself, private. Its parent must
-            // exist; a symlinked final component is refused by the anchor.
-            let target = roots.state.as_path();
-            let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
-                return Err(error.into());
-            };
-            let parent = provenant_os::fs::Directory::open_anchor(parent)?;
-            match parent.mkdir(name, 0o700) {
-                Ok(()) => parent.sync()?,
-                Err(error) if error.is_exists() => {}
-                Err(error) => return Err(error.into()),
-            }
-            provenant_os::fs::Directory::open_anchor(target)?
-        }
-        Err(error) => return Err(error.into()),
-    };
-    state
-        .atomic_write_with_permissions(
-            OsStr::new("config.toml"),
-            ".config-",
-            updated.as_bytes(),
-            0o600,
-            PublishMode::Replace,
-        )?
-        .require_durable()?;
-    crate::loader::read_with_domains(roots, sections)
 }
 
 #[cfg(test)]

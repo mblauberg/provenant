@@ -434,6 +434,65 @@ Accepted by every command, before or after the subcommand.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant config schema`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+## `provenant config apply`
+
+| Argument | Contract |
+|---|---|
+| `--file` | `{"name": "file", "required": true}` |
+| `--expect-revision` | `{"name": "expect_revision", "required": true}` |
+| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "file",
+        "expect_revision",
+        "dry_run"
+      ],
+      "multiple": true,
+      "name": "Apply",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant config history`
+
+| Argument | Contract |
+|---|---|
+| `--since` | `{"name": "since"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "since",
+        "limit"
+      ],
+      "multiple": true,
+      "name": "History",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant config set`
 
 | Argument | Contract |

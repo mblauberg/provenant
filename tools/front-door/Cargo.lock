@@ -557,6 +557,7 @@ dependencies = [
 name = "provenant-config"
 version = "1.3.0"
 dependencies = [
+ "jiff",
  "provenant-core",
  "provenant-os",
  "provenant-records",

@@ -3,7 +3,7 @@ use crate::{
     ModelId, RoutingError,
     request::{effort_valid, identifier},
 };
-use provenant_config::{DomainConfig, DomainSection, Profile, SectionError};
+use provenant_config::{DomainConfig, DomainSection, FieldMetadata, Profile, SectionError};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -856,10 +856,25 @@ fn defaults(_: Profile) -> &'static str {
 }
 /// Enforced model policy restrictions, including a retired schedule key in a
 /// restricting rule, are a boundary; other routing input recovers.
+pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::int("settlement_retries", 0, MAX_SETTLEMENT_RETRIES as i64),
+    FieldMetadata::int("capacity_retry_seconds", 0, MAX_RETRY_WAIT_SECONDS as i64),
+    FieldMetadata::int(
+        "capacity_retry_max_seconds",
+        0,
+        MAX_RETRY_WAIT_SECONDS as i64,
+    ),
+    FieldMetadata::int(
+        "retry_delay_ceiling_seconds",
+        0,
+        MAX_RETRY_WAIT_SECONDS as i64,
+    ),
+];
 pub const SECTION: DomainSection = DomainSection {
     validate: validate_section,
     ..DomainSection::new::<RoutingConfig>("routing", defaults)
         .with_boundary_check(crate::policy::boundary)
+        .with_fields(FIELD_METADATA)
 };
 /// Retired timing keys are named first; serde never reads their values.
 fn validate_section(table: &toml_edit::Table) -> Vec<SectionError> {
