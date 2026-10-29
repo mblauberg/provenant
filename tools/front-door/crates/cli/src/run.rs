@@ -3081,10 +3081,16 @@ fn dispatch_inner(
                     .find(|tree| tree.path == writer.worktree)
                     .ok_or(worktrees::WorktreeError::NotFound)?;
                 let branch = info.branch.ok_or(worktrees::WorktreeError::DetachedWorktree { head: info.head })?;
-                if !replay && matches!(info.writer, worktrees::WriterState::Busy | worktrees::WriterState::Live) {
-                    let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-                    let holder = worktrees::load_owner(&tree)?.and_then(|owner| owner.attempt_id);
-                    return Err(worktrees::WorktreeError::WriterBusy { holder });
+                if !replay {
+                    match worktrees::cache_writer_probe(context.project_state, &info.path) {
+                        Ok(_) => {}
+                        Err(worktrees::WorkerState::Busy) => {
+                            let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                            let holder = worktrees::load_owner(&tree)?.and_then(|owner| owner.attempt_id);
+                            return Err(worktrees::WorktreeError::WriterBusy { holder });
+                        }
+                        Err(_) => return Err(worktrees::WorktreeError::UnknownWriter),
+                    }
                 }
                 Ok(json!({"path": info.path, "branch": branch.trim_start_matches("refs/heads/"), "owned": false}))
             },
@@ -9890,6 +9896,253 @@ mod tests {
             repair,
             Some("retry the same command with --operation-id retry-lane")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn dispatch_existing_worktree_checks_custody_and_replays()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::worktrees::{self, WorktreeOrigin, WorktreeOwner};
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        use provenant_supervisor::custody::{self, Scope};
+        use std::ffi::OsString;
+        use std::os::unix::fs::DirBuilderExt;
+        const MARKER: &str = "PROVENANT_TEST_WORKTREE_ADMISSION";
+        let executor = SystemExecutor::new(1)?;
+        let parent = AttemptId::from_bytes([8; 16]);
+        let Some(root) = std::env::var_os(MARKER).map(PathBuf::from) else {
+            let fixture = linked_fixture()?;
+            let argv = vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "\"$@\" & child=$!; wait \"$child\"".into(),
+                "worktree-admission".into(),
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::tests::dispatch_existing_worktree_checks_custody_and_replays".into(),
+                "--nocapture".into(),
+            ];
+            let mut env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| {
+                    !key.to_string_lossy().starts_with("GIT_")
+                        && key != MARKER
+                        && key != provenant_core::RUN_STATE_DIRECTORY_ENV
+                        && key != run::LANE_DEPTH_ENV
+                        && key != run::PARENT_ATTEMPT_ENV
+                })
+                .collect();
+            env.extend([
+                (MARKER.into(), fixture.root.as_os_str().to_owned()),
+                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                (
+                    provenant_core::RUN_STATE_DIRECTORY_ENV.into(),
+                    fixture
+                        .root
+                        .join("state/children")
+                        .join(parent.to_string())
+                        .into_os_string(),
+                ),
+                (run::LANE_DEPTH_ENV.into(), "1".into()),
+                (run::PARENT_ATTEMPT_ENV.into(), parent.to_string().into()),
+            ]);
+            // Nested writer proposals must stay beneath the primary checkout.
+            let tree = fixture.project.join("writer");
+            let move_argv = vec![
+                provenant_os::git::git_executable()
+                    .ok_or("Git unavailable")?
+                    .into_os_string(),
+                "worktree".into(),
+                "move".into(),
+                fixture.tree.as_os_str().to_owned(),
+                tree.as_os_str().to_owned(),
+            ];
+            let mut options =
+                ExecOptions::new(&move_argv, &fixture.project, Duration::from_secs(5));
+            options.env = Some(&env);
+            let out = executor.execute(options)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+            // Both the submitting process and its parent shell are inside the tree.
+            let mut options = ExecOptions::new(&argv, &tree, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let out = executor.execute(options)?;
+            assert_eq!(
+                out.termination,
+                Termination::Exit(0),
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout.bytes),
+                String::from_utf8_lossy(&out.stderr.bytes)
+            );
+            return Ok(());
+        };
+        let project = root.join("project");
+        let tree = project.join("writer");
+        let prompt = root.join("prompt.md");
+        std::fs::write(&prompt, "reply OK")?;
+        with_edge(
+            &root,
+            &tree,
+            |edge| -> Result<(), Box<dyn std::error::Error>> {
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(edge.roots.state.as_path())?;
+                provenant_config::bind_project(
+                    edge.roots,
+                    provenant_config::ProjectLocation::new(project.join(".git"))?,
+                )?;
+                provenant_config::bind_host(edge.roots)?;
+                let clock = SystemClock::new();
+                let cancel = CancelToken::new();
+                let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+                let session = open(edge, &call).map_err(|fail| fail.message)?;
+                let command = |operation| {
+                    parsed_run(&[
+                        "--operation-id",
+                        operation,
+                        "--model",
+                        "codex/gpt-6-luna",
+                        "--mode",
+                        "worktree-write",
+                        "--worktree",
+                        tree.to_str().unwrap(),
+                        "--prompt-file",
+                        prompt.to_str().unwrap(),
+                    ])
+                    .map(|mut command| {
+                        command.wait = None;
+                        command
+                    })
+                };
+                let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+                let switch = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
+                    let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                        .chain(args.iter().map(OsString::from))
+                        .collect();
+                    let out =
+                        executor.execute(ExecOptions::new(&argv, &tree, Duration::from_secs(5)))?;
+                    assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+                    Ok(())
+                };
+                switch(&["switch", "--detach"])?;
+                let detached = dispatch(command("detached-tree")?, edge);
+                assert_eq!(detached.result.status, Status::Refused);
+                let message = &detached
+                    .result
+                    .error
+                    .as_ref()
+                    .ok_or("detached error")?
+                    .message;
+                assert!(message.contains("detached HEAD at"), "{message}");
+                assert!(
+                    message.contains("remove --worktree and pass --mode read-only"),
+                    "{message}"
+                );
+                assert!(
+                    session
+                        .store
+                        .operation(&"detached-tree".parse()?, &call)?
+                        .is_none()
+                );
+                switch(&["switch", "writer"])?;
+                let admitted = dispatch(command("free-tree")?, edge);
+                assert_eq!(
+                    admitted.result.status,
+                    Status::Ok,
+                    "{:?}",
+                    admitted.result.error
+                );
+                let run_id = admitted.result.data["run_id"].clone();
+                assert!(!run_id.is_null(), "{:?}", admitted.result.data);
+                let holder = AttemptId::from_bytes([7; 16]);
+                let held = worktrees::with_context(
+                    edge.roots,
+                    edge.home,
+                    &project,
+                    &clock,
+                    &cancel,
+                    |context| {
+                        let verified = provenant_confinement::verify_worktree(context.repo, &tree)?;
+                        let info = worktrees::list(context, &cancel)?
+                            .into_iter()
+                            .find(|info| info.path == tree)
+                            .ok_or(worktrees::WorktreeError::NotFound)?;
+                        let (directory, binding) = worktrees::writer_custody(
+                            context.project_state,
+                            &verified,
+                            &provenant_confinement::repo::GitRefName::branch("writer").unwrap(),
+                            info.head,
+                            || {
+                                Ok(provenant_confinement::run_utility(
+                                    context.executor,
+                                    provenant_confinement::GitRead::WorktreeList,
+                                    context.repo,
+                                    context.utility,
+                                    context.utility_budget,
+                                    &cancel,
+                                )?
+                                .stdout
+                                .bytes)
+                            },
+                        )?;
+                        worktrees::save_owner(
+                            &verified,
+                            &WorktreeOwner {
+                                attempt_id: Some(holder),
+                                operation_id: Some("holder".parse().unwrap()),
+                                branch: "writer".into(),
+                                base: info.head.to_string(),
+                                host: provenant_config::bind_host(edge.roots).unwrap(),
+                                created_at: WallTime::from_micros(1).unwrap(),
+                                origin: WorktreeOrigin::Lane,
+                                label: None,
+                            },
+                        )?;
+                        Ok((directory, binding))
+                    },
+                )?;
+                let lease = custody::acquire_writer(
+                    held.0,
+                    Scope {
+                        run: RunId::from_bytes([7; 16]),
+                        attempt: holder,
+                        generation: 1,
+                    },
+                    held.1,
+                    provenant_core::WaitBudget::cli(clock.mono_now(), 1)?,
+                    &cancel,
+                    &clock,
+                )?;
+                let busy = dispatch(command("busy-tree")?, edge);
+                assert_eq!(busy.result.status, Status::Refused);
+                let message = &busy.result.error.as_ref().ok_or("busy error")?.message;
+                assert!(
+                    message.contains(&format!(
+                        "worktree writer is busy, held by attempt {holder}"
+                    )),
+                    "{message}"
+                );
+                assert!(
+                    session
+                        .store
+                        .operation(&"busy-tree".parse()?, &call)?
+                        .is_none()
+                );
+                let replay = dispatch(command("free-tree")?, edge);
+                assert_eq!(
+                    replay.result.status,
+                    Status::Ok,
+                    "{:?}",
+                    replay.result.error
+                );
+                assert_eq!(replay.result.data["run_id"], run_id);
+                drop(lease);
+                Ok(())
+            },
+        )??;
         Ok(())
     }
 

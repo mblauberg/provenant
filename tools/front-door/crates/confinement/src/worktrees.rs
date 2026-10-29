@@ -55,7 +55,9 @@ pub enum WorktreeError {
     DetachedPrimary,
     #[error("detached HEAD at {head} is not merged into the integration branch")]
     DetachedUnmerged { head: GitOid },
-    #[error("detached HEAD at {head}; git switch -c BRANCH or pass --mode read-only")]
+    #[error(
+        "detached HEAD at {head}; git switch -c BRANCH or remove --worktree and pass --mode read-only"
+    )]
     DetachedWorktree { head: GitOid },
     #[error("worktree writer is busy{}", .holder.as_ref().map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy { holder: Option<AttemptId> },
@@ -6252,7 +6254,7 @@ mod lifecycle_tests {
         let head = GitOid::parse("0123456789abcdef0123456789abcdef01234567")?;
         assert_eq!(
             WorktreeError::DetachedWorktree { head }.to_string(),
-            "detached HEAD at 0123456789abcdef0123456789abcdef01234567; git switch -c BRANCH or pass --mode read-only"
+            "detached HEAD at 0123456789abcdef0123456789abcdef01234567; git switch -c BRANCH or remove --worktree and pass --mode read-only"
         );
         Ok(())
     }
