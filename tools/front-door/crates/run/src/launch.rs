@@ -1276,9 +1276,13 @@ impl RunStore {
                 .map_err(|e| local(&e))
         };
         let mut holder_context = context(record, requester).map_err(|e| local(&e))?;
-        let reservation =
-            PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
-                .map_err(|e| local(&e))?;
+        let reservation = PublicationReservation::prepare(
+            directory()?,
+            call.transaction_budget(),
+            call.cancel,
+            call.clock,
+        )
+        .map_err(|e| local(&e))?;
         // Clone before acquiring custody: failure leaves no writer reservation.
         let held = if self.sealed_requester.is_some() {
             Some((
@@ -1462,7 +1466,7 @@ impl RunStore {
             OwnedLaunch {
                 command,
                 lease: &mut lease,
-                handshake: call.budget,
+                handshake: call.transaction_budget(),
                 cancel: call.cancel,
                 clock: call.clock,
             },

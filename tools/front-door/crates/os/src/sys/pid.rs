@@ -3,6 +3,70 @@ use std::io;
 
 const MAX_EINTR_RETRIES: u64 = 8;
 
+pub(crate) fn uid(pid: i32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Read;
+        // /proc/PID ownership can change to root for a nondumpable process;
+        // status instead reports its real, effective, saved and filesystem UIDs.
+        const LIMIT: u64 = 65_536;
+        let file = std::fs::File::open(format!("/proc/{pid}/status")).ok()?;
+        let mut status = String::new();
+        file.take(LIMIT + 1).read_to_string(&mut status).ok()?;
+        if status.len() as u64 > LIMIT {
+            return None;
+        }
+        linux_status_uid(&status)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let requested = i32::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).ok()?;
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+        // SAFETY: info is aligned writable storage of the exact ABI size.
+        // libproc borrows it for this call and retains no pointer.
+        let returned = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                requested,
+            )
+        };
+        if returned != requested {
+            return None;
+        }
+        // SAFETY: the exact-size successful read initialised the whole record.
+        let info = unsafe { info.assume_init() };
+        (info.pbsi_pid == pid as u32
+            && info.pbsi_uid == info.pbsi_ruid
+            && info.pbsi_uid == info.pbsi_svuid)
+            .then_some(info.pbsi_uid)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_status_uid(status: &str) -> Option<u32> {
+    let mut records = status.lines().filter_map(|line| line.strip_prefix("Uid:"));
+    let record = records.next()?;
+    if records.next().is_some() {
+        return None;
+    }
+    let mut fields = record.split_whitespace();
+    let uid = fields.next()?.parse::<u32>().ok()?;
+    for _ in 0..3 {
+        if fields.next()?.parse::<u32>().ok()? != uid {
+            return None;
+        }
+    }
+    fields.next().is_none().then_some(uid)
+}
+
 pub(crate) fn signal_process(pid: i32, signal: ProcessSignal) -> io::Result<()> {
     // Keep group signalling impossible even if another internal caller is added.
     if pid <= 0 {
@@ -194,6 +258,26 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uid_observation_requires_complete_matching_credentials() {
+        assert_eq!(
+            linux_status_uid("Name:\twriter\nUid:\t1000\t1000\t1000\t1000\n"),
+            Some(1000)
+        );
+        for status in [
+            "",
+            "Uid:\t1000\t1000\t1000",
+            "Uid:\t1000\t1001\t1000\t1000",
+            "Uid:\t1000\t1000\t0\t1000",
+            "Uid:\t1000\t1000\t1000\t0",
+            "Uid:\t1000\t1000\t1000\t1000\t1000",
+            "Uid:\t1000\t1000\tinvalid\t1000",
+            "Uid:\t1000\t1000\t1000\t1000\nUid:\t1000\t1000\t1000\t1000",
+        ] {
+            assert_eq!(linux_status_uid(status), None, "{status}");
+        }
+    }
 
     #[test]
     fn darwin_zero_result_ignores_stale_errno_and_short_records_are_typed() {

@@ -1,7 +1,7 @@
 use super::*;
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Digest, MonoTime, OperationId, ProjectId, RootInputs, RunId,
-    TaskId, TestClock, WaitBudget, WallTime,
+    ActorId, AttemptId, CancelToken, Clock as _, Digest, MonoTime, OperationId, ProjectId,
+    RootInputs, RunId, TaskId, TestClock, WaitBudget, WallTime,
 };
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_records::CanonicalV1;
@@ -239,6 +239,35 @@ pub(super) fn exit() -> ExitObservation {
         stderr: CaptureTotals::default(),
     }
 }
+#[test]
+fn a_long_step_between_transactions_does_not_expire_later_store_writes() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        budget: WaitBudget::per_transaction(clock.mono_now(), 10)?,
+        cancel: &cancel,
+    };
+    let store = RunStore::open(&context, &call)?;
+    // A provider launch or a bounded wait runs far past the allowance.
+    clock.wait_until(MonoTime::from_micros(60_000_000))?;
+    let input = input();
+    store.create(&input, &call)?;
+    assert!(store.operation(&input.operation_id, &call)?.is_some());
+    // A single deadline for the whole operation is spent by that step.
+    let spent = Request {
+        budget: WaitBudget::cli(MonoTime::from_micros(0), 10)?,
+        ..call
+    };
+    assert!(matches!(
+        store.operation(&input.operation_id, &spent),
+        Err(RunError::Contention)
+    ));
+    Ok(())
+}
+
 #[test]
 fn overview_reads_committed_wal_and_bounds_rows() -> TestResult {
     let temp = tempfile::tempdir()?;

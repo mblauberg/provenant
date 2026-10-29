@@ -703,6 +703,7 @@ mod tests {
                     task_id: task.task_id,
                     prompt: "child".into(),
                     base: None,
+                    pinned_base: None,
                     head: None,
                     route: task.route.clone(),
                     account: None,

@@ -63,10 +63,20 @@ pub enum CwdObservation {
 }
 pub trait CwdObserver: Send + Sync {
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError>;
+
+    /// Independent credentials; mixed or unreadable credentials stay unknown.
+    fn uid(&self, _pid: i64) -> Option<u32> {
+        None
+    }
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemCwdObserver;
 impl CwdObserver for SystemCwdObserver {
+    fn uid(&self, pid: i64) -> Option<u32> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        crate::sys::pid::uid(pid)
+    }
+
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError> {
         if pid <= 0 {
             return Err(PidError::Refused { pid });

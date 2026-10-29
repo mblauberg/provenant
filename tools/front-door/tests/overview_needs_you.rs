@@ -231,6 +231,7 @@ fn overview_needs_you() -> Result {
                 task_id: TaskId::from_bytes([3; 16]),
                 prompt: "PRIVATE PROMPT MARKER".into(),
                 base: None,
+                pinned_base: None,
                 head: None,
                 route: RequestedRoute::Named {
                     extra: Default::default(),

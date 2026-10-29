@@ -157,6 +157,7 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
             task_id: TaskId::from_bytes([3; 16]),
             prompt: prompt.into(),
             base: None,
+            pinned_base: None,
             head: None,
             route: RequestedRoute::Named {
                 extra: Default::default(),

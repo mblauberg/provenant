@@ -192,12 +192,16 @@ impl<'a> Service<'a> {
                     Ok(())
                 };
                 validate(head, "head")?;
-                if let Some(base) = &task.base {
+                if let Some(pinned) = &task.pinned_base {
+                    validate(&pinned.to_string(), "base")?;
+                } else if let Some(base) = &task.base {
                     validate(base, "base")?;
                 }
             }
             let base = if let Some(prior) = prior {
                 prior.base.clone()
+            } else if let Some(pinned) = task.pinned_base {
+                Some(pinned.to_string())
             } else if let Some(head) = task.head.as_deref().filter(|_| task.base.is_none()) {
                 let git = provenant_os::git::git_executable()
                     .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
@@ -652,6 +656,8 @@ pub struct DispatchTask {
     pub task_id: provenant_core::TaskId,
     pub prompt: String,
     pub base: Option<String>,
+    /// Commit pinned by owned worktree creation. Keep `base` for replay comparison.
+    pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
     pub route: RequestedRoute,
     pub account: Option<String>,
