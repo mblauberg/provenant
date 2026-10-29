@@ -310,6 +310,7 @@ fn completion_closes_a_pause_ask_left_by_lowered_limits() {
     .unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.pause_reason.is_none());
+    assert!(run.checkpoint.pause_code.is_none());
     assert!(
         run.checkpoint
             .asks

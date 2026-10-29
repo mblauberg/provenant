@@ -2100,9 +2100,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             .find_map(|n| n.expansion_pause.clone())
         {
             checkpoint.pause_reason = Some(reason);
-            checkpoint
-                .pause_code
-                .get_or_insert_with(|| "expansion_refused".into());
+            checkpoint.pause_code = Some("invalid_plan_expansion".into());
         }
         let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
             None
@@ -2177,6 +2175,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             if ask.node.as_deref() == Some(node.id.as_str()) {
                                 ask.resolved = true;
                                 if let Some(answer) = ask.answer.as_mut() {
+                                    answer
+                                        .rejection_code
+                                        .get_or_insert_with(|| "invalid_loop_decision".into());
                                     answer.rejected.get_or_insert_with(|| {
                                         bounded(&reason, MAX_ADVANCE_ERROR_BYTES)
                                     });
@@ -2792,6 +2793,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             && checkpoint.nodes.iter().all(|n| n.expansion_pause.is_none())
             && checkpoint.pause_reason.take().is_some()
         {
+            checkpoint.pause_code = None;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
         // Close asks only after an obsolete pause is cleared, so its ask closes too.
