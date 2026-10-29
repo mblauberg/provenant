@@ -6759,7 +6759,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     if reservation_case == ReservationCase::DifferentAttempt {
         assert!(
             matches!(reconciled.as_slice(),
-            [(attempt, Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { .. } })] if *attempt == id),
+            [(attempt, Reconciled::Uncertain { reason: UncertainReason::RebootProofUnavailable { .. } })] if *attempt == id),
             "{reconciled:?}"
         );
     } else {
