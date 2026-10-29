@@ -34,6 +34,8 @@ const S2_DISK_PRESSURE: &str = "s2-disk-pressure";
 /// Seconds the guardian's wall clock jumps forward after launch, as a sleeping
 /// host's does while its monotonic clock stands still.
 const S2_WALL_JUMP: &str = "s2-wall-jump-seconds";
+/// Present once the jump has happened.
+const S2_WALL_JUMP_NOW: &str = "s2-wall-jump-now";
 const S2_DISK_SAMPLED: &str = "s2-disk-sampled";
 
 struct MarkerDiskPressure {
@@ -2203,6 +2205,8 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
     )?;
     let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
     byte(&mut held, b'R')?;
+    // The host sleeps: the wall clock moves two hours, the monotonic one not at all.
+    std::fs::write(home.join(S2_WALL_JUMP_NOW), b"asleep")?;
     let exit = exited(&handle)?;
     assert_eq!(exit.stop_reason, Some(StopReason::WallDeadline));
     assert_eq!(
@@ -2427,15 +2431,20 @@ fn main() -> Result<()> {
         let production_shape = home.join(S2_PRODUCTION_SHAPE).is_file();
         let store = FileNestedChildren { home: home.clone() };
         let refusal_marker = home.join(S2_REFUSE_ADMISSION);
-        let jump = std::fs::read_to_string(home.join(S2_WALL_JUMP))
+        let jump_marker = home.join(S2_WALL_JUMP);
+        let jump = std::fs::read_to_string(&jump_marker)
             .ok()
             .and_then(|text| text.trim().parse::<i64>().ok());
-        let reads = std::sync::atomic::AtomicU32::new(0);
+        // The jump starts once the test has the provider connected: a stop at
+        // once would end it before it could.
+        let sleeping = home.join(S2_WALL_JUMP_NOW);
         let jumping = move || {
             let now = provenant_core::Clock::wall_now(&SystemClock::new()).ok()?;
-            // The first read stamps the launch; later reads are after the sleep.
-            let first = reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0;
-            let offset = if first { 0 } else { jump.unwrap_or(0) };
+            let offset = if sleeping.exists() {
+                jump.unwrap_or(0)
+            } else {
+                0
+            };
             provenant_core::WallTime::from_micros(now.as_micros() + offset * 1_000_000).ok()
         };
         let registry = FileChildRegistry { home };
