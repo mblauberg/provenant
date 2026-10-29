@@ -135,6 +135,9 @@ fn secret_value(value: &Value) -> bool {
     match value {
         Value::String(text) => secret_text(text),
         Value::Array(items) => items.iter().any(secret_value),
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| secret_path(key) || secret_value(value)),
         _ => false,
     }
 }
@@ -310,5 +313,21 @@ mod tests {
         }
         assert_eq!(by_path["x.plain"].after, Some(Value::from("fine")));
         assert!(!serde_json::to_string(&found).unwrap().contains("ghp_"));
+    }
+
+    #[test]
+    fn secrets_inside_object_arrays_are_redacted() {
+        let found = changes(
+            "schema_version = 1\n",
+            "schema_version = 1\n[domains.routing.review.shapes.deep]\nreviewers = [{ pool = \"junior\", lenses = [\"ghp_fake1234567890\"] }, { token = \"plain\" }]\n",
+        );
+        let by_path: BTreeMap<_, _> = found.iter().map(|c| (c.path.as_str(), c)).collect();
+        let after = by_path["domains.routing.review.shapes.deep.reviewers"]
+            .after
+            .clone()
+            .unwrap();
+        assert_eq!(after, REDACTED);
+        assert!(!serde_json::to_string(&found).unwrap().contains("ghp_"));
+        assert!(!serde_json::to_string(&found).unwrap().contains("plain"));
     }
 }

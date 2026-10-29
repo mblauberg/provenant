@@ -45,7 +45,8 @@ mod tests;
 mod tolerance_tests;
 
 pub use domains::{
-    DomainConfig, DomainSection, DomainSections, NoDomains, SectionError, read_domain,
+    DomainConfig, DomainSection, DomainSections, FieldMetadata, NoDomains, SectionError,
+    read_domain,
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};

@@ -33,6 +33,43 @@ pub fn read_domain<T: DeserializeOwned + Default>(state: &Path, name: &str) -> s
     crate::loader::read_boundary_settings(state, &format!("domains.{name}"))
 }
 
+/// Editor metadata for one field the owning domain accepts. Paths are
+/// section-local; a `{name}` segment stands for one keyed map entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldMetadata {
+    pub path: &'static str,
+    pub kind: &'static str,
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+    pub values: &'static [&'static str],
+    pub restart_required: bool,
+}
+impl FieldMetadata {
+    pub const fn new(path: &'static str, kind: &'static str) -> Self {
+        Self {
+            path,
+            kind,
+            min: None,
+            max: None,
+            values: &[],
+            restart_required: false,
+        }
+    }
+    pub const fn int(path: &'static str, min: i64, max: i64) -> Self {
+        Self {
+            min: Some(min),
+            max: Some(max),
+            ..Self::new(path, "int")
+        }
+    }
+    pub const fn enumeration(path: &'static str, values: &'static [&'static str]) -> Self {
+        Self {
+            values,
+            ..Self::new(path, "enum")
+        }
+    }
+}
+
 /// One domain's immutable entry. Assets contain section-local keys: config
 /// nests them under `[domains.<name>]`. Defaults include every accepted key.
 /// Arrays replace as a whole; tables (including inline tables) merge recursively.
@@ -42,6 +79,8 @@ pub struct DomainSection {
     pub validate: fn(&Table) -> Vec<SectionError>,
     /// The owner identifies invalid input that controls a real boundary.
     pub boundary: fn(&SectionError) -> bool,
+    /// Owner-published types, bounds and variants for the settings editor.
+    pub fields: &'static [FieldMetadata],
 }
 impl DomainSection {
     /// Erase only the registration function, never the resolved section type.
@@ -54,7 +93,12 @@ impl DomainSection {
             defaults,
             validate: validate::<T>,
             boundary: |_| false,
+            fields: &[],
         }
+    }
+    pub const fn with_fields(mut self, fields: &'static [FieldMetadata]) -> Self {
+        self.fields = fields;
+        self
     }
     pub const fn with_boundary_checks(mut self) -> Self {
         self.boundary = |_| true;

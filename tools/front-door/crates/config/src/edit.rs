@@ -149,6 +149,9 @@ where
             })?;
     edit(&mut document, &current)?;
     let updated = document.to_string();
+    // Reads recover invalid optional values; a write must refuse instead of
+    // publishing a document whose effective value differs from the edit.
+    crate::loader::validate_edit(&updated, sections)?;
     let config =
         crate::loader::load_with_domains(roots, Some(Cursor::new(updated.as_bytes())), sections)?;
     let changes = crate::history::changes(text.as_deref().unwrap_or(MINIMAL), &updated);
