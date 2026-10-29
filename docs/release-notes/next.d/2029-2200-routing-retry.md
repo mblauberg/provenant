@@ -1,7 +1,0 @@
-## Behaviour changes
-### Accounts, quota and routing
-
-- Provider capacity errors from Codex, Claude, OpenCode and Agy now settle as `model_unavailable`, and a spent Claude or Codex account settles as `quota_limited`. Neither is a generic failure any more. A Claude 429 that names no plan allowance, such as a usage, session or weekly limit, counts as transient capacity, even when it names a reset. A capacity stop resumes the same session after a short, jittered backoff, or redraws the route when there is no session. A quota stop retries the same model at once on another account, provided one is registered, unpinned and not spent. Configuration sets every bound: `domains.routing.settlement_retries` (default 2, at most 32), `domains.routing.capacity_retry_seconds` (backoff base, default 30), `domains.routing.capacity_retry_max_seconds` (backoff cap, default 600) and `domains.routing.retry_delay_ceiling_seconds` (ceiling on any sealed wait, default 3600) (#2029).
-- A run can now retry more than once. The run store previously allowed one continuation row per run, so a second settlement retry, or any retry in a resumed run, failed its terminal transaction and left the lane running. The store migrates to schema version 5, and older binaries refuse the migrated store (#2029).
-- Account selection skips an account whose latest reading is exhausted, whatever its pacing policy, and falls through to an available account for the same model when admission refuses the first one (#2200).
-- `route pacing` now confirms what it recorded (#2200).
