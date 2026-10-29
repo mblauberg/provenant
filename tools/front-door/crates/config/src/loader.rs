@@ -63,7 +63,9 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
         .transpose()?;
     let inspection = inspect(text.as_deref(), sections)?;
     for warning in &inspection.snapshot.warnings {
-        warn(&roots.state.as_path().join("config.toml"), warning);
+        if first_warning(roots.state.as_path(), text.as_deref(), warning) {
+            warn(&roots.state.as_path().join("config.toml"), warning);
+        }
     }
     if let Some(error) = inspection.error {
         return Err(error);
@@ -82,11 +84,49 @@ pub fn read_with_domains<T: DeserializeOwned + Serialize>(
 ) -> Result<ResolvedConfig<T>, ConfigError> {
     load_with_domains(roots, open(roots)?, sections)
 }
+/// Read a snapshot without printing its advisory findings; errors remain errors.
 pub fn config_show<T: DeserializeOwned + Serialize>(
     roots: &Roots,
     sections: &DomainSections<T>,
 ) -> Result<ResolvedConfig<T>, ConfigError> {
-    read_with_domains(roots, sections)
+    let path = roots.state.as_path().join("config.toml");
+    let text = open(roots)?.map(|r| bounded_text(r, &path)).transpose()?;
+    let inspection = inspect(text.as_deref(), sections)?;
+    if let Some(error) = inspection.error {
+        return Err(error);
+    }
+    Ok(inspection.snapshot)
+}
+
+// A separate marker for each finding ensures different domain readers do not
+// consume each other's warnings. Creation is atomic across concurrent commands.
+fn first_warning(state: &Path, text: Option<&str>, warning: &Finding) -> bool {
+    // The command edge reads settings for usage attribution before dispatching
+    // the hook. Suppress those advisories as well as the hook's own reads.
+    if is_pre_tool_hook(std::env::args_os().skip(1)) {
+        return false;
+    }
+    let text = text.unwrap_or_default().as_bytes();
+    let mut bytes = (text.len() as u64).to_be_bytes().to_vec();
+    bytes.extend_from_slice(text);
+    bytes.extend_from_slice(warning.message.as_bytes());
+    let digest = provenant_records::CanonicalV1::file_digest(&bytes);
+    let name = format!("config-warning-{digest}");
+    let Ok(dir) = provenant_os::fs::Directory::open_anchor(state) else {
+        return true;
+    };
+    match dir.create_new(OsStr::new(&name)) {
+        Ok(_) => true,
+        Err(error) if error.is_exists() => false,
+        Err(_) => true,
+    }
+}
+
+fn is_pre_tool_hook(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    let mut words = args.into_iter();
+    words.any(|word| word == "hook")
+        && words.any(|word| word == "claude")
+        && words.any(|word| word == "pre-tool-use")
 }
 
 /// Validate a proposed edit strictly through the owning domain validators.
@@ -697,12 +737,19 @@ fn seed_origins(
 }
 fn warn(path: &Path, warning: &Finding) {
     use std::io::Write;
+    let repair = if warning.message.contains("moved_to_schedule.") {
+        let quoted = path.display().to_string().replace('\'', "'\\''");
+        format!("; repair: \"$EDITOR\" '{quoted}'")
+    } else {
+        String::new()
+    };
     let _ = writeln!(
         std::io::stderr().lock(),
-        "warning: {}:{}: {}",
+        "warning: {}:{}: {}{}",
         path.display(),
         warning.line,
-        warning.message
+        warning.message,
+        repair
     );
 }
 
@@ -786,10 +833,10 @@ fn read_section<T: DeserializeOwned + Default>(
                         source: None,
                         rejected: String::new(),
                     };
-                    warn(
-                        &path,
-                        &issue_finding(&issue).map_err(std::io::Error::other)?,
-                    );
+                    let finding = issue_finding(&issue).map_err(std::io::Error::other)?;
+                    if first_warning(state, Some(&text), &finding) {
+                        warn(&path, &finding);
+                    }
                 }
                 Err(_) => return Err(std::io::Error::other("invalid domain value")),
             }
@@ -798,7 +845,10 @@ fn read_section<T: DeserializeOwned + Default>(
     let mut issues = Vec::new();
     let value = recover_settings(&mut item, prefix, &sites, &origin, &mut issues, validate);
     for issue in &issues {
-        warn(&path, &issue_finding(issue).map_err(std::io::Error::other)?);
+        let finding = issue_finding(issue).map_err(std::io::Error::other)?;
+        if first_warning(state, Some(&text), &finding) {
+            warn(&path, &finding);
+        }
     }
     Ok(value)
 }
@@ -1095,6 +1145,13 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
         path: user_path()?,
         line: issue.location.line,
         message: match &issue.source {
+            Some(source) if source.code.starts_with("moved_to_schedule.") => {
+                let replacement = source.code.trim_start_matches("moved_to_schedule.");
+                format!(
+                    "{key}: ignored invalid configuration ({}: {}); replace the retired key with schedule.{replacement}; edit config.toml and run `provenant config check`",
+                    issue.rule, source.code
+                )
+            }
             Some(source) => format!(
                 "{key}: ignored invalid configuration ({}: {})",
                 issue.rule, source.code
@@ -2214,5 +2271,71 @@ fn normalise_tables(table: &mut Table) {
             normalise_tables(&mut child);
             *item = Item::Table(child);
         }
+    }
+}
+
+#[cfg(test)]
+mod warning_tests {
+    use super::*;
+    use provenant_core::{PathResolver, RootInputs};
+    use std::{io, path::PathBuf};
+
+    struct Resolver;
+    impl PathResolver for Resolver {
+        fn resolve_existing_ancestor(&self, path: &Path) -> io::Result<PathBuf> {
+            Ok(path.to_owned())
+        }
+    }
+
+    #[test]
+    fn warning_stamp_is_per_revision_and_finding() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut inputs = RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        std::fs::create_dir(inputs.state_dir.as_ref().ok_or("state")?)?;
+        let roots = inputs.resolve(&Resolver)?;
+        let issue = Issue {
+            location: location(
+                "",
+                0,
+                &Origin::Compiled {
+                    profile: Profile::Balanced,
+                },
+                "domains.routing.pacing_overrides.0",
+            ),
+            rule: "invalid",
+            source: Some(SectionError {
+                field: String::new(),
+                code: "moved_to_schedule.expires",
+            }),
+            rejected: String::new(),
+        };
+        let warning = issue_finding(&issue)?;
+        assert!(warning.message.contains("schedule.expires"));
+        assert!(warning.message.contains("provenant config check"));
+        assert!(first_warning(
+            roots.state.as_path(),
+            Some("revision one"),
+            &warning
+        ));
+        assert!(!first_warning(
+            roots.state.as_path(),
+            Some("revision one"),
+            &warning
+        ));
+        assert!(first_warning(
+            roots.state.as_path(),
+            Some("revision two"),
+            &warning
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn pre_tool_hook_arguments_are_identified() {
+        assert!(is_pre_tool_hook(
+            ["--json", "hook", "claude", "pre-tool-use"].map(Into::into)
+        ));
+        assert!(!is_pre_tool_hook(["config", "show"].map(Into::into)));
     }
 }
