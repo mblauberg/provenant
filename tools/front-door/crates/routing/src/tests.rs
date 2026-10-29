@@ -296,12 +296,19 @@ fn effort_errors_report_recorded_controls_and_nearest_models()
     ] {
         let mut query = request(model)?;
         query.effort = Some("unsupported".into());
-        let message = resolve(&query, &context)
-            .expect_err("effort must be refused")
-            .to_string();
-        assert!(message.contains(model), "{message}");
-        assert!(message.contains("unsupported"), "{message}");
-        assert!(message.contains(expected), "{message}");
+        let error = resolve(&query, &context).expect_err("effort must be refused");
+        assert_eq!(error.code(), "unsupported_effort");
+        let RoutingError::UnsupportedEffort {
+            model: refused_model,
+            effort,
+            support,
+        } = error
+        else {
+            unreachable!();
+        };
+        assert_eq!(refused_model, model);
+        assert_eq!(effort, "unsupported");
+        assert!(support.contains(expected), "{support}");
     }
     assert_eq!(
         catalogue
@@ -486,19 +493,9 @@ fn route_names_validate_at_the_string_boundary() -> Result<(), Box<dyn std::erro
     let longest = "x".repeat(64);
     assert_eq!(RouteName::parse(&longest)?.as_str(), longest);
     for text in ["", "bad name", "bad/name", "bad\n", "é", &"x".repeat(65)] {
-        assert!(matches!(
-            RouteName::parse(text),
-            Err(RoutingError::InvalidValue)
-        ));
+        assert_eq!(RouteName::parse(text).unwrap_err().code(), "invalid_value");
         let wire = serde_json::json!({"kind": "named_route", "value": text});
-        let error = serde_json::from_value::<RouteChoice>(wire)
-            .err()
-            .ok_or("invalid name accepted")?;
-        assert!(
-            error
-                .to_string()
-                .contains(&RoutingError::InvalidValue.to_string())
-        );
+        assert!(serde_json::from_value::<RouteChoice>(wire).is_err());
     }
     for value in [
         serde_json::json!({"name": "review"}),

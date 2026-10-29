@@ -11,7 +11,7 @@ pub mod refresh;
 mod trace;
 pub mod usage;
 pub use chair::{ChairModelUsage, Unread, attach_usage as attach_chair_usage};
-pub use native::{NativeError, NativeModel, NativeReport, claude_subagents};
+pub use native::{NativeError, NativeInput, NativeModel, NativeReport, claude_subagents};
 pub use prices::{
     BillingKind, Categories, ConfiguredModel, ConfiguredPrices, Freshness, PriceError,
     PriceIdentity, PriceTable, Rates, validate_prices,

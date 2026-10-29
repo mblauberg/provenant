@@ -148,8 +148,21 @@ impl PriceTable {
 pub enum PriceError {
     #[error("unsupported price schema version {0}")]
     UnsupportedVersion(u64),
-    #[error("invalid price table: {0}")]
-    Invalid(&'static str),
+    #[error("invalid price table: {message}")]
+    Invalid {
+        code: &'static str,
+        message: &'static str,
+    },
+}
+
+impl PriceError {
+    /// Stable machine-readable refusal code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::UnsupportedVersion(_) => "unsupported_version",
+            Self::Invalid { code, .. } => code,
+        }
+    }
 }
 
 pub fn validate_prices(config: &ConfiguredPrices) -> Result<PriceTable, PriceError> {
@@ -157,7 +170,10 @@ pub fn validate_prices(config: &ConfiguredPrices) -> Result<PriceTable, PriceErr
         return Err(PriceError::UnsupportedVersion(config.schema_version));
     }
     if config.units != "usd_microdollars_per_million_tokens" {
-        return Err(PriceError::Invalid("units"));
+        return Err(PriceError::Invalid {
+            code: "units",
+            message: "units",
+        });
     }
     if config.id.trim().is_empty()
         || config
@@ -166,7 +182,10 @@ pub fn validate_prices(config: &ConfiguredPrices) -> Result<PriceTable, PriceErr
             .ok()
             .is_none_or(|d| d.to_string() != config.reviewed_at)
     {
-        return Err(PriceError::Invalid("identity or review date"));
+        return Err(PriceError::Invalid {
+            code: "identity",
+            message: "identity or review date",
+        });
     }
     let mut models = BTreeMap::new();
     for model in &config.models {
@@ -175,18 +194,23 @@ pub fn validate_prices(config: &ConfiguredPrices) -> Result<PriceTable, PriceErr
             || model.sources.is_empty()
             || model.sources.iter().any(|s| s.trim().is_empty())
         {
-            return Err(PriceError::Invalid("model identity or source references"));
+            return Err(PriceError::Invalid {
+                code: "model_identity",
+                message: "model identity or source references",
+            });
         }
         let rates = model.rates.values();
         if rates.contains(&Some(0)) && !model.zero_rate_verified {
-            return Err(PriceError::Invalid(
-                "zero rate requires explicit verification",
-            ));
+            return Err(PriceError::Invalid {
+                code: "unverified_zero_rate",
+                message: "zero rate requires explicit verification",
+            });
         }
         if model.billing == BillingKind::Free && rates != [Some(0); 4] {
-            return Err(PriceError::Invalid(
-                "free billing requires four verified zero rates",
-            ));
+            return Err(PriceError::Invalid {
+                code: "invalid_free_rates",
+                message: "free billing requires four verified zero rates",
+            });
         }
         let date = |value: &Option<String>| match value {
             None => Ok(None),
@@ -195,19 +219,28 @@ pub fn validate_prices(config: &ConfiguredPrices) -> Result<PriceTable, PriceErr
                 .ok()
                 .filter(|d| d.to_string() == *text)
                 .map(Some)
-                .ok_or(PriceError::Invalid("effective date")),
+                .ok_or(PriceError::Invalid {
+                    code: "effective_date",
+                    message: "effective date",
+                }),
         };
         if let (Some(from), Some(to)) = (date(&model.effective_from)?, date(&model.effective_to)?)
             && from > to
         {
-            return Err(PriceError::Invalid("effective_from after effective_to"));
+            return Err(PriceError::Invalid {
+                code: "effective_range",
+                message: "effective_from after effective_to",
+            });
         }
         let key = (model.provider.clone(), model.model.clone());
         if models
             .insert(key, (model.rates.clone(), model.billing))
             .is_some()
         {
-            return Err(PriceError::Invalid("duplicate provider/model"));
+            return Err(PriceError::Invalid {
+                code: "duplicate_model",
+                message: "duplicate provider/model",
+            });
         }
     }
     Ok(PriceTable {
