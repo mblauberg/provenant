@@ -26,6 +26,10 @@ pub struct HostDeliveryContext {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     tools: Option<HostTools>,
     bound: Option<BoundDelivery>,
+    /// Where the lane can write: its worktree and the project's lane areas.
+    /// Host transport refuses configuration and programs located there.
+    #[serde(default)]
+    lane_roots: Vec<PathBuf>,
     #[serde(skip)]
     cancellation: Option<provenant_core::CancelToken>,
 }
@@ -85,6 +89,7 @@ impl Clone for HostDeliveryContext {
             environment: self.environment.clone(),
             tools: self.tools.clone(),
             bound: self.bound.clone(),
+            lane_roots: self.lane_roots.clone(),
             cancellation: self.cancellation.clone(),
         }
     }
@@ -428,6 +433,7 @@ impl HostDeliveryContext {
                 .collect(),
             bound: None,
             tools: None,
+            lane_roots: Vec::new(),
             cancellation: None,
         }
     }
@@ -612,37 +618,7 @@ impl HostDeliveryContext {
         });
         self.validate_transport_helpers(writer)?;
         if fetch && !matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
-            let uploadpack = format!("remote.{}.uploadpack=git-upload-pack", request.remote);
-            let refspec = format!("+refs/heads/*:refs/remotes/{}/*", request.remote);
-            self.command(
-                &writer.worktree,
-                "git",
-                &[
-                    "-c",
-                    "protocol.allow=never",
-                    "-c",
-                    "protocol.ssh.allow=always",
-                    "-c",
-                    "protocol.https.allow=always",
-                    "-c",
-                    "protocol.http.allow=always",
-                    "-c",
-                    "protocol.file.allow=always",
-                    "-c",
-                    &uploadpack,
-                    "-c",
-                    "core.logAllRefUpdates=false",
-                    "fetch",
-                    "--no-auto-maintenance",
-                    "--no-tags",
-                    "--no-recurse-submodules",
-                    "--refmap=",
-                    "--",
-                    &request.remote,
-                    &refspec,
-                ],
-                stage,
-            )?;
+            self.refresh_remote(writer, &[], &request.remote)?;
         }
         Ok(self)
     }
@@ -679,39 +655,145 @@ impl HostDeliveryContext {
             return Ok(());
         }
         host.validate_transport_helpers(writer)?;
-        host.command(
-            &writer.worktree,
-            "git",
-            &[
-                "--git-dir",
-                git_dir,
-                "--work-tree",
-                worktree,
-                "-c",
-                "protocol.allow=never",
-                "-c",
-                "protocol.ssh.allow=always",
-                "-c",
-                "protocol.https.allow=always",
-                "-c",
-                "protocol.http.allow=always",
-                "-c",
-                "protocol.file.allow=always",
-                "-c",
-                "remote.origin.uploadpack=git-upload-pack",
-                "-c",
-                "core.logAllRefUpdates=false",
-                "fetch",
-                "--no-auto-maintenance",
-                "--no-tags",
-                "--no-recurse-submodules",
-                "--refmap=",
-                "--",
-                "origin",
-                "+refs/heads/*:refs/remotes/origin/*",
-            ],
-            Stage::Prepare,
-        )?;
+        host.refresh_remote(
+            writer,
+            &["--git-dir", git_dir, "--work-tree", worktree],
+            "origin",
+        )
+    }
+
+    /// Fetch every advertised branch of `remote` into `refs/remotes/<remote>/`,
+    /// leaving out any whose tracking ref could alias another one. `prefix`
+    /// holds the repository selection arguments, if the caller has no bound
+    /// repository.
+    fn refresh_remote(&self, writer: &WriterRequest, prefix: &[&str], remote: &str) -> Result<()> {
+        let tracking = format!("refs/remotes/{remote}/");
+        let uploadpack = format!("remote.{remote}.uploadpack=git-upload-pack");
+        let with = |tail: &[&str]| -> Vec<String> {
+            prefix
+                .iter()
+                .chain(tail)
+                .map(|arg| (*arg).to_owned())
+                .collect()
+        };
+        let run = |tail: &[&str]| -> Result<String> {
+            let args = with(tail);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.command(&writer.worktree, "git", &args, Stage::Prepare)
+        };
+        let advertised = run(&[
+            "-c",
+            &uploadpack,
+            "ls-remote",
+            "--symref",
+            "--",
+            remote,
+            "HEAD",
+            "refs/heads/*",
+        ])?;
+        let mut default = None;
+        let mut heads = Vec::new();
+        for line in advertised.lines() {
+            let Some((value, name)) = line.split_once('\t') else {
+                continue;
+            };
+            if name == "HEAD" {
+                if let Some(branch) = value.strip_prefix("ref: refs/heads/") {
+                    default = Some(branch.to_owned());
+                }
+            } else if let Some(branch) = name.strip_prefix("refs/heads/")
+                && GitOid::parse(value).is_ok()
+            {
+                heads.push(branch);
+            }
+        }
+        // Names that alias on a case-insensitive filesystem would share one
+        // tracking ref. `HEAD` is the symref `<remote>/HEAD`, so a branch
+        // named `head` aliases it there, and so does any local tracking symref:
+        // a fetch writes through a symref to the ref it points at. Leave such
+        // names out. Only a colliding default is fatal.
+        let mut reserved = vec!["HEAD".to_owned()];
+        let mut existing = Vec::new();
+        for line in run(&["for-each-ref", "--format=%(refname)%09%(symref)", &tracking])?.lines() {
+            if let Some((name, symref)) = line.split_once('\t')
+                && let Some(short) = name.strip_prefix(&tracking)
+            {
+                if !symref.is_empty() {
+                    reserved.push(short.to_owned());
+                }
+                existing.push(short.to_owned());
+            }
+        }
+        // Spellings that differ only in Unicode normalisation share one
+        // tracking ref where Git precomposes names or the filesystem folds
+        // them, so a sibling's commit would land behind the default (or
+        // behind `<remote>/HEAD`). Which spelling survives is not ours to
+        // choose, so refuse outright instead of leaving a name out.
+        let advertised: Vec<&str> = default
+            .iter()
+            .map(String::as_str)
+            .chain(heads.iter().copied())
+            .collect();
+        let on_disk: Vec<&str> = existing.iter().map(String::as_str).collect();
+        if let Some((name, other)) = provenant_core::find_normalisation_alias(&advertised, &on_disk)
+        {
+            return Err(prepare_error(
+                "origin refresh",
+                format!(
+                    "branch names {} and {} are equivalent under Unicode NFC normalisation; refusing to refresh {remote} until one spelling is gone",
+                    spelled(name),
+                    spelled(other),
+                ),
+            ));
+        }
+        let mut refspecs = Vec::new();
+        for name in &heads {
+            let collides = heads
+                .iter()
+                .any(|other| provenant_core::refs_collide(name, other))
+                || reserved
+                    .iter()
+                    .any(|held| *name == held || provenant_core::refs_collide(name, held));
+            if collides && default.as_deref() == Some(*name) {
+                return Err(prepare_error(
+                    "origin refresh",
+                    "default branch collides with another branch name",
+                ));
+            }
+            if collides || GitRefName::branch(name).is_err() {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: not refreshing {remote} branch {name:?}; its name collides or is unsupported, and an existing tracking ref may be stale"
+                );
+                continue;
+            }
+            refspecs.push(format!("+refs/heads/{name}:{tracking}{name}"));
+        }
+        if refspecs.is_empty() {
+            return Ok(());
+        }
+        let mut tail = vec![
+            "-c",
+            &uploadpack,
+            "-c",
+            "core.logAllRefUpdates=false",
+            // Git precomposes decomposed Unicode in ref names itself, so
+            // NFC and NFD spellings of one branch land on one tracking ref
+            // (which `refs_collide` then sees) without a normalisation
+            // dependency here.
+            "-c",
+            "core.precomposeunicode=true",
+            "fetch",
+            "--no-auto-maintenance",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--refmap=",
+            "--",
+            remote,
+        ];
+        tail.extend(refspecs.iter().map(String::as_str));
+        run(&tail)?;
         Ok(())
     }
 
@@ -746,16 +828,6 @@ impl HostDeliveryContext {
                 "git",
                 &[
                     "-c",
-                    "protocol.allow=never",
-                    "-c",
-                    "protocol.ssh.allow=always",
-                    "-c",
-                    "protocol.https.allow=always",
-                    "-c",
-                    "protocol.http.allow=always",
-                    "-c",
-                    "protocol.file.allow=always",
-                    "-c",
                     "remote.origin.uploadpack=git-upload-pack",
                     "ls-remote",
                     "--exit-code",
@@ -774,21 +846,12 @@ impl HostDeliveryContext {
             return Err(RunError::Delivery(stage));
         }
         let tracking = format!("refs/remotes/origin/{branch}");
+        self.refuse_symref_destination(&writer.worktree, &tracking, stage)?;
         let refspec = format!("+{source}:{tracking}");
         self.command(
             &writer.worktree,
             "git",
             &[
-                "-c",
-                "protocol.allow=never",
-                "-c",
-                "protocol.ssh.allow=always",
-                "-c",
-                "protocol.https.allow=always",
-                "-c",
-                "protocol.http.allow=always",
-                "-c",
-                "protocol.file.allow=always",
                 "-c",
                 "remote.origin.uploadpack=git-upload-pack",
                 "-c",
@@ -883,6 +946,18 @@ impl HostDeliveryContext {
         Ok(())
     }
     fn host_environment(&mut self, writer: &WriterRequest) -> Result<()> {
+        // A graph delivery runs in the project checkout itself, which is not a
+        // lane.
+        self.lane_roots = (writer.worktree != writer.project)
+            .then(|| writer.worktree.clone())
+            .into_iter()
+            .collect();
+        self.lane_roots.extend(
+            [".worktrees", ".provenant", ".agent-run"].map(|name| writer.project.join(name)),
+        );
+        if let Some(run_state) = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV) {
+            self.lane_roots.push(PathBuf::from(run_state));
+        }
         for (key, value) in &mut self.environment {
             let name = std::str::from_utf8(key).unwrap_or_default();
             if name == "GIT_SSH_COMMAND" && !value.is_empty() {
@@ -1022,8 +1097,22 @@ impl HostDeliveryContext {
         } else {
             &[]
         };
+        // Advertisement and fetch share one hardened transport: the same
+        // protocol limits everywhere, and a refusal to run when the effective
+        // configuration or a transport program lives where a lane can write.
+        let network = tool == "git" && reaches_remote(args);
+        if network {
+            self.check_transport(cwd, &environment, stage)?;
+        }
+        let transport = if network {
+            provenant_confinement::transport::config_args()
+        } else {
+            Vec::new()
+        };
         let argv: Vec<OsString> = std::iter::once(executable.as_os_str().to_owned())
-            .chain(git_options.iter().chain(args).map(OsString::from))
+            .chain(git_options.iter().map(OsString::from))
+            .chain(transport)
+            .chain(args.iter().map(OsString::from))
             .collect();
         let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
         let mut redactor = if stage == Stage::Prepare {
@@ -1048,8 +1137,14 @@ impl HostDeliveryContext {
         options.env = Some(&environment);
         options.stdin = Some(input);
         let commit_log = tool == "git" && args.first() == Some(&"log");
+        // A configuration listing with origins can exceed an ordinary reply.
+        let listing = args.contains(&"--show-origin");
         options.stdout = StreamPolicy::Capture {
-            limit: if commit_log { 56_000 } else { 16 * 1024 },
+            limit: match (commit_log, listing) {
+                (true, _) => 56_000,
+                (false, true) => 1024 * 1024,
+                (false, false) => 16 * 1024,
+            },
         };
         options.stop_on_output_limit = commit_log;
         options.stderr = if stage == Stage::Prepare {
@@ -1098,6 +1193,78 @@ impl HostDeliveryContext {
         String::from_utf8(output.stdout.bytes)
             .map(|v| v.trim().into())
             .map_err(|error| failure(error.to_string()))
+    }
+    /// A fetch writes through a symref to the ref it points at, which would
+    /// move that ref instead. Never fetch into one.
+    pub(super) fn refuse_symref_destination(
+        &self,
+        cwd: &Path,
+        reference: &str,
+        stage: Stage,
+    ) -> Result<()> {
+        let target = self.command(cwd, "git", &["symbolic-ref", "--quiet", reference], stage)?;
+        if target.is_empty() {
+            return Ok(());
+        }
+        if stage == Stage::Prepare {
+            return Err(prepare_error("fetch", "destination is a symbolic ref"));
+        }
+        Err(RunError::Delivery(stage))
+    }
+
+    /// Refuse an advertisement or fetch whose effective configuration is read
+    /// from a lane-writable file, or names a transport program there.
+    fn check_transport(
+        &self,
+        cwd: &Path,
+        environment: &[(OsString, OsString)],
+        stage: Stage,
+    ) -> Result<()> {
+        use provenant_confinement::transport;
+        let refuse = |error: transport::TransportError| {
+            if stage == Stage::Prepare {
+                prepare_error("transport", error)
+            } else {
+                RunError::Delivery(stage)
+            }
+        };
+        let roots = transport::LaneRoots::new(self.lane_roots.iter().cloned());
+        let base = self
+            .bound
+            .as_ref()
+            .map_or(cwd, |bound| bound.host_cwd.as_path());
+        transport::check_environment(environment, base, &roots).map_err(refuse)?;
+        let listing = self.command_with_input(cwd, "git", &transport::LISTING_ARGS, stage, b"")?;
+        let entries = transport::parse_listing(listing.as_bytes()).map_err(refuse)?;
+        transport::check_listing(&entries, base, &roots).map_err(refuse)?;
+        // Git rereads configuration for the command itself, so refuse any
+        // include directive that names a lane area, read or not: a lane could
+        // otherwise create the target between this check and the command.
+        let directives =
+            self.command_with_input(cwd, "git", &transport::DIRECTIVE_ARGS, stage, b"")?;
+        let top = transport::parse_listing(directives.as_bytes()).map_err(refuse)?;
+        let home = environment
+            .iter()
+            .find(|(name, _)| name == "HOME")
+            .map_or(base, |(_, home)| Path::new(home));
+        let mut read = |file: &Path| -> std::result::Result<
+            Option<Vec<transport::ConfigEntry>>,
+            transport::TransportError,
+        > {
+            if !file.is_file() {
+                return Ok(None);
+            }
+            let file = file.to_str().ok_or(transport::TransportError::Unreadable)?;
+            let args = ["config", "--file", file]
+                .into_iter()
+                .chain(["--no-includes", "--show-origin", "-z", "--list"])
+                .collect::<Vec<_>>();
+            let listing = self
+                .command_with_input(cwd, "git", &args, stage, b"")
+                .map_err(|_| transport::TransportError::Unreadable)?;
+            transport::parse_listing(listing.as_bytes()).map(Some)
+        };
+        transport::check_includes(&top, base, home, &roots, &mut read).map_err(refuse)
     }
     pub(super) fn head(&self, writer: &WriterRequest) -> Result<GitOid> {
         let head = self.command(
@@ -1189,7 +1356,14 @@ impl HostDeliveryContext {
         let commits = self.command(
             &writer.worktree,
             "git",
-            &["log", "--max-count=100", "--format=%s%n%b", range, "--"],
+            &[
+                "log",
+                "--no-show-signature",
+                "--max-count=100",
+                "--format=%s%n%b",
+                range,
+                "--",
+            ],
             Stage::Head,
         )?;
         Ok(cap_pr_body(format!("{identity}\n\n{commits}")))
@@ -1220,6 +1394,7 @@ impl HostDeliveryContext {
         let target = if remote {
             let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
             if request.remote != "origin" {
+                self.refuse_symref_destination(&writer.worktree, &tracking, Stage::Fetch)?;
                 self.command(
                     &writer.worktree,
                     "git",
@@ -1355,6 +1530,7 @@ impl HostDeliveryContext {
             let verified = if request.remote == "origin" {
                 self.refresh_target_and_resolve(writer, &request.branch, Stage::Verify)?
             } else {
+                self.refuse_symref_destination(&writer.worktree, &target, Stage::Verify)?;
                 self.command(
                     &writer.worktree,
                     "git",
@@ -1483,6 +1659,7 @@ impl HostDeliveryContext {
         )?;
         let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
         let fetchspec = format!("+{destination}:{tracking}");
+        self.refuse_symref_destination(cwd, &tracking, Stage::Fetch)?;
         self.command(
             cwd,
             "git",
@@ -1637,6 +1814,20 @@ pub(super) fn redact_url_userinfo(detail: &str) -> String {
     safe
 }
 
+/// A name with its non-ASCII characters escaped, so two spellings of one
+/// name read differently.
+fn spelled(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            out.push_str(&c.escape_unicode().to_string());
+        }
+    }
+    format!("\"{name}\" ({out})")
+}
+
 pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
     let detail = detail.to_string();
     let safe = provenant_confinement::redact::known_shapes(detail.as_bytes())
@@ -1694,6 +1885,22 @@ fn host_path(path: &Path, writer: &WriterRequest) -> std::result::Result<PathBuf
         return Err(HostPathError::InsideWorktree);
     }
     Ok(canonical)
+}
+
+/// Whether the Git command talks to a remote to advertise or fetch refs. The
+/// subcommand is the first argument that is not an option or an option value.
+fn reaches_remote(args: &[&str]) -> bool {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match *arg {
+            "-c" | "-C" | "--git-dir" | "--work-tree" => {
+                args.next();
+            }
+            option if option.starts_with('-') => {}
+            subcommand => return matches!(subcommand, "fetch" | "ls-remote"),
+        }
+    }
+    false
 }
 
 fn pull_request_repo(url: &str) -> Result<String> {

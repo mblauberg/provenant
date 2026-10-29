@@ -91,7 +91,7 @@ pub fn collect(
         if lane.writer == WriterState::Unknown {
             let stale = match repository_lock(context, LockMode::Exclusive, cancel) {
                 Ok(_repository) => matches!(
-                    read_worktree_identity(context, entry, true),
+                    read_worktree_identity(context, entry, true, cancel),
                     Err(WorktreeError::RegistrationMismatch { .. })
                 ),
                 Err(_) => false,
@@ -866,7 +866,7 @@ fn collect_foreign(
     if !is_ancestor(context, lane.head, upstream, cancel)? {
         return Ok(None);
     }
-    let verified = verify_worktree(context.repo, &lane.path)?;
+    let verified = verify_probed_worktree(context, &lane.path, cancel)?;
     // Serialise state creation and writer acquisition with temporary-state
     // disposal and worktree creation, so no collector opens a detached lock.
     let repository = repository_lock(context, LockMode::Exclusive, cancel)?;
