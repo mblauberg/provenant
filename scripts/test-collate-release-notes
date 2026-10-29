@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/test-git-env.sh"
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/test-git-env.sh"
 script=$(cd "$(dirname "$0")" && pwd -P)/collate-release-notes
 PATH="/usr/bin:/bin:$PATH"
 export PATH
