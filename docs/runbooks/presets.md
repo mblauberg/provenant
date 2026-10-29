@@ -395,6 +395,62 @@ A planner fragment cannot widen what its planner node holds. Each child
 `role` and `source` must equal the planner's, and each child `read_roots` entry
 must already be one of the planner's.
 
+## Planner patterns
+
+A plan node can also offer known-good patterns to its fragment. The plan node
+carries the allow-list, so the runtime does not read preset files while
+expanding a fragment. Each entry names the pattern, declares its typed
+parameters and holds the pattern's nodes and exports:
+
+```json
+{"id":"plan","kind":"plan","access":"read_only","prompt":"Slice the work",
+ "plan":{"kinds":["task"],"max_nodes":6,"patterns":[
+   {"name":"generator-evaluator",
+    "parameters":{
+      "worktree":{"type":"string"},
+      "scope":{"type":"list","default":["."]}
+    },
+    "nodes":[
+      {"id":"write","prompt":"Implement ${scope}","access":"worktree_write",
+       "worktree":"${worktree}","write_scope":"${scope}",
+       "acceptance_checks":["The change is verified"]}
+    ],
+    "exports":[{"node":"write","outputs":["result","commit"]}]}
+ ]}}
+```
+
+Parameter schemas use the preset forms `type` (`string`, `integer`, `number`,
+`boolean`, `list` or `table`), `default`, `min`, `max`, `enum` and `doc`. A
+parameter without a default is required. The fragment names a listed pattern
+and supplies values; it cannot supply nodes, `access`, `role`, `source` or
+`read_roots`. Those fields stay fixed in the pattern definition, and a
+placeholder in one of them is refused, so a parameter cannot widen them.
+Pattern nodes are prepared like ordinary fragment agents: they need a brief,
+literal write scope and acceptance checks, and omitted routes resolve through
+`senior`.
+
+The fragment adds a `patterns` array next to `nodes`. An instance has a local
+`id`, the pattern `name`, typed `parameters`, and optional `depends_on`,
+`inputs` and `title`:
+
+```json
+{"schema_version":1,"nodes":[],"patterns":[
+  {"id":"impl","pattern":"generator-evaluator",
+   "parameters":{"worktree":"/absolute/path/to/writer","scope":["src"]}}
+]}
+```
+
+An instance expands to the same composite boundary, child IDs, exports and
+scheduling as a statically written composite with the same template. The
+pattern name and effective parameters, including defaults, are recorded with
+the expansion. `plan.max_nodes` counts every expanded child against the host
+node, edge, fan-out and depth ceilings.
+
+An unlisted pattern, an unknown or invalid parameter, or a widening field
+pauses the graph and admits no children. The pause reason names the pattern,
+parameter or field. When the graph has a decision session, the pause also
+raises the usual inbox decision.
+
 Graph limits and host ceilings cover all children and every possible loop
 round. The ordinary dependency-depth limit remains four. The default host
 ceiling is 64, and `big-batch` explicitly requests 64. A host can choose a
