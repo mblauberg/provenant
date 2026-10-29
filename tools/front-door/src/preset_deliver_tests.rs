@@ -376,10 +376,7 @@ fn a_red_gate_repairs_from_the_failure_excerpt_and_the_repaired_head_is_reviewed
     // A fresh agent: the writer's brief is not carried, only its final report.
     let (_, writer_brief) = host.prompts.iter().find(|(id, _)| id == "write").unwrap();
     assert!(writer_brief.contains("Implement one bounded slice"));
-    assert!(
-        !prompt.contains("Implement one bounded slice"),
-        "{prompt}"
-    );
+    assert!(!prompt.contains("Implement one bounded slice"), "{prompt}");
     assert!(prompt.contains("no earlier transcript"), "{prompt}");
     // The repair continues the writer's branch; review and land pin its head.
     let repaired = commit(2);
@@ -625,7 +622,9 @@ fn remaining_work_at_the_end_of_a_long_report_reaches_every_repair_round() {
     while report.len() < 3 * 4096 {
         report.push_str("Notes: the tokenizer keeps byte offsets for every span.\n");
     }
-    report.push_str("Remaining: wire the docs table.\n");
+    report.push_str(
+        "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"Parser landed.\",\"remaining\":[\"Wire the docs table.\"],\"decisions\":[],\"verify\":[]}\n```\n",
+    );
     let document = deliver(&[]);
     let mut host = Host {
         ci: VecDeque::from([
@@ -647,10 +646,7 @@ fn remaining_work_at_the_end_of_a_long_report_reaches_every_repair_round() {
     };
     for round in ["ci--repair--r1--fix", "ci--repair--r2--fix"] {
         let prompt = brief(round);
-        assert!(
-            prompt.contains("Remaining: wire the docs table."),
-            "{round}: {prompt}"
-        );
+        assert!(prompt.contains("Wire the docs table."), "{round}: {prompt}");
     }
     let second = brief("ci--repair--r2--fix");
     assert!(second.contains("second red"), "{second}");
