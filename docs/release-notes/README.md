@@ -35,10 +35,11 @@ Add one file per user-visible change under `next.d/`, named `<issue>-<topic>.md`
 
 - **First line.** Exactly one of `## Breaking changes`, `## Behaviour changes`,
   `## Additions` or `## Fixes`. No other `##` heading is allowed.
-- **Second line (area).** `### <Area>`, from the list below. The collator groups
-  each section's entries by area in this order and leaves out empty areas.
-  Untagged fragments come last, under no sub-heading, so tag every fragment.
-  An unknown area fails `scripts/collate-release-notes --check`.
+- **Second line (area).** `### <Area>`, from the project list below. Tag every
+  fragment; an unknown area fails `scripts/collate-release-notes --check`. The
+  collator decides whether to show the tag: it renders `### Area` sub-headings,
+  in the order below, only in a section with more than 12 entries, and lists a
+  smaller section flat in the same order, with untagged entries last.
   1. CLI and install
   2. Lanes and settlement
   3. Git and safety
@@ -47,19 +48,16 @@ Add one file per user-visible change under `next.d/`, named `<issue>-<topic>.md`
   6. Chair, inbox and console
   7. Fabric and MCP
   8. Telemetry and providers
-- **Body.** One to three bullets, each a finished sentence for the published
-  notes: subject first, in the user's terms, ending with `(#issue)`. A breaking
-  change also says who is affected and what to do instead, in up to five
-  sentences: `**The change.** Action.`
-- **Upgrade actions.** Anything a user must do on upgrade (drain lanes, upgrade
-  every host together, edit config, rerun a command) is a breaking change, or
-  goes in the intro's upgrade note. Never leave one under Behaviour changes.
+- **Body.** One bullet per change, each one to three sentences for the
+  published notes: subject first, in the user's terms, ending with `(#issue)`.
+  A breaking change states the action: `**The change.** What to do.`
+- **Upgrade actions.** Anything a user must do on upgrade is a breaking change.
+  A change that needs no action never goes under Breaking changes.
 - **Do not include.** Stability or version boilerplate, an intro, mechanism or
-  failure-sequence detail, slice or wave numbers, internal-only changes, or
-  entries copied from commit messages. A change no user can notice needs no
-  fragment.
+  failure-sequence detail, internal-only changes, or entries copied from commit
+  messages. A change no user can notice needs no fragment.
 - **Links.** Paths are relative to `next.d/`. Link to a guide or ADR for depth
   instead of explaining it in the entry.
 - **Intro.** `next.d/_intro.md` is two sentences on what the release is about,
-  a one-line link to this page's Stability section, and an upgrade note only if
-  the release breaks something. Maintainers write it last.
+  a one-line link to the Stability section above, and a pointer to Breaking
+  changes if the release has any. Maintainers write it last.

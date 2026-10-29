@@ -1,5 +1,4 @@
 ## Breaking changes
 ### Lanes and settlement
 
-- **`gc.free_floor` now governs all lane admission and build pauses, and the `[disk_guard]` table is removed.** Read-only lanes use the same floor as writers. Delete `[disk_guard]` from your configuration (#1941).
-- **`provenant disk-guard` is removed.** Active lanes watch disk pressure themselves, and scheduled GC runs daily as a backstop (#1941).
+- **The `[disk_guard]` table and `provenant disk-guard` are removed.** Delete `[disk_guard]` from your configuration. Lanes now pause their own builds below `gc.free_floor` and resume at the same floor, housekeeping runs when a lane settles, and `install` retires the old disk-guard agent (#1941, #1952, #1965).

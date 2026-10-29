@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- Nested runs now carry child run and attempt IDs that the host verifies, so a lane can no longer rewrite an ID to affect a sibling. Existing child records are not migrated (#2054).
+- A lane can no longer choose child or continuation run IDs that affect a sibling or create a host chair association (#2054, #2088).

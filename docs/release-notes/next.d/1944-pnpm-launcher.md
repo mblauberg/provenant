@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- Lanes run the installed `pnpm` instead of switching to the version a project pins, which failed with `ENOEXEC`. Lane environments set `manage-package-manager-versions` and `package-manager-strict` to `false` (#1944).
+- Lanes now run the installed `pnpm` instead of switching to the version a project pins, which failed with `ENOEXEC` (#1944).

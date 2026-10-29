@@ -1,4 +1,4 @@
 ## Breaking changes
 ### Pipelines and graphs
 
-- **Guardians from an earlier version cannot read checkpoints that carry the new graph policy fields.** Finish or restart older lanes when you upgrade (#2004).
+- **Graph lanes from an earlier release cannot read checkpoints that carry the new graph policy fields.** Finish or restart them when you upgrade (#2004).

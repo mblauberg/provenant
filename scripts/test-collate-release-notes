@@ -24,7 +24,7 @@ printf 'See [policy](../../release-notes/README.md).\n' > "$dir/_intro.md"
 "$script" | grep -F '(../release-notes/README.md)' > /dev/null
 ! "$script" | sed -n '1,/^## /p' | grep -F '../../' > /dev/null
 
-# Area grouping: configured order, untagged last, empty areas left out.
+# Area order: small sections list entries flat, in area order, untagged last.
 rm -f "$dir"/*.md
 printf 'Intro.\n' > "$dir/_intro.md"
 printf '## Fixes\n### Fabric and MCP\n\n- Fabric fix.\n' > "$dir/a.md"
@@ -34,19 +34,31 @@ printf '## Additions\n### Git and safety\n\n- Git addition.\n' > "$dir/d.md"
 "$script" > "$tmp/out"
 expected='## Fixes
 
-### CLI and install
-
 - CLI fix.
-
-### Fabric and MCP
-
 - Fabric fix.
-
 - Untagged fix.'
+! grep -q '^### ' "$tmp/out"
+actual=$(sed -n '/^## Fixes/,$p' "$tmp/out")
+[ "$actual" = "$expected" ] || { echo "unexpected flat order:" >&2; printf '%s\n' "$actual" >&2; exit 1; }
+
+# A section with more than 12 entries renders area sub-headings.
+rm -f "$dir"/*.md
+printf 'Intro.\n' > "$dir/_intro.md"
+printf '## Fixes\n### Fabric and MCP\n\n- Fabric fix.\n' > "$dir/a.md"
+printf '## Fixes\n### CLI and install\n\n- CLI fix.\n' > "$dir/b.md"
+printf '## Fixes\n\n- Untagged fix.\n' > "$dir/c.md"
+for n in 1 2 3 4 5 6 7 8 9 10; do
+  printf '## Fixes\n### Git and safety\n\n- Git fix %s.\n' "$n" > "$dir/g$n.md"
+done
+printf '## Additions\n### Git and safety\n\n- Git addition.\n' > "$dir/d.md"
+"$script" > "$tmp/out"
+grep -qxF '### CLI and install' "$tmp/out"
 grep -qxF '### Git and safety' "$tmp/out"
 ! grep -qxF '### Lanes and settlement' "$tmp/out"
-actual=$(sed -n '/^## Fixes/,$p' "$tmp/out")
-[ "$actual" = "$expected" ] || { echo "unexpected grouping:" >&2; printf '%s\n' "$actual" >&2; exit 1; }
+awk '/^## Fixes/ { f = 1 } f && /^### / { print }' "$tmp/out" | head -3 | paste -sd'|' - > "$tmp/headings"
+[ "$(cat "$tmp/headings")" = '### CLI and install|### Git and safety|### Fabric and MCP' ] || { echo "unexpected sub-headings" >&2; exit 1; }
+[ "$(tail -n 1 "$tmp/out")" = '- Untagged fix.' ]
+sed -n '/^## Additions/,/^## Fixes/p' "$tmp/out" | grep -q '^### ' && { echo "small section got sub-headings" >&2; exit 1; }
 printf '## Fixes\n### Nowhere\n\n- Bad.\n' > "$dir/e.md"
 if "$script" --check > "$tmp/out" 2> "$tmp/err"; then
   echo "collate-release-notes accepted an unknown area" >&2

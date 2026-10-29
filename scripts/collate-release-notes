@@ -6,8 +6,9 @@
 #                                   delete the fragments, keeping _intro.md
 # Each fragment is <topic>.md whose first line is one of the section headings
 # below, followed by its bullets, with no later ## heading. An optional second
-# line, "### <Area>", names one of the areas below; the collated notes group
-# each section's entries by area in that order, untagged entries last.
+# line, "### <Area>", names one of the areas below. The collated notes render
+# "### Area" sub-headings only in a section with more than 12 entries; smaller
+# sections list their entries flat, in area order. Untagged entries come last.
 # Links in fragments are relative to next.d/;
 # the collated file sits one directory up, so ../../ becomes ../.
 set -eu
@@ -65,6 +66,16 @@ check() {
   return $status
 }
 
+# Count the bullets in section $1.
+section_count() {
+  for f in "$dir"/*.md; do
+    [ -e "$f" ] || continue
+    [ "$f" = "$dir/_intro.md" ] && continue
+    [ "$(sed -n 1p "$f")" = "$1" ] || continue
+    grep -c '^- ' "$f" || true
+  done | awk '{ n += $1 } END { print n + 0 }'
+}
+
 # Print the bodies of the fragments in section $1 tagged with area $2
 # (untagged when $2 is empty).
 section_part() {
@@ -82,28 +93,46 @@ section_part() {
 
 collate() {
   if [ -n "${1:-}" ]; then
-    echo "# $1"
+    echo "# Provenant $1"
+    echo
+    echo "Released $(date '+%-d %B %Y')."
   else
     echo "# Next release"
   fi
   echo
   sed 's|](\.\./\.\./|](../|g' "$dir/_intro.md"
   printf '%s\n' "$sections" | while IFS= read -r heading; do
+    if [ "$(section_count "$heading")" -gt 12 ]; then
+      grouped=1
+    else
+      grouped=0
+    fi
     body=$(printf '%s\n' "$areas" | {
       first=1
       while IFS= read -r area; do
         part=$(section_part "$heading" "$area")
         [ -n "$part" ] || continue
-        [ "$first" = 1 ] || printf '\n'
+        if [ "$grouped" = 1 ]; then
+          [ "$first" = 1 ] || printf '\n'
+          printf '### %s\n\n%s\n' "$area" "$part"
+        else
+          printf '%s\n' "$part"
+        fi
         first=0
-        printf '### %s\n\n%s\n' "$area" "$part"
       done
     })
     rest=$(section_part "$heading" "")
     if [ -n "$rest" ]; then
-      [ -z "$body" ] || body="$body
+      if [ -z "$body" ]; then
+        :
+      elif [ "$grouped" = 1 ]; then
+        body="$body
 
 $rest"
+      else
+        body="$body
+$rest"
+      fi
       [ -n "$body" ] || body=$rest
     fi
     [ -n "$body" ] || continue

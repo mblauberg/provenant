@@ -1,4 +1,4 @@
 ## Fixes
 ### Fabric and MCP
 
-- Console and chair MCP calls keep CLI error codes and data. Chair mutations are guarded in lanes, and generated chair log operation IDs can be replayed (#2142).
+- Console and chair MCP calls now return the same error codes and data as the CLI (#2142).
