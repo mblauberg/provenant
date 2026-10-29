@@ -954,7 +954,7 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>) -> Result<(), Fail
 /// Resolve dispatch access flags into the sealed record. Roots must be
 /// existing directories, stored canonically, and clear of the state root;
 /// the confinement compiler refuses credential, broad and Git roots.
-fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
+pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
     let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
     let mut postgres = false;
     for name in &access.capability {

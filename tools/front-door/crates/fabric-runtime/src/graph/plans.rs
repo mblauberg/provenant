@@ -64,7 +64,7 @@ pub(super) fn validate_spec(node: &GraphNode) -> Result<(), &'static str> {
             || spec.kinds.iter().any(|kind| {
                 let duplicate = seen.contains(kind);
                 seen.push(*kind);
-                duplicate || *kind == NodeKind::Loop
+                duplicate || matches!(*kind, NodeKind::Loop | NodeKind::Composite)
             })
         {
             return Err(
@@ -166,6 +166,13 @@ fn append(document: &mut GraphDocument, expansion: &Expansion) {
             node.after_expansion
                 .extend(expansion.nodes.iter().map(|n| n.id.clone()));
             if expansion.continuation {
+                if let Some(composite) = &mut node.composite {
+                    for export in &mut composite.exports {
+                        if export.node == expansion.source {
+                            export.node = expansion.nodes[0].id.clone();
+                        }
+                    }
+                }
                 for input in &mut node.inputs {
                     if input.node == expansion.source {
                         input.node = expansion.nodes[0].id.clone();
@@ -346,6 +353,9 @@ fn fragment(
         for input in &mut child.inputs {
             input.node = id(&input.node);
         }
+        if let Some(SourceBinding::Node { node: source }) = &mut child.source {
+            *source = id(source);
+        }
         child.on_fail = child.on_fail.as_deref().map(id);
         child.round = None;
     }
@@ -455,6 +465,11 @@ fn continuation(
     child.depends_on = vec![node.id.clone()];
     child.after_expansion.clear();
     child.inputs.clear();
+    if child.access == AccessMode::WorktreeWrite && child.source.is_some() {
+        child.source = Some(SourceBinding::Node {
+            node: node.id.clone(),
+        });
+    }
     child.prompt.push_str(&format!(
         "\n\nContinue this work in the same worktree. Stopped-early handoff:\n{note}"
     ));

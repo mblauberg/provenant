@@ -17,8 +17,10 @@ use thiserror::Error;
 #[cfg(test)]
 #[path = "graph/ci_tests.rs"]
 mod ci_tests;
+mod composites;
 mod loops;
 mod plans;
+pub use composites::CompositeSpec;
 pub use loops::{LoopAsk, LoopDecision, LoopRound, LoopScope, LoopSpec, close_resolved_loop_asks};
 pub use plans::{Expansion, PlanSpec, RemainingBudgets};
 
@@ -131,6 +133,16 @@ pub struct GraphExecution {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphNode {
+    #[serde(skip)]
+    composite_members: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composite: Option<CompositeSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceBinding>,
     /// Internal completion edges accept handled gates and inactive paths.
     #[serde(skip)]
     after_expansion: Vec<String>,
@@ -192,15 +204,84 @@ impl GraphNode {
     }
 }
 
+impl GraphDocument {
+    /// Host preflight sees the same bounded static composite/loop expansion as
+    /// the scheduler. Planner additions are checked separately before admission.
+    pub fn expanded(&self) -> Result<Self, &'static str> {
+        loops::expand(self, &[])
+    }
+
+    pub fn inspect(
+        &self,
+        limits: &crate::config::GraphLimits,
+    ) -> Result<GraphInspection, &'static str> {
+        let expanded = self.expanded()?;
+        let generous = crate::config::GraphLimits {
+            nodes: usize::MAX,
+            edges: usize::MAX,
+            routes_per_node: u16::MAX as usize,
+            node_prompt_bytes: usize::MAX,
+            graph_prompt_bytes: usize::MAX,
+            ..limits.clone()
+        };
+        let (plan, _) = validate_flat_plan(&expanded, &generous)?;
+        let mut depths = std::collections::BTreeMap::<&str, usize>::new();
+        let mut dependency_depth = 0;
+        for node in &plan.nodes {
+            let depth = node
+                .dependencies()
+                .map(|parent| depths[parent.as_str()] + 1)
+                .max()
+                .unwrap_or(0);
+            dependency_depth = dependency_depth.max(depth);
+            depths.insert(&node.id, depth);
+        }
+        Ok(GraphInspection {
+            nodes: plan.nodes.len(),
+            edges: plan
+                .nodes
+                .iter()
+                .map(|node| node.dependencies().count())
+                .sum(),
+            dependency_depth,
+            max_attempts: plan.nodes.iter().map(|node| node.routes.len()).sum(),
+            prompt_bytes: plan.nodes.iter().map(|node| node.prompt.len()).sum(),
+            limit_reason: structural_limit_reason(&expanded, &plan, limits, &[]),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GraphInspection {
+    pub nodes: usize,
+    pub edges: usize,
+    pub dependency_depth: usize,
+    /// Static route attempts, including all declared loop rounds. Planner
+    /// fragments and honest-stop continuations consume separate host budgets.
+    pub max_attempts: usize,
+    pub prompt_bytes: usize,
+    pub limit_reason: Option<String>,
+}
+
 /// Node purpose. Omitted kinds retain the original task wire format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
+    Composite,
     Plan,
     Task,
     Synthesise,
     Gate,
     Loop,
+}
+
+/// Immutable review subject or the commit a later writer must start from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SourceBinding {
+    Commit { commit: String },
+    Node { node: String },
+    Integration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,6 +478,12 @@ fn not_delivered(delivered: &bool) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeProgress {
+    /// Direct children of a composite, whose individual evidence stays available.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<String>,
+    /// Resolved once before launch and retained across retries and replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
     /// Bounded planner JSON retained until admission succeeds, including across resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
@@ -544,7 +631,16 @@ impl NodeProgress {
         if self.state == NodeState::Skipped {
             Some(format!("Node {}: skipped\n\n", self.id))
         } else if self.attempts.is_empty() && self.outputs.is_some() && self.gate.is_none() {
-            Some(format!("Node {}: loop {:?}\n\n", self.id, self.state))
+            Some(format!(
+                "Node {}: {} {:?}\n\n",
+                self.id,
+                if self.children.is_empty() {
+                    "loop"
+                } else {
+                    "composite"
+                },
+                self.state
+            ))
         } else {
             self.gate.as_ref().map(|gate| {
                 format!(
@@ -638,6 +734,8 @@ pub struct Replay<'a> {
 
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
+    pub read_roots: &'a [String],
+    pub source_commit: Option<&'a str>,
     pub title: &'a str,
     pub prompt: &'a str,
     pub required_verdict: Option<&'a str>,
@@ -657,6 +755,11 @@ pub trait CiStatus {
 /// launch duplicate work. Provider launch and terminal publication remain run's responsibility.
 pub trait AttemptOwner {
     type Error: Error + 'static;
+
+    /// Pin the integration branch at the instant this node is first admitted.
+    fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
+        Ok(None)
+    }
 
     /// A host without CI support fails closed.
     fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
@@ -1172,6 +1275,16 @@ struct PlannedGraph {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    composite_members: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    composite: Option<CompositeSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    read_roots: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<SourceBinding>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     after_expansion: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     plan: Option<PlanSpec>,
@@ -1357,6 +1470,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .nodes
                     .iter()
                     .map(|node| NodeProgress {
+                        children: node.composite_members.clone(),
+                        source_commit: None,
                         fragment: None,
                         handoff: None,
                         expansion_pause: None,
@@ -1568,6 +1683,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             if loops::inactive_round(node, &checkpoint, &positions) {
                 checkpoint.nodes[node_index].state = NodeState::Skipped;
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                continue;
+            }
+            if node.composite.is_some() {
+                composites::settle::<R, J>(
+                    node_index,
+                    &plan,
+                    &positions,
+                    &mut checkpoint,
+                    journal,
+                )?;
                 continue;
             }
             if let Some(spec) = &node.loop_body {
@@ -1784,6 +1909,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 *index != node_index
                                     && node.state == NodeState::Running
                                     && node.ci.is_none()
+                                    && plan.nodes[*index].composite.is_none()
                             })
                             .count()
                             >= cap
@@ -1822,6 +1948,35 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
+                    if node.source.is_some() && checkpoint.nodes[node_index].source_commit.is_none()
+                    {
+                        let commit = match node.source.as_ref() {
+                            Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+                            Some(SourceBinding::Node { node: source }) => positions
+                                .get(source)
+                                .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
+                                .and_then(|outputs| outputs.commit.clone()),
+                            Some(SourceBinding::Integration) => {
+                                owner.integration_head().map_err(GraphError::Run)?
+                            }
+                            None => None,
+                        };
+                        let progress = &mut checkpoint.nodes[node_index];
+                        if commit
+                            .as_ref()
+                            .is_none_or(|commit| commit.parse::<provenant_core::GitOid>().is_err())
+                        {
+                            progress.state = NodeState::Failed;
+                            progress.advance_error = Some(format!(
+                                "node {}: source commit unavailable or invalid",
+                                node.id
+                            ));
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            break;
+                        }
+                        progress.source_commit = commit;
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    }
                     checkpoint.nodes[node_index].attempts.push(GraphAttempt {
                         key: key.clone(),
                         route: route.clone(),
@@ -1855,6 +2010,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .observe_or_start(
                         &key,
                         NodeInput {
+                            read_roots: &node.read_roots,
+                            source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
                             title: node.title.as_deref().unwrap_or(&node.id),
                             prompt: &prompt,
                             required_verdict: node.required_verdict.as_deref(),
@@ -2653,6 +2810,10 @@ fn validate_flat_plan(
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
         plans::validate_spec(node)?;
+        let is_composite = node.kind == Some(NodeKind::Composite);
+        if is_composite != node.composite.is_some() {
+            return Err("composite requires nodes and exports");
+        }
         let is_loop = node.kind == Some(NodeKind::Loop);
         if is_loop != node.loop_body.is_some() {
             return Err("loop requires a body");
@@ -2745,6 +2906,40 @@ fn validate_flat_plan(
         if let Some(title) = &node.title {
             provenant_core::validate_task_title(title)?;
         }
+        if node
+            .role
+            .as_ref()
+            .is_some_and(|role| !valid_identifier(role))
+        {
+            return Err("invalid role name");
+        }
+        let mut roots = std::collections::BTreeSet::new();
+        if node.read_roots.len() > 32
+            || node.read_roots.iter().any(|root| {
+                root.is_empty() || root.len() > 4096 || root.contains('\0') || !roots.insert(root)
+            })
+        {
+            return Err("invalid read roots");
+        }
+        match &node.source {
+            Some(SourceBinding::Commit { commit })
+                if commit.parse::<provenant_core::GitOid>().is_err() =>
+            {
+                return Err("source requires a full commit ID");
+            }
+            Some(SourceBinding::Node { node: source }) if !node.depends_on.contains(source) => {
+                return Err("source node must be a direct dependency");
+            }
+            Some(SourceBinding::Integration) if document.integration_branch.is_none() => {
+                return Err("integration source requires an integration branch");
+            }
+            _ => {}
+        }
+        if (is_gate || is_loop || is_composite)
+            && (node.source.is_some() || !node.read_roots.is_empty())
+        {
+            return Err("execution bindings require an agent node");
+        }
         validate_access(node.access, node.worktree.as_deref())?;
         if node.access == AccessMode::ReadOnly
             && !matches!(node.delivery, None | Some(DeliveryMode::None))
@@ -2754,7 +2949,7 @@ fn validate_flat_plan(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err("graph PR is exclusive with node PRs");
         }
-        if !is_gate && !is_loop && node.prompt.is_empty()
+        if !is_gate && !is_loop && !is_composite && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
             return Err("prompt size");
@@ -2773,7 +2968,7 @@ fn validate_flat_plan(
         }
 
         let routes = match (&node.route, &node.routes) {
-            (None, None) if is_gate || is_loop => Vec::new(),
+            (None, None) if is_gate || is_loop || is_composite => Vec::new(),
             (Some(route), None) => vec![route.clone()],
             (None, Some(routes)) if !routes.is_empty() => routes.clone(),
             (Some(_), Some(_)) => return Err("route and routes are exclusive"),
@@ -2826,6 +3021,11 @@ fn validate_flat_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            composite_members: node.composite_members.clone(),
+            composite: node.composite.clone(),
+            role: node.role.clone(),
+            read_roots: node.read_roots.clone(),
+            source: node.source.clone(),
             after_expansion: node.after_expansion.clone(),
             plan: node.plan.clone(),
             write_scope: node.write_scope.clone(),
@@ -2833,9 +3033,13 @@ fn validate_flat_plan(
             loop_body: node.loop_body.clone(),
             round: node.round.clone(),
             kind: match node.kind {
-                Some(NodeKind::Plan | NodeKind::Synthesise | NodeKind::Gate | NodeKind::Loop) => {
-                    node.kind
-                }
+                Some(
+                    NodeKind::Plan
+                    | NodeKind::Synthesise
+                    | NodeKind::Gate
+                    | NodeKind::Loop
+                    | NodeKind::Composite,
+                ) => node.kind,
                 _ => None,
             },
             condition: node.condition.clone(),
@@ -3167,6 +3371,12 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .collect();
     for (progress, node) in checkpoint.nodes.iter().zip(&plan.nodes) {
         if progress.round != node.round
+            || progress.children != node.composite_members
+            || progress.source_commit.is_some() && node.source.is_none()
+            || progress
+                .source_commit
+                .as_ref()
+                .is_some_and(|commit| commit.parse::<provenant_core::GitOid>().is_err())
             || progress.id != node.id
             || progress.worktree != node.worktree
             || progress.attempts.len() > node.routes.len()
@@ -3226,6 +3436,34 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             loops::validate_progress(progress, node, checkpoint, &positions)
                 .map_err(|_| GraphError::BadCheckpoint)?;
             continue;
+        }
+        if node.composite.is_some() {
+            composites::validate_progress(progress, node, plan, checkpoint, &positions)
+                .map_err(|_| GraphError::BadCheckpoint)?;
+            continue;
+        }
+        if !progress.attempts.is_empty()
+            && node.source.is_some()
+            && progress.source_commit.is_none()
+        {
+            return Err(GraphError::BadCheckpoint);
+        }
+        if let Some(commit) = &progress.source_commit {
+            let expected = match &node.source {
+                Some(SourceBinding::Commit { commit }) => Some(commit),
+                Some(SourceBinding::Node { node: source }) => positions
+                    .get(source)
+                    .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
+                    .and_then(|outputs| outputs.commit.as_ref()),
+                _ => None,
+            };
+            if matches!(
+                node.source,
+                Some(SourceBinding::Commit { .. } | SourceBinding::Node { .. })
+            ) && expected != Some(commit)
+            {
+                return Err(GraphError::BadCheckpoint);
+            }
         }
         if node.condition.is_some() {
             continue;
@@ -3341,6 +3579,9 @@ mod tests {
         usage_fails: bool,
         refuse_expansion_target: bool,
         expansion_validations: usize,
+        integration_heads: VecDeque<String>,
+        source_commits: Vec<Option<String>>,
+        read_roots: Vec<Vec<String>>,
     }
 
     impl AttemptOwner for FakeOwner {
@@ -3348,6 +3589,9 @@ mod tests {
 
         fn actor(&self) -> String {
             self.actor.clone()
+        }
+        fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
+            Ok(self.integration_heads.pop_front())
         }
         fn validate_expansion(
             &mut self,
@@ -3392,6 +3636,9 @@ mod tests {
             worktree: Option<&str>,
             replay: Replay<'_>,
         ) -> Result<AttemptObservation, Self::Error> {
+            self.source_commits
+                .push(node.source_commit.map(str::to_owned));
+            self.read_roots.push(node.read_roots.to_vec());
             self.titles.push(node.title.to_owned());
             self.prompts.push(node.prompt.to_owned());
             self.delivery_modes.push(replay.delivery.cloned());
@@ -3415,6 +3662,11 @@ mod tests {
 
     fn node(id: &str, route: GraphRoute) -> GraphNode {
         GraphNode {
+            composite_members: Vec::new(),
+            composite: None,
+            role: None,
+            read_roots: Vec::new(),
+            source: None,
             after_expansion: Vec::new(),
             plan: None,
             write_scope: Vec::new(),
@@ -3447,6 +3699,266 @@ mod tests {
             graph_id: "g-test".to_owned(),
             nodes,
         }
+    }
+
+    #[test]
+    fn source_and_read_roots_survive_retry_and_replay() {
+        let commit = "1".repeat(40);
+        let mut leaf = node("review", route("first"));
+        leaf.source = Some(SourceBinding::Integration);
+        leaf.read_roots = vec!["/authorised/other-worktree".into()];
+        leaf.route = None;
+        leaf.routes = Some(vec![route("first"), route("fallback")]);
+        let mut document = graph(vec![leaf]);
+        document.integration_branch = Some("batch".into());
+        let mut owner = FakeOwner {
+            integration_heads: [commit.clone(), "2".repeat(40)].into(),
+            observations: [
+                AttemptObservation::Pending {
+                    attempt_ref: Some("existing".into()),
+                },
+                terminal(AttemptOutcome::AuthRequired),
+                terminal(AttemptOutcome::Succeeded),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let pending = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(
+            pending.checkpoint.nodes[0].source_commit,
+            Some(commit.clone())
+        );
+        let done = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(done.status, GraphStatus::Complete);
+        assert_eq!(owner.integration_heads.len(), 1);
+        assert_eq!(owner.source_commits, vec![Some(commit.clone()); 3]);
+        assert_eq!(
+            owner.read_roots,
+            vec![vec!["/authorised/other-worktree".to_owned()]; 3]
+        );
+        let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        assert_eq!(replay.checkpoint.nodes[0].source_commit, Some(commit));
+    }
+
+    #[test]
+    fn source_requires_upstream_commit_and_fails_before_launch_when_missing() {
+        let mut child = node("review", route("review"));
+        child.depends_on.push("author".into());
+        child.source = Some(SourceBinding::Node {
+            node: "author".into(),
+        });
+        let document = graph(vec![node("author", route("writer")), child]);
+        let mut owner = FakeOwner {
+            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(owner.calls.len(), 1);
+        assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
+        assert_eq!(
+            run.checkpoint.nodes[1].advance_error.as_deref(),
+            Some("node review: source commit unavailable or invalid")
+        );
+        assert_eq!(
+            advance(&document, &mut FakeOwner::default(), &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+    }
+
+    #[test]
+    fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"parallel-composite","nodes":[
+                {"id":"start","access":"read_only","prompt":"start","route":{"alias":"senior"}},
+                {"id":"parallel","kind":"composite","access":"read_only","depends_on":["start"],
+                "inputs":[{"node":"start","outputs":["result"]}],
+                "composite":{"nodes":[
+                    {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
+                    {"id":"b","access":"read_only","prompt":"b","route":{"alias":"junior"}}
+                ],"exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]}}
+            ]
+        }))
+        .unwrap();
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, "initial evidence"),
+                terminal_with_result(AttemptOutcome::Succeeded, "evidence A"),
+                terminal_with_result(AttemptOutcome::Succeeded, "evidence B"),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert!(run.checkpoint.successful());
+        assert!(owner.prompts[1].contains("initial evidence"));
+        assert!(owner.prompts[2].contains("initial evidence"));
+        let result = run
+            .checkpoint
+            .nodes
+            .last()
+            .unwrap()
+            .outputs
+            .as_ref()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap();
+        assert!(result.excerpt.contains("parallel--a:\nevidence A"));
+        assert!(result.excerpt.contains("parallel--b:\nevidence B"));
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn composite_running_status_does_not_consume_an_attempt_slot() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"composite-running","nodes":[{
+                "id":"group","kind":"composite","access":"read_only",
+                "composite":{"nodes":[
+                    {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
+                    {"id":"b","access":"read_only","prompt":"b","route":{"alias":"junior"}}
+                ],"exports":[]}
+            }]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits {
+            concurrency: Some(1),
+            ..Default::default()
+        };
+        let mut owner = FakeOwner {
+            observations: [
+                AttemptObservation::Pending { attempt_ref: None },
+                terminal(AttemptOutcome::Succeeded),
+                terminal(AttemptOutcome::Succeeded),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let pending = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(owner.calls.len(), 1);
+        assert_eq!(
+            pending.checkpoint.nodes.last().unwrap().state,
+            NodeState::Running
+        );
+        let complete = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(complete.status, GraphStatus::Complete);
+        assert!(complete.checkpoint.successful());
+        assert_eq!(owner.calls.len(), 3);
+    }
+
+    #[test]
+    fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
+        let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"failed-composite","nodes":[{
+                "id":"group","kind":"composite","access":"read_only",
+                "composite":{"nodes":[
+                    {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
+                    {"id":"b","access":"read_only","prompt":"b","route":{"alias":"junior"}}
+                ],"exports":[{"node":"a","outputs":["commit"]},{"node":"b","outputs":["commit"]}]}
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_plan(&document).unwrap_err(),
+            "composite scalar output has multiple sources"
+        );
+        document.nodes[0].composite.as_mut().unwrap().exports.pop();
+        let mut owner = FakeOwner {
+            observations: [
+                terminal(AttemptOutcome::TaskFailed),
+                terminal(AttemptOutcome::Succeeded),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(
+            run.checkpoint.nodes.last().unwrap().state,
+            NodeState::Blocked
+        );
+        assert!(!run.checkpoint.successful());
+        assert_eq!(
+            advance(&document, &mut FakeOwner::default(), &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+    }
+
+    #[test]
+    fn composite_executes_nested_children_and_exports_only_declared_outputs() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"composite-test","nodes":[{
+                "id":"swarm","kind":"composite","access":"read_only",
+                "composite":{"nodes":[{
+                    "id":"nested","kind":"composite","access":"read_only",
+                    "composite":{"nodes":[{
+                        "id":"scout","access":"read_only","prompt":"scout", "route":{"alias":"junior"}
+                    }],"exports":[{"node":"scout","outputs":["result"]}]}
+                }],"exports":[{"node":"nested","outputs":["result"]}]}
+            }, {
+                "id":"consume","access":"read_only","prompt":"consume", "route":{"alias":"senior"},
+                "depends_on":["swarm"],"inputs":[{"node":"swarm","outputs":["result"]}]
+            }]
+        })).unwrap();
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, "evidence"),
+                terminal_with_result(AttemptOutcome::Succeeded, "done"),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert!(run.checkpoint.successful());
+        assert_eq!(owner.calls.len(), 2);
+        assert_eq!(owner.calls[0].0.node_id, "swarm--nested--scout");
+        let swarm = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "swarm")
+            .unwrap();
+        assert_eq!(swarm.state, NodeState::Succeeded);
+        assert!(swarm.attempts.is_empty());
+        assert_eq!(
+            swarm
+                .outputs
+                .as_ref()
+                .unwrap()
+                .result
+                .as_ref()
+                .unwrap()
+                .excerpt,
+            "evidence"
+        );
+        assert_eq!(swarm.outputs.as_ref().unwrap().verdict, None);
+        assert!(owner.prompts[1].contains("evidence"));
+        let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        assert_eq!(run.checkpoint, replay.checkpoint);
     }
 
     #[test]
@@ -4992,6 +5504,11 @@ mod tests {
             route("fourth"),
         ];
         let document = graph(vec![GraphNode {
+            composite_members: Vec::new(),
+            composite: None,
+            role: None,
+            read_roots: Vec::new(),
+            source: None,
             after_expansion: Vec::new(),
             plan: None,
             write_scope: Vec::new(),
@@ -5150,6 +5667,11 @@ mod tests {
         ] {
             let routes = vec![route("first"), route("second")];
             let document = graph(vec![GraphNode {
+                composite_members: Vec::new(),
+                composite: None,
+                role: None,
+                read_roots: Vec::new(),
+                source: None,
                 after_expansion: Vec::new(),
                 plan: None,
                 write_scope: Vec::new(),
@@ -5401,6 +5923,11 @@ mod tests {
     #[test]
     fn terminal_task_failure_does_not_try_a_fallback_route() {
         let document = graph(vec![GraphNode {
+            composite_members: Vec::new(),
+            composite: None,
+            role: None,
+            read_roots: Vec::new(),
+            source: None,
             after_expansion: Vec::new(),
             plan: None,
             write_scope: Vec::new(),

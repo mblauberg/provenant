@@ -320,9 +320,10 @@ existing branch. The `until` gate must follow the entire body. Body delivery,
 negative `until` verdict starts the next round.
 
 Configure host limits for the full expansion before running. This example
-requires seven nodes and a dependency depth of six. The default host depth and
-ceiling are four, so this example needs explicit host configuration before it
-runs. To run two rounds and permit an extension to four, set:
+requires seven nodes and a dependency depth of six. The ordinary host limit is
+four and its default ceiling is 64, so this example must request depth six in
+the graph document or host configuration. To run two rounds and permit an
+extension to four while setting a narrower ceiling, use:
 
 ```toml
 [domains.fabric.graph.limits]
@@ -480,8 +481,10 @@ The defaults are 16 routes, 256 KiB per node prompt, 4 MiB per graph,
 expansion depth 4 and fan-out 32. Set concurrency to 0 to use host lane caps.
 Fan-out counts direct dependants of a node; expansion depth is the longest
 dependency chain in edges, with root nodes at depth 0.
-Each omitted ceiling defaults to its configured limit and can be raised to
-allow a graph document to request a higher value. Budget fields are optional;
+Each omitted ceiling defaults to its configured limit, except expansion depth,
+whose omitted ceiling is at least 64. An explicit ceiling can narrow that
+allowance. A ceiling can also be raised to allow a graph document to request a
+higher value. Budget fields are optional;
 unset fields have no budget. Costs are in US dollars.
 
 A graph document can set a `limits` object with any of these fields. Values

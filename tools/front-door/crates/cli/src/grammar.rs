@@ -494,12 +494,12 @@ pub struct DispatchInput {
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
     /// Expand and run a named pipeline preset
-    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "worktree", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "read_root", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id", "wait"])]
+    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"])]
     pub preset: Option<String>,
     /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
     #[arg(long = "set", requires = "preset")]
     pub preset_set: Vec<String>,
-    /// Print the expanded graph and origins without running it
+    /// Explain roles, limits and the expanded graph without running it
     #[arg(long, requires = "preset")]
     pub explain: bool,
     /// Use the build-heavy scheduling priority
@@ -541,8 +541,8 @@ pub struct Dispatch {
     /// Provider timeout in seconds
     #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), value_parser = clap::value_parser!(u64).range(1..=14400))]
     pub provider_timeout: u64,
-    /// Manifest lanes to run at once (1 to 16)
-    #[arg(long, requires = "manifest", conflicts_with_all = ["prompt_file", "prompt_stdin"], value_parser = clap::value_parser!(u64).range(1..=16))]
+    /// Manifest lanes or preset graph attempts to run at once (1 to 16)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=16))]
     pub concurrency: Option<u64>,
     /// Override an effective harness knob for this dispatch (NAME=VALUE).
     #[arg(long = "knob")]
@@ -562,7 +562,7 @@ pub struct Dispatch {
     /// Git base for attempt history and a new writer branch
     #[arg(long)]
     pub base: Option<String>,
-    /// Wait for settlement (seconds, or a duration such as 30m)
+    /// Wait for task or preset graph settlement (seconds, or a duration such as 30m)
     #[arg(long, value_parser = duration_seconds)]
     pub wait: Option<u64>,
 }

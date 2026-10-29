@@ -1,0 +1,79 @@
+stages = [
+  { id = "subject", role = "review-subject" },
+  { id = "lenses", parallel = [
+    { id = "tests", role = "test-lens" },
+    { id = "correctness", role = "correctness-lens" },
+    { id = "simplicity", role = "simplicity-lens" },
+    { id = "risk", role = "risk-lens" },
+  ], source = { type = "node", node = "subject" } },
+  { id = "synthesis", role = "synthesiser" },
+]
+exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict", "commit"] }]
+
+[parameters]
+subject = { type = "commit", commit = "HEAD" }
+worktree = ""
+correctness_tier = "senior"
+simplicity_tier = "senior"
+risk_tier = "senior"
+
+[roles.review-subject]
+tier = "senior"
+worktree = "${worktree}"
+source = "${subject}"
+prompt = """
+Frame the immutable review subject for: ${prompt}
+Identify acceptance criteria and risk areas from the pinned source commit.
+Do not edit files. Subsequent independent lenses review this exact commit.
+"""
+
+[roles.test-lens]
+tier = "junior"
+worktree = "${worktree}"
+prompt = """
+Inspect test coverage and weak assertions for: ${prompt}
+Cite evidence. This junior lens is advisory for senior or principal authors.
+Emit one exact VERDICT: PASS or VERDICT: FAIL line. Do not edit files.
+"""
+
+[roles.correctness-lens]
+tier = "${correctness_tier}"
+worktree = "${worktree}"
+prompt = """
+Inspect correctness, failure paths, data integrity and concurrency for: ${prompt}
+Use the pinned subject and cite actionable evidence. Emit one exact
+VERDICT: PASS or VERDICT: FAIL line. Do not edit files.
+"""
+
+[roles.simplicity-lens]
+tier = "${simplicity_tier}"
+worktree = "${worktree}"
+prompt = """
+Inspect redundancy, test quality, cleanup and rigid over-engineering for:
+${prompt}
+Cite actionable evidence. Emit one exact VERDICT: PASS or VERDICT: FAIL line.
+Do not edit files.
+"""
+
+[roles.risk-lens]
+tier = "${risk_tier}"
+worktree = "${worktree}"
+prompt = """
+Inspect the chair's high-risk areas for: ${prompt}
+The chair selects principal tier for high-risk work. Cite evidence and inspect
+the pinned subject. Emit one exact VERDICT: PASS or VERDICT: FAIL line.
+Do not edit files.
+"""
+
+[roles.synthesiser]
+tier = "senior"
+kind = "synthesise"
+worktree = "${worktree}"
+source = { type = "node", node = "subject" }
+prompt = """
+Reconcile independent review findings against evidence for: ${prompt}
+Do not take a majority vote. Junior reviews of senior or principal work are
+advisory. Counted reviews must be at or above the author's tier. Preserve all
+actionable findings and unresolved uncertainty. Emit one exact VERDICT: PASS
+only when acceptance evidence is satisfied, otherwise VERDICT: FAIL.
+"""

@@ -129,6 +129,11 @@ fn prepare_with(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
+    if let (Some(writer), Some(head)) = (&writer, task.head.as_deref()) {
+        writer
+            .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
+            .map_err(|error| error.to_string())?;
+    }
     // Publishing is optional. Missing gh tools or configuration leave the
     // writer able to do local work without publishing credential access.
     let publishing_gh = (writer.is_some()
@@ -2918,6 +2923,25 @@ mod tests {
             host: None,
             cancel: Some(&cancel),
         };
+        // A clean writer that moved after graph source preparation must be
+        // refused before provider probing or any launch artefact is written.
+        let mut stale_source = task.clone();
+        stale_source.head = Some("a".repeat(40));
+        let error = prepare_with(
+            &registry,
+            &stale_source,
+            &prompt,
+            &paths,
+            None,
+            |_| Err("provider lookup must follow source validation".into()),
+            None,
+        )
+        .err()
+        .ok_or("stale writer source was accepted")?;
+        assert_eq!(
+            error,
+            "invalid run record: writer differs from pinned source commit"
+        );
         let call = run::Request {
             clock: &clock,
             budget: WaitBudget::cli(clock.mono_now(), 5)?,

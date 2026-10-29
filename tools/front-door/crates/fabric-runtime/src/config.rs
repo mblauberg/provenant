@@ -20,15 +20,28 @@ pub struct FabricConfig {
     pub lanes: Lanes,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GraphConfig {
     pub limits: GraphLimits,
     pub limit_ceiling: GraphLimits,
     pub budget: GraphBudget,
 }
 
-// Omitted ceiling fields inherit the corresponding resolved host limit. The
-// compiled asset leaves the ceiling absent so overrides precede this fallback.
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            limits: GraphLimits::default(),
+            limit_ceiling: GraphLimits {
+                expansion_depth: 64,
+                ..Default::default()
+            },
+            budget: GraphBudget::default(),
+        }
+    }
+}
+
+// Omitted ceiling fields inherit the resolved host limit. Depth allows an
+// explicit document override up to 64 by default for composed batches.
 impl<'de> Deserialize<'de> for GraphConfig {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Default, Deserialize)]
@@ -40,6 +53,7 @@ impl<'de> Deserialize<'de> for GraphConfig {
         }
         let raw = RawGraphConfig::deserialize(deserializer)?;
         let mut ceiling = raw.limits.clone();
+        ceiling.expansion_depth = ceiling.expansion_depth.max(64);
         macro_rules! inherit {
             ($($field:ident),+ $(,)?) => {$(
                 if let Some(value) = raw.limit_ceiling.$field {
@@ -603,6 +617,8 @@ mod tests {
     #[test]
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
+        assert_eq!(config.graph.limits.expansion_depth, 4);
+        assert_eq!(config.graph.limit_ceiling.expansion_depth, 64);
         assert_eq!(config.graph.limits.nodes, 512);
         assert_eq!(config.graph.limits.continuations, 2);
         config.graph.limits.continuations = 0;
@@ -637,6 +653,12 @@ mod tests {
         assert_eq!(graph.limit_ceiling.nodes, 10);
         assert_eq!(graph.limit_ceiling.edges, 30);
         assert_eq!(graph.limit_ceiling.concurrency, Some(3));
+        assert_eq!(graph.limit_ceiling.expansion_depth, 64);
+        let bounded: GraphConfig = serde_json::from_value(serde_json::json!({
+            "limit_ceiling": {"expansion_depth": 8}
+        }))
+        .unwrap();
+        assert_eq!(bounded.limit_ceiling.expansion_depth, 8);
         assert_eq!(graph.budget.unknown_usage, UnknownUsage::Warn);
 
         let unlimited: GraphConfig = serde_json::from_value(serde_json::json!({

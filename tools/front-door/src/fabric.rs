@@ -1997,7 +1997,23 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        self.submit_inner(input, budget, cancel)
+        self.submit_inner(
+            input,
+            budget,
+            cancel,
+            provenant_records::run::LaneAccess::default(),
+        )
+        .map_err(|error| scope_io(error, "submit"))
+    }
+    /// Graph nodes use the same validated, sealed access grants as CLI lanes.
+    fn submit_with_access(
+        &mut self,
+        input: SubmitInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        access: provenant_records::run::LaneAccess,
+    ) -> Result<SubmissionReceipt, FacadeError> {
+        self.submit_inner(input, budget, cancel, access)
             .map_err(|error| scope_io(error, "submit"))
     }
     fn submit_inner(
@@ -2005,6 +2021,7 @@ impl BinaryRunOwner<'_> {
         input: SubmitInput,
         budget: WaitBudget,
         cancel: &CancelToken,
+        access: provenant_records::run::LaneAccess,
     ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
         let SubmitInput::Submit {
@@ -2016,6 +2033,9 @@ impl BinaryRunOwner<'_> {
         } = input;
         // Explicit placement forwards the whole batch; the peer confines it.
         if let Some(host) = host.filter(|h| *h != self.factory.context.identity.host) {
+            if !access.is_default() {
+                return Err(FacadeError::ConfinementRefused);
+            }
             if !self.allow_remote {
                 return Err(FacadeError::ConfinementRefused);
             }
@@ -2089,8 +2109,7 @@ impl BinaryRunOwner<'_> {
                 delivery_id: task.delivery_id,
                 deliver: task.deliver,
                 worktree: task.worktree.map(PathBuf::from),
-                // Fabric lanes take the mode defaults; overrides are CLI-only.
-                access: provenant_records::run::LaneAccess::default(),
+                access: access.clone(),
             });
         }
         let session = self.session(budget, cancel)?;
@@ -2717,6 +2736,7 @@ impl BinaryRunOwner<'_> {
 struct BoundGraphOwner<'a> {
     factory: &'a Factory,
     integration_base: Option<provenant_core::GitOid>,
+    integration_branch: Option<String>,
     budget: WaitBudget,
     cancel: &'a CancelToken,
     prices: Option<Result<provenant_telemetry::PriceTable, String>>,
@@ -3162,6 +3182,7 @@ fn advance_graphs_after_settlement(
             let mut owner = BoundGraphOwner {
                 factory: &factory,
                 integration_base: execution.integration_base,
+                integration_branch: execution.document.integration_branch.clone(),
                 budget,
                 cancel: &cancel,
                 prices: None,
@@ -3836,6 +3857,22 @@ impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
+    fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
+        let branch =
+            self.integration_branch
+                .as_deref()
+                .ok_or_else(|| FacadeError::DispatchRefused {
+                    reason: "an integration source requires graph.integration_branch".into(),
+                })?;
+        let reference = match branch.strip_prefix("origin/") {
+            Some(branch) => format!("refs/remotes/origin/{branch}"),
+            None => format!("refs/heads/{branch}"),
+        };
+        let git = provenant_os::git::git_executable().ok_or(FacadeError::InvalidInput)?;
+        provenant_run::resolve_git_base(&git, &self.factory.cwd, &reference)
+            .map(Some)
+            .map_err(run_error)
+    }
     fn ci_status(&mut self) -> Option<&mut dyn provenant_fabric_runtime::graph::CiStatus> {
         Some(self)
     }
@@ -3986,6 +4023,43 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             };
             (target, Some(reference.to_owned()))
         } else {
+            // Replaying an accepted operation must observe its existing writer,
+            // even after that writer has advanced beyond the pinned start.
+            owner.actor = Some(
+                replay
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            );
+            let operation_id = graph_operation("graph-attempt-operation", key)?;
+            let accepted = owner
+                .store(self.budget, self.cancel)?
+                .operation(&operation_id, &owner.call(self.budget, self.cancel))
+                .map_err(run_error)?
+                .is_some_and(|operation| {
+                    operation.state != provenant_run::OperationState::Prepared
+                });
+            if !accepted && let (Some(path), Some(commit)) = (worktree, node.source_commit) {
+                let head = commit.parse().map_err(|_| FacadeError::InvalidInput)?;
+                provenant_confinement::worktrees::with_context(
+                    &self.factory.context.roots,
+                    &self.factory.home,
+                    &self.factory.cwd,
+                    &self.factory.clock,
+                    self.cancel,
+                    |context| {
+                        provenant_confinement::worktrees::fast_forward(
+                            context,
+                            Path::new(path),
+                            head,
+                            self.cancel,
+                        )
+                    },
+                )
+                .map_err(|error| FacadeError::DispatchRefused {
+                    reason: format!("initialise graph writer at {commit}: {error}"),
+                })?;
+            }
             let delivery = if let Some(mode) = replay.delivery {
                 let branch = if let Some(path) = worktree {
                     let writer = provenant_run::resolve_writer(
@@ -4012,13 +4086,15 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             } else {
                 None
             };
-            let operation_id = graph_operation("graph-attempt-operation", key)?;
             let input = SubmitInput::Submit {
                 operation_id,
                 tasks: vec![SubmittedTask {
                     build_heavy: false,
-                    base: None,
-                    head: None,
+                    base: node.source_commit.map(|head| {
+                        self.integration_base
+                            .map_or_else(|| head.to_owned(), |base| base.to_string())
+                    }),
+                    head: node.source_commit.map(str::to_owned),
                     account: route.account.clone(),
                     access,
                     worktree: worktree.map(str::to_owned),
@@ -4057,7 +4133,30 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 provenant_core::ActorId::parse(replay.launch_actor)
                     .map_err(|_| FacadeError::StateCorrupt)?,
             );
-            let receipt = owner.submit(input, self.budget, self.cancel)?;
+            let grants = provenant_cli::run::lane_access(
+                &provenant_cli::Access {
+                    mode: provenant_cli::Mode::ReadOnly,
+                    worktree: None,
+                    read_root: node
+                        .read_roots
+                        .iter()
+                        .map(|root| {
+                            let path = Path::new(root);
+                            if path.is_absolute() {
+                                path.to_path_buf()
+                            } else {
+                                self.factory.cwd.join(path)
+                            }
+                        })
+                        .collect(),
+                    write_root: Vec::new(),
+                    network: None,
+                    capability: Vec::new(),
+                },
+                self.factory.context.roots.state.as_path(),
+            )
+            .map_err(fail_error)?;
+            let receipt = owner.submit_with_access(input, self.budget, self.cancel, grants)?;
             owner.actor = None;
             let target = receipt
                 .targets
@@ -4163,9 +4262,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             })
                     }),
                     branch: effective_delivery.map(|receipt| receipt.branch.clone()),
-                    commit: (access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
-                        .then(|| attempt.head.map(|head| head.to_string()))
-                        .flatten(),
+                    commit: if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                    {
+                        attempt.head.map(|head| head.to_string())
+                    } else {
+                        node.source_commit.map(str::to_owned)
+                    },
                 })
             }
             _ => Ok(AttemptObservation::Pending {
@@ -4243,7 +4345,13 @@ impl Factory {
                 )
                 .map_err(graph_journal_error)?;
                 let admitted = checkpoint.is_some();
-                for node in &document.nodes {
+                let expanded =
+                    document
+                        .expanded()
+                        .map_err(|reason| FacadeError::DispatchRefused {
+                            reason: reason.into(),
+                        })?;
+                for node in &expanded.nodes {
                     if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
                         &node.delivery
                     {
@@ -4347,6 +4455,7 @@ impl Factory {
             let mut owner = BoundGraphOwner {
                 factory: self,
                 integration_base,
+                integration_branch: document.integration_branch.clone(),
                 budget,
                 cancel,
                 prices: None,
@@ -4438,6 +4547,7 @@ impl Factory {
             let mut graph_owner = BoundGraphOwner {
                 factory: self,
                 integration_base: None,
+                integration_branch: None,
                 budget,
                 cancel,
                 prices: None,
@@ -4627,6 +4737,124 @@ pub(crate) fn publish_preset_graph(
     Ok(scratch.join("graphs").join(filename))
 }
 
+fn graph_human(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
+    let members: std::collections::BTreeSet<_> = run
+        .checkpoint
+        .nodes
+        .iter()
+        .flat_map(|node| node.children.iter())
+        .collect();
+    let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
+    for node in &run.checkpoint.nodes {
+        if members.contains(&node.id) || node.round.is_some() {
+            continue;
+        }
+        human.push_str(&format!("  {}: {:?}", node.id, node.state));
+        if !node.children.is_empty() {
+            human.push_str(&format!(" ({} members)", node.children.len()));
+        }
+        if let Some(head) = &node.source_commit {
+            human.push_str(&format!(" source={head}"));
+        }
+        human.push('\n');
+    }
+    if let Some(error) = &run.advance_error {
+        human.push_str(&format!("Advance error: {error}\n"));
+    }
+    human
+}
+
+/// Preset waiting advances the retained immutable graph, including CI gates.
+pub(crate) fn run_preset_graph(
+    document: PathBuf,
+    wait_seconds: u64,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> u8 {
+    use provenant_fabric_runtime::graph::GraphStatus;
+    use provenant_records::Outcome;
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let factory = factory(globals, workers)?;
+        if factory.context.in_lane {
+            return Err(CoordinationError::LaneMutation.into());
+        }
+        let cancel = CancelToken::new();
+        let waiting = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
+        loop {
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+            let run = factory.graph(
+                GraphInput::Run {
+                    document: document.clone(),
+                },
+                budget,
+                &cancel,
+            )?;
+            if run.status != GraphStatus::Pending
+                || waiting.remaining(factory.clock.mono_now()).as_micros() == 0
+            {
+                return Ok(run);
+            }
+            provenant_fabric_store::RetryWait::wait(
+                &factory.backoff,
+                provenant_core::DurationMicros::from_micros(
+                    250_000.min(waiting.remaining(factory.clock.mono_now()).as_micros()),
+                ),
+                &cancel,
+            );
+        }
+    })();
+    match result {
+        Ok(run) => {
+            let outcome = match run.status {
+                GraphStatus::Complete if run.checkpoint.successful() => Outcome::Ok,
+                GraphStatus::Complete => Outcome::Failed,
+                GraphStatus::Cancelled => Outcome::Cancelled,
+                GraphStatus::Paused => Outcome::Refused,
+                GraphStatus::Pending => Outcome::Timeout,
+            };
+            let continuation = format!(
+                "provenant fabric graph resume --document {}",
+                document.display()
+            );
+            let mut human = graph_human(&run);
+            if matches!(run.status, GraphStatus::Pending | GraphStatus::Paused) {
+                human.push_str(&format!("Continue: {continuation}\n"));
+            } else if let Some(result) = run
+                .checkpoint
+                .nodes
+                .iter()
+                .rev()
+                .filter_map(|node| {
+                    node.outputs
+                        .as_ref()
+                        .and_then(|outputs| outputs.result.as_ref())
+                })
+                .next()
+            {
+                human.push_str(&result.excerpt);
+                human.push('\n');
+            }
+            crate::emit(
+                &provenant_records::CommandResult::new(
+                    "run",
+                    outcome,
+                    serde_json::json!({"graph":run,"document":document,"continue":continuation}),
+                ),
+                globals,
+                &human,
+                false,
+            )
+        }
+        Err(error) => crate::fail(
+            "run",
+            Outcome::Error,
+            "preset_graph",
+            &error.to_string(),
+            globals,
+        ),
+    }
+}
+
 pub fn graph(
     input: provenant_cli::fabric::Graph,
     globals: &provenant_cli::Globals,
@@ -4653,7 +4881,7 @@ pub fn graph(
     })();
     match result {
         Ok(data) => {
-            let human = provenant_cli::terse(&serde_json::to_value(&data).unwrap_or_default());
+            let human = graph_human(&data);
             crate::emit(
                 &provenant_records::CommandResult::new(
                     command,
@@ -6030,6 +6258,7 @@ mod peer_tests {
             let mut owner = BoundGraphOwner {
                 factory: &factory,
                 integration_base: None,
+                integration_branch: None,
                 budget,
                 cancel: &cancel,
                 prices: None,
@@ -6139,6 +6368,7 @@ mod peer_tests {
         let mut owner = BoundGraphOwner {
             factory: &factory,
             integration_base: None,
+            integration_branch: None,
             budget,
             cancel: &cancel,
             prices: None,

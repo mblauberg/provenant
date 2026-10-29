@@ -1,0 +1,42 @@
+stages = [
+  { id = "implement", role = "implementer" },
+  { id = "lens", role = "lane-lens" },
+]
+exports = [
+  { node = "implement", outputs = ["branch", "commit"] },
+  { node = "lens", outputs = ["result", "findings", "verdict"] },
+]
+
+[parameters]
+worktree = ""
+scope = ["."]
+subject = { type = "commit", commit = "HEAD" }
+delivery = "none"
+lens_tier = "senior"
+
+[roles.implementer]
+tier = "senior"
+access = "worktree_write"
+worktree = "${worktree}"
+write_scope = "${scope}"
+source = "${subject}"
+delivery = "${delivery}"
+acceptance_checks = ["Run targeted tests and required static checks", "Commit the completed slice"]
+prompt = """
+Implement one bounded approved slice: ${prompt}
+Keep changes within the supplied write scope. Run targeted checks and commit.
+Use a curated high-junior tier only when the chair configures that pool.
+"""
+
+[roles.lane-lens]
+tier = "${lens_tier}"
+worktree = "${worktree}"
+source = { type = "node", node = "implement" }
+outputs = ["result", "commit"]
+prompt = """
+Review this implementation through the refactor and over-engineering lens:
+${prompt}
+Challenge redundancy, test quality, cleanup, rigid abstractions and unnecessary
+machinery. Read the pinned implementation commit. Cite actionable evidence and
+emit one exact VERDICT: PASS or VERDICT: FAIL line. Do not edit files.
+"""
