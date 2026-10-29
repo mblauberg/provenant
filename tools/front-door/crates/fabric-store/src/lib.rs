@@ -50,6 +50,8 @@ pub struct Page<T> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("change signal failed after commit; reread state before retrying")]
+    ChangeSignal(#[source] std::io::Error),
     #[error("SQLite operation failed: {}", sqlite_diagnostic(.0))]
     Sqlite(rusqlite::Error),
     #[error("safe filesystem operation failed")]

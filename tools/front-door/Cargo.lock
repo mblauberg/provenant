@@ -650,6 +650,7 @@ dependencies = [
  "libc",
  "provenant-core",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

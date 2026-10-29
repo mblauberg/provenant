@@ -130,6 +130,8 @@ impl From<Power> for schedule::Power {
 }
 #[derive(Debug, Error)]
 pub(crate) enum EdgeError {
+    #[error("change signal failed after quota commit; reread state before retrying")]
+    ChangeSignal(#[source] io::Error),
     #[error(transparent)]
     Usage(#[from] provenant_telemetry::usage::UsageError),
     #[error(transparent)]
@@ -563,6 +565,18 @@ pub(crate) fn persist_provider_success(
             0o600,
             PublishMode::Replace,
         )?)?;
+        signal_quota(&directory)?;
+    }
+    Ok(())
+}
+
+fn signal_quota(dir: &Directory) -> Result<(), EdgeError> {
+    let path = dir.current_path()?;
+    if path.file_name() == Some(OsStr::new("quota"))
+        && let Some(state) = path.parent()
+    {
+        provenant_os::changes::bump(state, provenant_core::changes::Scope::Quota)
+            .map_err(EdgeError::ChangeSignal)?;
     }
     Ok(())
 }
@@ -610,6 +624,7 @@ fn write_intent(
             }
         }
     }
+    signal_quota(dir)?;
     Ok(())
 }
 
@@ -1063,6 +1078,7 @@ fn execute(
         0o600,
         PublishMode::Replace,
     )?)?;
+    signal_quota(&dir)?;
     // Publish all accounts even when the caller requests a filtered projection.
     let mut shown = schedule::report(
         &policies,
@@ -1655,6 +1671,33 @@ mod tests {
         );
         let single = snapshot(serde_json::json!([window("weekly", 10_000)]))?;
         assert_eq!(pool_states(&single), None);
+        Ok(())
+    }
+
+    #[test]
+    fn quota_record_commit_bumps_generation() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let dir = child(&root, OsStr::new("quota"))?;
+        let account = AccountScope {
+            adapter: "codex".into(),
+            account_key: "work".into(),
+            label: "work".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.revision = 1;
+        write_intent(
+            &dir,
+            &UpdateIntent {
+                account,
+                expected: None,
+                replacement: Some(record),
+            },
+            &mut Vec::new(),
+        )?;
+        assert_eq!(provenant_os::changes::read(temp.path())?.quota, Some(1));
         Ok(())
     }
 

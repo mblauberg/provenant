@@ -45,6 +45,23 @@ provider signal.
 
 ## Records
 
+### Owner change generations
+
+Owners publish local invalidations in `changes.json` in the state root after
+committing inbox, board, chair summary or log, quota, and configuration changes.
+`provenant console changes --json` reads this small signal without opening the
+owner databases. Pass its `generations` object as JSON to `--since` to compare:
+`changed` contains true or false for comparable generations and null for an
+unknown value or reset. Unknown requires a full bounded re-read. File events
+are hints; watch the state directory as well as the file and reattach watches
+after replacement or directory recreation, watching an existing ancestor when
+the state directory is absent. Remote freshness remains the CLI's peer reads,
+explicit refresh and slow bounded fallback.
+If publishing a signal fails after an owner commit, the operation reports that
+the commit may already be visible. Re-read the owner state before retrying.
+- Owner: `crates/os/src/changes.rs`, with bumps at each committing owner
+- Test: `crates/cli/src/console.rs::changes_reports_unknown_and_comparison`
+
 ### Strict, bounded records
 
 Stored records are typed serde models with `schema_version`, closed enums and

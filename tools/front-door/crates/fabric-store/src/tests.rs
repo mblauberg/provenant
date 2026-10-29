@@ -21,6 +21,47 @@ fn sqlite_diagnostic_reports_code_without_private_details() {
 }
 
 struct Resolver;
+
+#[test]
+fn fabric_commits_signal_inbox_and_board() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let before = provenant_os::changes::read(fixture.root.as_path()).unwrap();
+    store
+        .send(&message(&fixture, 5), &fixture.request())
+        .unwrap();
+    let after = provenant_os::changes::read(fixture.root.as_path()).unwrap();
+    assert!(after.inbox > before.inbox);
+    store
+        .create_task(&task(&fixture), &fixture.request())
+        .unwrap();
+    let board = provenant_os::changes::read(fixture.root.as_path()).unwrap();
+    assert!(board.board > after.board);
+}
+
+#[test]
+fn signal_failure_reports_a_committed_fabric_write() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let signal = fixture
+        .root
+        .as_path()
+        .join(provenant_core::changes::FILE_NAME);
+    std::fs::remove_file(&signal).unwrap();
+    std::fs::create_dir(&signal).unwrap();
+    assert!(matches!(
+        store.send(&message(&fixture, 5), &fixture.request()),
+        Err(Error::ChangeSignal(_))
+    ));
+    assert_eq!(
+        store
+            .read_mail(project(), actor(3), Some(0), 10, &fixture.request())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+}
 impl PathResolver for Resolver {
     fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
         if path.exists() {

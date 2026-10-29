@@ -69,6 +69,7 @@ impl Request<'_> {
 
 pub struct Store {
     pub(crate) db: Connection,
+    pub(crate) state_root: std::path::PathBuf,
     pub(crate) locks: Option<Directory>,
     // SQLite supports movable connections, but Fabric requires worker ownership.
     _owner: PhantomData<Rc<()>>,
@@ -171,6 +172,7 @@ impl Store {
         }
         let store = Self {
             db,
+            state_root: root.as_path().to_owned(),
             locks: None,
             _owner: PhantomData,
         };
@@ -220,6 +222,7 @@ impl Store {
         }
         Ok(Self {
             db,
+            state_root: root.as_path().to_owned(),
             locks: None,
             _owner: PhantomData,
         })
@@ -341,6 +344,7 @@ impl Store {
         }
         let store = Self {
             db,
+            state_root: root.as_path().to_owned(),
             locks,
             _owner: PhantomData,
         };
@@ -360,6 +364,12 @@ impl Store {
         }
         Ok(store)
     }
+    pub(crate) fn signal_changes(&self) -> Result<()> {
+        use provenant_os::changes::{Scope, bump};
+        bump(&self.state_root, Scope::Inbox).map_err(Error::ChangeSignal)?;
+        bump(&self.state_root, Scope::Board).map_err(Error::ChangeSignal)?;
+        Ok(())
+    }
     pub(crate) fn write<T>(
         &self,
         request: &Request<'_>,
@@ -373,6 +383,7 @@ impl Store {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let value = action(&tx)?;
         tx.commit()?;
+        self.signal_changes()?;
         Ok(value)
     }
 }

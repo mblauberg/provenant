@@ -17,6 +17,12 @@ pub use overview::summary_comparison;
 
 #[derive(Debug, Subcommand)]
 pub enum Console {
+    /// Read local owner change generations
+    Changes {
+        /// Previous generations as a JSON object
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// Read a bounded local tree of nested runs
     Tree {
         /// Maximum store depth, including the host store
@@ -82,6 +88,10 @@ pub enum Error {
     Cursor,
     #[error("cannot encode catalogue")]
     Encode,
+    #[error("invalid generations; pass the generations object from a previous changes response")]
+    InvalidGenerations,
+    #[error(transparent)]
+    Changes(#[from] std::io::Error),
 }
 
 #[derive(Serialize)]
@@ -121,6 +131,45 @@ fn read_with_budget(
     command: &Console,
     budget: usize,
 ) -> Result<Value, Error> {
+    if let Console::Changes { since } = command {
+        let current = serde_json::to_value(provenant_os::changes::read(roots.state.as_path())?)
+            .map_err(|_| Error::Encode)?;
+        let previous: Option<Value> = since
+            .as_ref()
+            .map(|text| {
+                if text.len() > 1024 {
+                    return Err(Error::InvalidGenerations);
+                }
+                let value: Value =
+                    serde_json::from_str(text).map_err(|_| Error::InvalidGenerations)?;
+                let object = value.as_object().ok_or(Error::InvalidGenerations)?;
+                let names = ["epoch", "inbox", "board", "chair", "quota", "configuration"];
+                if object.len() != names.len()
+                    || names.iter().any(|name| {
+                        object
+                            .get(*name)
+                            .is_none_or(|v| !v.is_null() && v.as_u64().is_none())
+                    })
+                {
+                    return Err(Error::InvalidGenerations);
+                }
+                Ok(value)
+            })
+            .transpose()?;
+        let mut changed = serde_json::Map::new();
+        for name in ["inbox", "board", "chair", "quota", "configuration"] {
+            let now = current[name].as_u64();
+            let before = previous.as_ref().and_then(|value| value[name].as_u64());
+            let same_epoch = current["epoch"].as_u64().is_some()
+                && current["epoch"] == *previous.as_ref().map_or(&Value::Null, |v| &v["epoch"]);
+            let comparison = match (now, before) {
+                (Some(now), Some(before)) if same_epoch && now >= before => json!(now > before),
+                _ => Value::Null,
+            };
+            changed.insert(name.to_owned(), comparison);
+        }
+        return Ok(json!({"generations": current, "changed": changed}));
+    }
     if let Console::Board {
         all, limit, cursor, ..
     } = command
@@ -138,6 +187,7 @@ fn read_with_budget(
     }
     let projects = projects(roots, selected)?;
     let (session, limit, cursor) = match command {
+        Console::Changes { .. } => unreachable!("changes handled above"),
         Console::Board { .. } => unreachable!("board handled above"),
         Console::Tree { .. } => unreachable!("tree handled above"),
         Console::Overview => return overview::read(roots, &projects),
@@ -210,6 +260,73 @@ mod tests {
     use super::*;
     use provenant_core::RootInputs;
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn changes_reports_unknown_and_comparison() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let home = base.join("home");
+        let state = base.join("state");
+        let checkout = base.join("checkout");
+        for path in [&home, &state, &checkout] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut inputs = RootInputs::new(home, checkout);
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        let first = read(&roots, None, &Console::Changes { since: None }).unwrap();
+        assert!(first["generations"]["inbox"].is_null());
+        provenant_os::changes::bump(&state, provenant_core::changes::Scope::Inbox).unwrap();
+        let baseline = read(&roots, None, &Console::Changes { since: None }).unwrap();
+        let since = baseline["generations"].to_string();
+        let unchanged = read(
+            &roots,
+            None,
+            &Console::Changes {
+                since: Some(since.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(unchanged["changed"]["inbox"], false);
+        provenant_os::changes::bump(&state, provenant_core::changes::Scope::Inbox).unwrap();
+        let changed = read(
+            &roots,
+            None,
+            &Console::Changes {
+                since: Some(since.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(changed["changed"]["inbox"], true);
+        assert!(changed["changed"]["board"].is_null());
+        fs::remove_file(state.join(provenant_core::changes::FILE_NAME)).unwrap();
+        let missing = read(
+            &roots,
+            None,
+            &Console::Changes {
+                since: Some(since.clone()),
+            },
+        )
+        .unwrap();
+        assert!(missing["generations"]["inbox"].is_null());
+        assert!(missing["changed"]["inbox"].is_null());
+        provenant_os::changes::bump(&state, provenant_core::changes::Scope::Inbox).unwrap();
+        let reset = read(&roots, None, &Console::Changes { since: Some(since) }).unwrap();
+        assert!(reset["changed"]["inbox"].is_null());
+        assert!(matches!(
+            read(
+                &roots,
+                None,
+                &Console::Changes {
+                    since: Some("{}".into())
+                }
+            ),
+            Err(Error::InvalidGenerations)
+        ));
+    }
 
     #[test]
     fn scan_budget_counts_invalid_entries_across_projects() {

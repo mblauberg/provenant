@@ -2812,6 +2812,29 @@ Accepted by every command, before or after the subcommand.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
+## `provenant console changes`
+
+| Argument | Contract |
+|---|---|
+| `--since` | `{"name": "since"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "since"
+      ],
+      "multiple": true,
+      "name": "Changes",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant console tree`
 
 | Argument | Contract |

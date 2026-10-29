@@ -7,6 +7,7 @@ use std::io;
 #[allow(clippy::disallowed_methods)] // The process edge establishes the real-time deadline.
 pub fn run(command: Console, globals: &Globals) -> u8 {
     let leaf = match &command {
+        Console::Changes { .. } => "console changes",
         Console::Board { .. } => "console board",
         Console::Tree { .. } => "console tree",
         Console::Overview => "console overview",
@@ -117,7 +118,8 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
                 Some(
                     provenant_cli::console::Error::Cursor
                     | provenant_cli::console::Error::InvalidSession
-                    | provenant_cli::console::Error::BoardCursor,
+                    | provenant_cli::console::Error::BoardCursor
+                    | provenant_cli::console::Error::InvalidGenerations,
                 ) => (Outcome::Invalid, "CATALOGUE_INPUT"),
                 _ => (Outcome::Error, "CATALOGUE"),
             };

@@ -1256,6 +1256,33 @@ fn knob_edit(roots: &Roots, edit: KnobEdit) -> Result<ResolvedConfig, ConfigErro
 }
 
 #[test]
+fn config_edit_bumps_change_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let roots = state_roots(temp.path());
+    knob_edit(
+        &roots,
+        KnobEdit::Set {
+            name: "lanes.max_concurrency",
+            value: "2",
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        provenant_os::changes::read(temp.path())
+            .unwrap()
+            .configuration,
+        Some(1)
+    );
+    knob_edit(&roots, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
+    assert_eq!(
+        provenant_os::changes::read(temp.path())
+            .unwrap()
+            .configuration,
+        Some(2)
+    );
+}
+
+#[test]
 fn host_lane_build_settings_read_and_validate() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
