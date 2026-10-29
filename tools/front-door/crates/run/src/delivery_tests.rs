@@ -826,12 +826,13 @@ fn origin_refresh_refuses_names_that_differ_only_in_unicode_normalisation()
     // A tracking ref already on disk under the other spelling is a destination
     // the advertised name would write through. Packed refs keep the stored
     // spelling on any filesystem.
+    // Delete the loose ref first: deleting a ref also drops it from packed refs.
+    fixture.local(&["update-ref", "-d", &default_ref])?;
     let local_packed = fixture.project.join(".git/packed-refs");
     std::fs::write(
         &local_packed,
         format!("# pack-refs with: sorted\n{kept} refs/remotes/origin/{nfd}\n"),
     )?;
-    fixture.local(&["update-ref", "-d", &default_ref]).ok();
     fixture.advertise(&[("main", &kept), (nfc, &newer)], "main")?;
     let error = fixture
         .refresh(None)
