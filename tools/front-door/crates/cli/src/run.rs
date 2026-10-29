@@ -2080,15 +2080,15 @@ fn check_delivery_branch(project: &Path, branch: &str) -> Result<(), Fail> {
 /// Refuse flags outside the named adapters' launch tables before the first
 /// side effect, including `--worktree-branch` creation. Manifest tasks and
 /// named routes are checked again where their adapter is known.
-pub(crate) fn check_flag_capabilities(command: &Dispatch) -> Result<(), Fail> {
+pub(crate) fn check_flag_capabilities(
+    command: &Dispatch,
+    roots: Option<&Roots>,
+) -> Result<(), Fail> {
     let route = requested(
         command.route.model.as_ref().map(|m| m.0.as_str()),
         command.route.route.as_deref(),
         command.route.effort.clone(),
     );
-    let Ok(route) = route else {
-        return Ok(());
-    };
     let network = match command.access.network {
         Some(Switch::On) => Some(run::NetworkAccess::Open),
         Some(Switch::Off) => Some(run::NetworkAccess::Provider),
@@ -2107,15 +2107,65 @@ pub(crate) fn check_flag_capabilities(command: &Dispatch) -> Result<(), Fail> {
         })
         .map_err(|error| Fail::new(Status::Refused, ErrorKind::Unsupported, error.to_string()))
     };
-    if let run::RequestedRoute::Model {
-        provider, effort, ..
-    } = &route
-    {
-        check(provider, effort.as_deref())?;
+    let check_route = |route: run::RequestedRoute| -> Result<(), Fail> {
+        match run::Service::route(route) {
+            Ok(run::RequestedRoute::Model {
+                provider, effort, ..
+            }) => check(&provider, effort.as_deref())?,
+            // A pool whose every member's adapter takes no effort cannot serve one.
+            Ok(run::RequestedRoute::Named {
+                name,
+                effort: Some(effort),
+                ..
+            }) => {
+                if let Some(roots) = roots
+                    && let Ok(members) = crate::route::effective_members(roots, &name)
+                {
+                    let refusals: Vec<Fail> = members
+                        .iter()
+                        .filter_map(|member| check(member.model.adapter(), Some(&effort)).err())
+                        .collect();
+                    if !members.is_empty() && refusals.len() == members.len() {
+                        return Err(refusals
+                            .into_iter()
+                            .next()
+                            .unwrap_or_else(|| unreachable!()));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    };
+    let check_fallback = |model: &str| -> Result<(), Fail> {
+        match model.split_once('/') {
+            Some((provider, _)) => check(provider, None),
+            None => Ok(()),
+        }
+    };
+    if let Ok(route) = route {
+        check_route(route)?;
     }
     for model in &command.route.fallback {
-        if let Some((provider, _)) = model.0.split_once('/') {
-            check(provider, None)?;
+        check_fallback(&model.0)?;
+    }
+    // Manifest tasks carry their own routes; read them before any worktree exists.
+    // A malformed manifest is reported later by the normal path.
+    if let Some(path) = &command.input.manifest
+        && let Ok(text) = read_bounded(path)
+        && let Ok(manifest) = provenant_records::decode_v1::<Manifest, _>(
+            text.as_bytes(),
+            provenant_records::Limits {
+                max_bytes: PROMPT_LIMIT,
+                ..Default::default()
+            },
+        )
+    {
+        for task in manifest.tasks {
+            check_route(task.route)?;
+            for model in &task.fallback {
+                check_fallback(model)?;
+            }
         }
     }
     Ok(())
@@ -2135,7 +2185,7 @@ fn dispatch_inner(
             "coordination mutations are not allowed inside a lane",
         ));
     }
-    check_flag_capabilities(&command)?;
+    check_flag_capabilities(&command, Some(edge.roots))?;
     if let Some(branch) = &command.worktree_branch {
         if !matches!(command.access.mode, Mode::WorktreeWrite) || crate::fabric::in_lane() {
             return Err(Fail::new(

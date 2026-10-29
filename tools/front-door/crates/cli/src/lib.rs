@@ -1539,12 +1539,33 @@ mod tests {
             let Command::Run(request) = invocation.command else {
                 panic!("run")
             };
-            let result = run::check_flag_capabilities(&request);
+            let result = run::check_flag_capabilities(&request, None);
             assert_eq!(result.is_err(), refused, "{model}");
             if let Err(fail) = result {
                 assert!(fail.message.contains("does not support effort"), "{model}");
             }
         }
+    }
+    #[test]
+    fn manifest_task_is_refused_before_any_launch_side_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let write = |model: &str| {
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"schema_version":1,"tasks":[{{"prompt":"p","route":{{"kind":"model","provider":"cursor","model":"{model}","effort":"high"}}}}]}}"#
+                ),
+            )
+            .unwrap();
+        };
+        write("cursor/m");
+        let invocation = valid(&["run", "--manifest", path.to_str().unwrap()]);
+        let Command::Run(request) = invocation.command else {
+            panic!("run")
+        };
+        let fail = run::check_flag_capabilities(&request, None).unwrap_err();
+        assert!(fail.message.contains("cursor does not support effort"));
     }
     #[test]
     fn run_accepts_dispatch_effort_and_network() {

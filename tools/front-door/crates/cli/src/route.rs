@@ -334,7 +334,7 @@ fn resolve_request(
     Ok(request)
 }
 #[derive(Debug, thiserror::Error)]
-enum EdgeError {
+pub(crate) enum EdgeError {
     #[error(
         "no route or model matches `{name}`{}; try `provenant route resolve {}`, \
          `provenant route resolve {}` or `provenant route list`",
@@ -915,7 +915,10 @@ fn list_data(
     })
 }
 
-fn effective_members(roots: &Roots, pool: &str) -> Result<Vec<RoutePoolMember>, EdgeError> {
+pub(crate) fn effective_members(
+    roots: &Roots,
+    pool: &str,
+) -> Result<Vec<RoutePoolMember>, EdgeError> {
     let query = RouteListRequest {
         valid: false,
         adapter: None,
