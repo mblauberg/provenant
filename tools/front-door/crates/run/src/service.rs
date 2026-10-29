@@ -99,6 +99,13 @@ impl<'a> Service<'a> {
                     "a nested dispatch cannot set network, capability, read-root or write-root access",
                 ));
             }
+            if let RequestedRoute::Adapter { provider, .. } = &task.route
+                && let Some(spec) = provenant_records::AdapterSpec::get(provider)
+            {
+                task.access
+                    .network
+                    .get_or_insert(spec.launch.default_network);
+            }
             if task.deliver.is_some() && task.worktree.is_none() {
                 return Err(input_error(
                     ErrorKind::Invalid,
@@ -185,12 +192,16 @@ impl<'a> Service<'a> {
                     Ok(())
                 };
                 validate(head, "head")?;
-                if let Some(base) = &task.base {
+                if let Some(pinned) = &task.pinned_base {
+                    validate(&pinned.to_string(), "base")?;
+                } else if let Some(base) = &task.base {
                     validate(base, "base")?;
                 }
             }
             let base = if let Some(prior) = prior {
                 prior.base.clone()
+            } else if let Some(pinned) = task.pinned_base {
+                Some(pinned.to_string())
             } else if let Some(head) = task.head.as_deref().filter(|_| task.base.is_none()) {
                 let git = provenant_os::git::git_executable()
                     .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
@@ -331,6 +342,22 @@ impl<'a> Service<'a> {
     /// Canonical model IDs carry the provider prefix in every stored request.
     pub fn route(route: RequestedRoute) -> Result<RequestedRoute> {
         match route {
+            RequestedRoute::Adapter {
+                provider,
+                name,
+                extra,
+            } if !provider.is_empty()
+                && !provider.contains('/')
+                && !name.is_empty()
+                && !extra.contains_key("model")
+                && !extra.contains_key("effort") =>
+            {
+                Ok(RequestedRoute::Adapter {
+                    provider,
+                    name,
+                    extra,
+                })
+            }
             RequestedRoute::Model {
                 provider,
                 model,
@@ -631,6 +658,8 @@ pub struct DispatchTask {
     pub task_id: provenant_core::TaskId,
     pub prompt: String,
     pub base: Option<String>,
+    /// Commit pinned by owned worktree creation. Keep `base` for replay comparison.
+    pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
     pub route: RequestedRoute,
     pub account: Option<String>,
@@ -667,11 +696,12 @@ fn fresh<T>(make: impl FnOnce([u8; 16]) -> T) -> Result<T> {
 /// Named routes resolve their adapter later, where routing checks effort.
 fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Result<()> {
     let write = task.worktree.is_some() || !task.access.write_roots.is_empty();
-    let check = |provider: &str, effort: Option<&str>| {
+    let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
             return Ok(());
         };
         spec.check_launch(&provenant_records::LaunchRequest {
+            model,
             effort,
             resume: false,
             network: task.access.network,
@@ -679,11 +709,15 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
         })
         .map_err(|error| input_error(ErrorKind::Unsupported, error.to_string()))
     };
-    if let RequestedRoute::Model {
-        provider, effort, ..
-    } = route
-    {
-        check(provider, effort.as_deref())?;
+    match route {
+        RequestedRoute::Model {
+            provider,
+            model,
+            effort,
+            ..
+        } => check(provider, Some(model), effort.as_deref())?,
+        RequestedRoute::Adapter { provider, .. } => check(provider, None, None)?,
+        _ => {}
     }
     for route in &task.fallback {
         if let Some(provider) = route.provider.as_deref().or_else(|| {
@@ -693,7 +727,7 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
                 .and_then(|model| model.split_once('/'))
                 .map(|(provider, _)| provider)
         }) {
-            check(provider, route.effort.as_deref())?;
+            check(provider, route.model.as_deref(), route.effort.as_deref())?;
         }
     }
     Ok(())

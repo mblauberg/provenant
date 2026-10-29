@@ -182,9 +182,12 @@ pub struct Registry<'a> {
     pub cancel: Option<&'a CancelToken>,
 }
 impl Registry<'_> {
-    /// Each adapter supports resume; the attempt must carry a session handle.
+    /// Whether any registered adapter can continue a recorded session.
     pub fn continues_sessions(&self) -> bool {
-        !REGISTRY.is_empty()
+        REGISTRY.iter().any(|entry| {
+            provenant_records::AdapterSpec::get(entry.adapter.id())
+                .is_some_and(|spec| spec.launch.resume)
+        })
     }
     /// Refuse before the attempt's one continuation is spent.
     fn check_continuable(&self, prior: &run::AttemptRecord) -> Result<(), Fail> {
@@ -204,6 +207,7 @@ impl Registry<'_> {
         }
         if let Some(spec) = provenant_records::AdapterSpec::get(adapter) {
             spec.check_launch(&provenant_records::LaunchRequest {
+                model: None,
                 resume: true,
                 ..Default::default()
             })
@@ -819,6 +823,17 @@ impl Registry<'_> {
                 _ => {}
             }
         }
+        if adapter.id() == "command" {
+            decoded.observed_route = Some(run::RouteRecord {
+                source: Some("command_exit".into()),
+                ..route.clone()
+            });
+            if exit.stdout.bytes > stdout.len() as u64 {
+                decoded
+                    .result
+                    .insert_str(0, "[output truncated; retained tail]\n");
+            }
+        }
         if (is_claude || adapter.id() == "claude") && !has_usage {
             let has_result = stdout.split(|&b| b == b'\n').any(|line| {
                 serde_json::from_slice::<serde_json::Value>(line)
@@ -1039,6 +1054,9 @@ impl Registry<'_> {
 fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequest, String> {
     let model = |text: &str| ModelId::parse(text).map_err(|error| error.to_string());
     let (choice, effort) = match &task.route {
+        run::RequestedRoute::Adapter { .. } => {
+            return Err("model-less adapter routes are prepared directly".into());
+        }
         run::RequestedRoute::Model {
             model: id, effort, ..
         } => (RouteChoice::Model(model(id)?), effort.clone()),
@@ -1101,7 +1119,9 @@ impl Session {
 fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::Request<'a>, Fail> {
     Ok(run::Request {
         clock,
-        budget: WaitBudget::cli(clock.mono_now(), 30)
+        // Each store transaction gets its own 30-second contention allowance,
+        // so provider launch or a long wait never expires a later write.
+        budget: WaitBudget::per_transaction(clock.mono_now(), 30)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?,
         cancel,
     })
@@ -1427,6 +1447,7 @@ pub struct Submitted {
     pub task_id: TaskId,
     pub prompt: String,
     pub base: Option<String>,
+    pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
     pub route: run::RequestedRoute,
     pub account: Option<String>,
@@ -1636,6 +1657,7 @@ pub fn submit_with_host(
                 task_id: task.task_id,
                 prompt: task.prompt,
                 base: task.base,
+                pinned_base: task.pinned_base,
                 head: task.head,
                 route: task.route,
                 account: task.account,
@@ -2292,6 +2314,7 @@ pub(crate) fn pool_effort_refusal(
     effort: &str,
 ) -> Option<provenant_records::UnsupportedLaunch> {
     let request = provenant_records::LaunchRequest {
+        model: None,
         effort: Some(effort),
         ..Default::default()
     };
@@ -2325,11 +2348,12 @@ pub(crate) fn check_flag_capabilities(
         None => None,
     };
     let write = matches!(command.access.mode, Mode::WorktreeWrite);
-    let check = |provider: &str, effort: Option<&str>| {
+    let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
             return Ok(());
         };
         spec.check_launch(&provenant_records::LaunchRequest {
+            model,
             effort,
             resume: false,
             network,
@@ -2339,9 +2363,13 @@ pub(crate) fn check_flag_capabilities(
     };
     let check_route = |route: run::RequestedRoute| -> Result<(), Fail> {
         match run::Service::route(route) {
+            Ok(run::RequestedRoute::Adapter { provider, .. }) => check(&provider, None, None)?,
             Ok(run::RequestedRoute::Model {
-                provider, effort, ..
-            }) => check(&provider, effort.as_deref())?,
+                provider,
+                model,
+                effort,
+                ..
+            }) => check(&provider, Some(&model), effort.as_deref())?,
             // A pool whose every member's adapter takes no effort cannot serve one.
             Ok(run::RequestedRoute::Named {
                 name,
@@ -2365,11 +2393,12 @@ pub(crate) fn check_flag_capabilities(
     };
     let check_fallback = |model: &str, effort: Option<&str>| -> Result<(), Fail> {
         match model.split_once('/') {
-            Some((provider, _)) => check(provider, effort),
+            Some((provider, _)) => check(provider, Some(model), effort),
             None => Ok(()),
         }
     };
     let effort_of = |route: &run::RequestedRoute| match route {
+        run::RequestedRoute::Adapter { .. } => None,
         run::RequestedRoute::Model { effort, .. }
         | run::RequestedRoute::Named { effort, .. }
         | run::RequestedRoute::Review { effort, .. } => effort.clone(),
@@ -2419,7 +2448,10 @@ fn dispatch_inner(
         ));
     }
     check_flag_capabilities(&command, Some(edge.roots))?;
-    if let Some(branch) = &command.worktree_branch {
+    // Preflight. An owned worktree is the first side effect, so every check
+    // that does not depend on the tree runs before it and a refusal leaves
+    // no tree behind.
+    let owned = if let Some(branch) = command.worktree_branch.clone() {
         if !matches!(command.access.mode, Mode::WorktreeWrite) || crate::fabric::in_lane() {
             return Err(Fail::new(
                 Status::Refused,
@@ -2436,7 +2468,7 @@ fn dispatch_inner(
             return Ok(replayed);
         }
         if let Some(mode) = &command.deliver {
-            if let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), branch)? {
+            if let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), &branch)? {
                 check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
         } else if let Some(target) = &command.deliver_branch {
@@ -2444,105 +2476,18 @@ fn dispatch_inner(
         }
         let host = provenant_config::bind_host(edge.roots)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
-        let created_at = now(&clock)?;
-        let mut owner_refused = false;
-        let info = provenant_confinement::worktrees::with_context(
-            edge.roots,
-            edge.home,
-            edge.cwd,
-            &clock,
-            &cancel,
-            |context| {
-                use provenant_confinement::worktrees::{
-                    self, WorktreeCondition, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
-                    WriterState,
-                };
-                let context = &worktrees::WorktreeContext { workers, ..*context };
-                let existing = worktrees::list(context, &cancel)?.into_iter().find(|tree| {
-                    tree.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
-                });
-                let info = match existing {
-                    Some(info) => {
-                        let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-                        if worktrees::load_owner(&tree)?
-                            .is_some_and(|owner| owner.origin != WorktreeOrigin::Lane)
-                        {
-                            owner_refused = true;
-                            return Err(worktrees::WorktreeError::UnknownWriter);
-                        }
-                        if info.dirty != WorktreeCondition::Clean || info.writer != WriterState::Free {
-                            return Err(worktrees::WorktreeError::InvalidRequest);
-                        }
-                        info
-                    }
-                    None => {
-                        let info = worktrees::create(
-                            context,
-                            WorktreeCreate {
-                                branch: branch.clone(),
-                                base: command.base.clone(),
-                            },
-                            &cancel,
-                        )?;
-                        *created = Some((info.path.clone(), branch.clone()));
-                        info
-                    }
-                };
-                let verified = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-                let prior = worktrees::load_owner(&verified)?;
-                if prior.as_ref().is_some_and(|owner| owner.origin != WorktreeOrigin::Lane) {
-                    owner_refused = true;
-                    return Err(worktrees::WorktreeError::UnknownWriter);
-                }
-                let base = if let Some(owner) = prior
-                    .as_ref()
-                    .filter(|owner| owner.origin == WorktreeOrigin::Lane)
-                {
-                    owner.base.clone()
-                } else {
-                    let git = provenant_os::git::git_executable()
-                        .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-                    run::resolve_git_base(
-                        &git,
-                        context.repo.root_path(),
-                        command.base.as_deref().unwrap_or("HEAD"),
-                    )
-                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?
-                };
-                let owner = match prior {
-                    Some(owner) if owner.operation_id.as_ref() == Some(&command.operation_id) => {
-                        owner
-                    }
-                    _ => WorktreeOwner {
-                        attempt_id: None,
-                        operation_id: Some(command.operation_id.clone()),
-                        branch: branch.clone(),
-                        base,
-                        host,
-                        created_at,
-                        origin: WorktreeOrigin::Lane,
-                        label: None,
-                    },
-                };
-                if created.as_ref().is_some_and(|(path, _)| path == &info.path) {
-                    worktrees::save_owner(&verified, &owner)?;
-                } else {
-                    worktrees::save_lane_owner_when_free(context, &verified, &owner, &cancel)?;
-                }
-                Ok(info)
-            },
-        )
-        .map_err(|error| {
-            if owner_refused {
-                Fail::new(Status::Refused, ErrorKind::Refused,
-                    "--worktree-branch cannot reuse an adopted or foreign owner; its ownership, label and base are unchanged")
-            } else {
-                run::RunError::from(error).into()
-            }
-        })?;
-        command.access.worktree = Some(info.path);
-    }
-    let access = &command.access;
+        Some(OwnedWorktree {
+            branch,
+            host,
+            created_at: now(&clock)?,
+        })
+    } else {
+        worktree_access(
+            matches!(command.access.mode, Mode::WorktreeWrite) && command.branch.is_none(),
+            command.access.worktree.as_deref(),
+        )?;
+        None
+    };
     let unsupported = |what: &str| {
         Err(Fail::new(
             Status::Refused,
@@ -2550,11 +2495,8 @@ fn dispatch_inner(
             format!("{what} is not available in this build"),
         ))
     };
-    worktree_access(
-        matches!(access.mode, Mode::WorktreeWrite) && command.branch.is_none(),
-        access.worktree.as_deref(),
-    )?;
-    let lane_access = lane_access(access, edge.roots.state.as_path())?;
+    // An owned tree's write-root overlap is checked again once it exists.
+    let mut lane_access = lane_access(&command.access, edge.roots.state.as_path())?;
     // Naming this host is ordinary local placement in any mode. A peer writer
     // names a new branch the peer creates, since --worktree is a local path.
     let mut new_worktree = None;
@@ -2617,7 +2559,7 @@ fn dispatch_inner(
             .as_str()
             .trim_start_matches("refs/heads/")
             .to_owned()
-        } else if let Some(branch) = &command.branch {
+        } else if let Some(branch) = command.branch.as_ref().or(command.worktree_branch.as_ref()) {
             branch.clone()
         } else if matches!(mode, run::DeliveryMode::None) {
             String::new()
@@ -2800,6 +2742,65 @@ fn dispatch_inner(
             }
         }
     }
+    let chair = if crate::fabric::in_lane() {
+        None
+    } else {
+        let context = crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error.to_string()))?;
+        Some(run::ChairBinding {
+            extra: Default::default(),
+            session: crate::fabric::current_session(),
+            host: context.identity.inbox.host,
+            actor: crate::workflow::session_actor(&context, None)
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error))?,
+        })
+    };
+    // Validate deterministic admission inputs before creating or claiming a tree.
+    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    config
+        .dispatch_profile(&command.knobs)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    for (_, title, prompt, _, models, _, _, _, _, _, _) in &tasks {
+        run::Service::scan(prompt)?;
+        if let Some(title) = title {
+            provenant_core::validate_task_title(title)
+                .map_err(|message| Fail::new(Status::Invalid, ErrorKind::Invalid, message))?;
+        }
+        fallback(models)?;
+    }
+    // Preflight is complete: create or claim the owned tree, then admit.
+    let mut pinned_base = None;
+    let worktree = if let Some(owned) = owned {
+        let (info, base) = own_worktree(
+            &owned,
+            command.base.as_deref(),
+            &command.operation_id,
+            edge,
+            workers,
+            created,
+            &clock,
+            &cancel,
+        )?;
+        pinned_base = Some(base);
+        command.access.worktree = Some(info.path.clone());
+        lane_access = self::lane_access(&command.access, edge.roots.state.as_path())?;
+        Some(json!({"path": info.path, "branch": owned.branch, "owned": true}))
+    } else if let Some(path) = &command.access.worktree {
+        let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
+        Some(provenant_confinement::worktrees::with_context(
+            edge.roots, edge.home, &writer.project, &clock, &cancel, |context| {
+                use provenant_confinement::worktrees;
+                let info = worktrees::list(context, &cancel)?.into_iter()
+                    .find(|tree| tree.path == writer.worktree)
+                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                let branch = info.branch.ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                Ok(json!({"path": info.path, "branch": branch.trim_start_matches("refs/heads/"), "owned": false}))
+            },
+        ).map_err(run::RunError::from)?)
+    } else {
+        None
+    };
     let tasks = tasks
         .into_iter()
         .map(
@@ -2821,6 +2822,7 @@ fn dispatch_inner(
                     build_heavy,
                     title,
                     base,
+                    pinned_base,
                     head: command.head.clone(),
                     task_id,
                     prompt,
@@ -2830,46 +2832,17 @@ fn dispatch_inner(
                     provider_timeout: command.provider_timeout,
                     delivery_id,
                     deliver,
-                    worktree: access.worktree.clone(),
+                    worktree: command.access.worktree.clone(),
                     access: lane_access.clone(),
                 }
             },
         )
         .collect();
-    let worktree = if let Some(path) = &access.worktree {
-        let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
-        Some(provenant_confinement::worktrees::with_context(
-            edge.roots, edge.home, &writer.project, &clock, &cancel, |context| {
-                use provenant_confinement::worktrees;
-                let info = worktrees::list(context, &cancel)?.into_iter()
-                    .find(|tree| tree.path == writer.worktree)
-                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-                let branch = info.branch.ok_or(worktrees::WorktreeError::InvalidRequest)?;
-                Ok(json!({"path": info.path, "branch": branch.trim_start_matches("refs/heads/"), "owned": command.worktree_branch.is_some()}))
-            },
-        ).map_err(run::RunError::from)?)
-    } else {
-        None
-    };
     let (record, started) = submit(
         &session,
         edge,
         Submission {
-            chair: if crate::fabric::in_lane() {
-                None
-            } else {
-                let context = crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)
-                    .map_err(|error| {
-                        Fail::new(Status::Error, ErrorKind::Identity, error.to_string())
-                    })?;
-                Some(run::ChairBinding {
-                    extra: Default::default(),
-                    session: crate::fabric::current_session(),
-                    host: context.identity.inbox.host,
-                    actor: crate::workflow::session_actor(&context, None)
-                        .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error))?,
-                })
-            },
+            chair,
             operation_id: command.operation_id,
             tasks,
             concurrency,
@@ -2883,6 +2856,147 @@ fn dispatch_inner(
         data["worktree"] = worktree;
     }
     Ok((data, human, timed_out))
+}
+
+/// A `--worktree-branch` dispatch's owned tree, as preflight settled it.
+struct OwnedWorktree {
+    branch: String,
+    host: provenant_core::HostId,
+    created_at: WallTime,
+}
+
+/// Create or claim the owned tree and publish its lane ownership. A new
+/// tree's owner records the commit creation pinned, so nothing is resolved
+/// again after the side effect and a replay finds the same base.
+#[allow(clippy::too_many_arguments)]
+fn own_worktree(
+    owned: &OwnedWorktree,
+    requested_base: Option<&str>,
+    operation_id: &OperationId,
+    edge: &Edge<'_>,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    created: &mut Option<(PathBuf, String)>,
+    clock: &SystemClock,
+    cancel: &CancelToken,
+) -> Result<
+    (
+        provenant_confinement::worktrees::WorktreeInfo,
+        provenant_core::GitOid,
+    ),
+    Fail,
+> {
+    let OwnedWorktree {
+        branch,
+        host,
+        created_at,
+    } = owned;
+    let mut owner_refused = false;
+    provenant_confinement::worktrees::with_context(
+        edge.roots,
+        edge.home,
+        edge.cwd,
+        clock,
+        cancel,
+        |context| {
+            use provenant_confinement::worktrees::{
+                self, WorktreeCondition, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+                WriterState,
+            };
+            let context = &worktrees::WorktreeContext {
+                workers,
+                ..*context
+            };
+            let existing = worktrees::list(context, cancel)?.into_iter().find(|tree| {
+                tree.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
+            });
+            let (info, pinned) = match existing {
+                Some(info) => {
+                    let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                    if worktrees::load_owner(&tree)?
+                        .is_some_and(|owner| owner.origin != WorktreeOrigin::Lane)
+                    {
+                        owner_refused = true;
+                        return Err(worktrees::WorktreeError::UnknownWriter);
+                    }
+                    if info.dirty != WorktreeCondition::Clean || info.writer != WriterState::Free {
+                        return Err(worktrees::WorktreeError::InvalidRequest);
+                    }
+                    (info, None)
+                }
+                None => {
+                    // The creation receipt: the tree's head is the commit
+                    // creation pinned the base to.
+                    let info = worktrees::create(
+                        context,
+                        WorktreeCreate {
+                            branch: branch.clone(),
+                            base: requested_base.map(str::to_owned),
+                        },
+                        cancel,
+                    )?;
+                    *created = Some((info.path.clone(), branch.clone()));
+                    let pinned = info.head.to_string();
+                    (info, Some(pinned))
+                }
+            };
+            let verified = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+            let prior = worktrees::load_owner(&verified)?;
+            if prior
+                .as_ref()
+                .is_some_and(|owner| owner.origin != WorktreeOrigin::Lane)
+            {
+                owner_refused = true;
+                return Err(worktrees::WorktreeError::UnknownWriter);
+            }
+            let owner = match prior {
+                Some(owner) if owner.operation_id.as_ref() == Some(operation_id) => owner,
+                prior => WorktreeOwner {
+                    attempt_id: None,
+                    operation_id: Some(operation_id.clone()),
+                    branch: branch.clone(),
+                    base: match (pinned, prior) {
+                        (Some(pinned), _) => pinned,
+                        (None, Some(prior)) => prior.base,
+                        // An unowned existing tree: nothing was created, so
+                        // a base that does not resolve leaves no side effect.
+                        (None, None) => {
+                            let git = provenant_os::git::git_executable()
+                                .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                            run::resolve_git_base(
+                                &git,
+                                context.repo.root_path(),
+                                requested_base.unwrap_or("HEAD"),
+                            )
+                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?
+                        }
+                    },
+                    host: *host,
+                    created_at: *created_at,
+                    origin: WorktreeOrigin::Lane,
+                    label: None,
+                },
+            };
+            if created.as_ref().is_some_and(|(path, _)| path == &info.path) {
+                worktrees::save_owner(&verified, &owner)?;
+            } else {
+                worktrees::save_lane_owner_when_free(context, &verified, &owner, cancel)?;
+            }
+            let base = provenant_core::GitOid::parse(&owner.base)
+                .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+            Ok((info, base))
+        },
+    )
+    .map_err(|error| {
+        if owner_refused {
+            Fail::new(
+                Status::Refused,
+                ErrorKind::Refused,
+                "--worktree-branch cannot reuse an adopted or foreign owner; its ownership, label and base are unchanged",
+            )
+        } else {
+            run::RunError::from(error).into()
+        }
+    })
 }
 
 fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
@@ -3226,7 +3340,7 @@ fn with_chair_index<T>(
     use provenant_fabric_runtime::chairs::{ChairIndex, Request, ThreadWait};
     let index_call = Request {
         clock: call.clock,
-        budget: call.budget,
+        budget: call.transaction_budget(),
         cancel: call.cancel,
         backoff: &ThreadWait,
     };
@@ -4712,7 +4826,11 @@ fn route_label(record: &run::AttemptRecord) -> String {
         .as_ref()
         .or(record.applied_route.as_ref())
         .or(record.resolved_route.as_ref());
+    if let run::RequestedRoute::Adapter { provider, name, .. } = &record.requested_route {
+        return format!("{provider}:{name}");
+    }
     let (requested_model, requested_effort) = match &record.requested_route {
+        run::RequestedRoute::Adapter { .. } => (None, None),
         run::RequestedRoute::Model { model, effort, .. } => (Some(model.clone()), effort.clone()),
         run::RequestedRoute::Named { effort, .. } | run::RequestedRoute::Review { effort, .. } => {
             (None, effort.clone())
@@ -8278,31 +8396,49 @@ mod tests {
             };
             let reply = dispatch_with_workers(*command, &edge, &Free);
             assert_ne!(reply.result.status, Status::Ok);
-            let owner =
+            let load = || {
                 worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
                     worktrees::load_owner(&provenant_confinement::verify_worktree(
                         context.repo,
                         &path,
                     )?)
-                })?
-                .ok_or("owner")?;
+                })
+            };
+            // The unreadable prompt fails preflight, before any ownership change.
+            let previous = OperationId::parse("previous-lane")?;
+            assert_eq!(
+                load()?.map(|owner| owner.operation_id),
+                origin.map(|_| Some(previous.clone()))
+            );
+            let claimed = super::own_worktree(
+                &super::OwnedWorktree {
+                    branch: branch.into(),
+                    host,
+                    created_at: WallTime::from_micros(2)?,
+                },
+                Some("HEAD"),
+                &OperationId::parse("replacement-lane")?,
+                &edge,
+                &Free,
+                &mut None,
+                &clock,
+                &cancel,
+            );
+            let owner = load()?.ok_or("owner")?;
             assert_eq!(owner.base, base);
             if origin == Some(WorktreeOrigin::Adopted) {
                 assert_eq!(owner.origin, WorktreeOrigin::Adopted);
-                assert_eq!(
-                    owner.operation_id,
-                    Some(OperationId::parse("previous-lane")?)
-                );
+                assert_eq!(owner.operation_id, Some(previous));
                 assert_eq!(owner.label.as_deref(), Some("preserved-label"));
                 assert!(
-                    reply
-                        .result
-                        .error
-                        .ok_or("error")?
+                    claimed
+                        .err()
+                        .ok_or("adopted owner was claimed")?
                         .message
                         .contains("adopted or foreign owner")
                 );
             } else {
+                assert_eq!(claimed.map_err(|fail| fail.message)?.0.path, path);
                 assert_eq!(owner.origin, WorktreeOrigin::Lane);
                 assert_eq!(
                     owner.operation_id,
@@ -8310,6 +8446,242 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+        use provenant_core::RootInputs;
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        use std::ffi::{OsStr, OsString};
+        // A census that cannot clear any tree: cleanup after a late failure
+        // would retain whatever creation left behind.
+        struct Unknown;
+        impl WorkerObserver for Unknown {
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, WorkerState::Unknown))
+                    .collect()
+            }
+        }
+        let executor = SystemExecutor::new(1)?;
+        if crate::fabric::in_lane() {
+            let argv = vec![
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::tests::failed_preflight_creates_no_worktree".into(),
+            ];
+            let removed = [
+                OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
+                OsStr::new(run::LANE_DEPTH_ENV),
+                OsStr::new(run::PARENT_ATTEMPT_ENV),
+            ];
+            let env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| !removed.contains(&key.as_os_str()))
+                .collect();
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            let out = executor.execute(options)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let project = root.join("project");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&project)?;
+        let mut inputs = RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let run_git = |args: &[&str]| -> Result<_, Box<dyn std::error::Error>> {
+            let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.iter().map(OsString::from))
+                .collect();
+            let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
+            options.stdout = StreamPolicy::Capture { limit: 65_536 };
+            options.stderr = StreamPolicy::Capture { limit: 65_536 };
+            Ok(executor.execute(options)?)
+        };
+        for args in [
+            &["init", "-q"][..],
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "base",
+            ][..],
+        ] {
+            let out = run_git(args)?;
+            assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        }
+        let edge = Edge {
+            roots: &roots,
+            home: &home,
+            assets: &project,
+            cwd: &project,
+        };
+        let prompt = root.join("prompt");
+        let secret = root.join("secret-prompt");
+        std::fs::write(&prompt, "review changes")?;
+        std::fs::write(&secret, "sk-abcdefghijklmnopqrstuvwxyz123456")?;
+        let missing = root.join("missing-prompt");
+        for (input, extra, invalid) in [
+            (&missing, vec![], None),
+            (&prompt, vec!["--knob", "not.a.knob=1"], None),
+            (&prompt, vec![], Some("title")),
+            (&prompt, vec![], Some("fallback")),
+            (&secret, vec![], None),
+        ] {
+            let mut args: Vec<OsString> = [
+                "dispatch",
+                "--operation-id",
+                "preflight-lane",
+                "--model",
+                "codex/gpt-6-luna",
+                "--mode",
+                "worktree-write",
+                "--worktree-branch",
+                "preflight-lane",
+                "--base",
+                "HEAD",
+                "--prompt-file",
+                input.to_str().ok_or("path")?,
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            args.extend(extra.into_iter().map(OsString::from));
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
+                return Err("parse".into());
+            };
+            let crate::Command::Dispatch(mut command) = invocation.command else {
+                return Err("dispatch".into());
+            };
+            match invalid {
+                Some("title") => command.title = Some("invalid\ntitle".into()),
+                Some("fallback") => {
+                    command.route.fallback = vec![crate::route::Model("invalid".into())]
+                }
+                _ => {}
+            }
+            let reply = dispatch_with_workers(*command, &edge, &Unknown);
+            assert_ne!(reply.result.status, Status::Ok);
+            assert!(
+                !project.join(".worktrees").join("preflight-lane").exists(),
+                "{:?}",
+                reply.result
+            );
+            let branch = run_git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/preflight-lane",
+            ])?;
+            assert_ne!(branch.termination, Termination::Exit(0), "{branch:?}");
+        }
+        // A relative base is resolved in the source checkout exactly once.
+        // The new tree has no HEAD^, so admission must use creation's receipt.
+        let out = run_git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "second",
+        ])?;
+        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+        let session = open(&edge, &call).map_err(|fail| fail.message)?;
+        let operation = OperationId::parse("relative-base-lane")?;
+        let (info, pinned) = own_worktree(
+            &OwnedWorktree {
+                branch: "relative-base-lane".into(),
+                host: provenant_config::bind_host(&roots)?,
+                created_at: clock.wall_now()?,
+            },
+            Some("HEAD^"),
+            &operation,
+            &edge,
+            &Unknown,
+            &mut None,
+            &clock,
+            &cancel,
+        )
+        .map_err(|fail| fail.message)?;
+        assert_eq!(info.head, pinned);
+        let dispatch = |base: &str| run::DispatchRequest {
+            chair: None,
+            operation_id: operation.clone(),
+            concurrency: 1,
+            lane_depth: 0,
+            parent_attempt: None,
+            tasks: vec![run::DispatchTask {
+                context: None,
+                build_heavy: false,
+                title: None,
+                task_id: TaskId::from_bytes([3; 16]),
+                prompt: "review changes".into(),
+                base: Some(base.into()),
+                pinned_base: Some(pinned),
+                head: None,
+                route: run::RequestedRoute::Model {
+                    extra: Default::default(),
+                    provider: "fixture".into(),
+                    model: "fixture/model".into(),
+                    effort: None,
+                },
+                account: None,
+                fallback: vec![],
+                profile: Default::default(),
+                timeout_seconds: 10,
+                delivery_id: None,
+                deliver: None,
+                worktree: Some(info.path.clone()),
+                access: Default::default(),
+            }],
+        };
+        let service = run::Service::new(&session.store);
+        let record = service.dispatch(dispatch("HEAD^"), &project, &call)?;
+        let canonical = session.store.request(record.run_id, &call)?;
+        assert_eq!(
+            canonical.tasks[0].base.as_deref(),
+            Some(pinned.to_string().as_str())
+        );
+        assert_eq!(canonical.tasks[0].base_ref.as_deref(), Some("HEAD^"));
+        assert_eq!(
+            service.dispatch(dispatch("HEAD^"), &project, &call)?.run_id,
+            record.run_id
+        );
+        let changed_base = service.dispatch(dispatch("HEAD"), &project, &call);
+        assert!(
+            matches!(changed_base, Err(run::RunError::OperationConflict)),
+            "{changed_base:?}"
+        );
+        let mut with_head = dispatch("HEAD^");
+        with_head.operation_id = OperationId::parse("relative-base-with-head")?;
+        with_head.tasks[0].head = Some(pinned.to_string());
+        service.dispatch(with_head, &project, &call)?;
         Ok(())
     }
 
@@ -8502,6 +8874,7 @@ mod tests {
                 task_id: TaskId::from_bytes([3; 16]),
                 prompt: "review".into(),
                 base: Some(base.into()),
+                pinned_base: None,
                 head: None,
                 route: run::RequestedRoute::Model {
                     extra: Default::default(),

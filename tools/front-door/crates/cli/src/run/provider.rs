@@ -28,6 +28,13 @@ pub(super) fn prepare(
         paths,
         resume,
         |name| match registry.host {
+            Some(host) if matches!(task.route, run::RequestedRoute::Adapter { .. }) => {
+                find_command_on_path(name, &host.executable_search_path)
+            }
+            None if matches!(task.route, run::RequestedRoute::Adapter { .. }) => {
+                let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
+                find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
+            }
             _ if name == "gh" => resolve_executable(name),
             Some(host) => host_executable(host, name),
             None => resolve_executable(name),
@@ -115,6 +122,9 @@ fn prepare_candidates(
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     redirected: bool,
 ) -> Result<run::PreparedLaunch, String> {
+    if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
+        return prepare_command(registry, task, paths, resume, locate, provider, name);
+    }
     check_launch_prompt(prompt_text, paths, None)?;
     if task.fallback.is_empty()
         && let run::RequestedRoute::Model { model, .. } = &task.route
@@ -376,6 +386,7 @@ fn prepare_candidates(
         }
     }
     let requested_adapter = match &task.route {
+        run::RequestedRoute::Adapter { provider, .. } => Some(provider.as_str()),
         run::RequestedRoute::Model { model, .. } => {
             model.split_once('/').map(|(adapter, _)| adapter)
         }
@@ -705,6 +716,7 @@ fn prepare_candidates(
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
         let mut spec = match adapter.prepare(PrepareInput {
+            command: None,
             route: &provider_route,
             confined: &plan,
             prompt: &prompt,
@@ -737,36 +749,14 @@ fn prepare_candidates(
             }
         };
         let build_settings = config.domains.fabric.lanes.build_settings();
-        // Builds, not lanes, share the host's build slots: a `cargo` shim takes
-        // one around each compiling command. The host (this process, outside
-        // the sandbox) creates the slot files; the lane may only read and lock
-        // them. Memory is unreadable only on a host that cannot run lanes.
-        let cargo = home.join(".cargo/bin/cargo");
-        if spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") && cargo.is_file() {
-            let total =
-                provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
-            let slots = build_settings.build_limit(total);
-            match provenant_os::build_slots::BuildSlots::provision(roots.state.as_path(), slots) {
-                Ok(()) => spec
-                    .configure_build_slots(
-                        scratch,
-                        &provenant_providers::BuildSlotGate {
-                            provenant: &provenant_executable,
-                            state: roots.state.as_path(),
-                            slots,
-                            wait_seconds: build_settings.build_wait().as_secs(),
-                            cargo: &cargo,
-                        },
-                    )
-                    .map_err(|error| error.to_string())?,
-                // Build slots are fair sharing, not a boundary: without them
-                // the lane still runs, ungated.
-                #[allow(clippy::print_stderr)]
-                Err(error) => eprintln!(
-                    "provenant: build slots unavailable for this lane, building without them: {error}"
-                ),
-            }
-        }
+        configure_build_slots(
+            &mut spec,
+            &build_settings,
+            &home,
+            scratch,
+            &provenant_executable,
+            roots.state.as_path(),
+        )?;
         if !host_indexes_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
@@ -912,6 +902,205 @@ fn prepare_candidates(
         .join("; "))
 }
 
+/// Resolve only a host-configured entry. The result enters the ordinary lane
+/// launcher, supervisor, guardian and settlement path below this edge.
+fn prepare_command(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    paths: &run::LaunchPaths,
+    resume: Option<&run::AttemptRecord>,
+    locate: &dyn Fn(&str) -> Result<PathBuf, String>,
+    provider: &str,
+    name: &str,
+) -> Result<run::PreparedLaunch, String> {
+    use provenant_providers::Adapter;
+    if provider != "command" {
+        return Err(format!("{provider} has no named model-less entries"));
+    }
+    AdapterSpec::get(provider)
+        .ok_or("unknown adapter")?
+        .check_launch(&provenant_records::LaunchRequest {
+            resume: resume.is_some(),
+            write: task.writer.is_some() || !task.access.write_roots.is_empty(),
+            network: task.access.network,
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string())?;
+    let roots = registry.roots.ok_or("routing context is unavailable")?;
+    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|error| error.to_string())?;
+    let command =
+        config.domains.fabric.commands.get(name).ok_or_else(|| {
+            format!("command {name} is not configured in domains.fabric.commands")
+        })?;
+    let program = command
+        .argv
+        .first()
+        .filter(|program| !program.is_empty())
+        .ok_or("configured command has no executable")?;
+    let cwd = canonical(registry.cwd.ok_or("working directory is unavailable")?)?;
+    let invocation = if program.contains('/') {
+        cwd.join(program)
+    } else {
+        locate(program)?
+    };
+    let executable = canonical(&invocation)?;
+    let runtimes = command
+        .runtimes
+        .iter()
+        .map(|path| canonical(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let home = canonical(registry.home.ok_or("home directory is unavailable")?)?;
+    let assets = registry.assets.ok_or("product assets are unavailable")?;
+    let project = registry
+        .project_id
+        .ok_or("selected project identity is unavailable")?;
+    let git = canonical(&match registry.host {
+        Some(host) => host.git.clone(),
+        None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
+    })?;
+    let scratch = paths.temporary.join("command");
+    apply_setup_directory(&[&paths.temporary], &scratch)?;
+    let mut access = task.access.clone();
+    // With no API endpoints, provider-only reach is network off.
+    access.network.get_or_insert(
+        AdapterSpec::get(provider)
+            .ok_or("unknown adapter")?
+            .launch
+            .default_network,
+    );
+    let request = confinement_request(
+        project,
+        ConfinementRoots {
+            cwd: &cwd,
+            home: &home,
+            scratch: &scratch,
+            private_state: &paths.provider_state,
+            assets,
+            prompt_file: None,
+        },
+        None,
+        &access,
+        &config.domains.run,
+        provider,
+        false,
+    )?;
+    let (plan, observed_head, repository) = read_only_plan(roots, project, &cwd, &git, request)?;
+    let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
+        .map_err(|error| error.to_string())?
+        .ok_or("current user identity is unavailable")?
+        .name;
+    let runtime = canonical(&std::env::current_exe().map_err(|error| error.to_string())?)?;
+    let child_state = roots
+        .state
+        .as_path()
+        .join("children")
+        .join(paths.attempt_id.to_string());
+    let route = ResolvedRoute {
+        extra: [("name".into(), serde_json::Value::String(name.into()))]
+            .into_iter()
+            .collect(),
+        adapter: provider.into(),
+        model: String::new(),
+        effort: None,
+        catalogue_revision: String::new(),
+        account_key: None,
+        host: "local".into(),
+        alternatives: Default::default(),
+        exclusions: Vec::new(),
+        eligibility: provenant_records::RouteEligibility::Eligible,
+        readiness: provenant_records::RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: format!("domains.fabric.commands.{name}"),
+            expires_unix_seconds: i64::MAX,
+        },
+        confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: task.authority_digest.to_string(),
+        },
+        pool_selection: None,
+    };
+    let prompt = Prompt::new(String::new());
+    let mut spec = provenant_providers::command::Command
+        .prepare(PrepareInput {
+            route: &route,
+            command: Some(provenant_providers::command::Invocation {
+                argv: &command.argv,
+                runtimes: &runtimes,
+                program: &invocation,
+            }),
+            confined: &plan,
+            prompt: &prompt,
+            continuation: None,
+            grant_digest: &task.authority_digest.to_string(),
+            executable: &executable,
+            home: &home,
+            user: &user,
+            host_var: &|key| std::env::var_os(key),
+            account: None,
+            token: None,
+            cwd: &cwd,
+            git_context: false,
+            nonce: [0; 16],
+            provenant: LaneRuntime {
+                executable: &runtime,
+                git: &git,
+                state: roots.state.as_path(),
+                child_state: &child_state,
+                home: &home,
+                depth: paths.lane_depth,
+                attempt: paths.attempt_id,
+                assets,
+            },
+        })
+        .map_err(|error| error.to_string())?;
+    let settings = config.domains.fabric.lanes.build_settings();
+    configure_build_slots(
+        &mut spec,
+        &settings,
+        &home,
+        &scratch,
+        &runtime,
+        roots.state.as_path(),
+    )?;
+    set_cargo_profile(&mut spec.env, &settings);
+    set_cargo_jobs(
+        &mut spec.env,
+        registry
+            .host
+            .and_then(|host| host.cargo_build_jobs.as_deref()),
+        settings.jobs(),
+    );
+    apply_setup(&spec.setup, &[&scratch, &paths.provider_state], None)?;
+    Ok(run::PreparedLaunch {
+        provider_lease: None,
+        skipped_routes: Vec::new(),
+        argv: spec.argv,
+        environment: spec.env,
+        stdin: Vec::new(),
+        secret_input: None,
+        cwd: spec.cwd,
+        route: RouteRecord {
+            provider: Some(provider.into()),
+            source: Some(format!("domains.fabric.commands.{name}")),
+            extra: [("name".into(), serde_json::Value::String(name.into()))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+        observed_head,
+        repository,
+        confinement: Some(run::LaunchConfinement {
+            plan,
+            profile: spec.profile,
+            writer: None,
+            home,
+            cargo_registry_seed: false,
+            state_root: roots.state.as_path().to_owned(),
+        }),
+    })
+}
+
 fn nested_policy_fallback(
     task: &run::TaskRequest,
     route: &ResolvedRoute,
@@ -952,6 +1141,46 @@ fn nested_policy_fallback(
     }
     task.fallback.clear();
     Ok(task)
+}
+
+fn configure_build_slots(
+    spec: &mut provenant_providers::LaunchSpec,
+    settings: &provenant_config::LaneBuildSettings,
+    home: &Path,
+    scratch: &Path,
+    runtime: &Path,
+    state: &Path,
+) -> Result<(), String> {
+    // Builds, not lanes, share the host's build slots: a `cargo` shim takes
+    // one around each compiling command. The host (this process, outside
+    // the sandbox) creates the slot files; the lane may only read and lock
+    // them. Memory is unreadable only on a host that cannot run lanes.
+    let cargo = home.join(".cargo/bin/cargo");
+    if spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") && cargo.is_file() {
+        let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+        let slots = settings.build_limit(total);
+        match provenant_os::build_slots::BuildSlots::provision(state, slots) {
+            Ok(()) => spec
+                .configure_build_slots(
+                    scratch,
+                    &provenant_providers::BuildSlotGate {
+                        provenant: runtime,
+                        state,
+                        slots,
+                        wait_seconds: settings.build_wait().as_secs(),
+                        cargo: &cargo,
+                    },
+                )
+                .map_err(|error| error.to_string())?,
+            // Build slots are fair sharing, not a boundary: without them
+            // the lane still runs, ungated.
+            #[allow(clippy::print_stderr)]
+            Err(error) => eprintln!(
+                "provenant: build slots unavailable for this lane, building without them: {error}"
+            ),
+        }
+    }
+    Ok(())
 }
 
 fn set_cargo_jobs(
@@ -2209,6 +2438,10 @@ pub(crate) fn find_executable(name: &str) -> Result<PathBuf, String> {
 
 fn find_executable_on_path(name: &str, search_path: &[PathBuf]) -> Result<PathBuf, String> {
     let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
+    find_command_on_path(name, search_path)
+}
+
+fn find_command_on_path(name: &str, search_path: &[PathBuf]) -> Result<PathBuf, String> {
     for directory in search_path
         .iter()
         .filter(|directory| directory.is_absolute())
@@ -2430,6 +2663,26 @@ pub fn prepare_fixture(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_lookup_is_literal_and_preserves_symlink_invocation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let root = super::canonical(temp.path())?;
+        let executable = root.join("multicall");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let link = root.join("cursor");
+        std::os::unix::fs::symlink(&executable, &link)?;
+        assert_eq!(
+            super::find_command_on_path("cursor", std::slice::from_ref(&root))?,
+            link
+        );
+        assert_eq!(super::canonical(&link)?, executable);
+        // Model provider lookup keeps its cursor -> cursor-agent alias.
+        assert!(super::find_executable_on_path("cursor", &[root]).is_err());
+        Ok(())
+    }
     #[test]
     fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -4095,6 +4348,7 @@ mod tests {
                     home.join(".codex"),
                 )?;
                 let launch = Codex.prepare(PrepareInput {
+                    command: None,
                     route: &route,
                     confined: &plan,
                     prompt: &prompt,

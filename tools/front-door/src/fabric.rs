@@ -2399,6 +2399,7 @@ impl BinaryRunOwner<'_> {
                 context: task.context,
                 build_heavy: task.build_heavy,
                 base: task.base,
+                pinned_base: None,
                 head: task.head,
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
@@ -4774,6 +4775,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     prompt: node.prompt.into(),
                     title: Some(node.title.to_owned()),
                     route: match &route.model {
+                        None if route.name.is_some() => {
+                            provenant_records::run::RequestedRoute::Adapter {
+                                extra: Default::default(),
+                                provider: route.adapter.clone().ok_or(FacadeError::InvalidInput)?,
+                                name: route.name.clone().ok_or(FacadeError::InvalidInput)?,
+                            }
+                        }
                         Some(model) => {
                             let adapter =
                                 route.adapter.as_ref().ok_or(FacadeError::InvalidInput)?;
@@ -7192,6 +7200,7 @@ mod peer_tests {
                         task_id: TaskId::from_bytes([3; 16]),
                         prompt: "reply OK".into(),
                         base: Some(info.head.to_string()),
+                        pinned_base: None,
                         head: None,
                         profile: Default::default(),
                         route: provenant_run::RequestedRoute::Model {

@@ -32,7 +32,8 @@ fn effect_plan(adapter: &str) -> QuotaProbePlan {
         "claude" | "cursor" => QuotaEffectKind::HttpGet,
         "codex" | "agy" => QuotaEffectKind::Command,
         "opencode" => QuotaEffectKind::LocalLedger,
-        _ => unreachable!(),
+        "command" => unreachable!("command adapter has no quota probe"),
+        other => panic!("unlisted adapter {other}"),
     };
     QuotaProbePlan {
         kind,
@@ -251,13 +252,20 @@ fn no_reported_windows_remain_unknown() {
 #[test]
 fn quota_effects_follow_specs_and_require_successful_commands() {
     for spec in provenant_records::ADAPTER_SPECS {
-        let plan = super::plan(spec.name, &scope(spec.name), &input()).unwrap();
         let expected = match spec.name {
             "claude" | "cursor" => QuotaEffectKind::HttpGet,
             "codex" | "agy" => QuotaEffectKind::Command,
             "opencode" => QuotaEffectKind::LocalLedger,
-            _ => unreachable!(),
+            "command" => {
+                assert!(matches!(
+                    super::plan(spec.name, &scope(spec.name), &input()),
+                    Err(QuotaError::Disabled)
+                ));
+                continue;
+            }
+            other => panic!("unlisted adapter {other}"),
         };
+        let plan = super::plan(spec.name, &scope(spec.name), &input()).unwrap();
         assert_eq!(plan.kind, expected);
         let capture = provenant_quota::ProbeCapture {
             stdout: br#"{"payload": {}}"#.to_vec(),

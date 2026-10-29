@@ -640,6 +640,10 @@ fn detections(
 ) -> Vec<Detection> {
     registry
         .iter()
+        .filter(|r| {
+            provenant_records::AdapterSpec::get(r.adapter.id())
+                .is_some_and(|spec| spec.quota_probe != provenant_records::QuotaProbeKind::None)
+        })
         .map(|r| {
             let status = r.adapter.stream(None).and_then(|s| r.adapter.account(&s));
             Detection {

@@ -523,7 +523,6 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                         "write_root",
                         "network",
                         "capability",
-                        "provider_timeout",
                     ])
                 });
         }
@@ -915,7 +914,7 @@ fn constraints(path: &str) -> Vec<String> {
         "provenant dispatch" => &[
             "single prompt requires exactly one of model or route",
             "operation-id is generated when omitted; supply it for planned retries",
-            "manifest conflicts with per-task route, access, metadata and provider-timeout",
+            "manifest conflicts with per-task route, access and metadata",
             "concurrency requires manifest",
             "worktree, or a peer writer's branch, is required with, and only valid for, worktree-write",
             "fallback conflicts with a writer and has at most two distinct models",
@@ -924,7 +923,7 @@ fn constraints(path: &str) -> Vec<String> {
         "provenant run" => &[
             "single prompt selects a preset by rules when model, route and preset are omitted",
             "operation-id is generated when omitted; supply it for planned retries",
-            "manifest conflicts with per-task route, access, metadata and provider-timeout",
+            "manifest conflicts with per-task route, access and metadata",
             "concurrency requires manifest or preset",
             "single-task worktree, or a peer writer's branch, requires worktree-write",
             "preset worktree bindings require an existing registered worktree",
@@ -1727,11 +1726,23 @@ mod tests {
             "--concurrency",
             "8",
         ]);
+        let invocation = valid(&[
+            "dispatch",
+            "--manifest",
+            "tasks.json",
+            "--operation-id",
+            "op",
+            "--provider-timeout",
+            "1",
+        ]);
+        let Command::Dispatch(request) = invocation.command else {
+            panic!("dispatch")
+        };
+        assert_eq!(request.provider_timeout, 1);
         for args in [
             vec!["--model", "codex/id"],
             vec!["--mode", "read-only"],
             vec!["--network", "off"],
-            vec!["--provider-timeout", "1"],
             vec!["--effort", "high"],
         ] {
             let mut words = vec![
