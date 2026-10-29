@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Check tracked harness documents, skill metadata and routing fixtures."""
+
+import argparse
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import urllib.parse
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("check-harness: install PyYAML (python3 -m pip install PyYAML)")
+
+
+class UniqueLoader(yaml.SafeLoader):
+    """Reject duplicate keys, which otherwise silently hide mistakes."""
+
+
+def unique_mapping(loader, node, deep=False):
+    result = {}
+    for key, value in node.value:
+        key = loader.construct_object(key, deep=deep)
+        if key in result:
+            raise ValueError(f"duplicate key: {key}")
+        result[key] = loader.construct_object(value, deep=deep)
+    return result
+
+
+UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, unique_mapping)
+
+
+def nonempty(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("root", nargs="?", type=Path,
+                        default=Path(__file__).resolve().parent.parent)
+    root = parser.parse_args().root.resolve()
+    tracked = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z"]).decode().split("\0")
+    paths = {Path(p) for p in tracked if p}
+    failures = []
+
+    def fail(path, message):
+        failures.append(f"{path}: {message}")
+
+    def load_yaml(path, text):
+        try:
+            result = yaml.load(text, Loader=UniqueLoader)
+            if not isinstance(result, dict):
+                raise ValueError("expected a mapping")
+            return result
+        except (yaml.YAMLError, ValueError) as error:
+            fail(path, f"invalid YAML: {error}")
+            return {}
+
+    skills = {p.parent.name for p in paths if p.name == "SKILL.md"}
+    versions = {}
+    package = root / "package.json"
+    if package.exists():
+        data = json.loads(package.read_text())
+        for section in ("dependencies", "devDependencies"):
+            versions.update(data.get(section, {}))
+    cargo = root / "Cargo.toml"
+    if cargo.exists():
+        section = ""
+        for line in cargo.read_text().splitlines():
+            heading = re.match(r"\s*\[([^]]+)\]", line)
+            if heading:
+                section = heading.group(1)
+                continue
+            if section not in ("dependencies", "dev-dependencies", "workspace.dependencies"):
+                continue
+            entry = re.match(r'\s*([\w-]+)\s*=\s*(?:"([^"]+)"|\{[^}]*\bversion\s*=\s*"([^"]+)")', line)
+            if entry:
+                versions[entry.group(1)] = entry.group(2) or entry.group(3)
+
+    def version(value):
+        match = re.match(r"\s*(?:>=|\^|~)?(\d+)\.(\d+)", value)
+        return tuple(map(int, match.groups())) if match else None
+
+    def anchors(text):
+        result = set()
+        counts = {}
+        for line in text.splitlines():
+            match = re.match(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
+            if not match:
+                continue
+            title = re.sub(r"<[^>]*>", "", match.group(1)).lower()
+            slug = "".join(c for c in title if c.isalnum() or c in " -_").replace(" ", "-")
+            count = counts.get(slug, 0)
+            counts[slug] = count + 1
+            result.add(f"{slug}-{count}" if count else slug)
+        return result
+
+    def markdown(path, text):
+        fenced = None
+        for number, line in enumerate(text.splitlines(), 1):
+            fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+            if fence:
+                marker = fence.group(1)
+                if fenced is None:
+                    fenced = marker
+                elif marker[0] == fenced[0] and len(marker) >= len(fenced):
+                    fenced = None
+                continue
+            if fenced:
+                continue
+            line = re.sub(r"(`+).*?\1", "", line)
+            for match in re.finditer(r"\[[^\]]*\]\(([^\s)]+)(?:\s+[^)]*)?\)", line):
+                target = match.group(1).strip("<>")
+                if ":" in target or target.startswith("/"):
+                    continue
+                relative, _, anchor = target.partition("#")
+                destination = (root / path.parent / urllib.parse.unquote(relative)).resolve() if relative else root / path
+                if not destination.is_relative_to(root):
+                    fail(path, f"{number}: link escapes the repository: {target}")
+                    continue
+                dest = destination.relative_to(root)
+                if dest not in paths and not any(dest in p.parents for p in paths):
+                    fail(path, f"{number}: unresolved local link: {target}")
+                elif anchor and dest in paths and dest.suffix == ".md" and anchor not in anchors(destination.read_text()):
+                    fail(path, f"{number}: unresolved Markdown anchor: {target}")
+
+    for path in sorted(paths):
+        if path.suffix == ".md":
+            markdown(path, (root / path).read_text())
+        if path.name == "SKILL.md":
+            text = (root / path).read_text()
+            lines = text.splitlines()
+            if not lines or lines[0] != "---" or "---" not in lines[1:]:
+                fail(path, "missing frontmatter")
+                continue
+            fields = load_yaml(path, "\n".join(lines[1:lines.index("---", 1)]))
+            extra = fields.keys() - {"name", "description", "verified-against"}
+            if extra:
+                fail(path, f"unsupported frontmatter keys: {', '.join(sorted(map(str, extra)))}")
+            if fields.get("name") != path.parent.name:
+                fail(path, "name must match the skill directory")
+            if not nonempty(fields.get("description")) or len(fields["description"]) > 1024:
+                fail(path, "description must contain 1..1024 characters")
+            pins = fields.get("verified-against", "")
+            if isinstance(pins, str):
+                for pin in pins.split(","):
+                    name, sep, pinned = pin.strip().rpartition("@")
+                    current = versions.get(name)
+                    if sep and isinstance(current, str) and version(current) and version(pinned) and version(current) > version(pinned):
+                        fail(path, f"{name} is pinned to {pinned} but the project declares {current}")
+        elif path.as_posix().endswith("agents/openai.yaml"):
+            fields = load_yaml(path, (root / path).read_text())
+            interface = fields.get("interface")
+            if not isinstance(interface, dict):
+                fail(path, "interface mapping is required")
+                continue
+            for key in ("display_name", "short_description", "default_prompt"):
+                if not nonempty(interface.get(key)):
+                    fail(path, f"interface.{key} is required")
+            description = interface.get("short_description")
+            if nonempty(description) and not 25 <= len(description) <= 64:
+                fail(path, "interface.short_description must contain 25..64 characters")
+            if nonempty(interface.get("default_prompt")) and f"${path.parent.parent.name}" not in interface["default_prompt"]:
+                fail(path, "default prompt must invoke the skill")
+            for key in ("icon_small", "icon_large"):
+                if key in interface:
+                    asset = (root / path.parent.parent / str(interface[key])).resolve()
+                    if not asset.is_relative_to(root) or asset.relative_to(root) not in paths:
+                        fail(path, f"{key} must refer to a tracked local asset")
+        elif path.parent == Path(".github/ISSUE_TEMPLATE") and path.suffix in (".yml", ".yaml") and path.stem != "config":
+            fields = load_yaml(path, (root / path).read_text())
+            extra = fields.keys() - {"assignees", "body", "description", "labels", "name", "projects", "title", "type"}
+            if extra:
+                fail(path, f"unsupported issue form keys: {', '.join(sorted(map(str, extra)))}")
+            if not all(nonempty(fields.get(k)) for k in ("name", "description")):
+                fail(path, "name and description are required")
+            body = fields.get("body")
+            if not isinstance(body, list) or not body:
+                fail(path, "body must be a nonempty sequence")
+                continue
+            ids = set()
+            inputs = 0
+            for item in body:
+                if not isinstance(item, dict) or item.get("type") not in ("checkboxes", "dropdown", "input", "markdown", "textarea", "upload"):
+                    fail(path, "invalid issue field type")
+                    continue
+                extra = item.keys() - {"attributes", "id", "type", "validations"}
+                if extra:
+                    fail(path, f"unsupported issue body keys: {', '.join(sorted(map(str, extra)))}")
+                if item["type"] != "markdown":
+                    inputs += 1
+                attrs = item.get("attributes")
+                if not isinstance(attrs, dict):
+                    fail(path, "issue field attributes are required")
+                    continue
+                if item["type"] == "markdown":
+                    if not nonempty(attrs.get("value")) or "id" in item:
+                        fail(path, "markdown requires a value and no id")
+                else:
+                    ident = item.get("id")
+                    if not nonempty(ident) or not re.fullmatch(r"[A-Za-z0-9_-]+", ident) or ident in ids:
+                        fail(path, "input ids must be valid and unique")
+                    ids.add(ident)
+                    if not nonempty(attrs.get("label")):
+                        fail(path, "input label is required")
+                validations = item.get("validations", {})
+                if not isinstance(validations, dict) or ("required" in validations and not isinstance(validations["required"], bool)):
+                    fail(path, "required validation must be boolean")
+                if item["type"] in ("dropdown", "checkboxes"):
+                    options = attrs.get("options")
+                    labels = [o.get("label") if isinstance(o, dict) else o for o in options] if isinstance(options, list) else []
+                    if not labels or not all(nonempty(x) for x in labels) or len(set(labels)) != len(labels):
+                        fail(path, "options need unique, nonempty labels")
+            if not inputs:
+                fail(path, "at least one input is required")
+        elif path.parent.name == "evals" and path.name in ("trigger_cases.json", "regression_cases.json"):
+            try:
+                data = json.loads((root / path).read_text())
+                target = path.parent.parent.name
+                cases = data["cases"]
+                if data["schema_version"] != 1 or data["target_skill"] != target or not isinstance(cases, list) or not cases:
+                    raise ValueError("invalid version, target or cases")
+                seen = set()
+                for case in cases:
+                    ident, relation, prompt, tags, expected = (case[k] for k in ("id", "relation", "prompt", "tags", "expected"))
+                    primary, companions = expected["primary_skill"], expected["companion_skills"]
+                    prefix = "r" if path.name.startswith("regression") else "q"
+                    if not isinstance(ident, str) or not re.fullmatch(prefix + r"\d+", ident) or ident in seen or not nonempty(prompt):
+                        raise ValueError("invalid case identity or prompt")
+                    seen.add(ident)
+                    if not isinstance(tags, list) or not tags or not all(nonempty(t) for t in tags) or len(set(tags)) != len(tags):
+                        raise ValueError("invalid tags")
+                    if not isinstance(companions, list) or len(set(companions)) != len(companions) or any(c not in skills or c == primary for c in companions) or (primary is not None and primary not in skills):
+                        raise ValueError("invalid skill reference")
+                    if primary is None and (companions or "no-skill" not in tags):
+                        raise ValueError("invalid no-skill route")
+                    if relation == "positive" and primary != target or relation == "negative" and (primary == target or target in companions) or relation == "boundary" and not ({"adjacent", "composition"} & set(tags)) or relation not in ("positive", "negative", "boundary"):
+                        raise ValueError("invalid route relation")
+                    if prefix == "r" and (not nonempty(case.get("note")) or relation == "boundary" and primary != target and target not in companions) or prefix == "q" and "note" in case:
+                        raise ValueError("invalid regression note or route")
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                fail(path, f"invalid route fixture: {error}")
+
+    if failures:
+        print("\n".join(failures), file=sys.stderr)
+        return 1
+    print(f"check-harness: checked {len(paths)} tracked paths")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

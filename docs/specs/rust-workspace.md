@@ -29,8 +29,9 @@ Direct dependencies come only from the `DIRECT` list in
 `[workspace.dependencies]`; `tempfile` is dev-only. A new crate, feature or
 material transitive addition needs a recorded reason and an update to this rule.
 `rusqlite` also serves run's store, keeping admission atomic in one
-database. `toml_edit` enables `serde` for typed config. There is no
-async runtime and no daemon.
+database. `toml_edit` enables `serde` for typed config. `serde-saphyr` parses
+bounded session summary YAML, preserving unsigned revision values without a
+bespoke parser. There is no async runtime and no daemon.
 - Why: a small, audited supply chain with bounded, synchronous code.
 - Test: `tests/workspace_policy.rs::every_member_obeys_the_direct_dependency_policy`;
   `::transitive_crates_and_renamed_dependencies_are_rejected`

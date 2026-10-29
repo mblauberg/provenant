@@ -60,7 +60,6 @@ enum Inspectable {
         source: Option<PathBuf>,
         page: provenant_cli::Page,
     },
-    Harness(provenant_cli::Page),
     Release {
         base: Option<provenant_core::GitOid>,
         head: Option<provenant_core::GitOid>,
@@ -71,7 +70,6 @@ pub fn run(check: Check, globals: &Globals) -> u8 {
     let (name, check) = match check {
         Check::Config(page) => ("check config", Inspectable::Config(page)),
         Check::Install { source, page } => ("check install", Inspectable::Install { source, page }),
-        Check::Harness(page) => ("check harness", Inspectable::Harness(page)),
         Check::Release { base, head, page } => {
             ("check release", Inspectable::Release { base, head, page })
         }
@@ -154,7 +152,7 @@ impl Inspection {
     }
 }
 fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
-    let workspace = if matches!(check, Inspectable::Harness(_) | Inspectable::Release { .. }) {
+    let workspace = if matches!(check, Inspectable::Release { .. }) {
         roots::Workspace::Checkout
     } else {
         roots::Workspace::Project
@@ -164,8 +162,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
         home,
         project,
         roots,
-        claude_config,
-        codex_home,
+        ..
     } = roots::resolve(globals, workspace, roots::Product::Required)?;
     let selector = (
         env!("PROVENANT_SOURCE_DIGEST"),
@@ -252,31 +249,6 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 &page,
             )?)
         }),
-        Inspectable::Harness(page) => {
-            let harnesses = [
-                provenant_records::Harness::Claude,
-                provenant_records::Harness::Codex,
-                provenant_records::Harness::Cursor,
-                provenant_records::Harness::Agy,
-                provenant_records::Harness::Opencode,
-            ];
-            let mut targets = provenant_cli::install::configured_targets(
-                roots.clone(),
-                &home,
-                &harnesses,
-                claude_config.as_deref(),
-                codex_home.as_deref(),
-            )?;
-            targets.resolve_destinations(&provenant_os::fs::SystemPathResolver)?;
-            let skill_roots: Vec<_> = targets
-                .harnesses
-                .into_iter()
-                .map(|target| target.skills_dir)
-                .collect();
-            git_page(&project, |git| {
-                provenant_cli::check::harness_page(git, &skill_roots, ("harness", selector), &page)
-            })
-        }
         Inspectable::Release { base, head, page } => {
             let range = base.zip(head);
             git_page(&project, |git| {

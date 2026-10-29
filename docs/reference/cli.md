@@ -4003,34 +4003,6 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 }
 ```
 
-## `provenant check harness`
-
-| Argument | Contract |
-|---|---|
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
-| `--cursor` | `{"name": "cursor"}` |
-| `--json` | `{"name": "json", "values": ["true", "false"]}` |
-| `--state-dir` | `{"name": "state_dir"}` |
-| `--project` | `{"name": "project"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
-
-```json
-{
-  "groups": [
-    {
-      "arguments": [
-        "limit",
-        "cursor"
-      ],
-      "multiple": true,
-      "name": "Page",
-      "required": false
-    }
-  ]
-}
-```
-
 ## `provenant check release`
 
 | Argument | Contract |

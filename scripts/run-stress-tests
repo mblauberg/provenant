@@ -1,7 +1,9 @@
 #!/bin/sh
 # Advisory CI signal: stress-run the tests a pull request added or changed.
 #   run-stress-tests <base> [<head>]
-# Runs nextest with --stress-count 20 and no retries over just those tests.
+# Runs nextest with --stress-count 20 and no retries over just those tests,
+# stopped after STRESS_DURATION (default 15m) so a large diff cannot outrun
+# the job timeout and lose its log. Reaching the budget is not a failure.
 # A failure becomes a warning annotation and summary; the script always exits 0.
 set -eu
 
@@ -9,6 +11,9 @@ root=$(cd "$(dirname "$0")/.." && pwd -P)
 base=${1:?usage: run-stress-tests <base> [<head>]}
 head=${2:-HEAD}
 count=${STRESS_COUNT:-20}
+duration=${STRESS_DURATION:-15m}
+budget=
+if command -v timeout >/dev/null 2>&1; then budget="timeout -s INT $duration"; fi
 
 note() { # markdown for the job summary
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -27,13 +32,15 @@ cd "$root/tools/front-door"
 log=$(mktemp "${TMPDIR:-/tmp}/provenant-stress.XXXXXX")
 trap 'rm -f "$log"' EXIT HUP INT TERM
 status=0
-cargo nextest run --profile ci --workspace --locked \
+$budget cargo nextest run --profile ci --workspace --locked \
   --features provenant-providers/recording \
   --stress-count "$count" --retries 0 --no-tests=pass -E "$filter" > "$log" 2>&1 || status=$?
 tail -n 200 "$log"
 
 if [ "$status" -eq 0 ]; then
   note "Changed tests passed $count stress iterations with no retries."
+elif [ -n "$budget" ] && [ "$status" -eq 124 ] && ! grep -q 'FAIL' "$log"; then
+  note "Stopped at the $duration budget before $count iterations, with no failures."
 else
   echo "::warning title=Stress run failed::Changed tests failed under --stress-count $count with no retries (exit $status); a build error also lands here."
   note "**Stress run failed** (exit $status), \`--stress-count $count\`, no retries. Tail of the log:
