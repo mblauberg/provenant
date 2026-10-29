@@ -277,6 +277,8 @@ pub struct ProviderProfileSpec {
     pub allow_process_fork: bool,
     /// Deny keychain IPC and its CLI even when a tool can execute system programs.
     pub deny_keychain_access: bool,
+    /// An offline adapter denies even the runtime's DNS socket exception.
+    pub deny_network: bool,
     /// The CLI runs its tools' commands on a pseudo-terminal: open `/dev/ptmx`
     /// and only the terminals this sandbox allocates, never another `ttys`.
     pub allow_pseudo_tty: bool,
@@ -1790,6 +1792,9 @@ fn render_profile(
     }
     if plan.network == NetworkAccess::Open {
         source.push_str("(allow network-outbound (remote ip \"*:*\"))\n");
+    }
+    if profile.spec.deny_network {
+        source.push_str("(deny network*)\n");
     }
 
     // The gh read comes before the secret-root denies: Seatbelt is

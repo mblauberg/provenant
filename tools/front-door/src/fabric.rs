@@ -4361,6 +4361,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     prompt: node.prompt.into(),
                     title: Some(node.title.to_owned()),
                     route: match &route.model {
+                        None if route.name.is_some() => {
+                            provenant_records::run::RequestedRoute::Adapter {
+                                extra: Default::default(),
+                                provider: route.adapter.clone().ok_or(FacadeError::InvalidInput)?,
+                                name: route.name.clone().ok_or(FacadeError::InvalidInput)?,
+                            }
+                        }
                         Some(model) => {
                             let adapter =
                                 route.adapter.as_ref().ok_or(FacadeError::InvalidInput)?;

@@ -46,14 +46,17 @@ pub struct GraphDocument {
     pub nodes: Vec<GraphNode>,
 }
 
-/// Legacy Fabric route wire shape. Exactly one of `model` and `alias` is
-/// required. `adapter` is required for a model and optional for an alias.
+/// Exactly one of `model`, `alias` and `name` selects a route. A named
+/// model-less entry requires `adapter`, as does a model route.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphRoute {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<String>,
+    /// A trusted configuration entry for a model-less adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2940,9 +2943,9 @@ fn validate_flat_plan(
         }
         if routes
             .iter()
-            .any(|route| route.model.is_some() && route.adapter.is_none())
+            .any(|route| (route.model.is_some() || route.name.is_some()) && route.adapter.is_none())
         {
-            return Err("model route requires an adapter");
+            return Err("model or named adapter route requires an adapter");
         }
         if routes.iter().any(|route| !route_is_bounded(route)) {
             return Err("route field size");
@@ -2953,6 +2956,7 @@ fn validate_flat_plan(
                 .as_deref()
                 .and_then(provenant_records::AdapterSpec::get)
                 && let Err(error) = spec.check_launch(&provenant_records::LaunchRequest {
+                    model: route.model.as_deref(),
                     effort: route.effort.as_deref(),
                     write: node.access == AccessMode::WorktreeWrite,
                     ..Default::default()
@@ -3132,7 +3136,17 @@ fn route_is_bounded(route: &GraphRoute) -> bool {
         .adapter
         .as_deref()
         .is_none_or(|value| field(value, 128))
-        && (route.model.is_some() ^ route.alias.is_some())
+        && [
+            route.model.is_some(),
+            route.alias.is_some(),
+            route.name.is_some(),
+        ]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count()
+            == 1
+        && route.name.as_deref().is_none_or(|value| field(value, 128))
+        && (route.name.is_none() || (route.effort.is_none() && route.account.is_none()))
         && route.model.as_deref().is_none_or(|value| field(value, 256))
         && route.alias.as_deref().is_none_or(|value| field(value, 128))
         && route.effort.as_deref().is_none_or(|value| field(value, 64))
@@ -3632,6 +3646,7 @@ mod tests {
             extra: Default::default(),
             account: None,
             adapter: Some(adapter.to_owned()),
+            name: None,
             model: Some(format!("{adapter}/model")),
             alias: None,
             effort: None,
@@ -5659,6 +5674,28 @@ mod tests {
                 "{adapter}"
             );
         }
+    }
+
+    #[test]
+    fn named_adapter_route_has_no_model_and_rejects_mixed_selectors() {
+        let mut leaf = route("command");
+        leaf.model = None;
+        leaf.name = Some("fmt-check".into());
+        assert!(validate_plan(&graph(vec![node("check", leaf.clone())])).is_ok());
+        for field in ["model", "alias", "effort", "account"] {
+            let mut value = serde_json::to_value(&leaf).unwrap();
+            value[field] = "other".into();
+            let mixed = serde_json::from_value(value).unwrap();
+            assert!(
+                validate_plan(&graph(vec![node("check", mixed)])).is_err(),
+                "{field}"
+            );
+        }
+        leaf.adapter = None;
+        assert_eq!(
+            validate_plan(&graph(vec![node("check", leaf)])).err(),
+            Some("route requires an adapter or alias")
+        );
     }
 
     #[test]

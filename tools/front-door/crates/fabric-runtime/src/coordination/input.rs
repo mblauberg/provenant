@@ -182,6 +182,11 @@ fn landing_reference(reference: &str, path: &str) -> Result<(), InputError> {
 
 fn route(route: &RequestedRoute, path: &str) -> Result<(), InputError> {
     let effort = match route {
+        RequestedRoute::Adapter { provider, name, .. } => {
+            bounded_text(provider, &format!("{path}.provider"), MAX_ROUTE_BYTES)?;
+            bounded_text(name, &format!("{path}.name"), MAX_ROUTE_BYTES)?;
+            return Ok(());
+        }
         RequestedRoute::Model {
             provider,
             model,

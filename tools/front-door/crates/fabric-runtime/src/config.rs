@@ -9,6 +9,9 @@ use std::collections::BTreeMap;
 pub struct FabricConfig {
     pub agent_label: String,
     pub client_label: String,
+    /// Host-configured argv selected by adapter route name.
+    #[serde(default)]
+    pub commands: BTreeMap<String, Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_ssh_executable")]
     pub ssh_executable: Option<std::path::PathBuf>,
     pub home_hosts: BTreeMap<String, HostId>,
@@ -283,6 +286,16 @@ impl DomainConfig for FabricConfig {
                 reject(name.into());
             }
         }
+        for (name, argv) in &self.commands {
+            if name.is_empty()
+                || name.contains('\0')
+                || argv.is_empty()
+                || argv[0].is_empty()
+                || argv.iter().any(|arg| arg.contains('\0'))
+            {
+                reject(format!("commands.{name}"));
+            }
+        }
         for (name, peer) in &self.peers {
             if crate::identity::validate_label(name).is_err()
                 || peer.destination.is_empty()
@@ -416,6 +429,34 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn configured_commands_keep_literal_argv_and_validate_executable_and_nuls() {
+        let mut config = config();
+        config.commands.insert(
+            "fmt-check".into(),
+            vec!["cargo".into(), "fmt".into(), "a b;$(literal)".into()],
+        );
+        assert!(config.validate().is_empty());
+        assert_eq!(
+            serde_json::from_value::<FabricConfig>(serde_json::to_value(&config).unwrap()).unwrap(),
+            config
+        );
+        for argv in [
+            vec![],
+            vec![String::new()],
+            vec!["cargo\0".into()],
+            vec!["cargo".into(), "arg\0".into()],
+        ] {
+            config.commands.insert("fmt-check".into(), argv);
+            assert!(
+                config
+                    .validate()
+                    .iter()
+                    .any(|error| error.field == "commands.fmt-check")
+            );
+        }
+    }
+
+    #[test]
     fn lane_build_settings_validate_shared_bounds_and_auto() {
         let lanes: Lanes =
             serde_json::from_str(r#"{"max_concurrent_builds": -1, "cargo_build_jobs": -1}"#)
@@ -478,6 +519,7 @@ mod tests {
         FabricConfig {
             agent_label: "agent".into(),
             client_label: "agent".into(),
+            commands: BTreeMap::new(),
             home_hosts: BTreeMap::new(),
             peers: BTreeMap::from([(
                 "worker".into(),

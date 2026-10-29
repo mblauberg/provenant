@@ -12,6 +12,49 @@ use std::{ffi::OsString, path::Path, time::Duration};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn command_identity_is_verified_without_manufacturing_model_evidence() {
+    let route = RouteRecord {
+        provider: Some("command".into()),
+        ..Default::default()
+    };
+    assert!(crate::reader::verified_route(
+        Some(&route),
+        Some(&route),
+        Some(&route)
+    ));
+    for provider in ["codex", "unknown"] {
+        let route = RouteRecord {
+            provider: Some(provider.into()),
+            ..Default::default()
+        };
+        assert!(!crate::reader::verified_route(
+            Some(&route),
+            Some(&route),
+            Some(&route)
+        ));
+    }
+    assert!(!crate::reader::verified_route(
+        Some(&route),
+        Some(&route),
+        None
+    ));
+    let mut invented = route.clone();
+    invented.model = Some("placeholder".into());
+    assert!(!crate::reader::verified_route(
+        Some(&route),
+        Some(&invented),
+        Some(&route)
+    ));
+    let mut effort = route.clone();
+    effort.effort = Some("high".into());
+    assert!(!crate::reader::verified_route(
+        Some(&route),
+        Some(&effort),
+        Some(&route)
+    ));
+}
+
+#[test]
 fn unsafe_path_reports_each_check_and_relative_path() {
     for (check, reason) in [
         (PathCheck::Mode, "mode"),

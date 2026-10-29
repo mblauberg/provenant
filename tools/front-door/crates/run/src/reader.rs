@@ -864,7 +864,15 @@ pub(crate) fn verified_route(
     match (resolved, applied, observed) {
         (Some(r), Some(a), Some(o)) => {
             r.provider.as_ref().is_some_and(|v| !v.is_empty())
-                && r.model.as_ref().is_some_and(|v| !v.is_empty())
+                && (r.model.as_ref().is_some_and(|v| !v.is_empty())
+                    || (r.model.is_none()
+                        && r.effort.is_none()
+                        && a.effort.is_none()
+                        && o.effort.is_none()
+                        && r.provider
+                            .as_deref()
+                            .and_then(provenant_records::AdapterSpec::get)
+                            .is_some_and(|spec| !spec.launch.model)))
                 && r.provider == a.provider
                 && a.provider == o.provider
                 && r.model == a.model

@@ -71,6 +71,14 @@ pub fn runtime_seconds(task: &TaskRequest, cap: Option<u64>) -> u64 {
 
 pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64) -> CapturePlan {
     CapturePlan {
+        stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. } if provider == "command")
+        {
+            provenant_supervisor::custody::StreamMode::Tail {
+                limit: provenant_records::COMMAND_OUTPUT_TAIL_BYTES as u64,
+            }
+        } else {
+            CapturePlan::default().stdout
+        },
         wall_ms: runtime_seconds.saturating_mul(1000),
         silence_ms: task
             .profile

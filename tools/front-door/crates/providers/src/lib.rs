@@ -7,6 +7,7 @@ pub mod agy;
 pub mod claude;
 pub mod codex;
 pub mod codex_rollout;
+pub mod command;
 mod contract;
 pub mod cursor;
 mod dylib;
@@ -40,11 +41,13 @@ pub static REGISTRY: &[Registration] = &[
     cursor::REGISTRATION,
     agy::REGISTRATION,
     opencode::REGISTRATION,
+    command::REGISTRATION,
 ];
 
 pub fn quota_policies(registry: &[Registration]) -> Vec<provenant_quota::QuotaPolicy> {
     registry
         .iter()
+        .filter(|registration| registration.quota_source.is_some())
         .map(|registration| registration.quota)
         .collect()
 }

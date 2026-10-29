@@ -354,6 +354,13 @@ pub struct WriterDeliveryReceipt {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RequestedRoute {
+    /// A named configuration entry executed by a model-less adapter.
+    Adapter {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
+        provider: String,
+        name: String,
+    },
     Model {
         #[serde(flatten)]
         extra: crate::ExtraFields,
@@ -380,6 +387,12 @@ pub enum RequestedRoute {
 impl RequestedRoute {
     pub fn projection(self) -> crate::RouteFact {
         match self {
+            Self::Adapter { provider, .. } => crate::RouteFact {
+                provider: Some(provider),
+                model: None,
+                effort: None,
+                account_label: None,
+            },
             Self::Model {
                 provider,
                 model,

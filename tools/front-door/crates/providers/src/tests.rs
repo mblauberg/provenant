@@ -3,12 +3,164 @@ use provenant_records::ResolvedRoute;
 use serde::Deserialize;
 
 #[test]
+fn command_output_is_a_bounded_tail_with_an_exit_verdict() {
+    let adapter = REGISTRY
+        .iter()
+        .find(|entry| entry.adapter.id() == "command")
+        .expect("command adapter is registered")
+        .adapter;
+    for (code, timed_out, verdict, status) in [
+        (Some(0), false, "PASS", OutcomeStatus::Success),
+        (Some(7), false, "FAIL", OutcomeStatus::Failed),
+        (Some(0), true, "FAIL", OutcomeStatus::Partial),
+        (None, false, "FAIL", OutcomeStatus::Failed),
+    ] {
+        let mut state = adapter.stream(None).unwrap();
+        let bytes = [vec![b'x'; 100_000], b"\xff\nlast line".to_vec()].concat();
+        for chunk in bytes.chunks(317) {
+            assert!(adapter.observe(&mut state, chunk).unwrap().is_empty());
+        }
+        let outcome = adapter
+            .finish(state, ExitObservation { code, timed_out })
+            .unwrap();
+        assert_eq!(outcome.status(), status);
+        assert!(outcome.model().is_none());
+        assert!(outcome.session().is_none());
+        let result: String = outcome
+            .final_events()
+            .iter()
+            .filter_map(|event| {
+                if let ProviderEvent::Text(text) = event {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(result.len() < 66_000);
+        assert!(result.contains("retained tail"));
+        assert!(result.ends_with(&format!("| last line\nVERDICT: {verdict}\n")));
+    }
+}
+
+#[test]
+fn command_output_cannot_supply_the_graph_verdict() {
+    let adapter = &command::Command;
+    let mut state = adapter.stream(None).unwrap();
+    adapter
+        .observe(&mut state, b"quoted vErDiCt: FAIL\nVERDICT: FAIL\n")
+        .unwrap();
+    let outcome = adapter
+        .finish(
+            state,
+            ExitObservation {
+                code: Some(0),
+                timed_out: false,
+            },
+        )
+        .unwrap();
+    let result: String = outcome
+        .final_events()
+        .iter()
+        .filter_map(|event| {
+            if let ProviderEvent::Text(text) = event {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        result
+            .lines()
+            .filter(|line| line.starts_with("VERDICT:"))
+            .collect::<Vec<_>>(),
+        ["VERDICT: PASS"]
+    );
+    assert!(result.contains("| VERDICT\\: FAIL"));
+    let mut capture = provenant_records::result_capture::ResultCapture::new(None);
+    capture.push(result.as_bytes());
+    let captured = capture.finish();
+    assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"));
+    assert!(!captured.verdict_invalid);
+}
+
+#[test]
+fn command_prepare_preserves_invocation_and_literal_argv_without_a_rust_install() {
+    let adapter = &command::Command;
+    let mut route = route("command", "");
+    route.account_key = None;
+    route.effort = None;
+    let plan = read_only_plan("/fixture", None);
+    let prompt = Prompt::new("/bin/sh -c 'touch forbidden'".into());
+    let argv = vec![
+        "cargo".into(),
+        "fmt".into(),
+        "$(touch forbidden); a b".into(),
+    ];
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.command = Some(command::Invocation {
+        argv: &argv,
+        program: Path::new("/fixture/home/.cargo/bin/cargo"),
+    });
+    let spec = adapter.prepare(input).unwrap();
+    assert_eq!(spec.argv[4], "/fixture/home/.cargo/bin/cargo");
+    assert_eq!(spec.argv[5], "fmt");
+    assert_eq!(spec.argv[6], "$(touch forbidden); a b");
+    assert_eq!(spec.argv.len(), 7);
+    assert!(spec.profile.spec.provider_api.is_empty());
+    assert!(!spec.profile.spec.loopback_server);
+    assert!(spec.profile.spec.authentication.is_empty());
+    assert!(spec.profile.spec.state_writes.is_empty());
+    assert!(
+        !spec
+            .profile
+            .spec
+            .runtime_reads
+            .iter()
+            .any(|grant| grant.path == Path::new("/fixture/home/.rustup"))
+    );
+    assert_eq!(spec.stdin, Stdin::Null);
+    let source = provenant_confinement::permissions::snapshot::render(
+        plan.permissions(),
+        &spec.profile,
+        Path::new("/fixture/home"),
+    )
+    .unwrap();
+    assert!(source.contains("(deny default)"));
+    assert!(source.rfind("(deny network*)").unwrap() > source.rfind("(allow network-").unwrap());
+    assert!(source.contains("(deny file-read* (subpath \"/fixture/home/.ssh\"))"));
+    assert!(source.contains("(deny file-write* (subpath \"/fixture/home/.ssh\"))"));
+    assert!(!source.contains("(allow file-write* (subpath \"/fixture/repo\"))"));
+    assert!(spec.profile.spec.deny_keychain_access);
+    assert!(source.contains("(deny process-exec (literal \"/usr/bin/security\"))"));
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    assert!(matches!(
+        adapter.prepare(input),
+        Err(ProviderError::UnsupportedPolicy)
+    ));
+    route.model = "invented-model".into();
+    input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.command = Some(command::Invocation {
+        argv: &argv,
+        program: Path::new("/fixture/tool"),
+    });
+    assert!(matches!(
+        adapter.prepare(input),
+        Err(ProviderError::UnsupportedPolicy)
+    ));
+}
+
+#[test]
 fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), ProviderError> {
     use provenant_confinement::plan::ReadOnlyGrants;
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
-    for entry in REGISTRY {
+    for entry in REGISTRY.iter().filter(|entry| {
+        provenant_records::AdapterSpec::get(entry.adapter.id())
+            .is_some_and(|spec| spec.launch.model)
+    }) {
         let id = entry.adapter.id();
         let mut route = route(id, "fixture-model");
         route.account_key = None;
@@ -108,11 +260,18 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
     use std::path::PathBuf;
     use std::process::Command;
 
-    for (entry, access) in REGISTRY.iter().flat_map(|entry| {
-        [Access::WorktreeWrite]
-            .into_iter()
-            .map(move |access| (entry, access))
-    }) {
+    for (entry, access) in REGISTRY
+        .iter()
+        .filter(|entry| {
+            provenant_records::AdapterSpec::get(entry.adapter.id())
+                .is_some_and(|spec| spec.launch.write)
+        })
+        .flat_map(|entry| {
+            [Access::WorktreeWrite]
+                .into_iter()
+                .map(move |access| (entry, access))
+        })
+    {
         let id = entry.adapter.id();
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
@@ -1455,7 +1614,12 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
         if let Some(source) = entry.quota_source {
             assert_eq!(source.adapter_id(), entry.adapter.id());
         } else {
-            assert_eq!(entry.adapter.id(), "opencode");
+            assert!(
+                !provenant_records::AdapterSpec::get(entry.adapter.id())
+                    .unwrap()
+                    .launch
+                    .model
+            );
         }
     }
     Ok(())
@@ -1846,6 +2010,7 @@ pub(super) fn fixture_input<'a>(
 ) -> PrepareInput<'a> {
     let executable = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0/bin/provider");
     PrepareInput {
+        command: None,
         route,
         confined,
         prompt,
@@ -1953,7 +2118,10 @@ fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<()
     let prompt = Prompt::new("fixture prompt".into());
     let token = fixture_token();
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        for entry in REGISTRY {
+        for entry in REGISTRY.iter().filter(|entry| {
+            provenant_records::AdapterSpec::get(entry.adapter.id())
+                .is_some_and(|spec| spec.launch.model)
+        }) {
             let id = entry.adapter.id();
             let authentication = match id {
                 "codex" | "cursor" => Some("login"),
@@ -2061,7 +2229,10 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let repo = std::path::Path::new("/fixture/repo");
     let token = fixture_token();
-    for entry in REGISTRY {
+    for entry in REGISTRY.iter().filter(|entry| {
+        provenant_records::AdapterSpec::get(entry.adapter.id())
+            .is_some_and(|spec| spec.launch.model)
+    }) {
         let id = entry.adapter.id();
         let mut route = route(id, "fixture-model");
         route.account_key = None;
@@ -3947,7 +4118,10 @@ fn no_lane_can_write_shared_toolchain_stores() -> Result<(), ProviderError> {
         ".cache/node",
         ".cache/node/corepack",
     ];
-    for entry in REGISTRY {
+    for entry in REGISTRY.iter().filter(|entry| {
+        provenant_records::AdapterSpec::get(entry.adapter.id())
+            .is_some_and(|spec| spec.launch.model)
+    }) {
         let id = entry.adapter.id();
         // Claude shares the same launch helpers; its account setup needs
         // identities, so its writer lane is covered by its own test.

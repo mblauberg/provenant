@@ -61,6 +61,8 @@ pub struct PrepareInput<'a> {
     pub route: &'a ResolvedRoute,
     pub confined: &'a ConfinedPlan,
     pub prompt: &'a Prompt,
+    /// Trusted named command from Fabric configuration, never prompt argv.
+    pub command: Option<crate::command::Invocation<'a>>,
     pub continuation: Option<&'a Continuation>,
     pub grant_digest: &'a str,
     /// Canonical path of the provider CLI resolved at dispatch.

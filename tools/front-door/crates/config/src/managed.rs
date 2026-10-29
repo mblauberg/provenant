@@ -202,7 +202,7 @@ impl HarnessTarget {
         let instruction = match harness {
             Harness::Claude => Some("CLAUDE.md"),
             Harness::Codex | Harness::Opencode => Some("AGENTS.md"),
-            Harness::Cursor => None,
+            Harness::Cursor | Harness::Command => None,
             Harness::Agy => Some("GEMINI.md"),
         };
         Self {
@@ -223,6 +223,7 @@ impl Targets {
     pub fn new(roots: Roots, home: &Path, harnesses: &[Harness]) -> Self {
         let targets = harnesses
             .iter()
+            .filter(|h| !h.spec().binary.is_empty())
             .map(|h| {
                 let base = match h {
                     Harness::Claude => ".claude",
@@ -230,6 +231,7 @@ impl Targets {
                     Harness::Cursor => ".cursor",
                     Harness::Agy => ".gemini",
                     Harness::Opencode => ".config/opencode",
+                    Harness::Command => "",
                 };
                 HarnessTarget::at(*h, home, &home.join(base))
             })
