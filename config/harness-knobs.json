@@ -24,7 +24,7 @@
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {
-      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "1 at 16 GiB or less, otherwise 2", "effect": "Maximum active worktree-write lanes across the host."},
+      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "1 at 16 GiB or less, otherwise 2", "effect": "Maximum cargo builds, tests, checks and lints running at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot."},
       "cargo_build_jobs": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": "Half the available cores, at least 1", "effect": "Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence."}
     }
   },

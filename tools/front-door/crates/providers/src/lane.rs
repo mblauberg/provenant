@@ -856,6 +856,115 @@ mod tests {
 
     #[test]
     #[allow(clippy::disallowed_methods)]
+    fn the_cargo_shim_hands_the_command_to_the_build_slot_gate() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (scratch, state) = (root.join("it's scratch"), root.join("state"));
+        let attempt = "0b0e1d54-3c1e-4a53-8f0b-1d7c2a9a4f10";
+        let mut spec = crate::LaunchSpec {
+            argv: Vec::new(),
+            env: vec![("PATH".into(), "/home/.cargo/bin:/usr/bin:/bin".into())],
+            stdin: crate::Stdin::Null,
+            secret_input: None,
+            cwd: root.clone(),
+            setup: Vec::new(),
+            git_wrapper: Default::default(),
+            profile: provenant_confinement::permissions::ProviderProfile {
+                spec: ProviderProfileSpec::default(),
+                observations: Default::default(),
+            },
+            stream: crate::StreamState::new("claude", |_| Ok(Vec::new())),
+        };
+        let provenant = root.join("fake provenant");
+        let gate = BuildSlotGate {
+            provenant: &provenant,
+            state: &state,
+            slots: 3,
+            attempt,
+            cargo: Path::new("/home/.cargo/bin/cargo"),
+        };
+        spec.configure_build_slots(&scratch, &gate).unwrap();
+        let (_, path) = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
+        assert_eq!(
+            std::env::split_paths(path).next().unwrap(),
+            scratch.join("bin")
+        );
+        // The only new write is the slot directory: not the state root, not
+        // `fabric/locks`, and nothing near a repository's `.git`.
+        assert_eq!(
+            spec.profile.spec.state_writes,
+            [subtree(state.join("fabric/locks/build-slots"))]
+        );
+        assert!(spec.profile.spec.tool_writes.is_empty());
+        assert!(spec.setup.contains(&SetupStep::CreateDir(
+            state.join("fabric/locks/build-slots")
+        )));
+        let bytes = spec
+            .setup
+            .iter()
+            .find_map(|step| match step {
+                SetupStep::WriteExecutable { path, bytes } if path.ends_with("bin/cargo") => {
+                    Some(bytes.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        // Run the script against a stand-in for `provenant` that prints argv.
+        std::fs::write(&provenant, "#!/bin/sh\nprintf '<%s>' \"$@\"\n").unwrap();
+        let shim = root.join("cargo");
+        std::fs::write(&shim, bytes).unwrap();
+        for file in [&provenant, &shim] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = std::process::Command::new(&shim)
+            .args(["test", "--", "two words"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!(
+                "<internal><build-slot><--state-dir><{}><--slots><3><--attempt><{attempt}><--></home/.cargo/bin/cargo><test><--><two words>",
+                state.display()
+            )
+        );
+    }
+
+    #[test]
+    fn the_cargo_shim_refuses_an_attempt_that_is_not_a_plain_identifier() {
+        let mut spec = crate::LaunchSpec {
+            argv: Vec::new(),
+            env: vec![("PATH".into(), "/usr/bin".into())],
+            stdin: crate::Stdin::Null,
+            secret_input: None,
+            cwd: PathBuf::from("/"),
+            setup: Vec::new(),
+            git_wrapper: Default::default(),
+            profile: provenant_confinement::permissions::ProviderProfile {
+                spec: ProviderProfileSpec::default(),
+                observations: Default::default(),
+            },
+            stream: crate::StreamState::new("claude", |_| Ok(Vec::new())),
+        };
+        for attempt in ["", "a b", "a'; touch x; '", "../x"] {
+            let gate = BuildSlotGate {
+                provenant: Path::new("/p"),
+                state: Path::new("/s"),
+                slots: 1,
+                attempt,
+                cargo: Path::new("/c"),
+            };
+            assert!(
+                spec.configure_build_slots(Path::new("/scratch"), &gate)
+                    .is_err()
+            );
+        }
+        assert!(spec.setup.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
     fn claude_shell_restores_jobs_after_scrub() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();

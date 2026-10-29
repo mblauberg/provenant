@@ -10,7 +10,7 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 
 | Key | Default | Effect |
 |---|---|---|
-| `max_concurrent_builds` | 1 at 16 GiB or less, otherwise 2 | Maximum active worktree-write lanes across the host. (1 to 64 or -1 for auto). |
+| `max_concurrent_builds` | 1 at 16 GiB or less, otherwise 2 | Maximum cargo builds, tests, checks and lints running at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. (1 to 64 or -1 for auto). |
 | `cargo_build_jobs` | Half the available cores, at least 1 | Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence. (1 to 1024 or -1 for auto). |
 
 ## Provider updates

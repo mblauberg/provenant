@@ -133,15 +133,16 @@ fn warn(error: &dyn std::fmt::Display) {
 }
 
 #[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "the custom worktree test driver includes this library without the test harness"
+)]
 mod tests {
     use super::*;
 
-    fn args(list: &[&str]) -> Vec<OsString> {
-        list.iter().map(OsString::from).collect()
-    }
-
     #[test]
     fn compiling_subcommands_are_gated_whatever_their_options() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
         for list in [
             &["build"][..],
             &["+nightly", "test", "--workspace"],
@@ -157,6 +158,7 @@ mod tests {
 
     #[test]
     fn other_subcommands_and_bare_options_are_not_gated() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
         for list in [
             &[][..],
             &["fmt", "--check"],

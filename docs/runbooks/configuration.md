@@ -56,10 +56,33 @@ applies. The disk floor applies to both classes. `lanes` shows a queued or start
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s
 left of 2.0 s`.
 
-Every worktree-write lane occupies a host build slot until it settles, since
-build activity cannot be identified cheaply. The default is one slot on hosts
-with 16 GiB or less, and two on larger hosts. Cargo defaults to half the available
-cores per lane, at least one. Set host overrides in `config.toml`:
+Build slots gate builds, not lanes. A writer is admitted on the lane caps and
+the memory and disk floors alone, however many writers are live, so one
+project's idle writers never block another's. `max_concurrent_builds` is the
+number of cargo builds that run at once on the host: the default is one on
+hosts with 16 GiB or less, and two on larger hosts. Every lane that has the
+Rust toolchain gets a `cargo` shim first on its PATH. A cargo command that
+compiles (`build`, `check`, `clippy`, `test`, `bench`, `doc`, `rustc`,
+`rustdoc`, `fix`, `install`, `package`, `publish`, `nextest`, `llvm-cov` and
+`miri`, and their short aliases) takes one slot before the real cargo starts
+and keeps it until cargo and its children exit. Other commands, such as `fmt`,
+`metadata` and `run`, take none, and a cargo started inside a gated build
+shares its parent's slot. A command that finds every slot taken waits, prints
+`provenant: waiting for a build slot (n of m in use)`, and `lanes` reports the
+lane as `waiting for build slot: n of m in use`. Waiting blocks that command
+only, not the lane or its admission.
+
+The slots are lock files under `<state>/fabric/locks/build-slots/`, so they are
+shared by every project on the same state directory and are released by the
+kernel when the build exits, even after a crash or `kill -9`. A lane can write
+only that directory for this purpose. If the directory is unusable the build
+runs without a slot and prints a warning. A build that runs `~/.cargo/bin/cargo`
+by absolute path bypasses the shim. A lane waits for another build's
+`.cargo-lock` on its own target directory before it takes a slot, so a slot is
+never held by a build that Cargo would queue anyway.
+
+`cargo_build_jobs` is the separate per-build parallelism: Cargo defaults to
+half the available cores, at least one. Set host overrides in `config.toml`:
 
 ```toml
 [domains.fabric.lanes]
@@ -70,13 +93,14 @@ cargo_build_jobs = 5
 Omit either build setting from `config.toml` to select its host-dependent default.
 The host settings are not workflow knobs managed by `provenant config set`;
 edit the `[domains.fabric.lanes]` table directly. The value `-1` also selects
-automatic behaviour.
-
+automatic behaviour. A lane keeps the slot count it was launched with; a
+change applies to lanes launched afterwards.
 
 Higher values can reduce waiting but increase peak memory and CPU demand.
 An existing `CARGO_BUILD_JOBS` in the submitting environment takes precedence;
-a brief can also set it inside the lane. Pressure and slots are checked before
-lane admission, not continuously during a build.
+a brief can also set it inside the lane. Memory pressure and the disk floor are
+checked before lane admission, not continuously during a build; the memory
+floor remains the guard against running out of memory.
 
 ## Knob registry
 

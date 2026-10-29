@@ -455,7 +455,7 @@ impl RunStore {
                     } else {
                         None
                     };
-                    let fits = !matches!(
+                    !matches!(
                         pressure,
                         Some(
                             resources::MemoryPressure::Warning
@@ -465,8 +465,7 @@ impl RunStore {
                         && u128::from(memory.available_bytes) * 10_000
                             >= u128::from(memory.total_bytes)
                                 * u128::from(ticket.memory_floor_basis_points)
-                        && disk >= floor;
-                    fits
+                        && disk >= floor
                 }
                 _ => {
                     refusal = None;

@@ -347,13 +347,14 @@ memory and disk floors, startup spacing and a deadline.
 On macOS, Warning or Critical kernel memory pressure defers both classes.
 Normal pressure still requires the memory floor. An unavailable or unknown
 pressure sample is logged and falls back to the floor; Linux uses the floor.
-Disk and memory floors apply to both classes. Writers also require a host-wide
-build slot, defaulting to one at or below 16 GiB of RAM and two above that;
-read-only lanes do not consume one. At expiry, disk floor, known pressure and
-full build slots have distinct refusal reasons. Disk-floor refusal takes precedence
-when disk and pressure are both insufficient; otherwise Warning or Critical
-pressure is named before build-slot contention. A failed memory sample or a
-floor-only memory shortage retains the generic admission refusal. The ledger associates new leases
+Disk and memory floors apply to both classes. Build slots do not gate
+admission: a host-wide build semaphore, defaulting to one slot at or below
+16 GiB of RAM and two above that, gates each compiling cargo command a lane
+runs (`provenant_os::build_slots`, reached through the lane's `cargo` shim),
+so idle writers are admitted beyond the slot count. At expiry, disk floor and
+known pressure have distinct refusal reasons. Disk-floor refusal takes
+precedence when disk and pressure are both insufficient. A failed memory sample
+or a floor-only memory shortage retains the generic admission refusal. The ledger associates new leases
 with the boot and guardian identity; a different boot, a definitely absent
 guardian or an admission row proven absent from the same readable owner store
 releases a lease. A busy, missing, replaced or unreadable store retains the
@@ -416,10 +417,13 @@ action simply shows none.
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
 - Test: `crates/run/src/ledger.rs::tests::{live_guardian_fences_busy_replaced_and_corrupt_store, cross_boot_malformed_and_readable_row_removal_release}`;
-  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, writer_slot_refusal_and_release}`;
+  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, idle_writers_are_admitted_beyond_the_build_limit, a_running_lane_reports_a_wait_for_a_build_slot}`;
   `crates/providers/src/lane.rs::tests::claude_shell_restores_jobs_after_scrub`;
+  `crates/os/src/build_slots.rs::tests::{slots_are_bounded_and_reusable, contention_never_exceeds_the_limit, a_crashed_holder_releases_its_slot, a_waiter_is_visible_only_while_it_waits}`;
+  `crates/providers/src/lane.rs::tests::{the_cargo_shim_hands_the_command_to_the_build_slot_gate, the_cargo_shim_refuses_an_attempt_that_is_not_a_plain_identifier}`;
+  `tests/build_slot.rs::{more_builds_than_slots_compile_serially, a_killed_build_releases_its_slot_and_a_waiter_is_visible_meanwhile, commands_that_do_not_compile_and_nested_cargo_never_queue}`;
   `crates/config/src/gc.rs::build_tests::{defaults_and_overrides, automatic_and_invalid_build_values}`;
-  `crates/run/src/dispatch_tests.rs::{configured_build_limit_controls_host_leases, invalid_build_settings_refuse_without_waiting, guardian_identity_unknown_retries_and_names_expiry}`;
+  `crates/run/src/dispatch_tests.rs::{invalid_build_settings_refuse_without_waiting, guardian_identity_unknown_retries_and_names_expiry}`;
   `crates/fabric-runtime/src/config.rs::tests::lane_build_settings_validate_shared_bounds_and_auto`;
   `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
   `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;

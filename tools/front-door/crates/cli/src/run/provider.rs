@@ -648,35 +648,10 @@ fn prepare_with(
                 continue;
             }
         };
-        if !host_indexes_protected(
-            roots.state.as_path(),
-            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
-        ) {
-            return Err("write grants overlap a host index".into());
-        }
-        if !target_seeds_protected(
-            roots.state.as_path(),
-            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
-        ) {
-            return Err("write grants overlap the host target seed store".into());
-        }
-        if let Some(head) = &task.head {
-            spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
-            if let Some(base) = &task.base {
-                spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
-            }
-        }
         let build_settings = provenant_config::LaneBuildSettings {
             max_concurrent_builds: config.domains.fabric.lanes.max_concurrent_builds,
             cargo_build_jobs: config.domains.fabric.lanes.cargo_build_jobs,
         };
-        set_cargo_jobs(
-            &mut spec.env,
-            registry
-                .host
-                .and_then(|host| host.cargo_build_jobs.as_deref()),
-            build_settings.jobs(),
-        );
         // Builds, not lanes, share the host's build slots: a `cargo` shim takes
         // one around each compiling command. Memory is unreadable only on a
         // host that cannot run lanes; assume the smaller default there.
@@ -697,6 +672,31 @@ fn prepare_with(
             )
             .map_err(|error| error.to_string())?;
         }
+        if !host_indexes_protected(
+            roots.state.as_path(),
+            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
+        ) {
+            return Err("write grants overlap a host index".into());
+        }
+        if !target_seeds_protected(
+            roots.state.as_path(),
+            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
+        ) {
+            return Err("write grants overlap the host target seed store".into());
+        }
+        if let Some(head) = &task.head {
+            spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));
+            if let Some(base) = &task.base {
+                spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
+            }
+        }
+        set_cargo_jobs(
+            &mut spec.env,
+            registry
+                .host
+                .and_then(|host| host.cargo_build_jobs.as_deref()),
+            build_settings.jobs(),
+        );
         if adapter.id() == "claude" {
             spec.configure_claude_shell(scratch)
                 .map_err(|error| error.to_string())?;

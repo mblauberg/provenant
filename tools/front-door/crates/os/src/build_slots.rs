@@ -189,17 +189,22 @@ impl BuildSlots {
     }
 }
 
-/// Whether another process holds a Cargo build lock below `target`: a
-/// `.cargo-lock` in a profile directory (`target/debug`) or in a target
+/// Lock files Cargo holds in a profile directory while it builds there.
+const CARGO_LOCKS: [&str; 3] = [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"];
+
+/// Whether another process holds a Cargo build lock below `target`: one of
+/// `CARGO_LOCKS` in a profile directory (`target/debug`) or in a target
 /// triple's (`target/<triple>/debug`). Cargo queues a second build behind that
 /// lock, so a caller that waits for it first holds no build slot meanwhile.
 pub fn cargo_lock_held(target: &Path) -> bool {
-    let probe = |lock: PathBuf| {
-        std::fs::File::open(lock).is_ok_and(|file| {
-            matches!(
-                os::try_flock(&file, LockMode::Shared),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock
-            )
+    let held = |profile: PathBuf| {
+        CARGO_LOCKS.iter().any(|name| {
+            std::fs::File::open(profile.join(name)).is_ok_and(|file| {
+                matches!(
+                    os::try_flock(&file, LockMode::Shared),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock
+                )
+            })
         })
     };
     let Ok(top) = std::fs::read_dir(target) else {
@@ -207,12 +212,9 @@ pub fn cargo_lock_held(target: &Path) -> bool {
     };
     top.flatten().any(|entry| {
         let path = entry.path();
-        probe(path.join(".cargo-lock"))
-            || std::fs::read_dir(&path).is_ok_and(|inner| {
-                inner
-                    .flatten()
-                    .any(|child| probe(child.path().join(".cargo-lock")))
-            })
+        held(path.clone())
+            || std::fs::read_dir(&path)
+                .is_ok_and(|inner| inner.flatten().any(|child| held(child.path())))
     })
 }
 
@@ -397,13 +399,18 @@ mod tests {
         let _serial = serial();
         let target = tempfile::tempdir().unwrap();
         assert!(!cargo_lock_held(target.path()));
-        for relative in ["debug", "aarch64-apple-darwin/debug"] {
+        for (relative, name) in [
+            ("debug", ".cargo-lock"),
+            ("aarch64-apple-darwin/debug", ".cargo-lock"),
+            ("release", ".cargo-build-lock"),
+            ("release", ".cargo-artifact-lock"),
+        ] {
             let profile = target.path().join(relative);
             std::fs::create_dir_all(&profile).unwrap();
-            let lock = std::fs::File::create(profile.join(".cargo-lock")).unwrap();
+            let lock = std::fs::File::create(profile.join(name)).unwrap();
             assert!(!cargo_lock_held(target.path()), "an unheld lock is free");
             os::try_flock(&lock, LockMode::Exclusive).unwrap();
-            assert!(cargo_lock_held(target.path()), "{relative}");
+            assert!(cargo_lock_held(target.path()), "{relative}/{name}");
             drop(lock);
             assert!(!cargo_lock_held(target.path()));
         }

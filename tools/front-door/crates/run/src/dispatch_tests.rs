@@ -2582,7 +2582,11 @@ fn a_running_lane_reports_a_wait_for_a_build_slot() -> TestResult {
     assert!(store.claim(id, &clock, &call)?.is_some());
     let running = store.record(id, &call)?;
     let waits = |store: &RunStore| {
-        store.lane_waits_with_resources(&[running.clone()], &call, &Host { available: 100 })
+        store.lane_waits_with_resources(
+            std::slice::from_ref(&running),
+            &call,
+            &Host { available: 100 },
+        )
     };
     assert!(
         waits(&store).is_empty(),
