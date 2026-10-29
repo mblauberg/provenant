@@ -106,12 +106,7 @@ fn block<'a>(
 pub(super) fn handoff(
     capture: &crate::result_capture::CapturedResult,
 ) -> Result<Option<String>, String> {
-    let text = if capture.tail_truncated {
-        capture.tail.split_once('\n').map_or("", |(_, tail)| tail)
-    } else {
-        &capture.tail
-    };
-    let handoff = provenant_records::handoff::Handoff::from_result(text).map_err(str::to_owned)?;
+    let handoff = capture.handoff.clone().map_err(str::to_owned)?;
     Ok(handoff
         .filter(|handoff| handoff.status == provenant_records::handoff::HandoffStatus::StoppedEarly)
         .map(|handoff| handoff.fenced()))

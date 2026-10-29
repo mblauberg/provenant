@@ -49,34 +49,9 @@ impl Handoff {
     /// Only one complete fence at the end of the answer is a declaration.
     /// Missing and malformed declarations never imply unfinished work.
     pub fn from_result(result: &str) -> Result<Option<Self>, &'static str> {
-        let mut offset = 0;
-        let mut start = None;
-        for line in result.split_inclusive('\n') {
-            if line.trim_end_matches(['\r', '\n']) == OPEN {
-                start = Some(offset + line.len());
-                break;
-            }
-            offset += line.len();
-        }
-        let Some(start) = start else { return Ok(None) };
-        let rest = &result[start..];
-        let mut json_end = None;
-        let mut offset = 0;
-        for line in rest.split_inclusive('\n') {
-            let marker = line.trim_end_matches(['\r', '\n']);
-            if marker == OPEN {
-                return Err("handoff block repeated");
-            }
-            if marker == "```" && json_end.is_none() {
-                json_end = Some(offset);
-                if !rest[offset + line.len()..].trim().is_empty() {
-                    return Err("handoff must end the answer");
-                }
-            }
-            offset += line.len();
-        }
-        let end = json_end.ok_or("handoff block incomplete")?;
-        Self::from_json(rest[..end].trim_end().as_bytes()).map(Some)
+        let mut capture = HandoffCapture::default();
+        capture.push(result.as_bytes());
+        capture.finish()
     }
 
     pub fn unfinished(&self) -> bool {
@@ -86,6 +61,122 @@ impl Handoff {
     pub fn fenced(&self) -> String {
         format!("```handoff\n{}\n```", serde_json::json!(self))
     }
+}
+
+/// Parse the complete stream, independently of clipped result windows. Lines
+/// and declaration JSON are bounded; oversized fence syntax fails closed.
+#[derive(Default)]
+pub(crate) struct HandoffCapture {
+    line: Vec<u8>,
+    overflow: bool,
+    fence: Option<(u8, usize)>,
+    json: Option<Vec<u8>>,
+    declaration: Option<Handoff>,
+    error: Option<&'static str>,
+}
+
+impl HandoffCapture {
+    pub(crate) fn push(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                self.end_line();
+            } else if self.line.len() <= HANDOFF_BYTES {
+                self.line.push(byte);
+            } else {
+                self.overflow = true;
+            }
+        }
+    }
+
+    fn end_line(&mut self) {
+        let line = std::mem::take(&mut self.line);
+        let overflow = std::mem::take(&mut self.overflow);
+        if self.error.is_some() {
+            return;
+        }
+        if overflow {
+            // This prefix may end in the middle of a UTF-8 character. Only
+            // ASCII fence syntax matters when discarding a long prose line.
+            let indent = line.iter().take_while(|byte| **byte == b' ').count();
+            let fence_prefix = indent <= 3
+                && line
+                    .get(indent..indent + 3)
+                    .is_some_and(|prefix| prefix == b"```" || prefix == b"~~~");
+            if self.json.is_some() || self.declaration.is_some() || fence_prefix {
+                self.error = Some("handoff line exceeds 12288 bytes");
+            }
+            return;
+        }
+        let Ok(text) = std::str::from_utf8(&line) else {
+            self.error = Some("invalid handoff UTF-8");
+            return;
+        };
+        let marker = text.trim_end_matches('\r');
+        if self.declaration.is_some() {
+            if !marker.trim().is_empty() {
+                self.error = Some("handoff must end the answer");
+            }
+        } else if let Some(json) = &mut self.json {
+            if marker == OPEN {
+                self.error = Some("handoff block repeated");
+            } else if marker == "```" {
+                // The line ending preceding the closer is fence syntax, not
+                // part of the bounded JSON payload.
+                let payload = json
+                    .strip_suffix(b"\r\n")
+                    .or_else(|| json.strip_suffix(b"\n"))
+                    .unwrap_or(json);
+                match Handoff::from_json(payload) {
+                    Ok(handoff) => self.declaration = Some(handoff),
+                    Err(error) => self.error = Some(error),
+                }
+                self.json = None;
+            } else if json.len().saturating_add(line.len() + 1) > HANDOFF_BYTES + 2 {
+                self.error = Some("handoff exceeds 12288 bytes");
+            } else {
+                json.extend_from_slice(&line);
+                json.push(b'\n');
+            }
+        } else if let Some((delimiter, length)) = self.fence {
+            if let Some((found, count, suffix)) = fence(marker)
+                && found == delimiter
+                && count >= length
+                && suffix.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                self.fence = None;
+            }
+        } else if marker == OPEN {
+            self.json = Some(Vec::new());
+        } else if let Some((delimiter, length, info)) = fence(marker)
+            && (delimiter != b'`' || !info.contains('`'))
+        {
+            self.fence = Some((delimiter, length));
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> Result<Option<Handoff>, &'static str> {
+        self.end_line();
+        if let Some(error) = self.error {
+            Err(error)
+        } else if self.json.is_some() {
+            Err("handoff block incomplete")
+        } else {
+            Ok(self.declaration)
+        }
+    }
+}
+
+fn fence(line: &str) -> Option<(u8, usize, &str)> {
+    let text = line.trim_start_matches(' ');
+    if line.len() - text.len() > 3 {
+        return None;
+    }
+    let delimiter = *text.as_bytes().first()?;
+    if !matches!(delimiter, b'`' | b'~') {
+        return None;
+    }
+    let length = text.bytes().take_while(|byte| *byte == delimiter).count();
+    (length >= 3).then_some((delimiter, length, &text[length..]))
 }
 
 #[cfg(test)]
@@ -115,6 +206,50 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn maximum_json_round_trips_after_oversized_unicode_prose() {
+        let mut value = serde_json::json!({"schema_version":2,"status":"done","note":"Done","remaining":[],"decisions":[],"verify":[],"future":""});
+        let padding = HANDOFF_BYTES - serde_json::to_vec(&value).unwrap().len();
+        value["future"] = serde_json::json!("x".repeat(padding));
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(bytes.len(), HANDOFF_BYTES);
+        let handoff = Handoff::from_json(&bytes).unwrap();
+        assert_eq!(
+            Handoff::from_result(&handoff.fenced()),
+            Ok(Some(handoff.clone()))
+        );
+        assert_eq!(
+            Handoff::from_result(&handoff.fenced().replace('\n', "\r\n")),
+            Ok(Some(handoff.clone()))
+        );
+        assert_eq!(
+            Handoff::from_result(&format!("{}\n{}", "é".repeat(7000), handoff.fenced())),
+            Ok(Some(handoff))
+        );
+    }
+
+    #[test]
+    fn fenced_examples_are_not_final_declarations() {
+        for (open, close) in [
+            ("````markdown", "````"),
+            ("~~~markdown", "~~~"),
+            ("`````text", "`````"),
+            ("   ~~~~ text", "   ~~~~"),
+        ] {
+            let example = format!("Example:\n{open}\n{STOP}\n{close}");
+            assert_eq!(Handoff::from_result(&example), Ok(None), "{example}");
+            assert_eq!(Handoff::from_result(&format!("{open}\n{STOP}")), Ok(None));
+            assert_eq!(
+                Handoff::from_result(&format!("{example}\nReport.\n{STOP}")),
+                Handoff::from_result(STOP),
+            );
+        }
+        let example = format!("~~~~markdown\n~~~\n```\n{STOP}\n~~~~");
+        assert_eq!(Handoff::from_result(&example), Ok(None));
+        let example = format!("````markdown\n````\u{a0}\n{STOP}");
+        assert_eq!(Handoff::from_result(&example), Ok(None));
     }
 
     #[test]

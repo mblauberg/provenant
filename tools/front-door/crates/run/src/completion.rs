@@ -54,11 +54,7 @@ impl RunStore {
         // Provider-writable progress is output, not previously scanned input.
         // Sanitise every JSON field, including forward fields, before keeping
         // or disclosing the snapshot to a successor account or provider.
-        let handoff = handoff.and_then(|handoff| {
-            let raw = serde_json::to_vec(&handoff).ok()?;
-            let safe = provenant_confinement::redact::known_shapes(&raw).ok()?;
-            Handoff::from_json(&safe).ok()
-        });
+        let handoff = handoff.and_then(|handoff| sanitise_handoff(&handoff).ok());
         if let Some(handoff) = &handoff {
             seal(
                 attempt,
@@ -118,6 +114,51 @@ impl RunStore {
     }
 }
 
+pub(crate) fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
+    transform_handoff(handoff, |text| {
+        let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+            .map_err(|_| RunError::Validation("handoff redaction failed"))?;
+        String::from_utf8(safe).map_err(|_| RunError::Validation("handoff UTF-8"))
+    })
+}
+
+/// Transform decoded values and object keys, including nested forward fields,
+/// then revalidate both field and total bounds after any replacement growth.
+pub(crate) fn transform_handoff(
+    handoff: &Handoff,
+    mut transform: impl FnMut(&str) -> Result<String>,
+) -> Result<Handoff> {
+    fn walk(
+        value: &mut serde_json::Value,
+        transform: &mut impl FnMut(&str) -> Result<String>,
+    ) -> Result<()> {
+        match value {
+            serde_json::Value::String(text) => *text = transform(text)?,
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, transform)?;
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, mut value) in std::mem::take(fields) {
+                    let key = transform(&key)?;
+                    walk(&mut value, transform)?;
+                    if fields.insert(key, value).is_some() {
+                        return Err(RunError::Validation("handoff field collision"));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut value =
+        serde_json::to_value(handoff).map_err(|_| RunError::Validation("handoff encoding"))?;
+    walk(&mut value, &mut transform)?;
+    let bytes = serde_json::to_vec(&value).map_err(|_| RunError::Validation("handoff encoding"))?;
+    Handoff::from_json(&bytes).map_err(RunError::Validation)
+}
+
 fn read_snapshot(attempt: &Directory) -> Result<Option<Handoff>> {
     read_sealed(attempt, AttemptFile::Handoff.name(), HANDOFF_BYTES as u64)?
         .map(|bytes| Handoff::from_json(&bytes).map_err(RunError::Validation))
@@ -163,6 +204,69 @@ mod tests {
         Ok(())
     }
 
+    /// Provider boundary for exercising holder recovery when this host cannot
+    /// launch nested confinement. No launch or Git settlement is simulated.
+    struct RecoveringAccounts;
+    impl Providers for RecoveringAccounts {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            _: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, String> {
+            Err("holder-only fixture does not launch".into())
+        }
+        fn decode(
+            &self,
+            route: &RouteRecord,
+            _: &[u8],
+            _: &provenant_supervisor::custody::ExitObservation,
+            _: &Path,
+        ) -> std::result::Result<Decoded, String> {
+            let mut result = decoded();
+            match route.account_key.as_deref() {
+                Some("fixture-one") => result.result = "```handoff\n{\"schema_version\":2,".into(),
+                Some("fixture-two") => {
+                    result.outcome = Outcome::Succeeded;
+                    result.complete = true;
+                    result.result = "Recovered progress and completed the renderer".into();
+                    result.observed_route = Some(route.clone());
+                }
+                _ => return Err("unexpected fixture account".into()),
+            }
+            Ok(result)
+        }
+        fn assess_result(
+            &self,
+            _: &TaskRequest,
+            record: &AttemptRecord,
+            _: &Decoded,
+            handoff: Option<&Handoff>,
+            _: Option<&HolderContext>,
+            policy_attempt: u64,
+        ) -> std::result::Result<ResultAssessment, String> {
+            if policy_attempt != 1 {
+                return Ok(ResultAssessment::default());
+            }
+            let handoff = handoff.ok_or("holder did not recover progress")?;
+            if handoff.fenced().contains("sk-abcdefghijklmnopqrstuvwx") {
+                return Err("unsanitised progress reached assessment".into());
+            }
+            Ok(ResultAssessment {
+                retry: Some(PolicyRetry {
+                    schema_version: 1,
+                    route: record.requested_route.clone(),
+                    resume: false,
+                    max_attempts: 2,
+                    instruction: "Continue on the next eligible account.".into(),
+                    not_before_unix_seconds: None,
+                }),
+                ..Default::default()
+            })
+        }
+    }
+
     #[test]
     fn provider_death_retains_progress_and_supplies_the_fresh_retry_brief() -> TestResult {
         let temp = tempfile::tempdir()?;
@@ -170,7 +274,17 @@ mod tests {
         let cancel = provenant_core::CancelToken::new();
         let call = call(&clock, &cancel);
         let store = RunStore::open(&context(temp.path())?, &call)?;
-        let input = input();
+        let mut input = input();
+        let worktree = temp.path().join("retained-worktree");
+        std::fs::create_dir(&worktree)?;
+        std::fs::write(
+            worktree.join("partial.txt"),
+            "parser implementation survives",
+        )?;
+        input.request.tasks[0]
+            .access
+            .write_roots
+            .push(worktree.clone());
         store.create(&input, &call)?;
         seal_observation(&store, &input, &exit())?;
         let id = input.attempts[0].attempt_id;
@@ -180,7 +294,19 @@ mod tests {
         let candidate = crate::artifacts::subdir(&root, OsStr::new("candidate-1"), true)?;
         let secret_shape = "sk-abcdefghijklmnopqrstuvwx";
         let mut progress: serde_json::Value = serde_json::from_slice(&snapshot("stopped_early"))?;
-        progress["future"] = serde_json::json!({"token": secret_shape});
+        progress["note"] = serde_json::json!(format!(
+            "Parser committed; renderer remains.\n{secret_shape}"
+        ));
+        for field in ["remaining", "decisions", "verify"] {
+            progress[field]
+                .as_array_mut()
+                .ok_or("progress array")?
+                .extend([
+                    serde_json::json!(format!("\n{secret_shape}")),
+                    serde_json::json!(format!("\t{secret_shape}")),
+                ]);
+        }
+        progress["future"] = serde_json::json!({"nested":[format!("\n{secret_shape}"), {"token":format!("\t{secret_shape}")} ]});
         seal(
             &candidate,
             "handoff.json",
@@ -192,33 +318,44 @@ mod tests {
             old.run_id
         ));
         grant(&mut old, &candidate_path)?;
-        let mut interrupted = decoded();
-        interrupted.result = "```handoff\n{\"schema_version\":2,".into();
-        let handoff = store
-            .capture_handoff(&attempt, &old, &interrupted)?
-            .ok_or("missing snapshot")?;
-        assert_eq!(handoff.remaining, ["Finish renderer"]);
+        let route = RouteRecord {
+            account_label: Some("one".into()),
+            account_key: Some("fixture-one".into()),
+            ..crate::tests::route()
+        };
+        old.resolved_route = Some(route.clone());
+        old.applied_route = Some(route);
+        old.provider_launched = Some(true);
+        old.state = AttemptState::Running {
+            extra: Default::default(),
+        };
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![crate::db::bytes(&old)?, id.to_string()],
+        )?;
+        let terminal = store.finish(id, &attempt, &exit(), &RecoveringAccounts, &call)?;
+        assert!(matches!(
+            terminal.state,
+            AttemptState::Terminal {
+                outcome: Outcome::QuotaLimited,
+                ..
+            }
+        ));
+        let handoff = store.handoff(&terminal)?.ok_or("missing snapshot")?;
+        assert_eq!(
+            handoff.remaining,
+            ["Finish renderer", "\n[REDACTED]", "\t[REDACTED]"]
+        );
+        assert_eq!(
+            handoff.extra["future"]["nested"][1]["token"],
+            "\t[REDACTED]"
+        );
         assert!(!handoff.fenced().contains(secret_shape));
         assert!(handoff.fenced().contains("[REDACTED]"));
         // Progress survives temporary cleanup and provider history expiry.
         crate::artifacts::remove_entry_tree(&attempt, OsStr::new("provider-state"))?;
         assert_eq!(store.handoff(&old)?, Some(handoff.clone()));
-        let retry = PolicyRetry {
-            schema_version: 1,
-            route: old.requested_route.clone(),
-            resume: false,
-            max_attempts: 2,
-            instruction: "Continue on the next eligible account.".into(),
-            not_before_unix_seconds: None,
-        };
-        store.stage_policy_retry(&old, &retry, &call)?;
-        store
-            .db
-            .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
-        let mut publication = publication();
-        publication.outcome = Outcome::QuotaLimited;
-        store.publish_terminal(id, 1, &publication, &exit(), &call)?;
-        let next = store.pending_attempts(input.run_id, &call)?.remove(0);
+        let mut next = store.pending_attempts(input.run_id, &call)?.remove(0);
         let prompt =
             String::from_utf8(store.artifact_bytes(next.run_id, &next.prompt, RECORD_LIMIT)?)?;
         assert!(prompt.contains("exact prompt") && prompt.contains(&handoff.fenced()));
@@ -226,6 +363,107 @@ mod tests {
         assert!(prompt.contains("Keep the parser API") && prompt.contains("Parser tests passed"));
         assert_eq!(next.authority_digest, old.authority_digest);
         assert!(next.applied_route.is_none());
+        assert_eq!(next.continuation.as_deref(), Some("policy_fallback"));
+        let route = RouteRecord {
+            account_label: Some("two".into()),
+            account_key: Some("fixture-two".into()),
+            ..crate::tests::route()
+        };
+        next.applied_route = Some(route.clone());
+        next.resolved_route = Some(route);
+        next.provider_launched = Some(true);
+        next.state = AttemptState::Running {
+            extra: Default::default(),
+        };
+        store.db.execute(
+            "UPDATE attempts SET record=?1 WHERE id=?2",
+            rusqlite::params![crate::db::bytes(&next)?, next.attempt_id.to_string()],
+        )?;
+        let next_dir = store.attempt_dir(next.run_id, next.attempt_id, false)?;
+        let mut second_exit = exit();
+        second_exit.scope.attempt = next.attempt_id;
+        input.attempts[0].attempt_id = next.attempt_id;
+        seal_observation(&store, &input, &second_exit)?;
+        let terminal = store.finish(
+            next.attempt_id,
+            &next_dir,
+            &second_exit,
+            &RecoveringAccounts,
+            &call,
+        )?;
+        assert!(matches!(
+            terminal.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded,
+                ..
+            }
+        ));
+        assert_ne!(old.applied_route, terminal.applied_route);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("partial.txt"))?,
+            "parser implementation survives"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn final_handoff_redacts_decoded_strings_and_revalidates_bounds() -> TestResult {
+        for prefix in ["\n", "\t"] {
+            for field in ["note", "remaining", "decisions", "verify", "future"] {
+                let temp = tempfile::tempdir()?;
+                let clock = clock();
+                let cancel = provenant_core::CancelToken::new();
+                let call = call(&clock, &cancel);
+                let store = RunStore::open(&context(temp.path())?, &call)?;
+                let input = input();
+                store.create(&input, &call)?;
+                let record = store.record(input.attempts[0].attempt_id, &call)?;
+                let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+                let secret = format!("{prefix}sk-abcdefghijklmnopqrstuvwx");
+                let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
+                value[field] = match field {
+                    "note" => serde_json::json!(secret),
+                    "future" => {
+                        serde_json::json!({secret.clone():[secret.clone(),{"value":secret}]})
+                    }
+                    _ => serde_json::json!([secret]),
+                };
+                let mut result = decoded();
+                result.complete = true;
+                result.outcome = Outcome::Succeeded;
+                result.result = Handoff::from_json(&serde_json::to_vec(&value)?)?.fenced();
+                let safe = store
+                    .capture_handoff(&attempt, &record, &result)?
+                    .ok_or("final snapshot")?;
+                assert!(!safe.fenced().contains("sk-abcdefghijklmnopqrstuvwx"));
+                assert!(safe.fenced().contains("[REDACTED]"));
+                assert_eq!(store.handoff(&record)?, Some(safe));
+            }
+        }
+        // Redacting short URL credentials expands the note past its byte cap.
+        let url = "\nhttps://a:b@h";
+        let note = format!(
+            "{}{url}",
+            "x".repeat(provenant_records::handoff::NOTE_BYTES - url.len())
+        );
+        let mut handoff = Handoff::from_json(&snapshot("done"))?;
+        handoff.note = note;
+        let redact = |text: &str| {
+            let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
+                .map_err(|_| RunError::Validation("redaction"))?;
+            String::from_utf8(safe).map_err(|_| RunError::Validation("UTF-8"))
+        };
+        let invalid = transform_handoff(&handoff, redact);
+        assert!(matches!(invalid, Err(RunError::Validation(_))));
+        let mut value: serde_json::Value = serde_json::from_slice(&snapshot("done"))?;
+        value["future"] = serde_json::json!({"url":url,"padding":""});
+        let padding = HANDOFF_BYTES - serde_json::to_vec(&value)?.len();
+        value["future"]["padding"] = serde_json::json!("x".repeat(padding));
+        let handoff = Handoff::from_json(&serde_json::to_vec(&value)?)?;
+        assert!(matches!(
+            transform_handoff(&handoff, redact),
+            Err(RunError::Validation("handoff exceeds 12288 bytes"))
+        ));
         Ok(())
     }
 
@@ -321,7 +559,11 @@ mod tests {
         result.complete = true;
         result.result = "Completed prose without a declaration".into();
         assert!(store.capture_handoff(&attempt, &record, &result)?.is_none());
-        result.result = Handoff::from_json(&snapshot("done"))?.fenced();
+        let done = Handoff::from_json(&snapshot("done"))?.fenced();
+        let example = format!("````markdown\n{done}\n````");
+        result.result = example.clone();
+        assert!(store.capture_handoff(&attempt, &record, &result)?.is_none());
+        result.result = format!("{example}\n{done}");
         assert!(
             !store
                 .capture_handoff(&attempt, &record, &result)?

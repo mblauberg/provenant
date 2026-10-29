@@ -272,7 +272,16 @@ impl RunStore {
         let prompt = self.artifact_bytes(old.run_id, &old.prompt, RECORD_LIMIT)?;
         let handoff = self
             .handoff(old)?
-            .map(|handoff| handoff_brief(&handoff))
+            .map(|handoff| -> Result<String> {
+                // JSON escapes can hide token boundaries from a byte scan of
+                // the final prompt. Scan decoded strings before serialisation.
+                crate::completion::transform_handoff(&handoff, |text| {
+                    Service::scan(text)?;
+                    Ok(text.to_owned())
+                })?;
+                Ok(handoff_brief(&handoff))
+            })
+            .transpose()?
             .unwrap_or_default();
         let prompt = format!(
             "{}\n\n{}{handoff}",
@@ -415,6 +424,68 @@ impl RunStore {
 mod tests {
     use super::*;
     use crate::tests::{call, clock, context, exit, input, publication, seal_observation};
+
+    #[test]
+    fn retry_disclosure_scans_decoded_handoff_strings()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let id = input.attempts[0].attempt_id;
+        let old = store.record(id, &call)?;
+        let retry = PolicyRetry {
+            schema_version: 1,
+            route: old.requested_route.clone(),
+            resume: false,
+            max_attempts: 2,
+            instruction: "Continue.".into(),
+            not_before_unix_seconds: None,
+        };
+        store.stage_policy_retry(&old, &retry, &call)?;
+        let mut terminal = old.clone();
+        terminal.state = AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: Outcome::QuotaLimited,
+            finished_at: input.created_at,
+            exit_code: Some(1),
+            reason: None,
+        };
+        let directory = store.attempt_dir(old.run_id, id, false)?;
+        for prefix in ["\n", "\t"] {
+            for field in ["note", "remaining", "decisions", "verify", "future"] {
+                let secret = format!("{prefix}sk-abcdefghijklmnopqrstuvwx");
+                let mut handoff = serde_json::json!({"schema_version":2,"status":"stopped_early","note":"Continue","remaining":[],"decisions":[],"verify":[]});
+                handoff[field] = match field {
+                    "note" => serde_json::json!(secret),
+                    "future" => serde_json::json!({"nested":[{"token":secret}]}),
+                    _ => serde_json::json!([secret]),
+                };
+                // Simulate a snapshot sealed before decoded-string sanitisation.
+                seal(
+                    &directory,
+                    AttemptFile::Handoff.name(),
+                    &serde_json::to_vec(&handoff)?,
+                    RECORD_LIMIT,
+                )?;
+                assert!(
+                    matches!(
+                        store.policy_successor(&old, &terminal, &call),
+                        Err(RunError::Input {
+                            kind: ErrorKind::SecretInput,
+                            ..
+                        })
+                    ),
+                    "{field} {prefix:?}"
+                );
+                directory.unlink(std::ffi::OsStr::new(AttemptFile::Handoff.name()))?;
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn policy_retry_is_atomic_bounded_and_preserves_the_failed_receipt()

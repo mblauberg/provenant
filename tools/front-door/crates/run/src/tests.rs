@@ -677,6 +677,35 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
 }
 
 #[test]
+fn streamed_handoff_redacts_decoded_strings_before_graph_continuation() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let secret = "sk-abcdefghijklmnopqrstuvwx";
+    let handoff = serde_json::json!({"schema_version":2,"status":"stopped_early","note":format!("Continue.\n{secret}"),"remaining":[format!("\t{secret}")],"decisions":[],"verify":[],"future":{"token":format!("\n{secret}")}});
+    let text = format!("{}\n```handoff\n{handoff}\n```", "x".repeat(28_000));
+    let mut done = publication();
+    done.result = &text;
+    store.publish_terminal(id, 1, &done, &exit(), &call)?;
+    let result = store.stream_result(id, &call, None)?;
+    let handoff = result.handoff
+        .map_err(std::io::Error::other)?
+        .ok_or("streamed handoff")?;
+    assert!(!handoff.fenced().contains(secret));
+    assert_eq!(handoff.note, "Continue.\n[REDACTED]");
+    assert_eq!(handoff.remaining, ["\t[REDACTED]"]);
+    assert_eq!(handoff.extra["future"]["token"], "\n[REDACTED]");
+    Ok(())
+}
+
+#[test]
 fn streamed_verdict_evidence_validates_complete_large_artifacts() -> TestResult {
     for duplicate in [false, true] {
         let temp = tempfile::tempdir()?;

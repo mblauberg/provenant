@@ -29,6 +29,29 @@ fn fixture_owner(results: &[&str]) -> FakeOwner {
 const STOP: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"First half committed; finish the second half and run checks.\"}\n```";
 
 #[test]
+fn fenced_handoff_examples_do_not_control_continuations() {
+    for fence in ["````", "~~~~"] {
+        for padding in [0, 28_000] {
+            let example = format!("{fence}markdown\n{}\n{STOP}\n{fence}", "x".repeat(padding));
+            for genuine in [false, true] {
+                let output = if genuine {
+                    format!("{example}\n{STOP}")
+                } else {
+                    example.clone()
+                };
+                let mut doc = writer_graph();
+                doc.nodes[0].required_verdict = None;
+                let mut owner = fixture_owner(&[&output, "VERDICT: PASS", "checked"]);
+                let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+                assert_eq!(run.status, GraphStatus::Complete);
+                assert_eq!(run.checkpoint.expansions.len(), usize::from(genuine));
+                assert_eq!(run.checkpoint.nodes[0].handoff.is_some(), genuine);
+            }
+        }
+    }
+}
+
+#[test]
 fn refused_planner_fragment_retries_after_file_journal_reopen() {
     let directory = crate::test_support::tempdir().unwrap();
     let base = std::fs::canonicalize(directory.path()).unwrap();
