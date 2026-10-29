@@ -1,0 +1,118 @@
+{
+ "schema_version": 1,
+ "command": "inbox",
+ "status": "ok",
+ "data": {
+  "result": "item",
+  "item": {
+   "request": {
+    "schema_version": 1,
+    "id": "11111111111111111111111111111111",
+    "revision": 4,
+    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-10-30T01:00:00Z",
+    "updated_at": "2026-10-30T01:05:00Z",
+    "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "project_key": "provenant",
+    "owner_host": "cccccccccccccccccccccccccccccccc",
+    "chair_session_id": "3f9c2a10d4e84b7f",
+    "chair_actor": "dddddddddddddddddddddddddddddddd",
+    "request": {
+     "kind": "decision",
+     "title": "Pick the storage layer",
+     "body": "Body of Pick the storage layer",
+     "blocking": true,
+     "options": [
+      {
+       "id": "sqlite",
+       "label": "Sqlite",
+       "description": "Choose sqlite"
+      },
+      {
+       "id": "files",
+       "label": "Files",
+       "description": "Choose files"
+      }
+     ],
+     "recommended_option_id": "sqlite",
+     "proceeding_with": null,
+     "deadline": null,
+     "work": null,
+     "supersedes": null
+    },
+    "state": "answered",
+    "answer_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "closure_reason": null
+   },
+   "answer": {
+    "schema_version": 1,
+    "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "request_id": "11111111111111111111111111111111",
+    "request_revision": 3,
+    "action": "choose",
+    "option_id": "sqlite",
+    "text": null,
+    "actor": "dddddddddddddddddddddddddddddddd",
+    "channel": "console",
+    "answered_at": "2026-10-30T01:06:00Z",
+    "operation_id": "99999999999999999999999999999999"
+   },
+   "delivery": {
+    "schema_version": 1,
+    "answer_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "target_host": "cccccccccccccccccccccccccccccccc",
+    "target_session": "3f9c2a10d4e84b7f",
+    "target_actor": "dddddddddddddddddddddddddddddddd",
+    "transport": "fabric_mail",
+    "message_id": "ffffffffffffffffffffffffffffffff",
+    "state": "acknowledged",
+    "attempts": 1,
+    "last_attempt_at": "2026-10-30T01:06:05Z",
+    "acknowledged_at": "2026-10-30T01:06:09Z",
+    "error": null
+   },
+   "history": [
+    {
+     "schema_version": 1,
+     "id": "11111111111111111111111111111111",
+     "revision": 3,
+     "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "created_at": "2026-10-30T01:00:00Z",
+     "updated_at": "2026-10-30T01:05:00Z",
+     "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "project_key": "provenant",
+     "owner_host": "cccccccccccccccccccccccccccccccc",
+     "chair_session_id": "3f9c2a10d4e84b7f",
+     "chair_actor": "dddddddddddddddddddddddddddddddd",
+     "request": {
+      "kind": "decision",
+      "title": "Pick the storage layer",
+      "body": "Body of Pick the storage layer",
+      "blocking": true,
+      "options": [
+       {
+        "id": "sqlite",
+        "label": "Sqlite",
+        "description": "Choose sqlite"
+       },
+       {
+        "id": "files",
+        "label": "Files",
+        "description": "Choose files"
+       }
+      ],
+      "recommended_option_id": "sqlite",
+      "proceeding_with": null,
+      "deadline": null,
+      "work": null,
+      "supersedes": null
+     },
+     "state": "open",
+     "answer_id": null,
+     "closure_reason": null
+    }
+   ]
+  }
+ },
+ "error": null
+}

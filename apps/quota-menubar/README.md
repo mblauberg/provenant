@@ -29,9 +29,23 @@ Register each Claude account under a label in its required `~/.claude-LABEL` dir
 
 The menu shows local requests and lanes needing attention from `provenant console overview --json`. It observes local database, WAL and project registry metadata as invalidation hints, coalesces changes for 250 ms, and reads the overview through the CLI. Overview reads start at least two seconds apart, with one trailing read for changes during that interval or an active read. A failed read retains the previous overview and shows its age and error. A once-per-minute check recovers missed events, retries unavailable watches and retries a failed read. Menu opening and manual refresh also request a read.
 
+## Packages
+
+The package has three targets. `ProvenantKit` is the shared client: it runs the CLI off the main thread with bounded output, decodes the `{schema_version, command, status, data, error}` envelope, reports typed errors, and follows list cursors. Both executables use it. `QuotaMenuBar` is the menu agent and stays on macOS 14. `ProvenantConsole` is a separate process for the larger windows and needs macOS 26; on an older system it prints a message and exits. No console code enters the menu target, and a source test checks that.
+
+## Console
+
+`provenant-console` opens one inbox window. It reads `provenant inbox --json` and lists pending decisions, assumptions and questions with their kind, whether they block, and their session. Answering runs `provenant answer --expect-revision N --channel console`, so a request that changed since it was opened is not overwritten: the window shows its current state and sends nothing. Delivery and acknowledgement state is shown as the CLI returns it.
+
+The console refreshes when the app comes to the front and when you choose Refresh (⌘R); it has no timers. It exits when its last window closes, and it opens no database, credential, provider store or SSH connection (a source test checks the shared and console sources). Keyboard use: Tab moves between the list, options, reply field and buttons; arrow keys choose an option; Return sends the default answer; ⌘W closes.
+
+`provenant console open` opens `Provenant Console.app`, or prints an install hint. `./bundle` builds that app with the console as its main executable and the menu agent beside it.
+
+Memory and launch time are not measured in CI. Measure them on a Mac with `/usr/bin/time -l .build/release/provenant-console`.
+
 ## Build and run
 
-The app needs macOS 14 or later and the Swift toolchain. It has no third-party dependencies.
+The menu app needs macOS 14 or later (the console needs macOS 26) and the Swift toolchain. It has no third-party dependencies.
 
 ```bash
 cd apps/quota-menubar

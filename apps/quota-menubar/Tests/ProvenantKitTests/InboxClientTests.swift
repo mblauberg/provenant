@@ -1,0 +1,104 @@
+import Foundation
+import XCTest
+@testable import ProvenantKit
+
+/// A runner that replays recorded CLI output by argument prefix and records every call.
+final class Replay: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var calls: [[String]] = []
+    private var replies: [(prefix: [String], file: String, status: Int32)]
+    init(_ replies: [(prefix: [String], file: String, status: Int32)]) { self.replies = replies }
+
+    static func fixture(_ name: String) throws -> Data {
+        try Data(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "Fixtures/\(name).json"))
+    }
+
+    var client: CLIClient {
+        CLIClient { [self] arguments, _ in
+            lock.withLock { calls.append(arguments) }
+            let hit = lock.withLock { replies.first { arguments.starts(with: $0.prefix) } }
+            guard let hit else { throw ClientError.launch("no recorded reply for \(arguments)") }
+            return CLI.Output(status: hit.status, signalled: false, timedOut: false, truncated: false,
+                              out: try Self.fixture(hit.file), err: "")
+        }
+    }
+    var recorded: [[String]] { lock.withLock { calls } }
+}
+
+final class InboxClientTests: XCTestCase {
+    func testListFollowsTheCursorAndKeepsKindBlockingAndSession() async throws {
+        let replay = Replay([(["inbox", "--state", "open", "--limit", "50", "--cursor", "CUR1"], "inbox-page2", 0),
+                             (["inbox", "--state", "open"], "inbox-page1", 0)])
+        let page = try await InboxClient(cli: replay.client).list()
+        XCTAssertEqual(page.items.map(\.request.title), ["Pick the storage layer", "Assume UTC timestamps", "Which name?"])
+        XCTAssertEqual(page.items.map(\.request.kind), ["decision", "assumption", "question"])
+        XCTAssertEqual(page.items.map(\.request.blocking), [true, false, false])
+        XCTAssertEqual(page.items[0].chairSessionId, "3f9c2a10d4e84b7f")
+        XCTAssertNil(page.nextCursor)
+        XCTAssertEqual(replay.recorded.count, 2)
+        XCTAssertTrue(replay.recorded.allSatisfy { $0.last == "--json" })
+    }
+
+    func testPageLimitReportsRemainingPages() async throws {
+        let replay = Replay([(["inbox"], "inbox-page1", 0)])
+        let page = try await InboxClient(cli: replay.client).list(maxPages: 1)
+        XCTAssertEqual(page.items.count, 2)
+        XCTAssertEqual(page.nextCursor, "CUR1")
+        XCTAssertTrue(page.truncated)
+    }
+
+    func testAnswerUsesExpectRevisionAndConsoleChannelAndShowsDeliveryAsReturned() async throws {
+        let replay = Replay([(["answer"], "answer-saved", 0)])
+        let outcome = try await InboxClient(cli: replay.client)
+            .answer("1", action: .choose, option: "sqlite", expectRevision: 3)
+        guard case .saved(let receipt) = outcome else { return XCTFail("expected a saved answer") }
+        XCTAssertEqual(receipt.delivery?.state, "queued")
+        XCTAssertEqual(receipt.state, "answered")
+        let call = try XCTUnwrap(replay.recorded.first)
+        XCTAssertEqual(call, ["answer", "1", "--action", "choose", "--expect-revision", "3", "--channel", "console", "--option", "sqlite", "--json"])
+    }
+
+    func testStaleRevisionReadsTheCurrentStateAndWritesNothing() async throws {
+        let replay = Replay([(["answer"], "answer-conflict", 1), (["inbox", "1"], "inbox-item-stale", 0)])
+        let outcome = try await InboxClient(cli: replay.client).answer("1", action: .confirm, expectRevision: 3)
+        guard case .stale(let current) = outcome else { return XCTFail("expected a stale outcome") }
+        XCTAssertEqual(current.request.revision, 5)
+        XCTAssertEqual(current.request.state, "superseded")
+        XCTAssertEqual(replay.recorded.filter { $0.first == "answer" }.count, 1)
+    }
+
+    func testItemCarriesAnswerAndAcknowledgement() async throws {
+        let replay = Replay([(["inbox", "1"], "inbox-item-answered", 0)])
+        let item = try await InboxClient(cli: replay.client).item("1")
+        XCTAssertEqual(item.answer?.channel, "console")
+        XCTAssertEqual(item.delivery?.state, "acknowledged")
+        XCTAssertEqual(item.delivery?.acknowledgedAt, "2026-10-30T01:06:09Z")
+    }
+
+    func testErrorEnvelopeBecomesTypedError() async throws {
+        let replay = Replay([(["answer"], "answer-conflict", 1)])
+        do {
+            _ = try await replay.client.call(["answer"], as: InboxReceipt.self)
+            XCTFail("expected an error")
+        } catch let error as ClientError {
+            XCTAssertEqual(error.code, "conflict")
+        }
+    }
+
+    func testUnreadableOutputIsTypedAndBounded() async {
+        let garbage = CLIClient { _, _ in CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false, out: Data("nope".utf8), err: "") }
+        let big = CLIClient { _, _ in CLI.Output(status: 0, signalled: false, timedOut: false, truncated: true, out: Data(), err: "") }
+        let failed = CLIClient { _, _ in CLI.Output(status: 2, signalled: false, timedOut: false, truncated: false, out: Data(), err: "boom\n") }
+        for (client, expected) in [(garbage, "malformed"), (big, "outputTooLarge"), (failed, "exited")] {
+            do { _ = try await client.call(["inbox"], as: InboxReceipt.self); XCTFail("expected an error") } catch let error as ClientError {
+                XCTAssertTrue("\(error)".hasPrefix(expected), "\(error)")
+            } catch { XCTFail("\(error)") }
+        }
+    }
+
+    func testExecCapsOutput() throws {
+        let run = try CLI.exec(URL(fileURLWithPath: "/usr/bin/yes"), [], path: nil, limit: 0.3, maxOutput: 1024)
+        XCTAssertTrue(run.truncated)
+        XCTAssertLessThanOrEqual(run.out.count, 1024)
+    }
+}

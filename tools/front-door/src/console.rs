@@ -6,10 +6,14 @@ use std::io;
 
 #[allow(clippy::disallowed_methods)] // The process edge establishes the real-time deadline.
 pub fn run(command: Console, globals: &Globals) -> u8 {
+    if matches!(command, Console::Open) {
+        return open(globals);
+    }
     let leaf = match &command {
         Console::Board { .. } => "console board",
         Console::Tree { .. } => "console tree",
         Console::Overview => "console overview",
+        Console::Open => "console open",
         Console::Projects => "console projects",
         Console::Sessions { .. } => "console sessions",
     };
@@ -147,6 +151,70 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
         &mut io::stdout().lock(),
         &mut io::stderr().lock(),
     )
+}
+
+/// Name of the bundle `apps/quota-menubar/bundle` assembles, which holds the console and the menu agent.
+const APP_NAME: &str = "Provenant Console";
+
+/// Opens the console app with the system `open`, or says how to install it.
+fn open(globals: &Globals) -> u8 {
+    let result = if cfg!(target_os = "macos") {
+        let argv: Vec<std::ffi::OsString> = ["/usr/bin/open", "-a", APP_NAME]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let opened = provenant_os::exec::SystemExecutor::new(1)
+            .and_then(|executor| {
+                use provenant_os::exec::Executor;
+                executor.execute(provenant_os::exec::ExecOptions::new(
+                    &argv,
+                    std::path::Path::new("/"),
+                    std::time::Duration::from_secs(10),
+                ))
+            })
+            .is_ok_and(|outcome| {
+                matches!(
+                    outcome.termination,
+                    provenant_os::exec::Termination::Exit(0)
+                )
+            });
+        if opened {
+            CommandResult::new(
+                "console open",
+                Outcome::Ok,
+                Some(serde_json::json!({"app": APP_NAME})),
+            )
+        } else {
+            unavailable(format!(
+                "{APP_NAME} is not installed. Build it with apps/quota-menubar/bundle and copy the app to /Applications or ~/Applications."
+            ))
+        }
+    } else {
+        unavailable("The console app runs on macOS only.".into())
+    };
+    let human = match (&result.data, &result.error) {
+        (Some(_), _) => format!("Opened {APP_NAME}"),
+        (_, Some(error)) => error.message.clone(),
+        _ => String::new(),
+    };
+    render(
+        &result,
+        globals,
+        &human,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+    )
+}
+
+fn unavailable(message: String) -> CommandResult<Option<serde_json::Value>> {
+    let mut result = CommandResult::new("console open", Outcome::Error, None);
+    result.error = Some(CommandError {
+        code: "console_app_unavailable".into(),
+        message,
+        cause: None,
+        repair: None,
+    });
+    result
 }
 
 fn compose_peers(

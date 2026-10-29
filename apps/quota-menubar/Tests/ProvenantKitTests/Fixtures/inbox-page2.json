@@ -1,0 +1,42 @@
+{
+ "schema_version": 1,
+ "command": "inbox",
+ "status": "ok",
+ "data": {
+  "result": "listed",
+  "items": [
+   {
+    "schema_version": 1,
+    "id": "44444444444444444444444444444444",
+    "revision": 1,
+    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-10-30T01:00:00Z",
+    "updated_at": "2026-10-30T01:05:00Z",
+    "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "project_key": "provenant",
+    "owner_host": "cccccccccccccccccccccccccccccccc",
+    "chair_session_id": "3f9c2a10d4e84b7f",
+    "chair_actor": "dddddddddddddddddddddddddddddddd",
+    "request": {
+     "kind": "question",
+     "title": "Which name?",
+     "body": "Body of Which name?",
+     "blocking": false,
+     "options": [],
+     "recommended_option_id": null,
+     "proceeding_with": null,
+     "deadline": null,
+     "work": null,
+     "supersedes": null
+    },
+    "state": "open",
+    "answer_id": null,
+    "closure_reason": null
+   }
+  ],
+  "next_cursor": null,
+  "truncated": false,
+  "coverage": "local"
+ },
+ "error": null
+}
