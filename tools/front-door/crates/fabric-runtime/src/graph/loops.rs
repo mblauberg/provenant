@@ -548,6 +548,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 handoff: None,
                 expansion_pause: None,
                 loop_pause: None,
+                loop_pause_code: None,
                 round: n.round.clone(),
                 gate: None,
                 separation: None,
@@ -558,6 +559,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 id: n.id.clone(),
                 state: NodeState::Pending,
                 advance_error: None,
+                advance_error_code: None,
                 outputs: None,
                 attempts: vec![],
             })
@@ -750,10 +752,12 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         progress.state = state;
         progress.outputs = Some(gate_outputs(state == NodeState::Succeeded));
         checkpoint.nodes[index].loop_pause = None;
+        checkpoint.nodes[index].loop_pause_code = None;
         refresh_pause(checkpoint);
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     } else if settled && dependency_state(node, plan, checkpoint, positions).is_none() {
         if checkpoint.nodes[index].loop_pause.is_none() {
+            checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
             checkpoint.nodes[index].loop_pause = Some(format!(
                 "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
                 node.id
@@ -786,6 +790,7 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
                 .as_ref()
                 .is_none_or(|reason| !reason.contains("graph resume"))
             {
+                checkpoint.nodes[index].loop_pause_code = Some("loop_ask_closed".into());
                 checkpoint.nodes[index].loop_pause = Some(format!(
                     "loop {} exhausted after {rounds} rounds; ask closed; use graph resume --extend loop.{}.rounds=N or --extend loop.{}.decision=stop|accept",
                     node.id, node.id, node.id
@@ -797,6 +802,7 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         }
         match asks::poll(checkpoint, position, owner) {
             Ok(reply) => {
+                checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
                 checkpoint.nodes[index].loop_pause = Some(format!(
                     "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
                     node.id
@@ -856,6 +862,7 @@ fn apply<R: Error + 'static, J: GraphJournal>(
                     && ask.rounds == Some(rounds)
                     && let Some(answer) = ask.answer.as_mut()
                 {
+                    answer.rejection_code = Some("invalid_loop_decision".into());
                     answer
                         .rejected
                         .get_or_insert_with(|| bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
@@ -875,6 +882,7 @@ pub(super) fn pause_invalid_decision<R: Error + 'static, J: GraphJournal>(
     journal: &mut J,
 ) -> Result<(), GraphError<R, J::Error>> {
     if let Some(progress) = checkpoint.nodes.iter_mut().find(|n| n.id == node) {
+        progress.loop_pause_code = Some("invalid_loop_decision".into());
         progress.loop_pause = Some(format!(
             "loop {node} exhausted; decision cannot be applied: {}; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept",
             bounded(reason, MAX_ADVANCE_ERROR_BYTES)
@@ -938,6 +946,11 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
         .as_ref()
         .is_none_or(|r| r.starts_with("loops paused:") || r.starts_with("loop "))
     {
+        checkpoint.pause_code = if reasons.is_empty() {
+            None
+        } else {
+            Some(checkpoint.nodes.iter().filter_map(|node| node.loop_pause_code.as_deref()).find(|code| *code != "loop_paused").unwrap_or("loop_paused").into())
+        };
         checkpoint.pause_reason = (!reasons.is_empty()).then(|| {
             bounded(
                 &format!("loops paused: {}", reasons.join("; ")),

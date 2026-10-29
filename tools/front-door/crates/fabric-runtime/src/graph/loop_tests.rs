@@ -159,13 +159,7 @@ fn loop_fixture_exhausts_and_pauses_without_delivery() {
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert!(
-        run.checkpoint
-            .pause_reason
-            .as_ref()
-            .unwrap()
-            .contains("after 2 rounds")
-    );
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("loop_paused"));
     assert!(!run.checkpoint.successful());
     assert_eq!(owner.deliveries, 0);
     assert_eq!(run.checkpoint.ask_actor.as_deref(), Some("chair"));
@@ -249,12 +243,7 @@ fn loop_admission_counts_every_round_before_any_launch() {
     )
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert!(
-        run.checkpoint
-            .pause_reason
-            .unwrap()
-            .contains("limits.nodes=6 reached (7)")
-    );
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("structural_limit"));
     assert!(owner.calls.is_empty());
 }
 
@@ -632,13 +621,7 @@ fn loop_budget_counts_prior_round_attempts() {
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(owner.calls.len(), 1);
-    assert!(
-        paused
-            .checkpoint
-            .pause_reason
-            .unwrap()
-            .contains("per_graph.tokens")
-    );
+    assert_eq!(paused.checkpoint.pause_code.as_deref(), Some("budget_exceeded"));
     let run = resume_with_budget(
         &document,
         &mut owner,
@@ -783,14 +766,7 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
             observer > wrapper,
             "regression requires polling after the invalid decision"
         );
-        assert!(
-            paused
-                .checkpoint
-                .pause_reason
-                .as_ref()
-                .unwrap()
-                .contains("decision cannot be applied")
-        );
+        assert_eq!(paused.checkpoint.pause_code.as_deref(), Some("invalid_loop_decision"));
         assert_eq!(
             paused
                 .checkpoint
@@ -994,14 +970,7 @@ fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
         &["loop.revise.rounds=3".into()],
     );
     assert_eq!(rejected.status, GraphStatus::Paused);
-    assert!(
-        rejected
-            .checkpoint
-            .pause_reason
-            .as_ref()
-            .unwrap()
-            .contains("limits.expansion_depth=4")
-    );
+    assert_eq!(rejected.checkpoint.pause_code.as_deref(), Some("invalid_loop_decision"));
     assert_eq!(
         rejected.checkpoint.nodes.len(),
         paused.checkpoint.nodes.len()
@@ -1040,13 +1009,7 @@ fn loop_inbox_extension_respects_host_ceiling_and_closes_rejected_ask() {
     )
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
-    assert!(
-        paused
-            .checkpoint
-            .pause_reason
-            .unwrap()
-            .contains("limits.expansion_depth=4")
-    );
+    assert_eq!(paused.checkpoint.pause_code.as_deref(), Some("invalid_loop_decision"));
     assert!(paused.checkpoint.extensions.is_empty());
     assert_eq!(owner.closed, [("revise".into(), 2)]);
     let stopped = resume_with_budget(
@@ -1168,13 +1131,7 @@ fn loop_inbox_failure_pauses_without_stopping_later_attempt_observation() {
     )
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
-    assert!(
-        paused
-            .checkpoint
-            .pause_reason
-            .unwrap()
-            .contains("inbox unavailable")
-    );
+    assert_eq!(paused.checkpoint.pause_code.as_deref(), Some("invalid_loop_decision"));
     assert_eq!(
         paused
             .checkpoint
@@ -1214,14 +1171,7 @@ fn loop_simultaneous_exhaustion_keeps_both_reasons_and_resolves_individually() {
     )
     .unwrap();
     for name in ["revise", "second"] {
-        assert!(
-            paused
-                .checkpoint
-                .pause_reason
-                .as_ref()
-                .unwrap()
-                .contains(name)
-        );
+        assert_eq!(paused.checkpoint.nodes.iter().find(|node| node.id == name).unwrap().loop_pause_code.as_deref(), Some("loop_paused"));
     }
     let one = extension(
         &document,
@@ -1230,20 +1180,8 @@ fn loop_simultaneous_exhaustion_keeps_both_reasons_and_resolves_individually() {
         &["loop.revise.decision=accept".into()],
     );
     assert_eq!(one.status, GraphStatus::Paused);
-    assert!(
-        !one.checkpoint
-            .pause_reason
-            .as_ref()
-            .unwrap()
-            .contains("loop revise")
-    );
-    assert!(
-        one.checkpoint
-            .pause_reason
-            .as_ref()
-            .unwrap()
-            .contains("loop second")
-    );
+    assert!(one.checkpoint.nodes.iter().find(|node| node.id == "revise").unwrap().loop_pause_code.is_none());
+    assert_eq!(one.checkpoint.nodes.iter().find(|node| node.id == "second").unwrap().loop_pause_code.as_deref(), Some("loop_paused"));
     let both = extension(
         &document,
         &mut reviews(&[]),
@@ -1342,7 +1280,7 @@ fn loop_cancel_and_manual_decisions_close_unanswered_asks() {
             .unwrap();
             assert_eq!(cancelled.status, GraphStatus::Cancelled);
             let resumed = resume_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default(), &[]).unwrap();
-            assert!(resumed.checkpoint.pause_reason.as_ref().unwrap().contains("ask closed; use graph resume"));
+            assert_eq!(resumed.checkpoint.pause_code.as_deref(), Some("loop_ask_closed"));
         } else {
             let extension = if action == "extend" {
                 owner.inner.observations.push_back(terminal_with_result(
@@ -1392,13 +1330,7 @@ fn loop_inbox_large_extension_cannot_bypass_host_node_limit() {
     )
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
-    assert!(
-        paused
-            .checkpoint
-            .pause_reason
-            .unwrap()
-            .contains("node count")
-    );
+    assert_eq!(paused.checkpoint.pause_code.as_deref(), Some("invalid_loop_decision"));
     assert_eq!(paused.checkpoint.nodes.len(), 5);
     assert!(paused.checkpoint.extensions.is_empty());
     let accepted = resume_with_budget(
@@ -1583,14 +1515,7 @@ fn loop_inbox_recovery_clears_stale_unavailable_pause_durably() {
         &Default::default(),
     )
     .unwrap();
-    assert!(
-        !recovered
-            .checkpoint
-            .pause_reason
-            .as_ref()
-            .unwrap()
-            .contains("unavailable")
-    );
+    assert_eq!(recovered.checkpoint.pause_code.as_deref(), Some("loop_paused"));
     assert!(
         recovered
             .checkpoint
@@ -1765,7 +1690,7 @@ fn loop_decision_recovery_resets_pause_even_after_prior_ask_cleanup() {
         &Default::default(),
     )
     .unwrap();
-    assert!(!run.checkpoint.pause_reason.unwrap().contains("unavailable"));
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("loop_paused"));
 }
 
 #[test]
@@ -1804,11 +1729,8 @@ fn loop_checkpoint_from_before_node_asks_refuses_to_advance_but_can_be_cancelled
         advance(&document, &mut reviews(&[]), &mut journal),
         resume(&document, &mut reviews(&[]), &mut journal),
     ] {
-        let Err(GraphError::Refused(reason)) = run else {
-            panic!("legacy checkpoint advanced: {run:?}");
-        };
-        assert!(reason.contains("predates node asks"), "{reason}");
-        assert!(reason.contains("provenant fabric graph cancel loop-exhausts"), "{reason}");
+        let error = run.unwrap_err();
+        assert_eq!(error.code(), "graph_refused");
     }
 
     // The host's cancel path loads, fences and closes asks without validating.
