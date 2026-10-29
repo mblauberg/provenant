@@ -455,10 +455,10 @@ impl RunStore {
                 (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(settings)) => {
                     let mut disk = disk;
                     if disk < floor {
-                        if below_floor % RECLAIM_EVERY == 0 {
-                            if resources.reclaim_disk(attempt) {
-                                disk = resources.disk(attempt).unwrap_or(disk);
-                            }
+                        if below_floor.is_multiple_of(RECLAIM_EVERY)
+                            && resources.reclaim_disk(attempt)
+                        {
+                            disk = resources.disk(attempt).unwrap_or(disk);
                         }
                         below_floor = below_floor.saturating_add(1);
                     }

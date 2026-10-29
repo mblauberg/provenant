@@ -229,7 +229,7 @@ pub enum RunError {
     )]
     BuildSlots { active: u64, limit: u64 },
     #[error(
-        "invalid host build settings: check max_concurrent_builds, cargo_build_jobs and cargo_debug in domains.fabric.lanes"
+        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs and cargo_debug"
     )]
     BuildSettings,
     #[error("guardian process identity unavailable; retry when process observation is available")]
