@@ -1,71 +1,58 @@
 ---
 name: engineering-writing
-description: "Use for software docs, specs, READMEs, commits, PRs, runbooks, errors and thesis LaTeX invariants. Not for general/academic prose (natural-writing) or Australian legal prose (legal-writing)."
+description: "Use for software docs, READMEs, commits, PR bodies, runbooks, error text, release notes and thesis LaTeX invariants, written for readers who will not review closely. Not for general or academic prose (natural-writing), Australian legal drafting (legal-writing), or durable-doc placement and ADRs (engineering-docs)."
 ---
 
 # Engineering writing
 
-Write clear, brief, accurate and useful engineering prose in Australian English.
-Cut first. Add only what serves the reader's job and belongs in this document.
+The engineering overlay on `natural-writing`: that hub owns Australian
+English, the mechanism catalogue, the condense pass and claim classes. This
+skill adds what a reader of agent-written engineering text needs when they
+will not check every line.
 
-This skill is a specialisation of the `natural-writing` hub: it owns
-codebase/README/commit/PR artefact types and links to the hub for the
-Australian English default, the anti-AI taxonomy and the condense pass. See
-`references/process.md`, `references/style-standard.md` and
-`references/engineer-voice.md` for where each hub link applies.
+## Reader contract
 
-It owns thesis and paper LaTeX command and layout invariants. Academic prose,
-chapter structure, research voice, citation discipline, claim wording and
-thesis AI tells stay with the hub's academic prose reference.
+1. **Decision first.** Open with what changed, what was decided, or what the
+   reader must do. Background follows only if it changes their action.
+2. **Every claim traces** to code, a command, a test result or a link. Verify
+   each package, API, version, flag and URL against the source; otherwise mark
+   `[FLAG: verify]`. Never invent a specific to fill a shape.
+3. **Say what was not done or verified.** `Not load-tested above 500 users`
+   and `retry is out of scope here` are the most valuable lines in a PR.
+4. **Observed vs inferred.** `CPU sat at 100% for 4 minutes` is observed; `the
+   regex likely backtracks` is inferred, and marked as such.
+5. **One term per concept.** Repeat the precise noun; do not cycle `endpoint`,
+   `route` and `URL` for variety.
+6. **A command or path beats a paragraph** that describes it.
 
 ## Workflow
 
-1. Name the audience, prior knowledge, required action or decision, and format
-   constraint. If the reader's job is unclear, flag it before drafting.
-2. Choose one relevant pattern: [document patterns](references/document-patterns.md)
-   for codebase/short-form prose, [requirements and planning](references/requirements-and-planning.md)
-   for already-decided pre-build content, [architecture and communication](references/architecture-and-presentations.md)
-   for approved designs, ADRs, presentations and briefs, or
-   [academic artefacts](references/academic-artefacts.md) for thesis and paper
-   LaTeX command and layout invariants. Do not load more than one. For release
-   notes, changelogs and release fragments, load [release notes](references/release-notes.md)
-   after the pattern.
-3. Structure before sentences: front-load the point, use decision-oriented
-   headings and one idea or requirement per unit, then move wrong-home material.
-4. Lock facts, logic, stance, evidence, obligations, behaviour, identifiers,
-   paths, commands, flags, parameters, keys, error codes, numbers, units, dates,
-   citations and quoted terms.
-5. Revise in separate structure, accuracy, clarity/concision, voice and
-   Australian-English passes. Load only the needed section from
-   [process](references/process.md), [style standard](references/style-standard.md),
-   [engineer voice](references/engineer-voice.md) or the `natural-writing`
-   skill's Australian English default;
-   use [sentence mechanics](references/strunk-mechanics.md) or
-   [sources](references/sources.md) only for a specific problem. Load the hub
-   anti-AI taxonomy and condense pass from the `natural-writing` skill
-   alongside `engineer-voice.md` and `process.md` respectively.
-6. Optional, reader-facing prose only: consider a final voice pass by the model
-   under human-facing final polish in the advisory model dossier. Never
-   required; the chair owns substance, so diff the return for changed facts.
+1. Name the reader, what they already know and what they must do. If the job
+   is unclear, say so before drafting.
+2. Lock identifiers, commands, flags, error text, versions, numbers, dates,
+   obligations and honest negatives. They survive any edit.
+3. Pick the artefact shape from
+   [artefacts.md](references/artefacts.md): README, PR, commit, error,
+   bug report, runbook, postmortem, migration note. For release notes and
+   fragments use [release-notes.md](references/release-notes.md). For thesis
+   and paper LaTeX use [academic-artefacts.md](references/academic-artefacts.md).
+4. Draft structure before sentences, then apply the hub's mechanisms and
+   [engineer-voice.md](references/engineer-voice.md) for the internal-process
+   leaks agents add to deliverables.
+5. Audit fidelity independently when a style pass touched facts: give a
+   read-only reviewer the before and after, on fixed axes (dropped facts,
+   promoted hedges, weakened warnings, invented content). Adopt only on an
+   explicit verdict.
 
-When updating a living doc, edit or delete the stale text instead of
-appending dated entries; see the engineering-docs binding rules.
+## Bounds
 
-Preserve technical meaning and evidence altitude. Distinguish observation from
-interpretation; attach numbers to comparatives. Verify every package, API,
-version, flag and URL against code or documentation, otherwise mark
-`[FLAG: verify]`. Never invent facts to fill a document. Keep genuine caveats
-and honest negatives while cutting padding, marketing language, AI tells,
-statements about omitted implementation details and internal process language
-from reader-facing prose. Match existing repository conventions without copying
-signature phrases.
-
-For condensation, follow the reference stop and integrity checks and report the
-before/after word delta. Review mode returns severity, evidence, impact and fix;
-rewrite mode returns text first; final scrub makes defect fixes only.
-
-Flag unverifiable support, audience dependence, domain-required terms, or a cut
-that would drop an obligation. Use `[FLAG: verify source]`,
-`[FLAG: define audience]`, `[FLAG: preserve exact term]` or
-`[FLAG: shortening drops obligation]` where applicable. Do not smooth
-uncertainty away.
+- Edit living docs in place; do not append dated entries. Placement and ADR
+  scope belong to `engineering-docs`.
+- Never style-pass gates, credential custody, decision records or literal
+  runbooks; edit them by hand, and check first whether a test matches their
+  exact wording.
+- Agent-authored commits keep the repository's trailer convention. This skill
+  returns a message; staging or committing needs its own authority.
+- Specs, issue bodies and plans belong to `scope` and `tracker`, not here.
+- Flag what you cannot settle: `[FLAG: verify source]`,
+  `[FLAG: define audience]`, `[FLAG: shortening drops obligation]`.

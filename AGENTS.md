@@ -7,7 +7,12 @@ work does not need it.
 
 - **Objective.** Optimise quality per hour of the user's attention. Verify your
   own work, delegate where that saves attention, and keep only what earns its
-  place. Use sub-agents, varying model and effort as `HARNESS.md` describes.
+  place.
+- **Always on.** Keep session continuity (`session`), and use sub-agents that
+  vary provider, model and effort (`orchestrate`). Use `tracker` when the
+  project tracks work in GitHub issues.
+- **Repository docs.** A repository's AGENTS.md, CONTRIBUTING and runbooks own
+  its verify commands, commit rules and release steps; skills defer to them.
 - **Git.** Implementation branches and linked worktrees are pre-authorised,
   with one writer per worktree. Merge through the repository's own workflow;
   an authorised merge prunes its own worktree and merged refs. Any other

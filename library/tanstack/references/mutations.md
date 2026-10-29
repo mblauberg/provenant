@@ -1,5 +1,7 @@
 # Mutations and Suspense
 
+Version-sensitive guidance last checked 22 October 2026; verify against the installed package.
+
 ## Optimistic updates
 
 - Display the pending mutation's `variables` (or `useMutationState` from

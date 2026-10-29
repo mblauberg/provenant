@@ -1,83 +1,62 @@
 ---
 name: natural-writing
-description: "Use for general, mixed, academic/thesis or correspondence prose; preserve facts, citations, numbers and intent. Not for engineering (engineering-writing) or Australian legal prose (legal-writing)."
+description: "Use to rewrite, tighten or diagnose general, mixed, correspondence or academic/thesis prose without losing facts, citations or numbers; owns Australian English and the AI-prose mechanisms. Not for READMEs, commits or docs (engineering-writing) or Australian legal drafting (legal-writing)."
 ---
 
 # Natural writing
 
-Rewrite prose in a natural, direct voice. Preserve meaning, facts, citations,
-numbers and intent while removing filler, canned framing and chatbot residue.
+The writing hub. It owns prose doctrine for the family: fidelity locking, the
+mechanism catalogue, Australian English, claim discipline and academic prose.
+`engineering-writing` and `legal-writing` add a domain overlay and link here.
 
-## Hub role
+## Target
 
-This skill is the writing family's hub and owns academic prose directly. It
-holds the shared prose doctrine, anti-AI taxonomy, condense pass,
-claim-discipline schema, voice matching and the Australian English default.
-`engineering-writing` and `legal-writing` link here rather than clone it. Load
-[au-english.md](references/au-english.md) as the default house style unless a
-project convention overrides it.
-
-## Boundary
-
-Use this skill for general, mixed or unclassified prose including
-correspondence, and for academic prose: thesis chapters, papers, abstracts
-and literature reviews. Defer technical docs and READMEs to
-`engineering-writing`, and Australian legal drafting to `legal-writing`.
-Correspondence on a specialist matter stays here, with that specialist as
-companion.
-
-Do not fabricate experience, invent sources, add fake messiness or optimise
-for AI-detector scores. Formal prose is not proof of AI authorship.
-
-## Modes
-
-- `rewrite` (default): clean the full draft.
-- `light-touch`: preserve wording; repair only clear defects.
-- `match-voice`: follow a supplied writing sample.
-- `precision-preserving`: protect high-stakes or citation-heavy wording.
-- `full-rewrite`: reshape low-stakes prose when a normal pass fails.
-- `diagnose`: identify the strongest problems before rewriting.
-- `citation-safe`, `section-polish`, `final-scrub`: academic variants.
-
-Choose the least invasive mode; combine any with `match-voice` given a sample.
+A direct claim, a plain verb, an anchor from the source (number, name, path,
+date, honest negative), one calibrated qualifier, and an ending on the
+decision, risk or next action. Formal prose is not proof of AI authorship, so
+edit for reader value, never for a detector score, and never add fake
+messiness or invented detail.
 
 ## Workflow
 
-1. Lock facts, logic, stance, citations, numbers, names, quotes and terms.
-2. Diagnose the real defect: weak information, assistant residue, inflated
-   language, repeated templates, unclear sentences or voice mismatch.
-3. Rewrite structure, emphasis and rhythm rather than swapping synonyms. Use
-   specifics already in the source; never invent texture.
-4. Match confidence to evidence. Narrow or flag an unsupported claim, never
-   strengthen it.
-5. Repair remaining quality and voice mismatches, then check the result
-   against the locked invariants and any sample.
+1. **Lock** facts, numbers, names, quotes, citation keys, defined terms,
+   modals and negations. List them first; they are the fidelity contract.
+2. **Diagnose** by mechanism, not by phrase. Read
+   [mechanisms.md](references/mechanisms.md) and name the two or three that
+   cost the reader most. A swapped synonym leaves the mechanism in place and
+   the tell moves to the next word.
+3. **Rewrite once**, by mechanism: restate the claim directly, add only
+   anchors the source holds, and flag a gap (`[FLAG: cite source]`) rather
+   than filling it. Match a supplied voice sample over these defaults.
+4. **Audit independently.** A style pass is where facts drift. Compare the
+   locked list against the result and revert any sentence that lost or
+   strengthened a claim. For high-stakes prose, run the audit as a separate
+   clean-context reviewer given the before and after texts only.
+5. **Report** the final text first, with notes only for material flags.
 
-Load [patterns.md](references/patterns.md) for the sign catalogue,
-voice-matching rubric or genre guidance,
-[anti-ai-taxonomy.md](references/anti-ai-taxonomy.md) for the tiered sweep,
-[condense-pass.md](references/condense-pass.md) for shortening, and
-[claim-discipline.md](references/claim-discipline.md) for observed, inferred,
-limitation and pending claims. For academic prose load
-[academic-prose.md](references/academic-prose.md): register, citation-key
-preservation, evidence altitude and thesis AI tells. LaTeX command and layout
-invariants live in `engineering-writing`.
+If the draft already reads well, edit lightly and say so. Choose the least
+invasive pass: light-touch (repair named defects), rewrite (default) or
+diagnose (findings only, no edit).
 
-## Bright-line rules
+## Load when needed
 
-- Preserve facts, meaning, citations, citation keys, named entities and
-  quoted terms; flag a missing source rather than inventing a key.
-- Delete chatbot framing and tool residue instead of paraphrasing them.
-- Prefer concrete nouns and verbs; state each supported point once.
-- Repair repeated templates without manufacturing quirks.
-- Keep one honest qualifier for weak evidence; do not hedge strong evidence.
-- If the draft already reads naturally, edit lightly and say so.
-- Never adopt a style rewrite on its own ledger: an independent audit checks
-  for dropped facts, citations, status markers and weakened gates. Never
-  style-pass gates, ADR decisions or process runbooks.
+- [mechanisms.md](references/mechanisms.md): the defects, each with a reason
+  and a before/after pair.
+- [tells-2026.md](references/tells-2026.md): what current models still do and
+  what has faded, dated and sourced. Read before judging a draft's age.
+- [au-english.md](references/au-english.md): the default house style, unless a
+  repository, quote, API or form requires otherwise.
+- [condense-pass.md](references/condense-pass.md): shortening with a stop rule.
+- [claim-discipline.md](references/claim-discipline.md): observed, inferred,
+  planned and pending claims; comparatives that carry their number.
+- [academic-prose.md](references/academic-prose.md): thesis and paper
+  register, citation-key preservation, evidence altitude. LaTeX invariants
+  live in `engineering-writing`.
 
-## Output
+## Bounds
 
-Return the final text first, with notes only for material flags or choices.
-For a diagnosis, lead with the strongest risks. Keep inline flags short, such
-as `[FLAG: cite source]`.
+- Never style-pass gates, ADR decisions or process runbooks.
+- Use the punctuation the sentence needs. `provenant check writing` flags
+  em-dashes and lexical hints; its silence is necessary, not sufficient, and
+  its word rules are advisory prompts for a human read.
+- Do not fabricate experience or sources. Flag a missing source.

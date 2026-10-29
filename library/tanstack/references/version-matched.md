@@ -1,5 +1,7 @@
 # Version-matched context
 
+Version-sensitive guidance last checked 22 October 2026; verify against the installed package.
+
 Verified against `@tanstack/intent` 0.5.6 and `@tanstack/cli` 0.72.0 in a
 scratch project holding the adopted package versions.
 

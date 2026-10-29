@@ -1,7 +1,0 @@
-schema_version: 1
-target_skill: grill-me
-cases:
-  - {id: lifecycle-grill-me-positive, relation: positive, prompt: "Grill me one branch at a time while preserving the explicit decision context for a digest-bound handoff.", tags: [lifecycle-alignment, direct], expected: {primary_skill: grill-me, companion_skills: []}}
-  - {id: lifecycle-grill-me-negative, relation: negative, prompt: "All decisions and acceptance criteria are approved; implement the software change now.", tags: [lifecycle-alignment, boundary], expected: {primary_skill: implement, companion_skills: []}}
-  - {id: lifecycle-grill-me-adjacent, relation: adjacent, prompt: "Interview me on unresolved choices and turn the answers into the project scope artifact.", tags: [lifecycle-alignment, composition], expected: {primary_skill: scope, companion_skills: [grill-me]}}
-  - {id: lifecycle-grill-me-portability, relation: portability, prompt: "With Console, Herdr and GitHub unavailable, grill the decision using project artifacts and preserve the handoff context.", tags: [lifecycle-alignment, portable], adapters: {console: absent, herdr: absent, github: absent}, expected: {primary_skill: grill-me, companion_skills: []}}

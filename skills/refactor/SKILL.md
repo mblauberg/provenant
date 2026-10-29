@@ -1,65 +1,17 @@
 ---
 name: refactor
-description: "Use for authorised, behaviour-preserving structural simplification backed by characterisation and equivalence evidence. Not for new behaviour, read-only review, or unknown root cause; use tdd, code-review, or diagnose."
+description: "Use for authorised behaviour-preserving refactors and large structural changes proved by a mechanical oracle. Not for new behaviour or read-only review; use test-design or code-review."
 ---
 
 # Refactor
 
-Execute a structural method inside an authorised `implement` run. This skill
-inherits exact paths, non-goals and repair limits; it cannot widen scope, accept
-the change, release it or turn nearby cleanup into work.
+Record the cost to remove, observable invariants and the before/after ownership and dependency shape. Choose an oracle before changing structure: the compiler for type-driven moves, a reviewed codemod for uniform changes across about 20 or more sites, a differential run, or characterisation tests. Record the baseline and commands so another agent can repeat the comparison.
 
-## Entry evidence
+Land the shared seam first when independent modules depend on it. Then make the large change under the same oracle, with disjoint write scopes and one writer per worktree. Delete the old path in the same change and rewrite tests coupled to its structure at the public boundary. For a codemod, review the transform and a sample of sites. Structural search can locate candidates, for example `sg -p '$A.unwrap()'`.
 
-Before editing, record:
+Use a temporary strangler only for production traffic, persisted data, published APIs or a weak oracle; give its adapter an expiry. Do not add compatibility shims for unpublished code. Bound retries per unit and route the long tail to a senior. Stop on an unexplained oracle failure or discovered behaviour change; use diagnose or scope as appropriate. Report the ownership and dependency delta, evidence and residual uncertainty for code-review.
 
-- the named cost/risk to remove and the observable behaviours that must not
-  change;
-- public API, schema, protocol, data, ordering, error and performance invariants;
-- a green baseline plus characterisation, differential, replay, property or
-  compatibility checks selected by risk;
-- the dependency cone: callers, exports, registration/configuration, generated
-  artifacts, persistence and mixed-version boundaries;
-- canonical ownership, duplicate/parallel paths, rollback seam and a
-  move/deletion manifest.
+## How it runs
 
-Use SOLID and related principles as probes, not success metrics: improve
-cohesion and single ownership; preserve substitutability and caller contracts;
-segregate interfaces only where clients carry unused coupling; invert volatile
-dependencies only when the new seam hides real complexity. Prefer simple,
-explicit state and information hiding over speculative abstraction, pattern
-count, DRY-by-text or acronym compliance.
-
-If the desired structure or behaviour is undecided, route to `scope`. If a
-failure's cause is unknown, use `diagnose`. Changed behaviour is a separate TDD
-slice, never hidden in the refactor.
-
-## Method
-
-Use structural search when code shape matters more than spelling. `ast-grep`
-can locate syntax patterns across formatting and identifier changes; for
-example, `sg -p '$A.unwrap()'` finds unwrap calls and
-`sg -p 'Command::new($BIN)'` finds process construction sites.
-
-1. Establish a seam while green. Do not start by deleting the old path.
-2. Move one independently reviewable responsibility at a time. Preserve the
-   public contract or use an approved compatibility adapter with an expiry.
-3. Switch callers/registrations to one canonical owner and verify after each
-   slice. Keep focused checks fast; run affected and full required gates at the
-   enclosing tranche.
-4. Delete only when caller, runtime, build, registry, reflection/dynamic-load,
-   configuration and data evidence show the path is unreachable or replaced.
-   Unknown, user-owned and unrelated files stay untouched.
-5. Stop on behaviour drift, unexplained performance/resource change, scope
-   expansion or an invariant the evidence cannot cover. Revert only exact
-   run-owned hunks under authority and return to `scope`/`diagnose` as needed.
-
-## Completion gate
-
-Provide before/after ownership and dependency deltas, the classified
-move/deletion manifest, exact verification results and residual risk. Pass only
-when observable/API/schema/data contracts remain equivalent, the named
-structural debt is measurably reduced, no unowned parallel path remains,
-relevant performance/resource budgets hold, documentation is current and an
-independent `code-review` finds no blocking regression. Lines deleted alone are
-never proof.
+Use `generator-evaluator` to land the shared seam when needed. For multiple modules, prepare registered worktrees and a `big-batch` params file with one `lanes` entry per module and an `integration_branch`.
+Run `provenant run --preset big-batch --prompt-file BRIEF --params-file LANES --explain` before submission, then run without `--explain`.

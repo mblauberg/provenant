@@ -1,0 +1,158 @@
+schema_version: 1
+dataset_id: skill-portfolio-routing-holdout-20260719-v6
+split: current-catalogue-holdout
+catalogue_owner_count: 25
+cases:
+  - id: m01
+    category: requirements-before-build
+    critical: true
+    prompt: This feature request is still vague. Stress-test the trade-offs and turn it into an approved specification, user stories, acceptance criteria, and recorded decisions before anyone codes.
+    expected:
+      primary_skill: scope
+      required_companion_skills: []
+      allowed_companion_skills: [engineering-docs, engineering-writing, grill-me, prototype]
+  - id: m02
+    category: first-failing-test
+    critical: true
+    prompt: Write the first failing public-interface test for this behaviour change, then stop at red so the implementation owner can take over.
+    expected:
+      primary_skill: tdd
+      required_companion_skills: []
+      allowed_companion_skills: [implement]
+  - id: m03
+    category: session-continuity
+    critical: false
+    prompt: Start this substantial repository session by reading its live state and instructions, then maintain a compact handoff checkpoint if context compacts or the session ends.
+    expected:
+      primary_skill: session
+      required_companion_skills: []
+      allowed_companion_skills: [work-map]
+  - id: m04
+    category: effort-continuity
+    critical: false
+    prompt: This migration spans several sessions and agents. Create the durable effort-level map of completed work, active slice, blockers, ownership, evidence, and next steps.
+    expected:
+      primary_skill: work-map
+      required_companion_skills: []
+      allowed_companion_skills: [orchestrate, session]
+  - id: m05
+    category: promotion-after-acceptance
+    critical: true
+    prompt: The exact artifact digest has met acceptance through objective checks and tier-required review and has separate promotion authority. Activate it for the named external recipients, prove the visible outcome, and retain containment and observation evidence.
+    expected:
+      primary_skill: release
+      required_companion_skills: []
+      allowed_companion_skills: []
+  - id: m06
+    category: evidence-only-review
+    critical: true
+    prompt: Audit this commit and its dependency cone for defects, state and type boundary regressions, concurrency hazards, and structural simplification. Do not change files.
+    expected:
+      primary_skill: code-review
+      required_companion_skills: []
+      allowed_companion_skills: [refactor]
+  - id: m07
+    category: structural-simplification
+    critical: true
+    prompt: Preserve all observable contracts while consolidating duplicate ownership and simplifying the structure in verified slices. Delete only after callers, registries, configuration, and fallback paths are disproved.
+    expected:
+      primary_skill: refactor
+      required_companion_skills: []
+      allowed_companion_skills: [code-review, tdd]
+  - id: m08
+    category: ui-read-only-audit
+    critical: true
+    prompt: Return a read-only evidence matrix and prioritised findings for this frontend's accessibility, responsive states, hierarchy, interaction clarity, errors, and visual craft.
+    expected:
+      primary_skill: ui-ux-design
+      required_companion_skills: []
+      allowed_companion_skills: [code-review, engineering-docs]
+  - id: m09
+    category: skill-quality-diagnosis
+    critical: true
+    prompt: Examine the current skill for trigger collisions, false negatives, authority drift, token overhead, unsafe helpers, and weak eval coverage. Report the audit without editing it.
+    expected:
+      primary_skill: skill-craft
+      required_companion_skills: []
+      allowed_companion_skills: [code-review, evaluate, orchestrate]
+  - id: m11
+    category: finite-agent-coordination
+    critical: false
+    prompt: Split this finite cross-cutting review among independent agents with non-overlapping ownership, typed evidence returns, bounded budgets, and one central adjudicator.
+    expected:
+      primary_skill: orchestrate
+      required_companion_skills: []
+      allowed_companion_skills: [code-review, evaluate]
+  - id: m12
+    category: persistent-autonomous-mission
+    critical: true
+    prompt: Launch a durable autonomous mission for this open-ended programme, recover across sessions and crashes, preserve human gates, and keep making progress until I explicitly write STOP.
+    expected:
+      primary_skill: autopilot
+      required_companion_skills: []
+      allowed_companion_skills: [deliver, evaluate, orchestrate, session, work-map]
+  - id: m13
+    category: material-skill-revision
+    critical: true
+    prompt: >-
+      Materially revise this existing Agent Skill after its audit: tighten the
+      trigger boundary, progressive disclosure, resources, provider metadata,
+      fixtures, and fresh-context validation.
+    expected:
+      primary_skill: skill-craft
+      required_companion_skills: []
+      allowed_companion_skills: [evaluate, implement]
+  - id: m14
+    category: new-repository-setup-repo
+    critical: true
+    prompt: >-
+      Set up GitHub for this new repository: scaffold its labels, branch
+      ruleset, issue forms, pull-request template, work-item runbook, and
+      Project board with valid repository-specific defaults.
+    expected:
+      primary_skill: setup-repo
+      required_companion_skills: []
+      allowed_companion_skills: [engineering-docs]
+  - id: m15
+    category: existing-repository-github-mechanics
+    critical: true
+    prompt: >-
+      This established repository already has its GitHub setup. Triage today's
+      ordinary issues and pull requests using the repository's own runbook;
+      do not scaffold or replace labels, forms, rulesets, templates, or boards.
+    expected:
+      primary_skill: null
+      required_companion_skills: []
+      allowed_companion_skills: []
+  - id: m16
+    category: audit-then-approved-implementation
+    critical: true
+    prompt: >-
+      Audit these existing skills, then implement only the approved fixes
+      through deterministic verification and independent review.
+    expected:
+      primary_skill: implement
+      required_companion_skills: [skill-craft]
+      allowed_companion_skills: [code-review, tdd]
+  - id: m17
+    category: audit-and-heldout-evaluation
+    critical: true
+    prompt: >-
+      Audit this existing skill, then compare its routing and task quality
+      against baseline with a versioned held-out benchmark and repeated model
+      trials.
+    expected:
+      primary_skill: evaluate
+      required_companion_skills: [skill-craft]
+      allowed_companion_skills: [orchestrate]
+  - id: m18
+    category: audit-and-approved-external-export
+    critical: true
+    prompt: >-
+      Audit the existing Agent Skills against my local Claude Code history,
+      then promote the resulting accepted raw-excerpt packet to a newly
+      approved external reviewer and retain proof of that authorised send.
+    expected:
+      primary_skill: release
+      required_companion_skills: [skill-craft]
+      allowed_companion_skills: []

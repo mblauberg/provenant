@@ -30,17 +30,22 @@ grant merge or promotion authority.
 ## Change spec
 
 The issue body owns the ephemeral change spec; its authority ends with the
-delivering PR. Write it with the [`scope`](../../skills/scope/SKILL.md) skill,
-including the optional fresh-reader check. `scripts/check-scratch-paths` warns
+delivering PR, and any rule it settles moves to its durable home in the same PR.
+Write it with the [`scope`](../../skills/scope/SKILL.md) skill: the owner approves
+one digest, and implementers cannot change the acceptance criteria.
+`scripts/check-scratch-paths` warns
 about possible scratch citations in tracked Markdown and issue templates; its
 findings are advisory. Spec drift is a reviewer check at acceptance, never an
 automatic gate.
 
 ## Agent filing
 
-Filing follows the [`tracker`](../../skills/tracker/SKILL.md) skill: evidence
-first, recorded duplicate searches, `source:agent` and the `Filed-by:`
-trailer. This repository's Ready cap is advisory, set at about three times the
+Filing follows the [`tracker`](../../skills/tracker/SKILL.md) skill: recorded
+duplicate searches, one issue per outcome, `source:agent` and the `Filed-by:`
+trailer, and evidence for every agent-filed defect. Issues are Epic, Feature,
+Task or Bug; there is no Decision issue. Only architecture becomes an ADR, other
+settled calls go to the doc they change, and owner-only questions go through
+`provenant ask`. This repository's Ready cap is advisory, set at about three times the
 concurrent writer lanes, which follow provider quota and the chair's judgement.
 Pause new filing at the cap and deliver or reconcile existing work.
 
@@ -69,8 +74,9 @@ completion; bulk edits refresh timestamps without resolving the issue.
 
 The parent issue owns change scope, story and remaining gates. Native child
 issues own independently deliverable slices; the tracker skill covers when a
-leaf is created. Create or link a child through GitHub's `sub_issues` API, not
-a checklist or title.
+leaf is created. Create or link a child with `gh issue create --parent N` (and
+`--blocked-by` for ordering) when the installed `gh`
+supports it, otherwise through GitHub's `sub_issues` API, never a checklist or title.
 
 The POST requires explicit external-write authority. Without it, return the
 proposed parent/child relation and do not call `gh`.
@@ -125,11 +131,11 @@ slug.
 
 ### Branch and worktree
 
-Name the branch `<type>/<area>-<slug>` per
-[`setup-repo`](../../skills/setup-repo/SKILL.md)'s branch naming doctrine,
-for example `fix/repo-runbook-mechanics`; no issue number in the branch, since
-one branch may cover several issues or a slice. The worktree directory is the
-branch with `/` replaced by `-`. The
+Name the branch `<type>/<area>-<slug>`, at most 48 characters, where `<type>` is
+`feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `chore`, `ci` or `build`, for
+example `fix/repo-runbook-mechanics`. Use no issue number (one branch may cover
+several issues or a slice) and no run vocabulary such as batch, wave, lane or
+model name. The worktree directory is the branch with `/` replaced by `-`. The
 standing `HARNESS.md` envelope covers branch and worktree creation without
 extra authority. An authorised merge covers pruning its own worktree and
 merged refs; other deletion needs user authority. Dirty worktrees are refused.

@@ -4,10 +4,9 @@ Platform and system policy, and the user's explicit authority, come first.
 Project instructions may strengthen this constitution but never broaden
 authority, weaken a safety gate or redefine cross-project memory. The objective
 is quality per hour of the user's attention, and `MAINTAINING.md` governs
-changes to this file. A project owner may set the project's own cadence, such
-as when tests run or how decisions are recorded for confirmation. That is not a
-weakening so long as every gate still holds before merge or promotion. A project may also set its own review ladder and name its own
-acceptance gate, as described below.
+changes to this file. A project owner may set the project's own cadence, review
+ladder and acceptance gate. That is not a weakening so long as every gate still
+holds before merge or promotion.
 
 Skills ship in the product checkout and install into each configured harness's
 skills directory. When a skill is named, read its `SKILL.md`; a named skill binds.
@@ -28,7 +27,7 @@ Fabric exchange where one is available. Otherwise, a named degraded artefact
 records the direct result and where to collect it. Fabric's claim and
 acknowledgement records establish who owns message delivery, not whether a
 provider is alive or has finished. Herdr only observes and sends
-fire-and-forget steering.
+fire-and-forget steering (`docs/runbooks/herdr.md`).
 
 Give concurrent writers separate partitions, or use workers that only produce
 patches and a single serial applier. No author or decision-maker certifies
@@ -60,15 +59,15 @@ criteria.
 
 The full chain is:
 
-`[session] → [scope → user spec and one-way-door gate → deliver profile] →
-implement or domain execution [name the governing skill; tdd for observable
-change | diagnose] → deterministic verification → [evaluate] → [independent
+`[session] → [scope → user spec and one-way-door gate] →
+implement or domain execution [name the governing skill; test-design for
+observable change | diagnose] → deterministic verification → [evaluate] → [independent
 review + bounded repair] → acceptance → [release authority → release +
 observe] → [retrospect]`
 
 Bracketed links apply according to the tier, the scope or the need; the user
 gates below apply regardless. On failure, diagnose or implement, and route the
-evidence back to scope. `deliver` owns the neutral delivery-run receipt,
+evidence back to scope. `deliver` owns the outcome report for non-software work,
 `implement` is the front door for software, and `session` owns context hygiene,
 compaction and retention.
 
@@ -105,30 +104,15 @@ workflow.
 | Critical surface | none | public-contract | auth-security, privacy, financial, legal, build-release-gate | life-safety |
 
 The bundled routing catalogue provides weighted `utility`, `junior`, `senior`,
-`principal`, `writing` and `design` pools. Each task selects one named route or
-one exact model; a pool makes a deterministic weighted draw among ready
-positive-weight members, with zero-weight members reserved as ordered fallbacks.
-Provider pacing policies are wired: under `pace` the factor scales quota
-headroom against the remaining window (clamped to 0.25 to 2.0), and `spend` and
-`max` stay at 1.0.
-Routing overrides live under `[domains.routing]` in the state root's
-`config.toml`. Use `provenant route set` or `provenant route pacing` to change
-routing, and `provenant route list` to inspect configured weights; it does not
-probe, and pacing and readiness apply at dispatch.
-When several families are available, use the tiered-council method by
-submitting separate tasks for distinct exact models, then synthesise in the
-chair. Bind the applied route and effort from each attempt to the receipt.
-Unsupported effort is refused; never invent role or effort values.
-The runtime governs routing, the bundled catalogue supplies default pool
-membership and pacing, and the mechanics live in `orchestrate`. The CLI core
-path is `provenant run` for bounded submission, waiting and a result tail,
-`status` for active and recent lanes, `land N` for exact-head CI and landing,
-and `quota` for usage. Use `help --all` or `help COMMAND` for advanced controls.
-Prefer per-run controls: editing a global provider configuration, such as
-`~/.codex/config.toml`, needs explicit authority for that path and action. Run attempts live under
-`<state>/runs/<run>/attempts/<attempt>/`; the default state root is
-`~/.local/share/provenant/v1`. `.agent-run/` is a protected legacy root, not
-the current run store.
+`principal`, `writing` and `design` pools; each task selects one named route or
+one exact model. Bind the applied route and effort from each attempt to the
+receipt, and never invent role or effort values. Dispatch graphs with
+`provenant run --preset NAME` (inspect first with `--explain`); the core path
+is `run`, `status`, `land N` and `quota`, and `help --all` lists the rest. Pools,
+pacing, the council, run attempts and the state root are in
+`docs/runbooks/model-routing.md`. Prefer per-run controls: editing a global
+provider configuration, such as `~/.codex/config.toml`, needs explicit
+authority for that path and action.
 
 Durable knowledge belongs in project state, specs, ADRs and runbooks;
 harness-private memory holds only cross-project preferences. Once a memory
@@ -183,25 +167,17 @@ majority vote.
 
 - Intake and specification go to `scope`, and defect investigation to
   `diagnose`.
-- Orchestration, routing and Herdr go to `orchestrate`; implementation and
-  review to `implement` and `code-review`; lifecycle and delivery profiles to
-  `deliver`.
-- Context hygiene and compaction go to `session`; promotion and assurance to
-  `release` and `evaluate`; retrospectives to `retrospect`; governance to
-  `MAINTAINING.md`.
+- Orchestration and routing go to `orchestrate`; implementation and review to
+  `implement` and `code-review`; tests to `test-design`; non-software outcomes
+  to `deliver`.
+- Context hygiene and continuity go to `session`; issues to `tracker`;
+  promotion and assurance to `release` and `evaluate`; retrospectives to
+  `retrospect`; governance to `MAINTAINING.md`.
 - Reader-facing prose goes to its specialist: `engineering-writing` for
   commits, PRs, READMEs and specs, `legal-writing` for Australian legal prose,
-  and otherwise `natural-writing`, which routes the rest. Drafting under another
-  skill's lead does not exempt the prose.
+  and otherwise `natural-writing`. Drafting under another skill's lead does not
+  exempt the prose.
 - Documentation placement, living ADRs and nested instruction files go to
   `engineering-docs`. The root instruction file routes; nested policy belongs
   at an observed failure's real boundary.
-- `docs/glossary.md` defines terms such as chair, lane, front door, one-way
-  door, receipt, envelope and stage owner.
-
-## Portable fallback
-
-Optional adapters never displace canonical project artefacts. A skill's
-portable artefact proves only that its declared context existed. It is not
-evidence, route or task state, acceptance or authority, and its schema must
-require `accepted_artifact_identity`.
+- Panes (`docs/runbooks/herdr.md`) and `docs/glossary.md` are loaded when named.

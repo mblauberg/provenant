@@ -1,7 +1,0 @@
-schema_version: 1
-target_skill: deliver
-cases:
-  - {id: lifecycle-deliver-positive, relation: positive, prompt: "Deliver this approved agent outcome using its current project task, claim and landing evidence.", tags: [lifecycle-alignment, direct], expected: {primary_skill: deliver, companion_skills: []}}
-  - {id: lifecycle-deliver-negative, relation: negative, prompt: "Implement this approved software feature through tests and tier-required review to acceptance.", tags: [lifecycle-alignment, boundary], expected: {primary_skill: implement, companion_skills: []}}
-  - {id: lifecycle-deliver-adjacent, relation: adjacent, prompt: "Deliver the approved research outcome using bounded teams under one accountable chair.", tags: [lifecycle-alignment, composition], expected: {primary_skill: deliver, companion_skills: [orchestrate]}}
-  - {id: lifecycle-deliver-portability, relation: portability, prompt: "With Console, Herdr and GitHub unavailable, deliver this independent outcome from project artifacts and record explicit not_applicable Fabric parents in the filesystem receipt.", tags: [lifecycle-alignment, portable], adapters: {console: absent, herdr: absent, github: absent}, expected: {primary_skill: deliver, companion_skills: []}}

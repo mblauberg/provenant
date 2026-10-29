@@ -1,68 +1,80 @@
 ---
 name: engineering-docs
-description: "Use for creating, placing, indexing, updating, or archiving engineering docs and docs structures. Not for prose-only rewriting or session continuity; use engineering-writing or session."
+description: "Use to create, place, index, update or archive engineering docs: specs, ADRs, runbooks, reference, instruction files, kept prototypes and diagrams. Decides durable vs ephemeral and where each belongs. Not for wording (engineering-writing) or session handoffs (session)."
 ---
 
 # Engineering docs
 
-Treat docs as deliverables. Load engineering-writing for substantial prose;
-this skill owns placement and decision lifecycle.
+This skill decides what docs are worth keeping and where they live;
+`engineering-writing` shapes the prose.
 
-Read `Repository process` first. If absent, use an unambiguous existing owner
-or propose paths; never invent authority. In `issue-tracker`, parent issues own
-change scope, stories and current status. Docs own durable intent, decisions
-and invariants. In `project-docs`, use its named home. Do not create a second
-story or status projection.
-Link-only files are unavailable or cross-tracker fallbacks.
+Read the repository process declaration first. If it is absent, use an
+unambiguous existing owner or propose paths; never invent authority. With an
+`issue-tracker` home, the parent issue owns scope and status; docs own durable
+intent and invariants, and no second status projection is created. A link-only
+issue map is a fallback for unavailable or cross-tracker routes only.
 
-## Default homes
+## Durable or ephemeral
 
-Use [placement defaults](references/placement.md#default-homes) only with
-setup-repo write authority; advisory mode proposes paths.
+| Kind | Fate |
+|---|---|
+| Issue-body spec, plan, handoff, scratch notes | Ephemeral. Dies at delivery; its settled rules move into a durable doc in the same PR |
+| Invariants, non-derivable intent, ordering, failure semantics | Durable spec |
+| Architecture: crate and trust boundaries, protocols, storage, major dependencies | Living ADR |
+| Operator steps | Runbook, linked to its source and verification |
+| Implemented fields, flags, schemas, commands | Code, or generated reference. Never hand-edit it |
+| Other settled decisions | The relevant doc (spec, runbook, skill). Ephemeral ones stay in the PR or issue thread |
+| What changed and when | `git log`; release fragments per repository policy |
+
+A spec that code can regenerate, or a task spec that has shipped, should die.
+Keep only what code cannot say, and link code, schemas and tests.
 
 ## Binding rules
 
-- **Link or generate, do not restate.** Each domain keeps its natural owner;
-  link code, schemas, tests and other docs. Regenerate derived reference, never
-  hand-edit it. Specs retain intent, prohibitions and invariants.
-- **Edit in place, do not append history.** A living doc states the current
-  truth: rewrite or delete superseded text in the same change. Never add
-  dated `Update:`, `Changed on`, "as of" or progress entries to a spec,
-  runbook, README or ADR; git log and the PR hold the narrative. A diff that
-  only adds lines to a living doc needs a reason. Changelogs and release notes
-  are the exception, since recording change is their job.
-- Specs and runbooks carry `Owner:` and `Anchor:` lines; see
-  [placement](references/placement.md).
-- Verify cited decision IDs and repair indexes and inbound links together.
-  Keep ADR IDs stable; gaps left by retirement are deliberate.
-  Keep other numbered directories contiguous.
-- Quote and link frozen legal, compliance or gate wording.
-- Review bloat by owner, audience and lifecycle. Merge duplicate truths and
-  tiny files changed together; make claim → owner → evidence reachable in
-  three hops. Session residue belongs in session.
-  A doc past about 15 KB signals review, not an automatic split.
+- **Edit in place.** A living doc states current truth. Rewrite or delete
+  superseded text in the same change; never append dated `Update:` or "as of"
+  entries to a spec, runbook, README or ADR. A diff that only adds lines to a
+  living doc needs a reason. Changelogs and release notes are the exception.
+- **Owner and anchor.** Each spec and runbook opens with `Owner:` (the
+  responsible crate, skill or document) and `Anchor:` (relative links to source
+  symbols or tests that let a reader check its claims). Name the symbol, not a
+  line number.
+- **Prevent drift.** Mechanical owner, anchor, link and generated-diff checks
+  may fail CI; whether prose belongs in a spec is review judgement. Before
+  cutting apparent restatement, check renames and live callers.
+- **Three hops** from claim to owner to evidence. Merge duplicate truths and tiny
+  files that change together. A doc past about 15 KB prompts review, not a split.
+- Repair indexes and inbound links together. Quote and link frozen legal,
+  compliance or gate wording.
 
-## Living ADRs
+## ADRs: architecture only
 
-Record only architecture: crate/module and trust boundaries, protocols,
-storage and major dependencies. Amend accepted ADRs in place to state the
-current decision, keeping one `Changed: YYYY-MM-DD, #issue` line and replacing it on each
-amendment. Git log holds earlier ones. Merge or delete superseded ADRs and fix inbound links; index live
-decisions only. Move process into its skill or constitution, and deferrals
-or product calls into their issues. Do not leave compatibility stubs.
+Record the decision, its forces and consequences, for architecture alone.
+Process goes to its skill or `HARNESS.md`; deferrals and product calls to their
+issues. Amend an accepted ADR in place to the current decision, keeping one
+`Changed: YYYY-MM-DD, #issue` line that each amendment replaces. Merge or delete
+superseded ADRs, fix inbound links, index live decisions only, and leave no
+compatibility stubs.
+
+## Kept prototypes
+
+A prototype kept as reference lives in the repo with a one-line index entry in
+its owning doc (what it proves, how to open it). It may be shared as a private
+Claude artifact; the repo file stays the source. Throwaway ones are not indexed.
 
 ## Instruction files
 
-The root file routes. Add nested files only at real boundaries, after an
-observed failure; keep each 10 to 40 lines. `AGENTS.md` is canonical and each
-`CLAUDE.md` contains exactly `@AGENTS.md` on one line. Re-check placement
-and loading on model upgrades. Do not infer loading behaviour from filenames.
+The root file routes. Add a nested `AGENTS.md` (10 to 40 lines) only at a real
+boundary after an observed failure. Each `CLAUDE.md` holds exactly `@AGENTS.md`.
 
-## Diagrams and retirement
+## Diagrams and archive
 
-Use Mermaid by default; apply [diagram quality](references/diagram-quality.md),
-render and visually inspect before commit. Use d2-diagrams for justified fixed
-layouts. Archive retired substantive docs with owner authority, index them and
-repair references. Outside ADRs, keep a tombstone only for an external link or
-unsupported consumer that needs it. ADR retirement follows the living policy
-above.
+Default to Mermaid; use `d2-diagrams` for a justified fixed layout. Render the
+exact block and open the output: a clean parse is not visual verification.
+Check overlap, clipping and lost failure paths, and run `mmdc` from a temporary
+directory. Give each block `accTitle` and `accDescr`. Archive retired docs with
+owner authority and repair references; keep a tombstone only for an external
+link.
+
+See [placement](references/placement.md) for default homes (only with
+`setup-repo` write authority; otherwise propose paths).

@@ -1,80 +1,38 @@
-# Filing: duplicates and placement
+# Filing detail
 
 ## Evidence and provenance
 
-An agent-filed issue cites an event that already happened: a failure,
-contradiction or review finding, with evidence a newcomer can resolve. Refuse
-to file an evidence-free possibility. Record the observed event rather than a
-session plan code or scratch path. This is a judgement rule, not a mechanical
-block. Agents never approve their own filings; an independent authorised
-triager or the user decides readiness.
+An agent-filed defect cites an event that already happened (a failure,
+contradiction or review finding) with evidence a newcomer can resolve. Refuse a
+speculative defect. A feature the owner has authorised needs no prior event; it needs
+a spec. Apply `source:agent` where the repository declares that label, through its
+declarative sync, never by hand (pruning deletes undeclared labels). End the body
+with `Filed-by: <PROVENANT_AGENT_LABEL> <run>` using actual identities; the shared
+token's account name does not identify the filer.
 
-Apply `source:agent` where the repository declares that label, through a
-declaratively synced label. Never hand-create it: pruning would delete an
-undeclared label. Append this
-trailer to the body, substituting the actual agent label and run identity:
+## Search record
+
+Put this block in the body:
 
 ```text
-Filed-by: <PROVENANT_AGENT_LABEL> <run>
+Searched: "<title keywords>"; "<symbol or error>"; open PRs touching <path>
+Closest: #123 (different outcome: <why>), none otherwise
 ```
 
-The run identity is provenance, not a scratch-path citation. Resolve missing
-identities with the coordinator before filing; the shared GitHub token's
-account name does not identify the filer. Check the repository's advisory
-Ready cap before adding work; pause filing at the cap.
-
-## Evidence-based duplicate checks
-
-Before filing, run at least two searches against the tracker (for example
-`gh issue list --search "<keywords>"` and a search on a symbol, error string or
-file path the new issue touches). Record, in the issue body:
-
-- the queries run;
-- the closest candidates found, with why each is or isn't the same issue.
-
-Never assert "no duplicate" without the searches to back it; an agent's
-unrecorded belief is not evidence for the next reader. Three outcomes follow
-the search:
-
-- **Duplicate.** Close the new report as duplicate-of the canonical issue and
-  link it; add any new detail as a comment on the canonical issue instead.
-- **Reuse or widen.** An existing issue covers most of the ask. Widen its scope
-  in place (update the body, note what changed and why) rather than filing a
-  near-duplicate.
-- **New.** No real match. File it within the evidence, lease and WIP rules,
-  placed per below.
+Never assert "no duplicate" without it. Outcomes: duplicate (close the new one
+`duplicate-of`, add detail to the canonical issue), same outcome (extend in place and
+note what changed), or new.
 
 ## Placement
 
-An epic is an outcome with a stated `Done when`, not a folder for related
-work. Nest a new issue under an epic only when the issue is genuinely part of
-that outcome; never because a parent happens to exist nearby. Parents are
-optional:
+An epic is an outcome, not a folder. Nest an issue only when it serves that epic's
+unchanged `Done when`; otherwise it stands alone or starts a successor. Bugs and
+one-off tidying stand alone unless they are a slice of a `Done when`. One feature's
+acceptance list and one PR train is a feature with task sub-issues, not an epic.
+Record why on the issue. Never mirror children in a checklist in the parent body;
+unstarted work is a `## Backlog` line until promoted.
 
-- A bug stands alone unless it is explicitly a slice of an epic's `Done when`.
-- One-off tidying, chores and small fixes stand alone by default.
-- A new epic itself has no parent unless it is a slice of a larger declared
-  outcome.
-- An epic needs at least two independently shippable features over more than
-  one wave. One feature's acceptance list (about 10 lines) and one PR train is
-  a feature with sub-issues.
-- Later epics hold a `## Backlog` checklist for new scoping; a line becomes an
-  issue with a full brief when leased or Ready. Existing well-scoped leaves
-  stay as they are. When a PR closes a feature, move its leftover lines to the
-  epic backlog or drop them.
+## Follow-ups
 
-Record the placement decision on the issue (why this epic, or why standalone)
-so a later reader does not have to re-derive it. Sub-issues are the only
-parent relation the tracker recognises; use a native sub-issue link, never a
-checklist mirror of children in the parent body.
-
-## Body quality
-
-Write so a newcomer can act without asking a question:
-
-- Cite code as `path#Symbol`; never a line number, which drifts.
-- State the observed behaviour or wanted outcome, and for a bug, how to
-  reproduce it.
-- For an epic, state its `Done when` explicitly; a percentage of closed
-  children is not a completion signal (see
-  [hygiene.md](hygiene.md)).
+A worker reports a follow-up as a line in its report. The chair dedupes it against
+open issues and files it, or drops it. One finding rarely deserves its own issue.

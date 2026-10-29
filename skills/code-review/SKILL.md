@@ -1,70 +1,76 @@
 ---
 name: code-review
-description: "Use for read-only source review of PRs, diffs, commits, migrations and refactors through dependencies. Not for root cause (diagnose), fixes (implement) or browser/UX review (ui-ux-design)."
+description: "Use for independent read-only review of PRs, diffs, commits and refactors against the spec, through review-council or provenant review. Not for root cause (diagnose), fixes (implement) or rendered UI (ui-ux-design)."
 ---
 
 # Code review
 
-Review is source-read-only unless fixes are separately authorised. Write
-findings and traces only to the assigned artifact directory. Trace beyond the
-diff and judge the resulting system.
+With little or no human diff review, a clean verdict from a fresh reviewer plus
+CI on the exact head is the check on the code. So the reviewer must be
+independent and must prove its coverage, and "clean" must mean something.
 
-## Review
+Conventions and the review ladder come from the repo's own `AGENTS.md`,
+`CONTRIBUTING` and runbooks. Look there first.
 
-1. Read project instructions and preserve the requested scope and output
-   contract. Briefs carry the target and rubric, never the hypothesis or
-   verdict; see [review outcome](references/finding-contract.md#review-outcome).
-2. Establish the change intent from the spec, issue, tests, commit message, or
-   user request. Mark unclear intent instead of inventing it.
-3. Trace the affected dependency cone: full touched files, live callers/
-   consumers, exports, canonical owners, tests, configuration, migrations,
-   persistence boundaries, dependency/lock changes, and generated artefacts.
-   Record inspected/excluded surfaces; unavailable context stays `unknown`.
-4. Select review lenses from the task/risk profile. Correctness/spec alignment
-   is mandatory; add security/privacy, data/concurrency,
-   performance/reliability, tests, architecture, readability, UX/accessibility
-   or operations only when activated by the dependency cone.
-5. Follow the `HARNESS.md` Review ladder: routine needs chair and checks;
-   substantial adds one independent review; crucial needs two distinct lenses;
-   terminal adds an adversarial lens. `orchestrate` owns families/scheduling.
-   Record unavailable cross-family coverage. Councils challenge anonymised
-   claims before fresh reduction; never rank prose or majority-vote.
-   `provenant config show` sets `review.*` above that floor.
-6. Review the design delta. Look for duplicated ownership, scattered flags,
-   nullable modes, casts hiding invariants, thin wrappers, parallel flows, and
-   abstractions adding concepts without reducing complexity.
-7. Ask whether a proven reframe could delete branches, state, layers, or
-   duplicated flows. More than 1,000 lines warrants inspection, not a finding.
-   Report a concrete cohesion, ownership, reviewability or change-risk defect.
-8. Check tests and verification against the acceptance criteria. Confirm the
-   trajectory: relevant deterministic checks ran and their results are
-   available. Never infer coverage from a green summary alone.
-9. Report only high-confidence, actionable findings. Return `clean` when no
-   defect exists and required review coverage is complete.
+## How it runs
 
-Load [review-lenses.md](references/review-lenses.md) for the detailed inspection
-questions, [multi-agent-review.md](references/multi-agent-review.md) for lens
-fan-out/council reduction, and [finding-contract.md](references/finding-contract.md)
-before writing findings.
+```sh
+provenant run --preset review-council --prompt-file BRIEF.md \
+  --set 'parameters.subject.commit="SHA"' --set 'parameters.base="origin/main"' \
+  --set 'parameters.spec="#N"' --set 'parameters.risk_tags=["security"]' --explain
+```
+
+Lenses are `correctness-spec` (always), `design-fit-reuse`, `simplicity`,
+`conventions-readability`, `tests`, then `security-privacy`,
+`concurrency-data-errors` and `adversarial` by risk tag. The routing review
+shape (`quick`, `standard`, `deep`, chosen from `risk_tier`) decides who
+reviews. A verifier tries to falsify each finding and a senior synthesis gives
+each a disposition. For a quick fan-out without a graph:
+`provenant review TARGET --brief-file B --shape quick|standard|deep`.
+`deliver` already runs this council on the newest head.
+
+## Independence
+
+- The reviewer is read-only and reads the pinned commit with `git show` and
+  `git diff`, never the working tree, and uses no Git write verbs.
+- The brief carries the subject, the base and the spec. Never send the
+  author's hypothesis, expected verdict or scratchpad.
+- Distinct model families are preferred, not guaranteed. Record when the
+  family separation was unavailable; do not claim it.
+- A review that cannot read its rubric or required context is `incomplete`,
+  never `clean`.
+
+## Rubric
+
+- **Blocking:** a criterion fails or is left unverified, a security or
+  data-loss defect, a broken public contract, or a regression.
+- **Should-fix:** a concrete cost against this repo's conventions.
+- **Notes:** at most three.
+
+Each finding names the location, the failing scenario, the mechanism and the
+smallest fix. A claim that something is missing or unused cites the search that
+shows it. Reject outright: new abstractions, tests for states the types make
+impossible, style that lint covers, and scope growth. A structural alternative
+blocks only when tied to a defect. A file over 1,000 lines is a prompt to look
+for a cohesion defect, not a finding.
+
+Start with a line `Verdict: approve`, `request_changes` or `inconclusive`;
+graph nodes end with `VERDICT: PASS` or `VERDICT: FAIL`. The author marks each
+finding accepted, rejected (with evidence) or deferred. One repair follows and
+re-review covers only that repair. `clean` is a valid verdict.
+
+## What a clean verdict proves
+
+Say what was inspected: the dependency cone read (callers, owners, tests,
+config, migrations), the checks that ran with their results, and what was not
+reachable. Never infer coverage from a green summary. Check that acceptance
+criteria map to evidence and that no test was loosened, skipped or deleted.
+Inspection questions are in [review-lenses.md](references/review-lenses.md).
+Reviewer-facing context is [reviewer-context.md](references/reviewer-context.md);
+the lens prompts under `references/lenses/` load into the presets by path.
 
 ## Boundaries
 
-- `orchestrate` chooses reviewer topology, families, and waves. This skill
-  defines what each reviewer inspects and the independence/reduction contract.
-- `diagnose` owns reproduction and root cause for known broken behaviour.
-- `implement` owns authorised fixes and bounded re-review; `tdd` or `refactor`
-  may supply the method. Do not mutate source or Git state during review: no
-  Git write verbs (`orchestrate` lists them); read other refs with `git show`.
-- Artifact-only authority permits assigned run outputs, not repo-root scratch.
-  Without a run directory, use the session scratchpad. Bound captures; never
-  redirect over a wildcard/list that could include its own output.
-- Domain/project skills supply specialised lenses. For rendered-UI changes,
-  inspect light and dark desktop captures of changed surfaces before the
-  verdict (`ui-ux-design`).
-- Before aligning a looser validator with a stricter one, search tests for the
-  permissive values; they may be a designed route into a rejection path.
-- A structural alternative blocks only when tied to a defect or
-  material regression with a safer, validated design. Attractive redesign
-  alone is not a finding.
-
-Reference eval cases (not run by CI): [discipline cases](evals/discipline_cases.yaml).
+`orchestrate` owns topology and scheduling; `diagnose` owns root cause;
+`implement` owns repairs. For rendered-UI changes also inspect light and dark
+captures of changed screens (`ui-ux-design`).

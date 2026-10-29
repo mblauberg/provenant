@@ -103,21 +103,6 @@
       }
     },
     {
-      "id": "q072",
-      "relation": "boundary",
-      "prompt": "Reproduce the bug, confirm its root cause, then implement the authorised repair behind a regression test.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": [
-          "diagnose",
-          "tdd"
-        ]
-      }
-    },
-    {
       "id": "q176108",
       "relation": "negative",
       "prompt": "The crash diagnosis and root cause are confirmed; implement the approved fix.",

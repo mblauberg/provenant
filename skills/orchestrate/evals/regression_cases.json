@@ -5,51 +5,35 @@
     {
       "id": "r101",
       "relation": "positive",
-      "prompt": "Keep six implementation lanes running from the board's ready column, refilling as each finishes without exceeding free memory, and wait for completions without polling status.",
+      "prompt": "Coordinate the approved ready queue within available lane resources and verify returned commits before integration.",
       "tags": [
-        "direct",
-        "chair-loop"
+        "ready-queue"
       ],
       "expected": {
         "primary_skill": "orchestrate",
         "companion_skills": []
       },
-      "note": "Chair loop: refill to the resource budget and wait on events, not status polls."
+      "note": "Verify ready-queue behaviour against retained owner evidence; never infer authority or completion from status alone."
     },
     {
       "id": "r102",
       "relation": "positive",
-      "prompt": "The owner is unavailable and two lanes are blocked on a choice between two export formats; convene a cross-family decision council and record the outcome for later confirmation.",
+      "prompt": "A requested second family is unavailable: inspect actual separation and record the independent replacement required by HARNESS.",
       "tags": [
-        "direct",
-        "decision-council"
+        "degradation"
       ],
       "expected": {
         "primary_skill": "orchestrate",
         "companion_skills": []
       },
-      "note": "Decision council: independent first round across families, chair reconciles, assumption recorded."
-    },
-    {
-      "id": "r103",
-      "relation": "negative",
-      "prompt": "Write a short commit message for this one-file typo fix.",
-      "tags": [
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "engineering-writing",
-        "companion_skills": []
-      },
-      "note": "A one-file commit message needs no orchestration."
+      "note": "Verify degradation behaviour against retained owner evidence; never infer authority or completion from status alone."
     },
     {
       "id": "r104",
       "relation": "boundary",
-      "prompt": "Review these three open pull requests with independent reviewers from two model families, none of which may run git write commands in the shared checkout.",
+      "prompt": "Review three pinned PR heads with independent lenses, then verify their recorded subjects before counting coverage.",
       "tags": [
-        "composition",
-        "reviewer-git-denylist"
+        "composition"
       ],
       "expected": {
         "primary_skill": "code-review",
@@ -57,21 +41,20 @@
           "orchestrate"
         ]
       },
-      "note": "Review primary; orchestration supplies the families and the git-verb denylist."
+      "note": "Verify composition behaviour against retained owner evidence; never infer authority or completion from status alone."
     },
     {
-      "id": "r124",
+      "id": "r235003",
       "relation": "positive",
-      "prompt": "Before claiming this issue for a writer lane, confirm the Fabric MCP connection's project is this repository and fail closed if it is not.",
+      "prompt": "The combined branch moved after the council pinned it. Reconcile the current head before treating the review as covering integration.",
       "tags": [
-        "direct",
-        "fabric-identity"
+        "source-integrity"
       ],
       "expected": {
         "primary_skill": "orchestrate",
         "companion_skills": []
       },
-      "note": "Fabric identity: whoami project against the git common-dir root, a second client on mismatch, otherwise no claim."
+      "note": "Verify source-integrity behaviour against retained owner evidence; never infer authority or completion from status alone."
     }
   ]
 }

@@ -5,7 +5,7 @@
     {
       "id": "q226",
       "relation": "positive",
-      "prompt": "Resume this substantial task from its declared scope/story owner and current handoff, not a rolling project state file.",
+      "prompt": "Resume this substantial task from its declared scope owner, checkpoint and current git history; smoke check before new work.",
       "tags": [
         "direct"
       ],
@@ -17,7 +17,7 @@
     {
       "id": "q227",
       "relation": "positive",
-      "prompt": "Checkpoint the current session before compaction with exact progress, remainder, and verification commands.",
+      "prompt": "Rewrite the current host-session checkpoint before compaction with authority, evidence pointers and resume trigger.",
       "tags": [
         "direct"
       ],
@@ -27,9 +27,9 @@
       }
     },
     {
-      "id": "q228",
+      "id": "q235102",
       "relation": "positive",
-      "prompt": "End this changed session by graduating durable findings and classifying retained versus scratch artifacts.",
+      "prompt": "Atomically update the supplied schema-v2 lane handoff, leave unfinished criteria in remaining and repeat it at the end.",
       "tags": [
         "direct"
       ],
@@ -39,90 +39,25 @@
       }
     },
     {
-      "id": "q229",
-      "relation": "negative",
-      "prompt": "Create a durable route linking the parent issue, specification, and ADRs for this six-session migration without copying live status.",
-      "tags": [
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "work-map",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q230",
-      "relation": "negative",
-      "prompt": "Analyse recurring process friction across the completed delivery and turn it into evidence-backed regression gates.",
-      "tags": [
-        "adjacent",
-        "completed-cycle"
-      ],
-      "expected": {
-        "primary_skill": "retrospect",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q231",
-      "relation": "negative",
-      "prompt": "Explain what a shell session is in one sentence.",
-      "tags": [
-        "no-skill"
-      ],
-      "expected": {
-        "primary_skill": null,
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q232",
-      "relation": "boundary",
-      "prompt": "Checkpoint this multi-session effort and update both the session handoff and its current route leg.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "session",
-        "companion_skills": [
-          "work-map"
-        ]
-      }
-    },
-    {
-      "id": "q233",
-      "relation": "boundary",
-      "prompt": "Finish the substantial implementation, refresh its recovery checkpoint, and retain only authorised run evidence.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": [
-          "session"
-        ]
-      }
-    },
-    {
-      "id": "q234",
-      "relation": "boundary",
-      "prompt": "At session end, archive the retired context document under the project documentation policy.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "session",
-        "companion_skills": [
-          "engineering-docs"
-        ]
-      }
-    },
-    {
-      "id": "q923",
+      "id": "q235103",
       "relation": "positive",
-      "prompt": "Write the coordinator handoff; project rules give test runs to the lander, so cite its latest result and report the exact diff.",
+      "prompt": "Continue autonomously towards the approved bounded goal until its measurable criteria are verified.",
       "tags": [
-        "direct"
+        "direct",
+        "goal"
+      ],
+      "expected": {
+        "primary_skill": "session",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q235104",
+      "relation": "positive",
+      "prompt": "The standing STOP mission has no eligible work now; checkpoint the waiting condition and keep the mission open.",
+      "tags": [
+        "direct",
+        "standing-mission"
       ],
       "expected": {
         "primary_skill": "session",
@@ -153,6 +88,59 @@
       "expected": {
         "primary_skill": "engineering-docs",
         "companion_skills": []
+      }
+    },
+    {
+      "id": "q235107",
+      "relation": "negative",
+      "prompt": "Inspect the live Fabric graph's failed lanes and resume its retained document; no session continuity work is needed.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "orchestrate",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q229",
+      "relation": "negative",
+      "prompt": "Organise the parent epic and feature tasks into the durable route for this six-session migration.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q233",
+      "relation": "boundary",
+      "prompt": "Finish the approved implementation, refresh its recovery checkpoint and leave a verified handoff.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "session"
+        ]
+      }
+    },
+    {
+      "id": "q235110",
+      "relation": "boundary",
+      "prompt": "Continue the standing mission until STOP, dispatching independent Fabric waves and saving continuity across compaction.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "session",
+        "companion_skills": [
+          "orchestrate"
+        ]
       }
     }
   ]

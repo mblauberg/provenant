@@ -46,7 +46,7 @@
         "adjacent"
       ],
       "expected": {
-        "primary_skill": "tdd",
+        "primary_skill": "test-design",
         "companion_skills": [
           "implement"
         ]
@@ -103,20 +103,6 @@
       }
     },
     {
-      "id": "q099",
-      "relation": "boundary",
-      "prompt": "Evaluate frontend visual quality with a blinded rubric and evidence-bearing UI reviewers.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "evaluate",
-        "companion_skills": [
-          "ui-ux-design"
-        ]
-      }
-    },
-    {
       "id": "q176112",
       "relation": "negative",
       "prompt": "Test the deterministic parser's new rejection behaviour with a first failing regression test.",
@@ -125,7 +111,7 @@
         "adjacent"
       ],
       "expected": {
-        "primary_skill": "tdd",
+        "primary_skill": "test-design",
         "companion_skills": []
       }
     },

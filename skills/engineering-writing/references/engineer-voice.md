@@ -1,67 +1,46 @@
-# Writing Like an Engineer, Not Like AI (engineering overlay)
+# Engineer voice
 
-Load the `natural-writing` skill first for its hub taxonomy: the tiered
-artefact/density/structural sweep, noun-stacking,
-Markdown residue, additive drafting, defensive over-qualification, and
-calibrated confidence. This file adds only the engineering-specific
-material: internal process language in deliverables, positive habits with
-engineering examples, and the domain final scrub.
+Apply the `natural-writing` mechanisms first. This file
+holds only what engineering text adds.
 
-## The core test
+## Core test
 
-For each sentence ask: would an engineer write this because the document
-needed it, or did a language model produce it to fill a shape? Apply the
-hub's Core Test the same way; this is the engineering framing of it.
+Would an engineer write this sentence because the document needed it, or did a
+model produce it to fill a shape? Delete the second kind.
 
-## Internal process language in deliverables (Tier 1 addition)
+## Internal process language
 
-Agent, build, or workspace vocabulary leaking into reader-facing text: `the
+Agent, build and workspace vocabulary leaks into reader-facing text: `the
 subagent found`, `the workflow ran`, `gate fired`, `per the manifest`, `the
-review pass confirmed`, status enums, ticket numbers as prose. Translate to
-the engineering fact or cite the actual source: `the load test recorded
-...`, not `the perf agent reported ...`. Unresolved placeholders (`TODO`,
-`TBD`, `TBC`, `FIXME`, `insert value`, `drafting note`) are fine in working
-drafts and code, and a defect in anything sent to a client, stakeholder, or
-release.
+review pass confirmed`, status enums, ticket numbers used as prose. Translate
+to the engineering fact or cite the source. Reason: the reader cannot see the
+process, so the sentence carries no evidence.
 
-## Positive habits (what to do instead)
+- Before: The perf agent reported that the gate passed.
+- After: The load test recorded p95 of 210 ms against a 250 ms budget.
 
-- **Concrete verbs and nouns.** `The parser rejects malformed JSON` beats
-  `The parser handles input appropriately`.
-- **Specific numbers and identifiers.** Exact values, versions, limits,
-  error codes, file paths. `Times out after 30 s` beats `may take a while`.
-- **First-person ownership of decisions.** `We chose Postgres over DynamoDB
-  because the access pattern is relational and joins dominate.` Engineers
-  own their calls; passive fog (`it was decided`) hides the actor and the
-  reasoning.
-- **Say what was NOT done.** `Not load-tested above 500 concurrent users`,
-  `Retry logic is out of scope for this PR`. Honest negatives are high-value
-  and distinctly human.
-- **One term per concept.** Repeat the precise technical noun; do not
-  synonym-cycle `endpoint`/`route`/`URL` for variety. Consistency beats
-  elegant variation in engineering prose.
-- **Distinguish observation from interpretation.** `CPU sat at 100% for 4
-  minutes` (observed) versus `the regex is likely catastrophic-backtracking`
-  (inferred). Mark the inference. See the claim-discipline overlay in
-  `style-standard.md` for the full schema.
+Placeholders (`TODO`, `TBD`, `FIXME`, `insert value`) are fine in drafts and
+code; they are a defect in anything sent to a client or released.
 
-## Honest uncertainty
+## Engineering instances of the hub mechanisms
 
-Use direct uncertainty words: `appears`, `likely`, `unknown`, `not
-measured`, `not verified`, `assumed`. If a claim lacks support, narrow it or
-flag it: `[FLAG: verify]`. A budget overrun stays an overrun; a missed
-defect stays a miss. Never soften a real weakness into reassurance; see
-Positive form is not positive spin in the hub taxonomy.
+- Significance and participle tails: `ensures reliability` becomes the
+  measurement or the failure it prevents.
+- Copula avoidance: `serves as the entry point` becomes `is the entry point`.
+- Unanchored claims: `robust error handling` becomes which errors and what
+  happens: `a 5xx from upstream retries twice, then returns 503`.
+- Ownership: `We chose Postgres over DynamoDB because joins dominate` beats
+  `it was decided`. Passive fog hides the actor and the reason.
+- Uncertainty in plain words: `appears`, `likely`, `unknown`, `not verified`,
+  `assumed`. A budget overrun stays an overrun; never soften a real weakness.
 
-## What humanising is not
+## Structure
 
-Do not add slang, jokes, invented anecdotes, rhetorical questions,
-contractions-for-flavour, or fake personality. Clear, plain, consistent,
-specific writing is the target. Do not edit to beat an AI detector: see the
-hub taxonomy's detector guidance.
+Bullets for parallel items (steps, fields, flags), prose for rationale,
+headings only to navigate. Agent-written docs still sprawl into bold-lead
+bullets and a heading on every paragraph; collapse those.
 
-## Final scrub
+## Not humanising
 
-Run the hub taxonomy's Final scrub and Final self-audit against the whole
-document. This skill adds no further checklist; the internal-process-language
-sweep above is the only engineering-specific addition to it.
+No slang, jokes, anecdotes, rhetorical questions or invented personality, and
+no editing to beat a detector.

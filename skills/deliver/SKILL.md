@@ -1,72 +1,56 @@
 ---
 name: deliver
-description: "Use to verify and accept approved research, analysis, documents or agent work. Use implement for software changes, scope for unsettled work, and release for promotion."
+description: "Use to verify and accept approved non-software outcomes (research, analysis, documents, agent work) and to write the outcome report every skill uses. Not for software changes (implement), unsettled scope (scope) or promotion (release)."
 ---
 
 # Deliver
 
-Coordinate the domain-neutral lifecycle; domain skills own their methods.
+Non-software work has no CI to say it is done. This skill supplies the
+evidence standard and the report that lets the owner accept or reject the
+result without redoing it. Software goes through `implement`, which ends with
+the same report.
 
 ## Entry
 
-Require an approved intent, acceptance criteria, minimum risk tier and bounded
-authority. Scope/design, disclosure, one-way doors and risk downgrades need
-explicit user approval. If intent is unsettled, use `scope`.
+Require approved intent, acceptance criteria with how each is verified, a risk
+tier and bounded authority. Unsettled intent goes to `scope`. A run that
+needs a delivery record saves one with `provenant workflow receipt save ID
+--expected-revision N --request FILE` and reads it with `provenant workflow
+receipt show ID`.
 
-Classify the work as `software`, `research`, `analysis`, `document` or
-`agent-product`; add a high-stakes overlay when source authority, privacy or
-qualified review matters. Projects may strengthen the gates, never weaken them
-silently.
+## How it runs
 
-## Lifecycle
+- **Research or analysis:** `provenant run --preset scout-swarm --prompt-file
+  Q.md --set 'parameters.external=1' --explain` to gather sourced claims, then
+  the `plan.research` role to reconcile them. Every claim carries a source, a
+  date and whether it was observed or inferred.
+- **Documents:** a read-only fidelity check through `--preset single`,
+  preferably on a different model family, that compares the document with its
+  sources and criteria and lists unsupported claims, not stylistic edits.
+- **Agent work products:** check the output against the criteria directly;
+  produce deterministic evidence (a diff, a recomputation, a test) before
+  judgement evidence. For stochastic behaviour use `evaluate`.
 
-1. Mint a typed `DeliveryId` and carry it in every lane dispatch for the
-   delivery, reviewers included; retries, resumes and handoffs inherit it.
-   Record the receipt with `provenant workflow receipt save <id>
-   --expected-revision N --request <file>`; read it with `provenant workflow
-   receipt show <id>`. See [the receipt contract](references/contract.md).
-2. Keep the receipt truthful at each gate. No state may jump an approval,
-   evidence, review, acceptance or release gate.
-3. Execute through relevant skills. Software routes through `implement`;
-   stochastic behaviour through `evaluate`; failures use `diagnose`;
-   substantial parallel work uses `orchestrate`.
-4. Produce deterministic evidence before judgement evidence. Every gate links
-   to a typed artifact or receipt. A stochastic gate binds a passing
-   `evaluate` receipt; copied scores are not evidence.
-5. Review independently with lenses from the dependency cone under the
-   `HARNESS.md` risk ladder. Bind each reviewer attempt with `provenant
-   workflow review --request <file>`, which reads the attempt from run custody
-   and checks coverage. Record skipped legs.
-6. Repair under the risk-tier scaled budget in [the receipt
-   contract](references/contract.md). Scope/design drift returns to the user
-   gate.
-7. Accepting a substantial delivery is refused (`REVIEW_INCOMPLETE`) until
-   `workflow review` coverage passes. Acceptance is met by objective checks
-   and the review the tier requires.
-8. The chair reports the outcome; the user may still reject it. Explicit user
-   acceptance is required only for `terminal` work or when the approved scope
-   asks for it. A project may name its landing gate as acceptance. External
-   release needs separate user authority. Define observation
-   before release; close only after its evidence window passes. Feed incidents
-   into `retrospect`.
+## Outcome report
 
-## Boundaries
+The owner can reject it, so write it for a reader who will not open the
+artefact. Lead with the decision needed, then:
 
-Delegates may only narrow authority. One writer owns each shared source
-surface. Artifact manifests classify `canonical`, `evidence`, `handoff`,
-`scratch` or `external`; cleanup removes only expired, run-owned scratch with
-explicit authority. Filesystem receipts remain truth when Herdr or another
-transport is unavailable.
+1. What changed or was produced, and where it lives.
+2. Each acceptance criterion with its evidence, or `unverified` and why.
+3. Review coverage: who or what reviewed, from which model family, and what
+   was not covered.
+4. What was not verified, and the assumptions made on the owner's behalf.
+5. Follow-ups, each as a tracker issue or a named owner.
 
-`implement` uses the same receipt; no parallel format exists. Live task or membership projections may
-link to it but never replace its canonical acceptance evidence.
+Never fabricate approval from passing checks. A check that did not run is
+reported as not run. Evidence outranks confidence.
 
-For audience-ready HTML, apply the
-[interactive-document boundary](references/interactive-documents.md).
+## Acceptance
 
-## Project record
-
-Keep the scoped criteria, evidence and outcome in the existing project document
-or PR.
-
-Reference eval cases (not run by CI): [lifecycle cases](evals/lifecycle_cases.yaml).
+Objective checks plus the review the tier requires meet acceptance; the chair
+accepts and reports, and the owner may reject. Explicit owner acceptance is
+needed only for `terminal` work or when the approved scope asks for it.
+Delegates may only narrow authority. Sending, publishing and deploying are
+`release`. Keep the criteria, evidence and outcome in the existing issue or PR,
+and move settled rules to their durable home (`engineering-docs`).

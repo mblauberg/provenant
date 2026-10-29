@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "target_skill": "test-design",
+  "cases": [
+    {
+      "id": "q262",
+      "relation": "positive",
+      "prompt": "Write the first public-interface test for this new behaviour and witness the right-reason failure.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "test-design",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q263",
+      "relation": "positive",
+      "prompt": "TDD this bug fix: reproduce the exact symptom as a failing regression before repairing it.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "test-design",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q264",
+      "relation": "positive",
+      "prompt": "Prune this bloated test suite: merge duplicates, remove type-impossible cases and identify the defect each retained test catches.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "test-design",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q265",
+      "relation": "negative",
+      "prompt": "Restructure this module without changing any observable behaviour.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "refactor",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q266",
+      "relation": "negative",
+      "prompt": "Find why the existing test fails, but do not implement a repair.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q267",
+      "relation": "negative",
+      "prompt": "Review the current test suite source-read-only for gaps and brittle assertions.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q268",
+      "relation": "boundary",
+      "prompt": "Implement the approved feature end-to-end, using TDD for each changed behaviour.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "test-design"
+        ]
+      }
+    },
+    {
+      "id": "q269",
+      "relation": "boundary",
+      "prompt": "The bug's root cause is confirmed; implement its repair with a witnessed regression test.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "test-design"
+        ]
+      }
+    },
+    {
+      "id": "q175701",
+      "relation": "negative",
+      "prompt": "Review this Rust test diff read-only: it replaces a specific ConfigError::Schema assertion with is_err(). Report whether the change weakens coverage; do not implement anything.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q175702",
+      "relation": "negative",
+      "prompt": "Investigate why this rejection test now returns StorageUnavailable instead of PermissionDenied. Find the root cause and report it; do not edit tests or production code.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    }
+  ]
+}

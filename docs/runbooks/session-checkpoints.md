@@ -8,10 +8,10 @@ and read it with `provenant workflow session show SESSION`. Each checkpoint is
 limited to 256 KiB. Session hooks and hand-off prompts can include a shorter
 excerpt.
 
-Rewrite each checkpoint as the current state: retain authority references, open
-items and next steps. Do not append a running log; history belongs in PRs and
-issues. Saves warn about oversized checkpoints and references known to be
-closed, but still save them.
+The `session` skill owns checkpoint content, goal continuation and schema-v2 lane
+handoffs. This runbook owns storage, identity, revisions and structured summaries.
+Saves warn about oversized checkpoints and references known to be closed, but
+still save them.
 
 Chair session start and a successful session save show one disk warning when
 free space on the state, checkout or lane Cargo cache volume falls below twice

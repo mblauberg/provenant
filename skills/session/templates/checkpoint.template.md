@@ -1,28 +1,17 @@
 # Session checkpoint
 
-> Optional prompt for the current host-session checkpoint. Rewrite it as the
-> current state, not a log. Aim for about 2 KiB; the hard limit is 256 KiB.
-> Do not record live lanes, PR status or progress history here: the digest
-> derives lanes and PRs (write PRs as `PR #N`), and `provenant chair log`
-> holds the progress history.
+Rewrite the current context near 2 KiB. The continuity reference owns the
+content contract; this template supplies headings only.
 
 ## Goal
-
-<What this session is for, the outcome that closes it, and the issue, PR or
-project document that owns the durable record.>
+Outcome, done-criteria and the tracker or project document that owns them.
 
 ## Direction
-
-<User rulings and boundaries that govern the work, newest first, each with its
-date and the owner that records it. Note any gate that needs the user.>
+User rulings, authority pointers, one-way doors and unresolved gates.
 
 ## Process
-
-<How this session works: the skills and gates in use, where harness scratch
-lives, where durable results go, and which checks run in CI.>
+Governing skills, retained evidence locations and verification responsibility.
 
 ## Plan
-
-<Ordered next steps within authority. End with the resume trigger: the event
-or instruction that resumes the work, and the run, task or PR to reconcile
-first.>
+Next actions, blockers and resume trigger. Name the owner to reconcile first;
+use PR #N for pull-request pointers.
