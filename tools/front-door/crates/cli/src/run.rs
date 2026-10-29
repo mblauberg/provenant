@@ -2185,6 +2185,8 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                             .and_then(|route| route.model.clone())
                             .unwrap_or_else(|| "unresolved".into()),
                         reason: reason.unwrap_or_default(),
+                        provider_error: None,
+                        result_path: None,
                     }
                 })
                 .collect();
@@ -2210,6 +2212,8 @@ struct LaneLine {
     state: String,
     model: String,
     reason: String,
+    provider_error: Option<String>,
+    result_path: Option<String>,
 }
 /// Needs action (0), still moving (1), or finished well (2).
 fn lane_rank(state: &str) -> u8 {
@@ -2276,7 +2280,26 @@ fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> crate::Summ
             }
         })
     });
-    crate::Summary::new(headline, rows, next)
+    let mut summary = crate::Summary::new(headline, rows, next);
+    for lane in listed.iter().take(crate::limits::SUMMARY_ROWS) {
+        if lane.state == "failed" {
+            if let Some(error) = &lane.provider_error {
+                summary.lines.push(format!(
+                    "  provider error {}: {}",
+                    &lane.id[..lane.id.len().min(8)],
+                    plain_text(error, usize::MAX)
+                ));
+            }
+            if let Some(path) = &lane.result_path {
+                summary.lines.push(format!(
+                    "  result: {} ({})",
+                    plain_text(path, usize::MAX),
+                    &lane.id[..lane.id.len().min(8)]
+                ));
+            }
+        }
+    }
+    summary
 }
 /// The lane rows of a `lanes` or `run` reply, in the shape `lane_summary` reads.
 fn lane_lines(data: &Value) -> Vec<LaneLine> {
@@ -2297,6 +2320,8 @@ fn lane_lines(data: &Value) -> Vec<LaneLine> {
                             .or_else(|| row["waiting_for"].as_str())
                             .unwrap_or_default()
                             .to_owned(),
+                        provider_error: row["provider_error"].as_str().map(str::to_owned),
+                        result_path: row["result_path"].as_str().map(str::to_owned),
                     })
                 })
                 .collect()
@@ -4662,18 +4687,26 @@ fn render_settled(
         session.context.state_root.as_path(),
         cooldowns,
     );
-    append_provider_errors(session, lanes, &mut human);
+    append_provider_errors(session, lanes, &mut data, &mut human);
     attach_handoffs(session, lanes, &mut data);
     Ok((data, human))
 }
-fn append_provider_errors(session: &Session, lanes: &[run::AttemptRecord], human: &mut String) {
+fn append_provider_errors(
+    session: &Session,
+    lanes: &[run::AttemptRecord],
+    data: &mut Value,
+    human: &mut String,
+) {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = run::Request {
         clock: &clock,
         cancel: &cancel,
     };
-    for lane in lanes {
+    let Some(rows) = data["lanes"].as_array_mut() else {
+        return;
+    };
+    for (lane, row) in lanes.iter().zip(rows) {
         if matches!(
             lane.state,
             run::AttemptState::Terminal {
@@ -4682,6 +4715,7 @@ fn append_provider_errors(session: &Session, lanes: &[run::AttemptRecord], human
             }
         ) && let Some(error) = provider_error_line(session, lane.attempt_id, &call)
         {
+            row["provider_error"] = json!(error);
             human.push_str(&format!(
                 "  provider error {}: {}\n",
                 lane.attempt_id,
@@ -5112,7 +5146,7 @@ fn lanes_inner(
         session.context.state_root.as_path(),
         lane_cooldown_view(&cooldowns),
     );
-    append_provider_errors(&session, &lanes, &mut human);
+    append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
     Ok((data, human, false))
 }
