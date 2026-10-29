@@ -1555,6 +1555,7 @@ fn classify_pool(
                             .exclusions
                             .push(format!("{}: read-only model policy", member.model.as_str()));
                         classified.candidates.push(RouteSelectionCandidate {
+                            extra: Default::default(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,

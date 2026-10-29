@@ -394,7 +394,7 @@ fn assess_model_result(
             });
             fallback.and_then(|fallback| fallback.model.map(|model| run::PolicyRetry {
                 schema_version: 1,
-                route: run::RequestedRoute::Model { provider: fallback.provider.unwrap_or_default(), model, effort: fallback.effort },
+                route: run::RequestedRoute::Model { extra: Default::default(), provider: fallback.provider.unwrap_or_default(), model, effort: fallback.effort },
                 resume: false, max_attempts: 2,
                 instruction: "The previous read-only route failed its result check. Complete the original task and include concrete evidence in your final answer.".into(),
             }))
@@ -429,7 +429,7 @@ fn assess_model_result(
             refusal: Some("model reported unfinished work".into()),
             retry: (policy_attempt <= u64::from(policy.lane.max_continuations.unwrap_or(0))).then(|| run::PolicyRetry {
                 schema_version: 1,
-                route: run::RequestedRoute::Model { provider: route.provider.clone().unwrap_or_default(), model, effort: route.effort.clone() },
+                route: run::RequestedRoute::Model { extra: Default::default(), provider: route.provider.clone().unwrap_or_default(), model, effort: route.effort.clone() },
                 resume: true, max_attempts: u64::from(policy.lane.max_continuations.unwrap_or(0)) + 1,
                 instruction: "Continue the unfinished task in this session. Carry out the remaining work and verification. End with Status: complete only when done; otherwise Status: incomplete.".into(),
             }),

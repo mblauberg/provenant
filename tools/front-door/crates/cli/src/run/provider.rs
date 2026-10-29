@@ -895,6 +895,7 @@ fn nested_policy_fallback(
     .map_err(|error| error.to_string())?;
     let mut task = task.clone();
     task.route = run::RequestedRoute::Model {
+        extra: Default::default(),
         provider: model.adapter().into(),
         model: model.as_str().into(),
         effort: fallback.effort,

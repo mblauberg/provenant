@@ -265,9 +265,12 @@ impl RunStore {
         next.provider_ms = None;
         next.admission_deadline = None;
         next.runtime_deadline = None;
-        next.state = AttemptState::Queued;
+        next.state = AttemptState::Queued {
+            extra: Default::default(),
+        };
         next.usage = UsageRecord::default();
         next.prompt = ArtifactRecord {
+            extra: Default::default(),
             path: artifact_path(id, "prompt.txt")?,
             digest: CanonicalV1::file_digest(prompt.as_bytes()),
             bytes: prompt.len() as u64,
@@ -347,6 +350,7 @@ mod tests {
         let retry = PolicyRetry {
             schema_version: 1,
             route: RequestedRoute::Model {
+                extra: Default::default(),
                 provider: "codex".into(),
                 model: "codex/gpt-6-luna".into(),
                 effort: Some("low".into()),
@@ -358,6 +362,7 @@ mod tests {
         store.stage_policy_retry(&old, &retry, &call)?;
         let mut changed_policy = retry.clone();
         changed_policy.route = RequestedRoute::Model {
+            extra: Default::default(),
             provider: "codex".into(),
             model: "codex/gpt-6.1-sol".into(),
             effort: Some("high".into()),
