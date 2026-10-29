@@ -74,6 +74,7 @@ impl<'a> Service<'a> {
         let mut contribution_branches = std::collections::BTreeMap::new();
         for mut task in input.tasks {
             task.route = Self::route(task.route)?;
+            check_launch_capabilities(&task)?;
             Self::scan(&task.prompt)?;
             if let Some(title) = &task.title {
                 provenant_core::validate_task_title(title)
@@ -644,6 +645,43 @@ fn fresh<T>(make: impl FnOnce([u8; 16]) -> T) -> Result<T> {
     provenant_os::fs::entropy_128()
         .map(make)
         .map_err(RunError::from)
+}
+
+/// Refuse a request outside an adapter's declared launch table. This runs
+/// before any writer is prepared or any run, reservation or receipt exists.
+/// Named routes resolve their adapter later, where routing checks effort.
+fn check_launch_capabilities(task: &DispatchTask) -> Result<()> {
+    let write = task.worktree.is_some() || !task.access.write_roots.is_empty();
+    let check = |provider: &str, effort: Option<&str>| {
+        let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
+            return Ok(());
+        };
+        spec.check_launch(&provenant_records::LaunchRequest {
+            effort,
+            resume: false,
+            network: task.access.network,
+            write,
+        })
+        .map_err(|error| input_error(ErrorKind::Unsupported, error.to_string()))
+    };
+    if let RequestedRoute::Model {
+        provider, effort, ..
+    } = &task.route
+    {
+        check(provider, effort.as_deref())?;
+    }
+    for route in &task.fallback {
+        if let Some(provider) = route.provider.as_deref().or_else(|| {
+            route
+                .model
+                .as_deref()
+                .and_then(|model| model.split_once('/'))
+                .map(|(provider, _)| provider)
+        }) {
+            check(provider, route.effort.as_deref())?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

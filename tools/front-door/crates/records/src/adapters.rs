@@ -1,4 +1,5 @@
 //! Closed adapter identities and shared facts. Mechanics stay in their modules.
+use crate::run::NetworkAccess;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -45,8 +46,108 @@ pub struct AdapterSpec {
     pub free_account: Option<(&'static str, &'static str)>,
     pub free_pool: Option<&'static str>,
     pub pacing_keys: Option<(&'static str, &'static str)>,
+    /// What a launch may ask of this adapter. The one source for dispatch,
+    /// `run`, resume and graph validation.
+    pub launch: LaunchCapabilities,
 }
+
+const ALL_NETWORK: &[NetworkAccess] = &[
+    NetworkAccess::Provider,
+    NetworkAccess::Local,
+    NetworkAccess::Open,
+];
+
+/// Declared launch capabilities. A request outside them is refused before
+/// admission, worktree preparation or receipt creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchCapabilities {
+    /// Takes a reasoning-effort control on the command line.
+    pub effort: bool,
+    /// Continues a recorded provider session.
+    pub resume: bool,
+    /// Accepts follow-up input into a live session. No adapter offers this yet.
+    pub steering: bool,
+    /// Network modes the adapter's sandbox profile can enforce.
+    pub network: &'static [NetworkAccess],
+    /// Accepts image input in a prompt. No adapter offers this yet.
+    pub image_input: bool,
+    /// Runs with worktree-write access.
+    pub write: bool,
+}
+
+/// The fields of a launch request an adapter can refuse.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LaunchRequest<'a> {
+    pub effort: Option<&'a str>,
+    pub resume: bool,
+    pub network: Option<NetworkAccess>,
+    pub write: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchField {
+    Effort,
+    Resume,
+    Network,
+    Write,
+}
+impl LaunchField {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Effort => "effort",
+            Self::Resume => "resume",
+            Self::Network => "network",
+            Self::Write => "write",
+        }
+    }
+    /// A fixed refusal for callers that cannot carry the adapter name.
+    pub fn refusal(self) -> &'static str {
+        match self {
+            Self::Effort => "effort is not supported by the route's adapter",
+            Self::Resume => "resume is not supported by the route's adapter",
+            Self::Network => "network mode is not supported by the route's adapter",
+            Self::Write => "worktree-write is not supported by the route's adapter",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedLaunch {
+    pub adapter: &'static str,
+    pub field: LaunchField,
+}
+impl std::fmt::Display for UnsupportedLaunch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} does not support {}", self.adapter, self.field.name())
+    }
+}
+impl std::error::Error for UnsupportedLaunch {}
+
 impl AdapterSpec {
+    /// Check a request against the declared table before any side effect.
+    pub fn check_launch(&self, request: &LaunchRequest<'_>) -> Result<(), UnsupportedLaunch> {
+        let caps = &self.launch;
+        let field = if request.effort.is_some() && !caps.effort {
+            Some(LaunchField::Effort)
+        } else if request.resume && !caps.resume {
+            Some(LaunchField::Resume)
+        } else if request
+            .network
+            .is_some_and(|mode| !caps.network.contains(&mode))
+        {
+            Some(LaunchField::Network)
+        } else if request.write && !caps.write {
+            Some(LaunchField::Write)
+        } else {
+            None
+        };
+        field.map_or(Ok(()), |field| {
+            Err(UnsupportedLaunch {
+                adapter: self.name,
+                field,
+            })
+        })
+    }
     pub fn account_serves_model(&self, account: &str, model: &str) -> bool {
         self.free_account.is_none_or(|(free_account, prefix)| {
             (account == free_account) == model.starts_with(prefix)
@@ -88,6 +189,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         free_account: None,
         free_pool: None,
         pacing_keys: None,
+        launch: LaunchCapabilities {
+            effort: true,
+            resume: true,
+            steering: false,
+            network: ALL_NETWORK,
+            image_input: false,
+            write: true,
+        },
     },
     AdapterSpec {
         id: Harness::Codex,
@@ -108,6 +217,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         free_account: None,
         free_pool: None,
         pacing_keys: None,
+        launch: LaunchCapabilities {
+            effort: true,
+            resume: true,
+            steering: false,
+            network: ALL_NETWORK,
+            image_input: false,
+            write: true,
+        },
     },
     AdapterSpec {
         id: Harness::Cursor,
@@ -128,6 +245,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         free_account: None,
         free_pool: None,
         pacing_keys: None,
+        launch: LaunchCapabilities {
+            effort: false,
+            resume: true,
+            steering: false,
+            network: ALL_NETWORK,
+            image_input: false,
+            write: true,
+        },
     },
     AdapterSpec {
         id: Harness::Agy,
@@ -148,6 +273,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         free_account: None,
         free_pool: None,
         pacing_keys: None,
+        launch: LaunchCapabilities {
+            effort: true,
+            resume: true,
+            steering: false,
+            network: ALL_NETWORK,
+            image_input: false,
+            write: true,
+        },
     },
     AdapterSpec {
         id: Harness::Opencode,
@@ -168,6 +301,14 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         free_account: Some(("zen", "opencode/")),
         free_pool: Some("opencode-free"),
         pacing_keys: Some(("opencode_free", "opencode_paid")),
+        launch: LaunchCapabilities {
+            effort: true,
+            resume: true,
+            steering: false,
+            network: ALL_NETWORK,
+            image_input: false,
+            write: true,
+        },
     },
 ];
 
@@ -206,5 +347,95 @@ mod free_account_tests {
         assert!(!spec.account_serves_model("go", "opencode/beam-free"));
         assert!(spec.account_serves_model("go", "opencode-go/mimo-v2.6-flash"));
         assert!(!spec.account_serves_model("zen", "opencode-go/mimo-v2.6-flash"));
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn launch_table_is_checked_per_adapter() {
+        // (adapter, effort, resume, network, write, refused field)
+        let effort = Some("high");
+        let cases = [
+            ("claude", effort, None),
+            ("codex", effort, None),
+            ("agy", effort, None),
+            ("opencode", effort, None),
+            ("cursor", effort, Some(LaunchField::Effort)),
+            ("cursor", None, None),
+        ];
+        for (name, effort, refused) in cases {
+            let spec = AdapterSpec::get(name).unwrap();
+            let request = LaunchRequest {
+                effort,
+                resume: true,
+                network: Some(NetworkAccess::Open),
+                write: true,
+            };
+            assert_eq!(
+                spec.check_launch(&request).err().map(|e| e.field),
+                refused,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn refusal_names_the_adapter_and_field() {
+        let error = AdapterSpec::get("cursor")
+            .unwrap()
+            .check_launch(&LaunchRequest {
+                effort: Some("low"),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "cursor does not support effort");
+    }
+
+    #[test]
+    fn unsupported_modes_are_refused_by_field() {
+        let narrow = AdapterSpec {
+            launch: LaunchCapabilities {
+                resume: false,
+                network: &[NetworkAccess::Provider],
+                write: false,
+                ..ADAPTER_SPECS[0].launch
+            },
+            ..AdapterSpec {
+                id: Harness::Claude,
+                ..clone_spec(&ADAPTER_SPECS[0])
+            }
+        };
+        for (request, field) in [
+            (
+                LaunchRequest {
+                    resume: true,
+                    ..Default::default()
+                },
+                LaunchField::Resume,
+            ),
+            (
+                LaunchRequest {
+                    network: Some(NetworkAccess::Local),
+                    ..Default::default()
+                },
+                LaunchField::Network,
+            ),
+            (
+                LaunchRequest {
+                    write: true,
+                    ..Default::default()
+                },
+                LaunchField::Write,
+            ),
+        ] {
+            assert_eq!(narrow.check_launch(&request).unwrap_err().field, field);
+        }
+    }
+
+    fn clone_spec(spec: &AdapterSpec) -> AdapterSpec {
+        AdapterSpec { ..*spec }
     }
 }

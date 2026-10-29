@@ -1518,6 +1518,35 @@ mod tests {
         ]);
     }
     #[test]
+    fn run_refuses_adapter_unsupported_flags_before_side_effects() {
+        for (model, effort, refused) in [
+            ("claude/id", "high", false),
+            ("codex/id", "high", false),
+            ("agy/id", "high", false),
+            ("opencode/id", "high", false),
+            ("cursor/id", "high", true),
+        ] {
+            let invocation = valid(&[
+                "run",
+                "--prompt-stdin",
+                "--model",
+                model,
+                "--effort",
+                effort,
+                "--worktree-branch",
+                "feat/x",
+            ]);
+            let Command::Run(request) = invocation.command else {
+                panic!("run")
+            };
+            let result = run::check_flag_capabilities(&request);
+            assert_eq!(result.is_err(), refused, "{model}");
+            if let Err(fail) = result {
+                assert!(fail.message.contains("does not support effort"), "{model}");
+            }
+        }
+    }
+    #[test]
     fn run_accepts_dispatch_effort_and_network() {
         let invocation = valid(&[
             "run",

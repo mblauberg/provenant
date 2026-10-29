@@ -449,3 +449,45 @@ fn model_routes_are_canonical_before_replay_comparison() -> TestResult {
     ));
     Ok(())
 }
+
+#[test]
+fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
+    let model = |provider: &str, effort: Option<&str>| RequestedRoute::Model {
+        extra: Default::default(),
+        provider: provider.into(),
+        model: format!("{provider}/m"),
+        effort: effort.map(str::to_owned),
+    };
+    // (provider, effort, accepted): the effort column of the adapter table.
+    let cases = [
+        ("claude", Some("high"), true),
+        ("codex", Some("high"), true),
+        ("agy", Some("high"), true),
+        ("opencode", Some("high"), true),
+        ("cursor", Some("high"), false),
+        ("cursor", None, true),
+    ];
+    for (provider, effort, accepted) in cases {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut input = submission("capabilities");
+        let operation = input.operation_id.clone();
+        input.tasks[0].route = model(provider, effort);
+        let result = Service::new(&store).dispatch(input, temp.path(), &call);
+        let recorded = store.operation(&operation, &call)?.is_some();
+        assert_eq!(result.is_ok(), accepted, "{provider} {effort:?}");
+        assert_eq!(
+            recorded, accepted,
+            "{provider} {effort:?} left an operation"
+        );
+        if let Err(error) = result {
+            assert_eq!(
+                error.to_string(),
+                format!("{provider} does not support effort")
+            );
+        }
+    }
+    Ok(())
+}

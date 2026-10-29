@@ -202,6 +202,13 @@ impl Registry<'_> {
         if !REGISTRY.iter().any(|entry| entry.adapter.id() == adapter) {
             return Err(unsupported(format!("unknown provider {adapter}")));
         }
+        if let Some(spec) = provenant_records::AdapterSpec::get(adapter) {
+            spec.check_launch(&provenant_records::LaunchRequest {
+                resume: true,
+                ..Default::default()
+            })
+            .map_err(|error| unsupported(error.to_string()))?;
+        }
         if prior.session.is_none() {
             return Err(unsupported(
                 "the attempt recorded no provider session handle (it predates handle capture or the provider never reported one); dispatch a new lane with the prior result as context".into(),
@@ -2070,6 +2077,49 @@ fn check_delivery_branch(project: &Path, branch: &str) -> Result<(), Fail> {
         .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))
 }
 
+/// Refuse flags outside the named adapters' launch tables before the first
+/// side effect, including `--worktree-branch` creation. Manifest tasks and
+/// named routes are checked again where their adapter is known.
+pub(crate) fn check_flag_capabilities(command: &Dispatch) -> Result<(), Fail> {
+    let route = requested(
+        command.route.model.as_ref().map(|m| m.0.as_str()),
+        command.route.route.as_deref(),
+        command.route.effort.clone(),
+    );
+    let Ok(route) = route else {
+        return Ok(());
+    };
+    let network = match command.access.network {
+        Some(Switch::On) => Some(run::NetworkAccess::Open),
+        Some(Switch::Off) => Some(run::NetworkAccess::Provider),
+        None => None,
+    };
+    let write = matches!(command.access.mode, Mode::WorktreeWrite);
+    let check = |provider: &str, effort: Option<&str>| {
+        let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
+            return Ok(());
+        };
+        spec.check_launch(&provenant_records::LaunchRequest {
+            effort,
+            resume: false,
+            network,
+            write,
+        })
+        .map_err(|error| Fail::new(Status::Refused, ErrorKind::Unsupported, error.to_string()))
+    };
+    if let run::RequestedRoute::Model {
+        provider, effort, ..
+    } = &route
+    {
+        check(provider, effort.as_deref())?;
+    }
+    for model in &command.route.fallback {
+        if let Some((provider, _)) = model.0.split_once('/') {
+            check(provider, None)?;
+        }
+    }
+    Ok(())
+}
 fn dispatch_inner(
     mut command: Dispatch,
     edge: &Edge<'_>,
@@ -2085,6 +2135,7 @@ fn dispatch_inner(
             "coordination mutations are not allowed inside a lane",
         ));
     }
+    check_flag_capabilities(&command)?;
     if let Some(branch) = &command.worktree_branch {
         if !matches!(command.access.mode, Mode::WorktreeWrite) || crate::fabric::in_lane() {
             return Err(Fail::new(

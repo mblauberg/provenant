@@ -2,7 +2,10 @@
 #![forbid(unsafe_code)]
 
 mod adapters;
-pub use adapters::{ADAPTER_SPECS, AdapterSpec, QuotaProbeKind};
+pub use adapters::{
+    ADAPTER_SPECS, AdapterSpec, LaunchCapabilities, LaunchField, LaunchRequest, QuotaProbeKind,
+    UnsupportedLaunch,
+};
 mod artifact_ref;
 mod attempt_fact;
 mod attempt_file;

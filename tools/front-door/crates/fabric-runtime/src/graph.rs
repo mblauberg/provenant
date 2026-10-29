@@ -2947,6 +2947,20 @@ fn validate_flat_plan(
         if routes.iter().any(|route| !route_is_bounded(route)) {
             return Err("route field size");
         }
+        for route in &routes {
+            if let Some(spec) = route
+                .adapter
+                .as_deref()
+                .and_then(provenant_records::AdapterSpec::get)
+                && let Err(error) = spec.check_launch(&provenant_records::LaunchRequest {
+                    effort: route.effort.as_deref(),
+                    write: node.access == AccessMode::WorktreeWrite,
+                    ..Default::default()
+                })
+            {
+                return Err(error.field.refusal());
+            }
+        }
 
         let mut seen = std::collections::BTreeSet::new();
         for parent in node.dependencies() {
@@ -5625,6 +5639,26 @@ mod tests {
         assert_eq!(owner.calls[0].1.adapter, None);
         assert_eq!(owner.calls[1].1.adapter.as_deref(), Some("codex"));
         assert_eq!(owner.calls[2].1.alias.as_deref(), Some("senior"));
+    }
+
+    #[test]
+    fn route_effort_is_checked_against_the_adapter_table() {
+        for (adapter, accepted) in [
+            ("claude", true),
+            ("codex", true),
+            ("agy", true),
+            ("opencode", true),
+            ("cursor", false),
+        ] {
+            let mut leaf = route(adapter);
+            leaf.effort = Some("high".into());
+            let document = graph(vec![node("one", leaf)]);
+            assert_eq!(
+                validate_plan(&document).err(),
+                (!accepted).then_some("effort is not supported by the route's adapter"),
+                "{adapter}"
+            );
+        }
     }
 
     #[test]
