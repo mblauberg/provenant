@@ -3,8 +3,9 @@
 Owner: `crates/telemetry` (reducer, prices, trace, usage log)
 Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/usage/tests.rs`,
 `crates/telemetry/src/native.rs`, `crates/telemetry/src/ingest/tests.rs`,
-`crates/telemetry/src/chair/tests.rs`, `tests/usage.rs`,
-`tests/telemetry_native.rs`, `tests/telemetry_ingest.rs`, `tests/chair.rs`
+`crates/telemetry/src/mileage.rs`, `crates/telemetry/src/chair/tests.rs`,
+`tests/usage.rs`, `tests/telemetry_native.rs`, `tests/telemetry_ingest.rs`,
+`tests/telemetry_mileage.rs`, `tests/chair.rs`
 
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
@@ -164,6 +165,42 @@ its cap, ingest stops adding rows and the report says the store is full.
   `tests/telemetry_ingest.rs::ingest_is_idempotent_and_attributes_by_directory`;
   `::chair_session_start_ingests_the_session_as_chair`
 - Owner: `crates/telemetry/src/ingest.rs`, `src/usage.rs`, `src/hooks.rs`
+
+## Mileage and effective rates
+
+`provenant telemetry mileage [--account] [--window] [--model] [--since] [--json]`
+joins the quota history to ingested usage priced by the reviewed table. Mileage
+is the API-equivalent cost of one percentage point of a window between two
+distinct readings in one reset period; capacity is the cost of a full window
+(mileage times 100). A reset, an advance of the reset time, a fall in the used
+percentage or a plan change ends a run, so no segment is negative. A drop with
+no reset time is segmented the same way and flagged `reset: inferred`.
+Each figure is the median over the last seven days, with the segment count `n`
+and the priced share.
+
+The step change compares capacities in the last seven days with the prior 28 at
+the same plan and tier. It is `flagged` only for a fall of at least 20% with at
+least ten priced segments on both sides; otherwise it is `inconclusive`. A
+`plan.change` run boundary reports the capacity change around the upgrade.
+
+Effective rates apply the plan's discount factor `price / capacity` to the
+average API rate per bucket for the potential rate at full use, and divide the
+plan price by tokens actually used for the realised rate. The period is the
+report window: the monthly plan price is prorated to it, and one window's
+capacity is expanded to the number of full windows in the period. Both carry
+the window's utilisation, `n` and token coverage; while coverage is incomplete
+the report says token use is a lower bound and realised rates are upper bounds.
+Fitted non-negative weights for `delta used = sum w_b x tokens_b` are reported
+per account, window and model only with `n` and the fit's R-squared, and only
+when the fit explains at least half the variance. All money is integer
+microdollars, rounded once.
+- Why: a subscription's value is what a percentage point costs, not what the
+  list price says a token costs.
+- Test: `crates/telemetry/src/mileage.rs::tests::three_readings_give_exact_mileage_and_capacity`;
+  `::a_thirty_percent_fall_at_a_constant_plan_is_flagged`;
+  `::a_ten_percent_fall_or_too_few_runs_is_inconclusive`;
+  `tests/telemetry_mileage.rs::three_readings_give_exact_mileage_capacity_and_effective_rates`
+- Owner: `crates/telemetry/src/mileage.rs`, `crates/cli/src/mileage.rs`
 
 ## Trace export
 

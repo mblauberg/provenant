@@ -66,6 +66,35 @@ whose message streamed repeatedly keeps the largest count of each bucket.
 Reads never follow links, and a message without a timestamp is counted as
 skipped rather than guessed.
 
+## Mileage
+
+`provenant telemetry mileage [--account LABEL] [--window POOL] [--model MODEL]
+[--since T] [--json]` reports what a quota percentage point costs. It joins the
+quota history with ingested usage, priced by `config/telemetry-prices.toml`, so
+run ingest first and let the quota refresh build history.
+
+Mileage is the API-equivalent cost of one point between two distinct readings
+in a reset period; capacity is the cost of a full window. A reset, an advanced
+reset time, a used-percentage drop or a plan change starts a new run, and a run
+that started from a drop with no reset time is flagged `reset: inferred`. The
+headline is the median over the last seven days with `n` and the priced share.
+
+`step_change` compares the last seven days with the prior 28 at the same plan
+and tier. It is `flagged` for a fall of at least 20% with at least ten priced
+segments on each side, and `inconclusive` otherwise; change the judgement with
+`--min-runs`, `--fall-percent` and `--recent-days`. A plan change also reports
+the capacity change around the upgrade.
+
+`effective` reports, per bucket, the potential rate at full use (the API rate
+times the plan's `price / capacity` discount) and the realised rate (the plan
+price over tokens actually used), with the window's utilisation, `n` and token
+coverage. The monthly plan price is prorated to the report window, and one
+window's capacity is expanded to the full windows in it. Until ingest covers
+the account, token use is a lower bound and the realised rate is an upper
+bound; the report says so. Fitted bucket weights appear only with their sample
+size and R-squared, and only when they explain at least half the variance. A
+missing price table leaves rates unknown rather than guessing.
+
 ## Cache-read share
 
 `telemetry stats` prints each model's, account's and source's cache-read share:
@@ -191,10 +220,11 @@ effective_from = "2026-01-01"
 
 Prices are USD unless `currency` says otherwise, and nothing converts currencies. A free plan has
 `price = 0` and may carry `notional_usd`, the list price it replaces; history
-shows both. An account may also list extra `directories` signed into it; they
-are schema only until native ingest lands. The keys are listed in
-[config keys](../reference/config-keys.md). No value or mileage report reads
-this yet.
+shows both. An account may also list extra `directories` signed into it; native
+ingest attributes them to the same label, so one account signed in to two config
+directories counts once. The keys are listed in
+[config keys](../reference/config-keys.md). Mileage reads these prices; the
+value multiple is not built yet.
 
 ## Routing
 

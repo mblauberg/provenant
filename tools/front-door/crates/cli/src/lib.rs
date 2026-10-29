@@ -20,6 +20,7 @@ mod grammar;
 pub mod inbox;
 pub mod install;
 pub mod limits;
+pub mod mileage;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;

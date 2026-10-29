@@ -2623,6 +2623,41 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant telemetry mileage`
+
+| Argument | Contract |
+|---|---|
+| `--account` | `{"name": "account"}` |
+| `--window` | `{"name": "window"}` |
+| `--model` | `{"name": "model"}` |
+| `--since` | `{"name": "since"}` |
+| `--min-runs` | `{"defaults": ["10"], "name": "min_runs"}` |
+| `--fall-percent` | `{"defaults": ["20"], "name": "fall_percent"}` |
+| `--recent-days` | `{"defaults": ["7"], "name": "recent_days"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "account",
+        "window",
+        "model",
+        "since",
+        "min_runs",
+        "fall_percent",
+        "recent_days"
+      ],
+      "multiple": true,
+      "name": "Mileage",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant quota`
 
 | Argument | Contract |
