@@ -23,6 +23,7 @@ impl Harness {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaProbeKind {
+    None,
     HttpGet,
     Command,
     LocalLedger,
@@ -342,7 +343,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 6] = &[
         argv_prompt: false,
         authentication: None,
         user_sessions: false,
-        quota_probe: QuotaProbeKind::LocalLedger,
+        quota_probe: QuotaProbeKind::None,
         quota_credits: false,
         grouped_quota_pools: false,
         retain_quota_accounts: false,
@@ -410,6 +411,8 @@ mod launch_tests {
     #[test]
     fn command_has_no_model_effort_session_or_write_capability() {
         let command = AdapterSpec::get("command").unwrap();
+        assert!(!command.registered_account);
+        assert_eq!(command.quota_probe, QuotaProbeKind::None);
         assert_eq!(command.launch.default_network, NetworkAccess::Provider);
         assert!(command.check_launch(&LaunchRequest::default()).is_ok());
         for (request, field) in [
