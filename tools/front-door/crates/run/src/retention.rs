@@ -250,9 +250,12 @@ impl RunStore {
                     Err(error) if error.is_not_found() => None,
                     Err(error) => return Err(error.into()),
                 };
-                match attempt.metadata_at(OsStr::new(AttemptFile::Reservation.name()), false) {
-                    Ok(_) => return Err(RunError::Validation("attempt reservation retained")),
-                    Err(error) if error.is_not_found() => {}
+                match provenant_supervisor::custody::reservation_present(
+                    &attempt,
+                    Self::scope(&record),
+                ) {
+                    Ok(true) => return Err(RunError::Validation("attempt reservation retained")),
+                    Ok(false) => {}
                     Err(error) => return Err(error.into()),
                 }
                 let age = now.as_micros().saturating_sub(finished_at.as_micros());
@@ -1841,7 +1844,9 @@ mod tests {
         );
         assert!(attempt.join("tmp/keep").exists());
         drop(writer);
-        fs::write(attempt.join("reservation.json"), "{}")?;
+        let evidence = attempt.join(input.attempts[0].attempt_id.to_string());
+        fs::create_dir_all(&evidence)?;
+        fs::write(evidence.join("reservation.json"), "{}")?;
         assert_eq!(
             sweep(&store, &context, 1, DAY_MICROS, false, &call)?
                 .kept
@@ -1854,7 +1859,7 @@ mod tests {
                 .join("provider-state/candidate-0/auth.json")
                 .exists()
         );
-        fs::remove_file(attempt.join("reservation.json"))?;
+        fs::remove_file(evidence.join("reservation.json"))?;
         let report = sweep(&store, &context, 1, DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert!(!attempt.join("provider-state").exists());

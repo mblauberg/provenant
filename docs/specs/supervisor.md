@@ -6,8 +6,8 @@ Anchor: `crates/supervisor/tests/custody.rs`, `crates/supervisor/src/custody_tes
 `crates/confinement/src/permissions.rs`, `src/worktree_tests.rs`
 
 Supervisor holds processes, output and live custody through provider exit and
-durable exit publication. Run then drives resumable settlement without holding
-writer locks through external commands. Confinement turns an authorised plan into
+durable exit publication. Run then drives resumable settlement while retaining
+the worktree writer flock through import and publication. Confinement turns an authorised plan into
 filesystem, Git, network and provider permissions, checks evidence and
 quarantines instruction changes. Together they prevent a failed write, a lost client or a mistaken process identity from killing a healthy lane, freeing a busy worktree or publishing an incomplete result. Run owns admission and result
 semantics ([run](run.md)). Wiring and platform limits are in the [crate
@@ -146,12 +146,12 @@ supervisor releases a 64 KiB reserve for one retry, with no provider signal.
 
 ### Writer reservation and settlement
 
-The writer reservation is published under the writer lock before spawn and
-cleared only after quiescence, quarantine and run's terminal commit, or an
+The writer reservation is published in `<worktree-slot>/<attempt>/` under
+the shared writer lock before spawn and cleared only after quiescence, quarantine and run's terminal commit, or an
 authorised reconcile decision. Provider exit releases its host build slot;
-once quiescence is proven, the live custody and writer locks are released
-before object import. The reservation remains as a settling fence, so another
-writer cannot edit the checkout during settlement. Run journals import,
+once quiescence is proven, the attempt custody lock is released, while the
+worktree writer flock remains held through object import and publication. The
+reservation remains as recovery evidence. Run journals import,
 publication, terminal recording and release with one native process owner and
 a counter capped at three attempts that reach import. Import claims use
 persisted backoff; an unknown process observation expires after ten minutes.
@@ -162,8 +162,9 @@ writer lock; reconcile queues a detached driver rather than doing import in
 the caller. Lane waits continue reporting settlement until custody is released.
 See [publication order](run.md#publication-order). A missing or
 malformed reservation refuses
-acquisition. `SettlementCommit`, needed for scratch deletion and fence
-clearing, is issued only after the attempt inode, custody lock and both
+recovery and readmission of that attempt. Admission of a different attempt does
+not inspect predecessor records or retired files in the shared lock slot.
+`SettlementCommit`, needed for scratch deletion and fence clearing, is issued only after the attempt inode, custody lock and both
 digests in `release.json` are verified. After a verified boot change, a
 reservation whose recorded device number differs from the current one (APFS
 can renumber volumes across a reboot) is still recoverable when the
@@ -173,6 +174,9 @@ device number refuses recovery.
 - Why: a writer must never be freed on a partial or forged settlement.
 - Test: `crates/supervisor/src/custody_tests.rs::missing_or_malformed_reservation_does_not_reopen_a_writer`;
   `::settlement_checks_exact_attempt_and_both_digests_before_scratch`;
+  `::worktree_settlement_retains_flock_until_recovery_is_dropped`;
+  `::admission_ignores_predecessor_evidence_but_shares_writer_exclusion`;
+  `::reservation_listing_isolates_an_inaccessible_slot`;
   `crates/run/src/dispatch_tests.rs::reconcile_recovers_writer_when_device_numbers_change_after_reboot`;
   `::changed_device_numbers_on_same_boot_keep_writer_custody`
 - Owner: `crates/supervisor/src/custody.rs`
@@ -395,12 +399,20 @@ scoped by URL and multi-valued.
 
 ## Worktrees
 
+### Git is the worktree registry
+
+Git's porcelain inventory and verified common-directory/backlink membership
+establish linked-worktree membership. `.worktrees/` identifies managed cleanup
+scope. Persistent identity schemas, inode/device pins and path-digest matches
+are absent. Canonical paths only locate exclusion slots. Supervisor's attempt
+bindings and reservation journals remain launch and recovery evidence.
+
 ### One writer; removal never forces
 
 One writer holds each registered linked worktree, and custody outlives the
 requesting call. Landing and driver leases never substitute for it.
 `worktree remove` refuses the primary, a dirty tree, ignored files, a live
-writer and any reservation, and has no force; it deletes the branch only when
+writer lock or observed process, and has no force; it deletes the branch only when
 contained in the integration branch or named by `--discard`. `worktree list`
 never creates a lock.
 Registered detached checkouts use the same checks and preserve all branches.
@@ -409,7 +421,7 @@ commit and a command to preserve it. Removal rechecks the exact HEAD and
 optional branch by canonical path under writer custody.
 - Why: removing a tree under a live writer destroys its work.
 - Test: `src/worktree_tests.rs::second_writer_is_refused_while_first_holds_the_worktree`;
-  `crates/confinement/src/worktrees.rs::removal_refuses_live_writer_and_any_reservation_record`;
+  `crates/confinement/src/worktrees.rs::writer_lock_busy_is_distinct_from_observed_live_process`;
   `::remove_registered_detached_worktree`;
   `::detached_removal_keeps_dirty_unmerged_and_live_work`
 - Owner: `crates/confinement/src/worktrees.rs`
@@ -433,8 +445,9 @@ the primary checkout's HEAD changed during the add.
 `gc` collects caches and expired provider state; merged worktree and output
 deletion requires `--apply`. `--dry-run` previews all collection.
 Cache collection takes the writer lock
-without waiting; a held lock keeps a cache live, and a missing lock, a
-reservation or unverifiable registration keeps it. v1 owners are never idle.
+without waiting; a held lock reports busy and keeps the cache. Missing lock
+state is created only for mutation. Old identity and reservation records do not
+gate cache collection. v1 owners are never idle.
 Merged worktrees go only when clean, registered and with terminal lanes;
 output pruning skips tracked and keep paths, dirty trees, symlinks and
 writes within 24 hours. Deletion detaches and re-verifies identity first.

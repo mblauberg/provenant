@@ -315,7 +315,9 @@ mod reboot_tests {
             .state_root
             .as_path()
             .join(format!("runs/{}/attempts/{id}", run.run_id));
-        let reservation = path.join("reservation.json");
+        let evidence = path.join(id.to_string());
+        std::fs::create_dir_all(&evidence)?;
+        let reservation = evidence.join("reservation.json");
         let cause = if corrupt_reservation {
             std::fs::write(&reservation, b"corrupt reservation")?;
             "record is invalid"
@@ -870,6 +872,7 @@ impl RunStore {
                         Some(fence) => fence
                             .reservation
                             .parent()
+                            .and_then(std::path::Path::parent)
                             .ok_or_else(|| {
                                 RunError::unsafe_path(
                                     fence.reservation.clone(),
@@ -889,6 +892,7 @@ impl RunStore {
             };
             let recovery = match custody::acquire_recovery(
                 directory.try_clone()?,
+                Self::scope(record),
                 provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
                 call.cancel,
                 call.clock,
@@ -1026,6 +1030,7 @@ impl RunStore {
         };
         custody::acquire_recovery(
             directory,
+            Self::scope(record),
             provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
             call.cancel,
             call.clock,
@@ -1073,13 +1078,15 @@ impl RunStore {
                 Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(None),
                 Err(error) => return Err(error.into()),
             };
-            let stale = match custody.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
-                Err(error) if error.is_not_found() => false,
-                Ok(_) => {
+            let stale = match custody::reservation_present(&custody, Self::scope(record)) {
+                Ok(false) => false,
+                Ok(true) => {
                     let Some(slot) = &slot else {
                         return Ok(None);
                     };
-                    let path = slot.join("reservation.json");
+                    let path = slot
+                        .join(record.attempt_id.to_string())
+                        .join("reservation.json");
                     let scope = Self::scope(record);
                     if !self.writer_fences()?.iter().any(|fence| {
                         fence.reservation == path
@@ -1127,8 +1134,9 @@ impl RunStore {
             call,
         )?;
         if stale {
-            custody.unlink(std::ffi::OsStr::new("reservation.json"))?;
-            custody.sync()?;
+            let evidence = custody::attempt_evidence(&custody, Self::scope(record))?;
+            evidence.unlink(std::ffi::OsStr::new("reservation.json"))?;
+            evidence.sync()?;
         }
         self.set_temporary_retained(record.attempt_id, false, call)?;
         Ok(Some(Reconciled::Finished))
@@ -1758,11 +1766,16 @@ impl RunStore {
         Ok(found)
     }
     fn withdraw_prepared_writer(&self, fence: &WriterFence, call: &Request<'_>) -> Result<bool> {
-        let directory = fence.reservation.parent().ok_or_else(|| {
-            RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
-        })?;
+        let directory = fence
+            .reservation
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| {
+                RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
+            })?;
         let recovery = custody::acquire_recovery(
             provenant_os::fs::Directory::open_anchor(directory)?,
+            fence.scope,
             provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
             call.cancel,
             call.clock,
@@ -1831,13 +1844,14 @@ impl RunStore {
         // handoff began and keeps a late reservation out.
         let attempt = dir()?;
         let unreserved =
-            custody::prove_unreserved(&attempt, call.lock_budget(), call.cancel, call.clock)
+            custody::prove_unreserved(&attempt, scope, call.lock_budget(), call.cancel, call.clock)
                 .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
         let _recovery = match unreserved {
             Some(lease) => Held::Unreserved(lease),
             None => {
                 let recovery = match custody::acquire_recovery(
                     dir()?,
+                    scope,
                     call.lock_budget(),
                     call.cancel,
                     call.clock,
@@ -1947,8 +1961,10 @@ impl RunStore {
             // Once released, preserved scratch must never enter normal cleanup.
             match self
                 .attempt_dir(record.run_id, id, false)
-                .and_then(|attempt| read_sealed(&attempt, "reservation.json", RECORD_LIMIT))
-            {
+                .and_then(|attempt| {
+                    let evidence = custody::attempt_evidence(&attempt, scope)?;
+                    read_sealed(&evidence, "reservation.json", RECORD_LIMIT)
+                }) {
                 Ok(Some(_)) => {
                     return Ok(Some(Reconciled::uncertain(
                         UncertainReason::GuardianNotObservable,
@@ -2008,9 +2024,9 @@ impl RunStore {
                 std::ffi::OsStr::new("writer.lock"),
                 provenant_os::fs::LockMode::Exclusive,
             )?;
-            match attempt.metadata_at(std::ffi::OsStr::new("reservation.json"), false) {
-                Ok(_) => return Err(RunError::Validation("attempt reservation retained")),
-                Err(error) if error.is_not_found() => {}
+            match custody::reservation_present(&attempt, scope) {
+                Ok(true) => return Err(RunError::Validation("attempt reservation retained")),
+                Ok(false) => {}
                 Err(error) => return Err(error.into()),
             }
             artifacts::remove_unreserved_terminal_temporary(&attempt)?;

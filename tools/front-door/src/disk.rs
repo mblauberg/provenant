@@ -190,9 +190,7 @@ fn collect_resolved(
             budget,
             &cancel,
             &mut report,
-            registration
-                .as_ref()
-                .map(|(binding, directory)| (binding, directory)),
+            registration.as_ref().map(|(_, directory)| directory),
         )?)
     })();
     match inventory {

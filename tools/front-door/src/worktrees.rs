@@ -12,7 +12,7 @@ use provenant_core::{CancelToken, Clock, GitOid, WaitBudget};
 use provenant_os::{
     clock::SystemClock,
     exec::SystemExecutor,
-    fs::{Directory, FileKind, FsError, canonicalize},
+    fs::{Directory, FileKind, FsError},
 };
 use provenant_records::{CommandResult, Outcome};
 use serde::Serialize;
@@ -60,8 +60,6 @@ pub(crate) enum Error {
     Budget,
     #[error("{0}")]
     GcObservation(&'static str),
-    #[error("writer reservation retained: {0}")]
-    WriterRecovery(String),
     #[error("cannot read disk space: {0}")]
     DiskSpace(std::io::Error),
     #[error("invalid worktree removal scope")]
@@ -107,13 +105,11 @@ impl Error {
                 | WorktreeError::DetachedUnmerged { .. }
                 | WorktreeError::IgnoredPaths(_)
                 | WorktreeError::GitOperationInProgress
+                | WorktreeError::LockBusy
                 | WorktreeError::LiveWriter
                 | WorktreeError::LiveProcess(_)
                 | WorktreeError::UnknownWriter
-                | WorktreeError::RegistrationMismatch { .. }
                 | WorktreeError::GitEntryHeld { .. }
-                | WorktreeError::ReservationPresent
-                | WorktreeError::UnreadableRecord
                 | WorktreeError::IncompleteCensus
                 | WorktreeError::Primary
                 | WorktreeError::IdentityChanged
@@ -130,7 +126,6 @@ impl Error {
 enum Data {
     SeedBuilt(String),
     Created(worktrees::WorktreeInfo),
-    Adopted(worktrees::WorktreeInfo),
     Listed(Vec<worktrees::WorktreeInfo>),
     Removed(worktrees::RemoveOutcome),
 }
@@ -139,7 +134,6 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
     let name = match &command {
         Worktree::SeedBuild => "worktree seed-build",
         Worktree::Create { .. } => "worktree create",
-        Worktree::Adopt { .. } => "worktree adopt",
         Worktree::List => "worktree list",
         Worktree::Remove(_) => "worktree remove",
     };
@@ -163,7 +157,11 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
         Err(error) => crate::fail_with_repair(
             name,
             error.outcome(),
-            "WORKTREE",
+            if matches!(error, Error::Worktree(WorktreeError::LockBusy)) {
+                "WORKTREE_LOCK_BUSY"
+            } else {
+                "WORKTREE"
+            },
             &error.to_string(),
             error.repair(),
             globals,
@@ -174,17 +172,8 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
 /// The terse human form. `--json` keeps the structured path envelope; here a
 /// UTF-8 absolute path reads as a plain path, quoted only when it needs it.
 fn human(mut value: serde_json::Value) -> String {
-    let stale = value["retained"].as_array().is_some_and(|items| {
-        items
-            .iter()
-            .any(|item| item["reason"] == "stale_registration")
-    });
     plain_paths(&mut value);
-    let mut output = provenant_cli::terse(&value);
-    if stale {
-        output.push_str("\nrun `provenant worktree adopt PATH --owner NAME` from outside the tree to replace the stale registration");
-    }
-    output
+    provenant_cli::terse(&value)
 }
 
 fn plain_paths(value: &mut serde_json::Value) {
@@ -238,33 +227,6 @@ fn execute(
         |context, cancel| {
             Ok(match command {
                 Worktree::SeedBuild => unreachable!(),
-                Worktree::Adopt { path, owner } => {
-                    let path = if path.is_absolute() {
-                        path
-                    } else {
-                        project.join(path)
-                    };
-                    let info = worktrees::list(context, cancel)?
-                        .into_iter()
-                        .find(|tree| canonicalize(&path).ok().as_deref() == Some(&tree.path))
-                        .ok_or(worktrees::WorktreeError::NotFound)?;
-                    let owner = worktrees::WorktreeOwner {
-                        attempt_id: None,
-                        operation_id: None,
-                        branch: info
-                            .branch
-                            .as_deref()
-                            .and_then(|branch| branch.strip_prefix("refs/heads/"))
-                            .ok_or(worktrees::WorktreeError::InvalidRequest)?
-                            .to_owned(),
-                        base: info.head.to_string(),
-                        host: provenant_config::bind_host(roots)?,
-                        created_at: context.clock.wall_now().map_err(|_| Error::Budget)?,
-                        origin: worktrees::WorktreeOrigin::Adopted,
-                        label: owner,
-                    };
-                    Data::Adopted(worktrees::adopt(context, &path, &owner, cancel)?)
-                }
                 Worktree::Create { branch, base } => Data::Created(worktrees::create(
                     context,
                     WorktreeCreate { branch, base },
@@ -557,9 +519,6 @@ fn gc_data_summary(data: &GcData) -> String {
                     "kept worktree {} ({:?})\n",
                     kept.branch, kept.reason
                 ));
-                if kept.reason == RetainReason::StaleRegistration {
-                    human.push_str("run `provenant worktree adopt PATH --owner NAME` from outside the tree to replace the stale registration\n");
-                }
             }
         }
         for output in project
@@ -592,7 +551,7 @@ fn retained_exception(reason: RetainReason) -> bool {
         RetainReason::Dirty
             | RetainReason::GitOperationInProgress
             | RetainReason::UnknownWriter
-            | RetainReason::StaleRegistration
+            | RetainReason::LockBusy
             | RetainReason::Changed
             | RetainReason::GitFailure
             | RetainReason::LockedOrPrunable
@@ -825,19 +784,6 @@ pub(crate) fn land_cleanup(
                 regenerable.push("target".into());
             }
             let snapshot = crate::gc_support::lane_states(&roots, &home, &assets, project_id).ok();
-            if let Err(error) = clear_landed_writer(
-                context,
-                &lane,
-                snapshot.as_ref(),
-                &provenant_config::ProjectGcSettings {
-                    regenerable: regenerable.clone(),
-                    ..settings.clone()
-                },
-                cancel,
-            ) {
-                landed.kept = Some(error.to_string());
-                return Ok(landed);
-            }
             // A branch landed by hand may never have had a lane, so unlike a
             // sweep this accepts a worktree no lane used. A live or unobservable
             // lane, or a stale scan, still refuses.
@@ -895,83 +841,13 @@ pub(crate) fn land_cleanup(
                     landed.kept = outcome
                         .retained
                         .first()
-                        .map(|kept| {
-                            let mut message = format!("branch {} kept: {:?}", kept.branch, kept.reason);
-                            if kept.reason == RetainReason::StaleRegistration {
-                                message.push_str("; run `provenant worktree adopt PATH --owner NAME` from outside the tree to replace the stale registration");
-                            }
-                            message
-                        });
+                        .map(|kept| format!("branch {} kept: {:?}", kept.branch, kept.reason));
                 }
                 Err(error) => landed.kept = Some(error.with_repair()),
             }
             Ok(landed)
         },
     )
-}
-
-/// Recover only a verified abandoned writer. A merge alone is not evidence
-/// that a guardian stopped; supervisor and the canonical Run owner decide that.
-fn clear_landed_writer(
-    context: &WorktreeContext<'_>,
-    lane: &worktrees::WorktreeInfo,
-    snapshot: Option<&crate::gc_support::LaneSnapshot>,
-    output: &provenant_config::ProjectGcSettings,
-    cancel: &CancelToken,
-) -> Result<(), Error> {
-    use provenant_supervisor::custody::{self, CustodyError};
-    let state = context
-        .project_state
-        .open_verified_directory(OsStr::new(&worktrees::state_dir_name(&lane.path)))?;
-    match state.metadata_at(OsStr::new("reservation.json"), false) {
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error.into()),
-        Ok(_) => {}
-    }
-    match context
-        .workers
-        .observe_roots(std::slice::from_ref(&lane.path))
-        .get(&lane.path)
-    {
-        Some(worktrees::WorkerState::Free) => {}
-        Some(worktrees::WorkerState::Live) => {
-            return Err(worktrees::live_refusal(context.workers, &lane.path).into());
-        }
-        _ => return Err(WorktreeError::IncompleteCensus.into()),
-    }
-    let verified = provenant_confinement::repo::verify_worktree(context.repo, &lane.path)
-        .map_err(WorktreeError::from)?;
-    let branch = lane.branch.as_deref().ok_or(WorktreeError::UnknownWriter)?;
-    let acquire = || -> Result<_, Error> {
-        let recovery = custody::acquire_recovery(
-            state.try_clone()?,
-            WaitBudget::nonblocking(context.clock.mono_now()),
-            cancel,
-            context.clock,
-        )
-        .map_err(|error| Error::WriterRecovery(error.to_string()))?;
-        recovery
-            .writer_base(
-                verified.repo().root_dir(),
-                verified.repo().private_dir(),
-                branch,
-            )
-            .map_err(|error| Error::WriterRecovery(error.to_string()))?;
-        worktrees::check_removal_preconditions(context, &verified, output, cancel)?;
-        Ok(recovery)
-    };
-    match acquire()?.withdraw_prepared() {
-        Ok(()) => return Ok(()),
-        Err(CustodyError::Fenced) => {}
-        Err(error) => return Err(Error::WriterRecovery(error.to_string())),
-    }
-    let recovery = acquire()?;
-    snapshot
-        .ok_or(Error::GcObservation(
-            "cannot inspect canonical writer attempts",
-        ))?
-        .settle_landed_writer(recovery)
-        .map_err(|error| Error::WriterRecovery(error.to_string()))
 }
 
 /// How long an event caller (settlement or landing) waits for a busy
@@ -1242,13 +1118,12 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     };
     let report = gc_worktree_cargo_caches_with_writer_guard(&home, &policy, |path| {
         for project in &projects {
-            if let Some(lane) = project.lanes.iter().find(|lane| lane.path == path) {
-                return worktrees::cache_writer_guard(
-                    &project.binding,
-                    &project.state,
-                    path,
-                    lane.branch.as_deref(),
-                );
+            if project.lanes.iter().any(|lane| lane.path == path) {
+                return if policy.dry_run {
+                    worktrees::cache_writer_probe(&project.state, path)
+                } else {
+                    worktrees::cache_writer_guard(&project.state, path).map(Some)
+                };
             }
         }
         Err(WorkerState::Unknown)
@@ -1560,23 +1435,6 @@ mod human_tests {
 mod gc_preview_tests {
     #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
-    #[test]
-    fn stale_registration_reports_adopt_in_prune_and_gc_output() {
-        let mut outcome = worktrees::RemoveOutcome::default();
-        outcome.retained.push(worktrees::RetainedBranch {
-            branch: "stale".into(),
-            reason: RetainReason::StaleRegistration,
-        });
-        let output = human(serde_json::to_value(&outcome).unwrap_or_default());
-        assert!(output.contains("provenant worktree adopt PATH --owner NAME"));
-
-        let mut data = GcData::default();
-        data.worktree_cleanup.push(worktrees::WorktreeGcReport {
-            worktrees: outcome,
-            ..Default::default()
-        });
-        assert!(gc_data_summary(&data).contains("provenant worktree adopt PATH --owner NAME"));
-    }
     #[test]
     fn gc_summary_reports_build_output_reclaimed_and_remaining() {
         let mut data = GcData::default();

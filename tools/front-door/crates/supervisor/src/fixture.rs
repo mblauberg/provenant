@@ -850,6 +850,23 @@ pub fn dispatch() -> io::Result<bool> {
             ready.write_all(b"\n")?;
             wait_for_eof(&mut ready)?;
         }
+        "writer-lock-provider" => {
+            // Ordinary provider children inherit non-CLOEXEC descriptors. Do
+            // not use the utility runner here: it deliberately sanitises fds.
+            let mut descendant = ChildGuard::new(
+                Command::new(std::env::current_exe()?)
+                    .args([
+                        OsString::from("--fixture"),
+                        OsString::from("s2-setsid-descendant"),
+                        fixture_path(&args, 3)?.into_os_string(),
+                    ])
+                    .spawn()?,
+            );
+            let mut gate = std::os::unix::net::UnixStream::connect(fixture_path(&args, 4)?)?;
+            gate.write_all(b"R")?;
+            wait_for_eof(&mut gate)?;
+            descendant.detach();
+        }
         "s2-setsid-provider" | "s2-group-provider" => {
             let ready_socket = fixture_path(&args, 3)?.into_os_string();
             let gate_socket = fixture_path(&args, 4)?;
@@ -1108,13 +1125,6 @@ pub fn acquire_writer_with_binding(
 pub fn recovery_observation(recovery: &crate::custody::Recovery) -> crate::custody::RecoveryState {
     recovery.observe_with(&RecordedBootObserver)
 }
-pub fn advance_attempt(
-    writer: &mut crate::custody::CustodyLease,
-    next: crate::custody::Scope,
-) -> crate::custody::Result<()> {
-    writer.advance_with(next, &RecordedBootObserver)
-}
-
 /// Bind an unlaunched fixture reservation to its owned attempt directory.
 pub fn bind_writer_attempt(
     mut lease: crate::custody::CustodyLease,

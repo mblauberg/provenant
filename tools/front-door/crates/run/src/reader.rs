@@ -439,13 +439,18 @@ impl RunStore {
         else {
             return Ok(true);
         };
-        let name = provenant_confinement::worktrees::state_dir_name(&writer.worktree);
+        let slot = self
+            .writer_registry
+            .join("worktrees")
+            .join(record.project_id.to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(
+                &writer.worktree,
+            ));
+        let evidence = slot
+            .join(record.attempt_id.to_string())
+            .join("reservation.json");
         Ok(!fences.issues.iter().any(|issue| {
-            issue
-                .reservation
-                .parent()
-                .and_then(|parent| parent.file_name())
-                == Some(&name)
+            issue.reservation == evidence || issue.reservation == slot.join("reservation.json")
         }))
     }
     fn record_with_run(

@@ -52,7 +52,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
         .writer_registry
         .join("worktrees")
         .join(record.project_id.to_string());
-    let broken = worktrees.join("broken");
+    let broken = worktrees.join("broken").join(record.attempt_id.to_string());
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -117,7 +117,7 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
         .join("worktrees")
         .join(record.project_id.to_string());
     let unreadable = |name: &std::ffi::OsStr| -> TestResult {
-        let directory = worktrees.join(name);
+        let directory = worktrees.join(name).join(record.attempt_id.to_string());
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -132,6 +132,23 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
         "another worktree's unreadable reservation is not this attempt's"
     );
     let own = provenant_confinement::worktrees::state_dir_name(&worktree);
+    let own_slot = worktrees.join(&own);
+    let predecessor = own_slot.join(AttemptId::from_bytes([99; 16]).to_string());
+    std::fs::create_dir_all(&predecessor)?;
+    std::fs::write(
+        predecessor.join("reservation.json"),
+        b"malformed predecessor",
+    )?;
+    assert!(
+        store.custody_released(&record, &call)?,
+        "predecessor evidence is separate"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&own_slot, std::fs::Permissions::from_mode(0o0))?;
+    let observed = store.custody_released(&record, &call);
+    std::fs::set_permissions(&own_slot, std::fs::Permissions::from_mode(0o700))?;
+    assert!(!observed?, "an inaccessible own slot cannot prove release");
+    std::fs::remove_file(predecessor.join("reservation.json"))?;
     unreadable(&own)?;
     assert_eq!(store.writer_fence_listing()?.issues.len(), 2);
     assert!(
@@ -4479,7 +4496,10 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
         &cancel,
         &clock,
     )?);
-    let reservation = custody_dir.path().join("reservation.json");
+    let reservation = custody_dir
+        .path()
+        .join(observed.scope.attempt.to_string())
+        .join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
     let meta = attempt.metadata()?;
     value["launch_state"] = "never_spawned".into();
@@ -4495,6 +4515,7 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
     std::fs::write(reservation, serde_json::to_vec(&value)?)?;
     let recovery = provenant_supervisor::custody::acquire_recovery(
         Directory::open_anchor(custody_dir.path())?,
+        observed.scope,
         call.lock_budget(),
         &cancel,
         &clock,
@@ -4825,7 +4846,8 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
         }
     );
     assert!(
-        dir.metadata_at(std::ffi::OsStr::new("reservation.json"), false)
+        provenant_supervisor::custody::attempt_evidence(&dir, scope)?
+            .metadata_at(std::ffi::OsStr::new("reservation.json"), false)
             .is_ok()
     );
     drop(held);
@@ -5402,7 +5424,7 @@ fn cancel_requests_then_reconcile_settles_a_prepared_attempt_nobody_holds() -> T
         }
     );
     assert!(
-        attempt
+        provenant_supervisor::custody::attempt_evidence(&attempt, scope)?
             .metadata_at(std::ffi::OsStr::new("reservation.json"), false)
             .is_ok()
     );
@@ -5459,7 +5481,8 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
             .as_path()
             .join("worktrees")
             .join(context.project_id.to_string())
-            .join("corrupt");
+            .join("corrupt")
+            .join(terminal.to_string());
         std::fs::create_dir_all(&custody)?;
         std::fs::write(custody.join("reservation.json"), b"corrupt")?;
         assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
@@ -5937,7 +5960,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     )?;
     assert_eq!(std::fs::read_to_string(candidate.join("x.lock"))?, "keep");
     // An unreadable sibling must not hide this attempt's readable reservation.
-    let corrupt = custody.with_file_name("corrupt");
+    let corrupt = custody.with_file_name("corrupt").join(id.to_string());
     std::fs::create_dir_all(&corrupt)?;
     std::fs::write(corrupt.join("reservation.json"), b"corrupt")?;
     assert_eq!(store.writer_fence_listing()?.issues.len(), 1);
@@ -6156,7 +6179,9 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
         &cancel,
         &clock,
     )?);
-    let reservation = path.join("reservation.json");
+    let reservation = path
+        .join(observed.scope.attempt.to_string())
+        .join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
     let meta = attempt.metadata()?;
     value["boot"] = "darwin:00000000-0000-0000-0000-000000000000".into();
@@ -6443,7 +6468,9 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         )?;
     }
     // A launch summary alone does not prove the provider was never spawned.
-    let reservation = custody.join("reservation.json");
+    let reservation = custody
+        .join(scope.attempt.to_string())
+        .join("reservation.json");
     if reservation_case != ReservationCase::Missing {
         let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
         match reservation_case {
@@ -6487,20 +6514,26 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
         ));
         assert_eq!(std::fs::read(&reservation).ok(), before);
     }
-    assert!(
-        store
-            .reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?
-            .contains(&(
-                id,
-                match evidence {
-                    1 => Reconciled::Held,
-                    2 if should_settle => Reconciled::Finished,
-                    _ => Reconciled::Uncertain {
-                        reason: UncertainReason::GuardianNotObservable
-                    },
-                }
-            ))
-    );
+    let reconciled =
+        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, observer)?;
+    if reservation_case == ReservationCase::DifferentAttempt {
+        assert!(
+            matches!(reconciled.as_slice(),
+            [(attempt, Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { .. } })] if *attempt == id),
+            "{reconciled:?}"
+        );
+    } else {
+        assert!(reconciled.contains(&(
+            id,
+            match evidence {
+                1 => Reconciled::Held,
+                2 if should_settle => Reconciled::Finished,
+                _ => Reconciled::Uncertain {
+                    reason: UncertainReason::GuardianNotObservable
+                },
+            }
+        )));
+    }
     if should_settle {
         assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
         assert!(!reservation.exists());
@@ -6625,7 +6658,9 @@ fn recover_rebooted_writer_inner(
         &cancel,
         &clock,
     )?);
-    let reservation = custody.join("reservation.json");
+    let reservation = custody
+        .join(scope.attempt.to_string())
+        .join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
     let meta = attempt.metadata()?;
     let guardian = serde_json::json!({
@@ -6702,6 +6737,7 @@ fn recover_rebooted_writer_inner(
     if interrupted {
         let recovery = provenant_supervisor::custody::acquire_recovery(
             Directory::open_anchor(&custody)?,
+            scope,
             call.lock_budget(),
             &cancel,
             &clock,
@@ -6934,7 +6970,9 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
         &clock,
     )?);
     let meta = attempt.metadata()?;
-    let reservation = custody.join("reservation.json");
+    let reservation = custody
+        .join(scope.attempt.to_string())
+        .join("reservation.json");
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
     let fields = value.as_object_mut().ok_or("reservation")?;
     fields.insert("launch_state".into(), "never_spawned".into());

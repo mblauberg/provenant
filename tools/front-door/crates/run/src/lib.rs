@@ -189,10 +189,7 @@ pub enum RunError {
     Writer(#[from] provenant_confinement::worktrees::WorktreeError),
     #[error("local worktree {0} does not exist; create it with `provenant worktree create <name>`")]
     WorktreeMissing(std::path::PathBuf),
-    #[error(
-        "worktree {0} is not registered with Provenant; create it with \
-         `provenant worktree create --base <branch> <branch>`"
-    )]
+    #[error("worktree {0} is not listed by Git; run `git worktree list --porcelain`")]
     WorktreeUnregistered(std::path::PathBuf),
     #[error("writer Git ref lock {} already exists; check for a running Git process, then remove the stale lock before retrying", .0.display())]
     WriterRefLocked(std::path::PathBuf),

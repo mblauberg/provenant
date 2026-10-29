@@ -377,7 +377,7 @@ impl Driver<'_> {
         // Close, never LOCK_UN: descendants share this open file description.
         // A fresh nonblocking flock succeeds only after every inheritor closes.
         drop(self.writer.take());
-        match try_writer_lease(&self.writer_dir, self.writer_identity) {
+        match try_writer_lease(&self.lock_dir, self.writer_identity) {
             Ok(lease) => {
                 self.writer = Some(lease);
                 self.settlement_evidence = SettlementEvidence::DarwinCensusAndCustodyLease;

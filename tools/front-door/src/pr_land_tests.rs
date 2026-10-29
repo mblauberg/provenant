@@ -1252,7 +1252,7 @@ pub(crate) fn pr_land_canonicalises_quoted_worktree_paths() -> Result {
     Ok(())
 }
 
-pub(crate) fn pr_land_recovers_only_abandoned_prepared_writer_leases() -> Result {
+pub(crate) fn pr_land_uses_writer_lock_and_preserves_attempt_recovery_evidence() -> Result {
     use provenant_core::Clock;
     use provenant_supervisor::custody::{Scope, WriterBinding};
     for case in [
@@ -1316,9 +1316,18 @@ pub(crate) fn pr_land_recovers_only_abandoned_prepared_writer_leases() -> Result
             None
         };
         if case == "malformed" {
-            fs::write(state.join("reservation.json"), b"malformed reservation")?;
+            fs::write(
+                state
+                    .join(provenant_core::AttemptId::from_bytes([82; 16]).to_string())
+                    .join("reservation.json"),
+                b"malformed reservation",
+            )?;
         }
-        let reservation = fs::read(state.join("reservation.json"))?;
+        let reservation = fs::read(
+            state
+                .join(provenant_core::AttemptId::from_bytes([82; 16]).to_string())
+                .join("reservation.json"),
+        )?;
         match case {
             "dirty" => fs::write(landing.worktree.join("notes.txt"), "uncommitted")?,
             "symlink_output" => {
@@ -1340,7 +1349,10 @@ pub(crate) fn pr_land_recovers_only_abandoned_prepared_writer_leases() -> Result
             _ => {}
         }
         let value = land(&landing)?;
-        let removed = matches!(case, "abandoned" | "allowed_output");
+        let removed = matches!(
+            case,
+            "abandoned" | "malformed" | "wrong_binding" | "allowed_output"
+        );
         assert_eq!(
             status(&value, "worktree")?,
             if removed { "done" } else { "refused" },
@@ -1348,11 +1360,15 @@ pub(crate) fn pr_land_recovers_only_abandoned_prepared_writer_leases() -> Result
         );
         assert_eq!(landing.worktree.exists(), !removed);
         assert_eq!(branch_exists(&landing.rig, "feat")?, !removed);
-        if removed {
-            assert!(!state.join("reservation.json").exists());
-            assert!(state.join("settlement.json").exists());
-        } else {
-            assert_eq!(fs::read(state.join("reservation.json"))?, reservation);
+        assert_eq!(
+            fs::read(
+                state
+                    .join(provenant_core::AttemptId::from_bytes([82; 16]).to_string())
+                    .join("reservation.json")
+            )?,
+            reservation
+        );
+        if !removed {
             if case == "dirty" {
                 assert_eq!(
                     fs::read_to_string(landing.worktree.join("notes.txt"))?,
@@ -1378,9 +1394,9 @@ pub(crate) fn pr_land_recovers_only_abandoned_prepared_writer_leases() -> Result
     Ok(())
 }
 
-/// Terminal records may live in a child store while custody remains in the
-/// host registry. Exercise land through the production recursive snapshot.
-pub(crate) fn pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores() -> Result {
+/// Terminal records may live in a child store while recovery evidence remains
+/// in the host exclusion slot. Landing leaves that evidence to Run.
+pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores() -> Result {
     use provenant_core::{Clock, WaitBudget};
     use provenant_os::fs::Directory;
     use provenant_run::{AttemptState, RouteRecord, RunStore, TerminalPublication};
@@ -1540,7 +1556,9 @@ pub(crate) fn pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores
             &cancel,
             &clock,
         )?);
-        let reservation = state.join("reservation.json");
+        let reservation = state
+            .join(scope.attempt.to_string())
+            .join("reservation.json");
         let mut fence: serde_json::Value = serde_json::from_slice(&fs::read(&reservation)?)?;
         let metadata = Directory::open_anchor(&attempt)?.metadata()?;
         fence["launch_state"] = "never_spawned".into();
@@ -1563,9 +1581,8 @@ pub(crate) fn pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores
         assert_eq!(status(&value, "branch")?, "done", "child={child}: {value}");
         assert!(!landing.worktree.exists());
         assert!(!branch_exists(rig, "feat")?);
-        assert!(!reservation.exists());
-        assert!(state.join("settlement.json").is_file());
-        assert!(attempt.join("release.json").is_file());
+        assert_eq!(fs::read(&reservation)?, serde_json::to_vec(&fence)?);
+        assert!(!attempt.join("release.json").exists());
         assert_eq!(
             fs::read(attempt.join("quarantine/manifest.json"))?,
             manifest
@@ -1613,16 +1630,6 @@ pub(crate) fn pr_land_out_of_tree_with_separate_git_directory() -> Result {
                 lane.to_str().ok_or("path")?,
             ],
         )?;
-        let adopted = command(
-            &landing.rig,
-            &["worktree", "adopt", lane.to_str().ok_or("path")?, "--json"],
-        )?;
-        assert_eq!(
-            code(&adopted),
-            0,
-            "{}",
-            String::from_utf8_lossy(&adopted.stdout.bytes)
-        );
         if configured {
             git(
                 &landing.rig,

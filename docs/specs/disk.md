@@ -103,8 +103,8 @@ declared output containing it, including beneath ignored parents.
 
 `gc.projects.<id>.foreign_worktrees = "merged-clean"` applies exactly where
 GC otherwise reports unknown writer evidence. The default is `"keep"`.
-Fetched-default ancestry, idle writes, clean Git state, no live lanes or
-reservations, free existing writer locks and a complete free process census
+Fetched-default ancestry, idle writes, clean Git state, no live lanes, free
+writer locks and a complete free process census
 are required. Repository custody protects registration rechecks; every
 worktree is verified against the Git common directory. The primary stays
 protected and local refs survive this policy's removals.
@@ -128,12 +128,9 @@ Applied foreign removal creates a private writer lock when state is absent,
 and holds it across final checks and Git removal without creating an ownership
 identity. Previews do not create state. Native processes do not take this
 advisory lock; the complete process census and final clean recheck still apply.
-State created solely for this call is removed after removal or refusal, while
-the writer lock remains held and repository custody excludes state creation.
-Cleanup has an independent five-second repository-lock budget even when the
-collection's deadline has expired or its cancellation token has been set.
-Existing state survives. Cleanup avoids leaving identity-less directories that
-would block a later `worktree create`; creation does not adopt unknown state.
+Exclusion slots remain after collection or refusal. Reusing a canonical path
+uses the same flock inode and never requires a retired identity record. Legacy
+identity and registry reservation files are ignored by worktree collection.
 - Why: native worktrees need an explicit alternative to terminal-lane evidence.
 - Test: `crates/confinement/src/worktrees.rs::gc_foreign_merged_clean_is_opt_in_idle_and_requires_complete_census`
 - Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/config/src/gc.rs`

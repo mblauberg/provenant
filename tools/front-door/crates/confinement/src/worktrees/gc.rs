@@ -85,27 +85,7 @@ pub fn collect(
             continue;
         }
         let foreign = policy.foreign_merged_clean && !(policy.terminal)(&lane.path);
-        // Listing deliberately reports unsafe custody as unknown. Recheck
-        // under the repository lock before considering even foreign cleanup,
-        // which may otherwise treat an existing stale record as unregistered.
-        if lane.writer == WriterState::Unknown {
-            let stale = match repository_lock(context, LockMode::Exclusive, cancel) {
-                Ok(_repository) => matches!(
-                    read_worktree_identity(context, entry, true, cancel),
-                    Err(WorktreeError::RegistrationMismatch { .. })
-                ),
-                Err(_) => false,
-            };
-            if stale {
-                retain(
-                    &mut report.worktrees,
-                    &branch,
-                    RetainReason::StaleRegistration,
-                );
-                continue;
-            }
-        }
-        if policy.foreign_merged_clean && lane.writer == WriterState::Unknown {
+        if foreign || (policy.foreign_merged_clean && lane.writer == WriterState::Unknown) {
             match collect_foreign(context, entry, lane, policy, cancel) {
                 Ok(Some(info)) => report.worktrees.removed.push(info),
                 Ok(None) => retain(&mut report.worktrees, &branch, RetainReason::NotMerged),
@@ -114,7 +94,15 @@ pub fn collect(
             continue;
         }
         if lane.writer != WriterState::Free {
-            retain(&mut report.worktrees, &branch, RetainReason::UnknownWriter);
+            retain(
+                &mut report.worktrees,
+                &branch,
+                match lane.writer {
+                    WriterState::Busy => RetainReason::LockBusy,
+                    WriterState::Live => RetainReason::LiveWriter,
+                    _ => RetainReason::UnknownWriter,
+                },
+            );
             continue;
         }
         if !matches!(
@@ -129,7 +117,7 @@ pub fn collect(
             let mut prune = || -> Result<(), WorktreeError> {
                 let locked = {
                     let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-                    lock_worktree_for_mutation(context, entry, cancel)?
+                    lock_worktree(context, entry, cancel, policy.dry_run)?
                 };
                 if !(policy.no_live_lanes)(&lane.path) {
                     return Err(WorktreeError::UnknownWriter);
@@ -193,14 +181,6 @@ pub fn collect(
                 retain(&mut report.worktrees, &branch, retain_reason(&error));
                 continue;
             }
-        }
-        if foreign {
-            match collect_foreign(context, entry, lane, policy, cancel) {
-                Ok(Some(info)) => report.worktrees.removed.push(info),
-                Ok(None) => retain(&mut report.worktrees, &branch, RetainReason::NotMerged),
-                Err(error) => retain(&mut report.worktrees, &branch, retain_reason(&error)),
-            }
-            continue;
         }
         let Some(upstream) = policy.upstream else {
             continue;
@@ -867,52 +847,38 @@ fn collect_foreign(
         return Ok(None);
     }
     let verified = verify_probed_worktree(context, &lane.path, cancel)?;
-    // Serialise state creation and writer acquisition with temporary-state
-    // disposal and worktree creation, so no collector opens a detached lock.
+    // Serialise slot creation with worktree mutations. Slots remain stable.
     let repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-    let mut created_state = false;
-    let state = match context
-        .project_state
-        .open_verified_directory(&state_dir_name(&lane.path))
-    {
-        Ok(state) => Some(state),
-        Err(error) if error.is_not_found() && policy.dry_run => None,
-        Err(error) if error.is_not_found() => {
-            let name = state_dir_name(&lane.path);
-            match context.project_state.mkdir(&name, 0o700) {
-                Ok(()) => created_state = true,
-                Err(error) if error.is_exists() => {}
+    let state = if policy.dry_run {
+        match context
+            .project_state
+            .open_verified_directory(&state_dir_name(&lane.path))
+        {
+            Ok(state) => Some(state),
+            Err(error) if error.is_not_found() => None,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        Some(writer_directory(context.project_state, &lane.path)?)
+    };
+    let _writer = match state {
+        Some(state) => {
+            let guard = if policy.dry_run {
+                state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
+            } else {
+                state.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
+            };
+            match guard {
+                Ok(guard) => Some(guard),
+                Err(error) if policy.dry_run && error.is_not_found() => None,
+                Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LockBusy),
                 Err(error) => return Err(error.into()),
             }
-            Some(context.project_state.open_verified_directory(&name)?)
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let _writer = match &state {
-        Some(state) => {
-            ensure_unreserved(state)?;
-            let guard = if policy.dry_run {
-                state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?
-            } else if created_state {
-                // Finish establishing temporary custody even if cancellation
-                // arrives after mkdir, so cleanup can retain exclusion.
-                state.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?
-            } else {
-                state.lock(
-                    OsStr::new(WRITER_LOCK),
-                    LockMode::Exclusive,
-                    WaitBudget::nonblocking(context.clock.mono_now()),
-                    cancel,
-                    context.clock,
-                )?
-            };
-            ensure_unreserved(state)?;
-            Some(guard)
         }
         None => None,
     };
     drop(repository);
-    let result = (|| {
+    (|| {
         let recheck = || -> Result<(), WorktreeError> {
             verified.repo().revalidate()?;
             let entries = read_worktrees(context, cancel)?;
@@ -1002,33 +968,7 @@ fn collect_foreign(
             )?;
         }
         Ok(Some(lane.clone()))
-    })();
-    if created_state {
-        let cleanup_cancel = CancelToken::new();
-        // A large prune may outlive the collection's original lock deadline.
-        // Cleanup has its own bounded wait while retaining writer exclusion.
-        let cleanup_budget = WaitBudget::cli(context.clock.mono_now(), 5)
-            .map_err(|_| WorktreeError::UnknownWriter)?;
-        let _repository = context.project_state.lock(
-            OsStr::new(REPOSITORY_LOCK),
-            LockMode::Exclusive,
-            cleanup_budget,
-            &cleanup_cancel,
-            context.clock,
-        )?;
-        let name = state_dir_name(&lane.path);
-        let state = state.as_ref().ok_or(WorktreeError::IdentityChanged)?;
-        // This call's identity-less state is temporary custody, not a stable
-        // owner record. Never dispose of identities or unexpected new entries.
-        if entry_names(state, 2)? != [OsString::from(WRITER_LOCK)] {
-            return Err(WorktreeError::UnknownWriter);
-        }
-        let temporary = PayloadTree::claim(context.project_state, &name, &state.metadata()?)?;
-        temporary.unlink(OsStr::new(WRITER_LOCK))?;
-        context.project_state.rmdir(&name)?;
-        context.project_state.sync()?;
-    }
-    result
+    })()
 }
 
 #[cfg(test)]

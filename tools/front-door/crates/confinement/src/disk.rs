@@ -184,6 +184,7 @@ fn classify_lane_cache(
         Some(CacheGcReason::Tombstone) => "tombstone",
         Some(CacheGcReason::Foreign) => "foreign",
         Some(CacheGcReason::Live) => "live",
+        Some(CacheGcReason::Busy) => "busy",
         Some(CacheGcReason::Unobservable) => "unobservable",
         None => "live",
     };
@@ -191,7 +192,7 @@ fn classify_lane_cache(
 }
 
 /// Inventory worktrees with bounded Git reads and a native writer census.
-/// Unknown registrations remain protected. No state or lock files are created.
+/// Unobservable exclusion state remains protected. No state or locks are created.
 pub fn worktrees(
     repo: &VerifiedRepo,
     utility: &UtilityRuntime,
@@ -199,7 +200,7 @@ pub fn worktrees(
     budget: UtilityBudget,
     cancel: &CancelToken,
     report: &mut DiskReport,
-    registration: Option<(&provenant_config::ProjectBinding, &Directory)>,
+    registration: Option<&Directory>,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     let outcome = run_utility(
         executor,
@@ -228,13 +229,8 @@ pub fn worktrees(
     let observed = SystemWorkerObserver.observe_roots(&roots);
     let mut inventory = Vec::new();
     for listed in listed.into_iter().filter(|entry| !entry.bare) {
-        let registered = registration.map_or(WorkerState::Unknown, |(binding, directory)| {
-            disk_writer_state(
-                binding,
-                directory,
-                &listed.path,
-                listed.branch.as_ref().map(|b| b.as_str()),
-            )
+        let registered = registration.map_or(WorkerState::Unknown, |directory| {
+            disk_writer_state(directory, &listed.path)
         });
         let writer = combine_worker_state(
             registered,
@@ -284,6 +280,7 @@ pub fn worktrees(
             entry.writer = Some(
                 match writer {
                     WriterState::Live => "live",
+                    WriterState::Busy => "busy",
                     WriterState::Free => "free",
                     WriterState::Unknown => "unknown",
                 }

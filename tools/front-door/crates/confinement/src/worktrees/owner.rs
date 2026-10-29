@@ -101,21 +101,12 @@ pub fn save_lane_owner_when_free(
     }) {
         return Err(WorktreeError::IdentityChanged);
     }
-    let _writer = cache_writer_guard(
-        context.binding,
-        context.project_state,
-        tree.path(),
-        Some(&branch),
-    )
-    .map_err(|state| match state {
-        WorkerState::Live => WorktreeError::LiveWriter,
-        _ => WorktreeError::UnknownWriter,
-    })?;
-    ensure_unreserved(
-        &context
-            .project_state
-            .open_verified_directory(&state_dir_name(tree.path()))?,
-    )?;
+    let _writer =
+        cache_writer_guard(context.project_state, tree.path()).map_err(|state| match state {
+            WorkerState::Busy => WorktreeError::LockBusy,
+            WorkerState::Live => WorktreeError::LiveWriter,
+            _ => WorktreeError::UnknownWriter,
+        })?;
     if context
         .workers
         .observe_roots(&[tree.path().into()])
@@ -223,82 +214,4 @@ pub fn prune_owned(
         warn_cache_removal(&error);
     }
     Ok(result)
-}
-
-/// Register an existing linked checkout with Provenant's custody protocol.
-/// Membership is proved by Git's common-dir and backlink identities.
-pub fn adopt(
-    context: &WorktreeContext<'_>,
-    path: &Path,
-    owner: &WorktreeOwner,
-    cancel: &CancelToken,
-) -> Result<WorktreeInfo, WorktreeError> {
-    if owner.origin != WorktreeOrigin::Adopted {
-        return Err(WorktreeError::InvalidRequest);
-    }
-    validate(owner)?;
-    validate_binding(context)?;
-    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-    let worktree = verify_worktree(context.repo, path)?;
-    let path = canonicalize(worktree.path())?;
-    let entries = read_worktrees(context, cancel)?;
-    let entry = entries
-        .iter()
-        .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(&path))
-        .ok_or(WorktreeError::NotFound)?;
-    let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
-    if entry.locked || entry.prunable {
-        return Err(WorktreeError::GitEntryHeld {
-            locked: entry.locked,
-        });
-    }
-    if branch.as_str() != format!("refs/heads/{}", owner.branch) {
-        return Err(WorktreeError::InvalidRequest);
-    }
-    // Adoption replaces any earlier registration at this path, so a stale or
-    // mismatched record is repaired here. It still needs the writer lock and
-    // no reservation, and never takes either from a live writer.
-    let name = state_dir_name(&path);
-    match context.project_state.mkdir(&name, 0o700) {
-        Ok(()) => context.project_state.sync()?,
-        Err(error) if error.is_exists() => {}
-        Err(error) => return Err(error.into()),
-    }
-    let state = context.project_state.open_verified_directory(&name)?;
-    let _writer = match state.lock(
-        OsStr::new(WRITER_LOCK),
-        LockMode::Exclusive,
-        WaitBudget::nonblocking(context.clock.mono_now()),
-        cancel,
-        context.clock,
-    ) {
-        Ok(guard) => guard,
-        Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LiveWriter),
-        Err(error) => return Err(error.into()),
-    };
-    ensure_unreserved(&state)?;
-    // As for other mutations, an incomplete native census is not evidence of
-    // a writer. The exclusive lock and absent reservation establish custody.
-    let observed = context.workers.observe_roots(std::slice::from_ref(&path));
-    match observed.get(&path).copied().unwrap_or(WorkerState::Unknown) {
-        WorkerState::Live => return Err(live_refusal(context.workers, &path)),
-        WorkerState::Unknown if context.workers.requires_complete_census() => {
-            return Err(WorktreeError::IncompleteCensus);
-        }
-        WorkerState::Free | WorkerState::Unknown => {}
-    }
-    worktree.repo().revalidate()?;
-    save_owner(&worktree, owner)?;
-    write_identity(
-        &state,
-        &identity_for(context, &path, branch, &worktree),
-        PublishMode::Replace,
-    )?;
-    Ok(WorktreeInfo {
-        path,
-        branch: Some(branch.as_str().to_owned()),
-        head: entry.head,
-        dirty: worktree_dirty_at(context, worktree.repo(), cancel)?,
-        writer: WriterState::Free,
-    })
 }

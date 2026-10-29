@@ -3253,31 +3253,6 @@ Accepted by every command, before or after the subcommand.
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
-## `provenant worktree adopt`
-
-| Argument | Contract |
-|---|---|
-| `path` | `{"name": "path", "positional": true, "required": true}` |
-| `--owner` | `{"defaults": ["manual"], "name": "owner"}` |
-| `--help` | `{"name": "help"}` |
-| `--version` | `{"name": "version"}` |
-
-```json
-{
-  "groups": [
-    {
-      "arguments": [
-        "path",
-        "owner"
-      ],
-      "multiple": true,
-      "name": "Adopt",
-      "required": false
-    }
-  ]
-}
-```
-
 ## `provenant worktree create`
 
 | Argument | Contract |
