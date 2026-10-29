@@ -5,10 +5,9 @@
     {
       "id": "q217",
       "relation": "positive",
-      "prompt": "Read the repository process declaration and put this feature's change scope in its issue-native parent before writing accepted content.",
+      "prompt": "Write the spec for this new feature: acceptance criteria, risk tier, authority and the one-way doors, as a digest I can approve once.",
       "tags": [
-        "direct",
-        "sufficient-context"
+        "direct"
       ],
       "expected": {
         "primary_skill": "scope",
@@ -30,9 +29,10 @@
     {
       "id": "q219",
       "relation": "positive",
-      "prompt": "Define the risk tier, authority bounds, failure modes, and observable done state before execution.",
+      "prompt": "Grill me on this plan, one question at a time, each with your recommended answer.",
       "tags": [
-        "direct"
+        "direct",
+        "interview"
       ],
       "expected": {
         "primary_skill": "scope",
@@ -41,10 +41,24 @@
     },
     {
       "id": "q220",
+      "relation": "positive",
+      "prompt": "Run a timeboxed spike to answer whether the library can stream ten thousand rows, then fold the answer into the spec.",
+      "tags": [
+        "direct",
+        "spike"
+      ],
+      "expected": {
+        "primary_skill": "scope",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q221",
       "relation": "negative",
       "prompt": "The spec is approved; implement it through verification and tier-required review to acceptance.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "implement",
@@ -52,9 +66,9 @@
       }
     },
     {
-      "id": "q221",
+      "id": "q222",
       "relation": "negative",
-      "prompt": "Review this completed diff source-read-only for defects.",
+      "prompt": "Review this completed diff read-only for defects.",
       "tags": [
         "adjacent"
       ],
@@ -64,7 +78,7 @@
       }
     },
     {
-      "id": "q222",
+      "id": "q223",
       "relation": "negative",
       "prompt": "What is the capital of France?",
       "tags": [
@@ -76,30 +90,16 @@
       }
     },
     {
-      "id": "q223",
-      "relation": "boundary",
-      "prompt": "Scope this feature by grilling me one high-leverage decision at a time.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "scope",
-        "companion_skills": [
-          "grill-me"
-        ]
-      }
-    },
-    {
       "id": "q224",
       "relation": "boundary",
-      "prompt": "Resolve the final library feasibility question with a timeboxed spike, then finish the spec.",
+      "prompt": "Scope this feature, then file it under the right epic with deduplicated issues.",
       "tags": [
         "composition"
       ],
       "expected": {
         "primary_skill": "scope",
         "companion_skills": [
-          "prototype"
+          "tracker"
         ]
       }
     },
@@ -120,25 +120,12 @@
     {
       "id": "q921",
       "relation": "boundary",
-      "prompt": "The owner authorised assume-and-record here: take the recommended answer on this reversible business question, record it for confirmation, and keep the one-way door parked.",
+      "prompt": "The owner authorised assume-and-record: take the recommended answer on this reversible business question and note it in the spec.",
       "tags": [
         "adjacent"
       ],
       "expected": {
         "primary_skill": "scope",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q17550",
-      "relation": "negative",
-      "prompt": "The issue spec is approved and its fresh-reader questions are resolved. Implement the accepted criteria and retain reviewer evidence.",
-      "tags": [
-        "adjacent",
-        "near-miss"
-      ],
-      "expected": {
-        "primary_skill": "implement",
         "companion_skills": []
       }
     },
@@ -152,6 +139,19 @@
       ],
       "expected": {
         "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q17552",
+      "relation": "negative",
+      "prompt": "Find the root cause of this failing test before anyone writes a spec.",
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
         "companion_skills": []
       }
     }

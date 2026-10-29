@@ -1,76 +1,83 @@
 ---
 name: scope
-description: "Use when unsettled requirements or decisions need a spec, options, acceptance criteria, authority bounds, or decision record. Not for implementing approved scope or writing files during read-only advice; use implement."
+description: "Use when work is new or unsettled and needs a spec: acceptance criteria, risk tier, authority, one-way-door approval, a grill-me interview, a feasibility spike or a kept prototype. Not for implementing approved scope; use implement."
 ---
 
 # Scope
 
-Produce testable scope.
+Scope is the front human gate. Humans spend their effort here; after approval the
+agents work without them. A good spec lets a fresh agent build and verify the work
+without asking.
 
-## Frame
+## Spec gate
 
-Read the repository's `Repository process` declaration. Use an unambiguous
-existing owner or return proposed content in chat; never invent ownership.
-Define the decision, users and done there.
+Produce a one-screen digest and ask for one approval:
 
-Emit the minimum HARNESS tier, path/write/resource limits, prohibited actions,
-external effects, disclosure, expiry and approver. Credentials, secrets,
-unrelated paths, denials and project bans stay outside authority. Execution
-permission is not assurance. Ordinary authorised workspace content proceeds
-without a family-separation gate. Only a user may downgrade risk.
-Judgement-bearing AI requires evaluate. Tracker writes need explicit external
-authority; project-write authority alone grants none.
+- outcome, and the number of criteria
+- risk tier and authority (paths, effects, expiry)
+- one-way doors: release, publish, send, spend, destroy, widening authority
+- assumptions made, and open calls with a recommended default for each
 
-Scope owns accepted content and the decision register. Record disclosure in
-the authority envelope, never private memory.
+Only the user can downgrade risk. Approval covers the digest; a changed criterion
+needs a new revision and a new approval. Implementers cannot weaken criteria.
 
-## Resolve decisions
+## Size to the class
 
-Load grill-me when requested or dependent owner decisions remain materially
-unresolved. Otherwise present two or three choices, a recommendation and
-parked calls.
+A bug is repro, expected, observed and a regression check. A task has 2 to 5
+criteria, a feature about 10. Anything larger is an epic: a `Done when` plus
+backlog lines, not a mega-spec. Over-specifying a small change is a defect.
 
-Agents decide engineering calls. Business, legal and financial owner calls stay
-parked unless the owner authorises reversible assume-and-record; record those
-for confirmation. An owner-authorised process may resolve a blocking one-way
-door only with a recorded answer, cheap reversal until confirmed and owner
-confirmation before activation. Irreversible actions, promotion and live
-activation stay gated. Record every unresolved branch.
+State what and why, plus one-way-door constraints. Leave design to the implementer
+unless a decision has a rejected alternative, which becomes an ADR.
 
-Research through orchestrate; use prototype for timeboxed feasibility, harvest
-it and clean only manifest-owned scratch. Compare correctness, cost and
-operations. Architectural one-way decisions and rejected alternatives belong
-in ADRs; product calls and deferrals in their issues; reversible detail in the
-spec. In paired-primary mode one chair asks, the peer audits; record authorship.
+Write each criterion as one observable statement, `When <event>, <behaviour>`,
+tagged with how it is verified: `[test]`, `[command]`, `[capture]` or `[review]`.
+Add must-not-change behaviour and the verify command. The readiness test: could a
+fresh agent build and verify this without asking? If not, it is not ready.
 
-## Land outputs
+## Questions
 
-Read [output and handoff rules](references/output-contract.md) before writing
-or handing off scope. In read-only mode return proposals without changing files.
-Land only approved content with its declared owner. Issue-tracker scope lives
-in the issue body and expires with delivery; retain no delta archive.
-Durable invariants go through engineering-docs; run state stays run-local.
+Ask only when uncertainty and stakes are both high. The ladder:
 
-Size a small spec to its goal, two to five observable criteria and non-goals.
-Tag criteria by evidence type; name must-not-change behaviour, objective
-checks, tier-required review and any project landing gate. Preserve project
-schemas. Pin decision-critical interfaces, cache authority with source and
-date/version, and vendor only with redistribution permission.
+1. Engineering call: decide and record `Decided (<source>): <reason>`.
+2. Reversible owner call: assume, record, flag in the digest.
+3. Irreversible owner call: `provenant ask --file Q.json --session S` with options and
+   a recommendation (file shape in the human-inbox runbook). Park only that
+   branch; continue the rest.
 
-Never cite session scratch in tracked artefacts. Never leave a "Spec gap:"
-line: resolve and record it in the body; owner-only questions become Decision
-issues. Later epics hold Backlog checklists and decisions, not leaf briefs;
-keep existing well-scoped leaves.
+Never leave a `Spec gap:` line or a guess.
 
-Consider an advisory fresh-reader check before approval; skip trivial items.
-Answer substantive questions in the spec and dismiss noise explicitly.
-See [fresh-reader procedure](references/fresh-reader.md).
+## Modes
 
-Before handoff, record decisions, parked branches, exclusions, risk/authority
-and anchored evidence, with user approval of the spec and one-way doors.
-Handoff is digest-bound; changes require a new revision and gate.
-Spec drift is review-checked at acceptance. Explicit user acceptance is required
-only for terminal work or when scoped.
+- **Interview** (the user asks to be grilled): one question at a time, highest
+  leverage first, each with evidence and a recommendation. Answer from the
+  workspace instead of asking. Stop when criteria are clear.
+- **Spike**: one falsifiable question, a timebox, kill criteria, a registered scratch
+  worktree. Harvest the answer into the spec and discard the code. Read
+  [interview and spike](references/interview-and-spike.md).
+- **Kept prototype**: when it is a reference, own the repo file and index it
+  through engineering-docs. Publishing a private Claude artifact copy is fine; the
+  repo file stays the source. For UI, see ui-ux-design.
 
-Reference eval cases (not run by CI): [lifecycle](evals/lifecycle_cases.yaml),
-[spec](evals/spec_cases.yaml) and [fresh-reader evaluation](evals/fresh-reader/README.md).
+## Fan-out
+
+Name the preset, then run it with `--explain` first:
+
+```sh
+provenant run --preset scout-swarm --prompt-file brief.md --set 'parameters.external=1'
+provenant run --preset fan-out-synthesise --prompt-file options.md --set 'parameters.width=3'
+provenant run --preset scope-then-run --prompt-file brief.md --params-file lane.toml --explain
+```
+
+- `scout-swarm` maps the ground; `fan-out-synthesise` compares options with no oracle.
+- `scope-then-run` goes on to a build, so use it only when the build is authorised.
+  Its `plan.scope` node ends `VERDICT: PASS|FAIL` and gates the writer.
+- A read-only `scope-only` preset (scout, `plan.scope`, ready gate) is proposed.
+
+The role briefs in `references/` (scout-areas, researcher, architect,
+acceptance-writer, critic) are loaded by those presets. Do not rename them.
+
+## Land
+
+The spec lives in the issue body and dies with the delivering PR; tracker owns the
+template. Cite `path#Symbol`, never scratch files.

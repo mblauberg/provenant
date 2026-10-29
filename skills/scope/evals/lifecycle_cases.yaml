@@ -1,7 +1,0 @@
-schema_version: 1
-target_skill: scope
-cases:
-  - {id: lifecycle-scope-positive, relation: positive, prompt: "Turn this unsettled project intake and its decision context into an approved digest-bound scope handoff.", tags: [lifecycle-alignment, direct], expected: {primary_skill: scope, companion_skills: []}}
-  - {id: lifecycle-scope-negative, relation: negative, prompt: "The digest-bound scope is approved; implement the minor software change through verification.", tags: [lifecycle-alignment, boundary], expected: {primary_skill: implement, companion_skills: []}}
-  - {id: lifecycle-scope-adjacent, relation: adjacent, prompt: "Turn this unresolved intake into an approved scope and acceptance contract, using one-question-at-a-time grilling as the companion interview.", tags: [lifecycle-alignment, composition], expected: {primary_skill: scope, companion_skills: [grill-me]}}
-  - {id: lifecycle-scope-portability, relation: portability, prompt: "With Console, Herdr and GitHub unavailable, scope this request from project artifacts and return a digest-bound handoff.", tags: [lifecycle-alignment, portable], adapters: {console: absent, herdr: absent, github: absent}, expected: {primary_skill: scope, companion_skills: []}}

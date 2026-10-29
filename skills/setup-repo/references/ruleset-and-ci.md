@@ -1,8 +1,6 @@
 # Main-branch ruleset and the ci-status aggregate
 
-Pattern extracted from provenant's live ruleset (`gh api
-repos/mblauberg/provenant/rulesets`) and its
-`.github/workflows/ci.yml` `ci-status` job.
+Pattern from provenant's live ruleset and its `ci-status` job in `.github/workflows/ci.yml`.
 
 ## Why one aggregate check
 
@@ -77,14 +75,3 @@ gh api repos/<owner>/<repo>/rulesets/<id>
 
 The second call's `rules[].parameters.required_status_checks` must show the
 `ci-status` context bound to the intended `integration_id`.
-
-## Optional: path-filtered jobs and a security lint
-
-Provenant's `ci.yml` adds a `detect-changes` job (via `dorny/paths-filter`)
-so partial-surface changes skip irrelevant jobs while `ci-status` still
-resolves immediately (skipped counts as passing in the aggregate). It also
-runs `zizmor` (a GitHub Actions security linter) against `.github/workflows`
-and `.github/actions` whenever those paths change, gated into the same
-aggregate. Both are optional hardening, not part of the minimum pattern; add
-them once the project has enough jobs that skipping matters, or enough
-workflow surface that lint pays for itself.

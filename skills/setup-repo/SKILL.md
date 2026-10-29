@@ -1,90 +1,70 @@
 ---
 name: setup-repo
-description: "Use when asked to set up or scaffold a repository's process, labels, tracker, branch ruleset, issue forms, docs layout, work-item runbook, or board. Not for this repo's own day-to-day GitHub mechanics; use its runbook."
+description: "Use when asked to set up or scaffold a repository's process: tracker, issue forms, labels, branch ruleset, preset rules, roles, autonomy level, docs layout or work-item runbook. Not for a repo's day-to-day GitHub mechanics; use its runbook."
 ---
 
 # Setup
 
-## User gate first
+Scaffold the process a repository needs so agents can run it with the human near or
+out of the loop. Setup is the one place that sets how much autonomy a repo grants.
 
-Before writing, user approves the target, exact
-keep/create/adapt/conflict diff and, for GitHub, Project board.
-Ask for an unnamed target; never infer it from cwd.
+## Gate and classify
 
-## Inspect and classify
+Name the target; never infer it from the working directory. Read the target's
+`Repository process` declaration, `MAINTAINING.md`, `.github/**`, `.provenant/**` and
+its runbook before proposing anything. Ask only what the repo has not already settled.
 
-Read the target's `Repository process` declaration first, then inventory
-`MAINTAINING.md`, docs layout, `.github/**`, the work-item runbook and board.
-Classify each action as **keep (exact match)**, **create
-(absent)**, **adapt (compatible; propose the merge)** or **conflict (semantic
-mismatch; STOP and ask)**. Never overwrite; amend the declarations block per
-heading. A re-run against an already-set-up repository must produce no diff.
+Show one diff and get one approval. Mark each action **keep** (exact match),
+**create** (absent), **adapt** (compatible, propose the merge) or **conflict**
+(semantic mismatch: stop and ask). Never overwrite. A re-run on a set-up repo must
+produce no diff. Confirm the remote host before any `gh` command.
 
-## Choose tracker
+## Declare the process
 
-Ask: **Use GitHub issues?** If yes, use the GitHub branch, confirming
-the remote host before any `gh` command. If no, record the chosen tracker or
-`none`; skip labels, ruleset, issue forms and board. Tracker-specific setup
-remains out of scope; document the skip.
+Amend the `Repository process` block in `MAINTAINING.md` from
+[`templates/repo-declarations.md`](templates/repo-declarations.md): tracker, scope home
+(`issue-tracker` or `project-docs`), workflow-state owner, docs layout, merge policy
+and runbook pointers. Pointers only; never copy policy. With tracker `none`, both
+homes are `project-docs` and the GitHub steps are skipped. Ask where specs, runbooks
+and ADRs live, and apply engineering-docs' default homes.
 
-## Declare repository process
+## Autonomy
 
-Amend or create the **Repository process** block in `MAINTAINING.md` from
-[`templates/repo-declarations.md`](templates/repo-declarations.md). Record the
-tracker choice, canonical **scope and stories** home (`issue-tracker` or
-`project-docs`), workflow-state owner (`tracker` or `project-docs`) and pointer,
-docs-layout homes, merge policy/authority and work-item runbook pointer. Use
-pointers only; never duplicate runbook or policy content.
-With `issue-tracker`, the parent issue is the canonical change scope/story home;
-do not duplicate it. This block is the completion gate.
-With tracker `none`, use `project-docs` for both scope/story and workflow state.
+Record the chosen level in the runbook and wire it into config:
 
-## Docs layout
+- `.provenant/preset-rules.toml` selects the preset: `by_readiness` (underspecified
+  work goes to `scope-then-run`), `by_risk`, `by_paths` (for example a security path to
+  `review-council`).
+- `.provenant/roles.toml` holds project lenses and strictness, such as the verifier's
+  `family = "cross_required"`.
+- The `deliver` preset parameters `land_tier` and `decision_session` set what lands
+  unattended. Routine and substantial work land on green CI by default, and crucial
+  work asks the session. A repo file cannot lower `land_tier`; say so rather than try.
 
-Ask where specs, runbooks and ADRs live. `setup-repo` owns the declaration and
-may apply `engineering-docs`'s **Default homes** without invoking it.
+Confirm each with `provenant preset explain NAME` and `provenant config check`.
 
-## GitHub branch: steps 1-7
+## GitHub steps
 
-Only when the tracker is GitHub issues and the remote host is confirmed:
+Only with tracker GitHub issues and a confirmed host:
 
-1. **Labels:** copy [`templates/labels.yml`](templates/labels.yml) and
-   [`templates/workflows-labels.yml`](templates/workflows-labels.yml) to
-   `.github/labels.yml` and `.github/workflows/labels.yml`; warn that
-   `skip-delete: false` prunes undeclared labels.
-2. **Ruleset:** add the [`ci-status` aggregate](templates/ci-status-aggregate.yml),
-   then create the ruleset per
-   [ruleset guidance](references/ruleset-and-ci.md), confirming its app id.
-3. **Issue forms/security:** copy [`templates/SECURITY.md`](templates/SECURITY.md)
-   to the root or verify a valid private route. Copy
-   [`bug.yml`](templates/ISSUE_TEMPLATE/bug.yml),
-   [`config.yml`](templates/ISSUE_TEMPLATE/config.yml),
-   [`feature.yml`](templates/ISSUE_TEMPLATE/feature.yml), and
-   [`work-item.yml`](templates/ISSUE_TEMPLATE/work-item.yml) to
-   `.github/ISSUE_TEMPLATE/`, adapting project gates, fields, owner and repo.
-   Use feature for discovery and work-item for accepted, bounded proposals. Confirm private vulnerability
-   reporting is enabled or replace `<private-reporting-route>` with a working
-   confidential contact method. Publish only when the placeholder is gone and
-   both routes work.
-4. **PR template:** copy
-   [`templates/pull_request_template.md`](templates/pull_request_template.md)
-   into `.github/` and adapt evidence rows; retain decision and review sections.
-   Merge [`templates/gitignore-agent-runs.txt`](templates/gitignore-agent-runs.txt)
-   into the target `.gitignore` once, preserving its other rules. Local writers
-   also add these rules to `.git/info/exclude` initially.
-5. **Work-item runbook:** copy [the doctrine](references/doctrine.md) to the
-   target's declared work-item runbook path (default
-   `docs/runbooks/github-workflow.md`), adding its mechanics; the project
-   decides merge authority.
-   If the repository declares a tracker command, document it in the runbook
-   and route issue and project-item writes through that command.
-6. **Project board:** create the [six-status board](references/project-board.md).
-7. **CODEOWNERS/Dependabot:** adapt to the stack; the
-   [`Dependabot` template](templates/dependabot.yml) keeps its dependency label.
+1. **Labels:** copy [`labels.yml`](templates/labels.yml) and
+   [`workflows-labels.yml`](templates/workflows-labels.yml). The sync prunes any
+   undeclared label, so warn before the first run. Labels signal handling only, never
+   type or status.
+2. **Issue forms:** copy [`ISSUE_TEMPLATE/`](templates/ISSUE_TEMPLATE/config.yml): Epic,
+   Feature, Task and Bug. The spec fields sit on Feature and Task. Confirm private
+   vulnerability reporting works, then copy [`SECURITY.md`](templates/SECURITY.md).
+3. **Ruleset:** add the [`ci-status` aggregate](templates/ci-status-aggregate.yml), then
+   create a ruleset requiring that one exact-head check, per
+   [ruleset guidance](references/ruleset-and-ci.md). Ask which jobs it should `needs:`.
+4. **PR template:** copy [`pull_request_template.md`](templates/pull_request_template.md)
+   and adapt the evidence rows.
+5. **Runbook:** seed the declared work-item runbook from
+   [the runbook seed](references/runbook-seed.md) and add the project's mechanics.
+6. **Dependabot and CODEOWNERS:** adapt [`dependabot.yml`](templates/dependabot.yml).
 
-## Stop conditions
+## Stop
 
-Stop for an unnamed target, unconfirmed write permission, an unconfirmed
-remote host before any `gh` command, replacement of an existing ruleset or
-labels file, semantic conflict, or ambiguous `ci-status` dependencies. Ask
-which jobs it should `needs:`.
+Stop for an unnamed target, unconfirmed write permission or host, replacement of an
+existing ruleset or labels file, a semantic conflict, or ambiguous `ci-status`
+dependencies.
