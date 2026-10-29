@@ -37,12 +37,19 @@ format, so `feat/a+b` is accepted.
 
 A remote base such as `origin/main` is pinned to the commit the remote
 advertises, rather than the tracking ref, and revision operators apply to that
-commit (`origin/main~1`). Remote bases require a reachable remote; an offline
-or missing remote base fails instead of trusting a stale tracking ref.
+commit (`origin/main~1`). This holds for every spelling of the tracking root
+(`remotes/origin/HEAD~1`, `refs/remotes/origin/main^`, `origin`, `@{u}`).
+Remote bases require a reachable remote; an offline or missing remote base
+fails instead of trusting a stale tracking ref, and so does a base that Git
+resolves to a remote-tracking ref the remote did not advertise (such as
+`Origin/main` on a case-insensitive filesystem).
 
 Host origin refresh leaves out advertised branches whose names collide with
 another advertised name, with a warning; their tracking refs may remain
-stale. It fails only if the remote's default branch is among them. The
+stale. `HEAD` counts as an existing name, so a branch called `head` collides
+with `origin/HEAD`, and a branch that would be written into an existing
+tracking symref is left out too. It fails only if the remote's default branch
+is among them. Refresh fetches pass `core.precomposeunicode=true`. The
 pre-push policy reads the remote's advertised default branch instead of the
 local tracking HEAD, and refuses the push if none is advertised.
 
