@@ -20,6 +20,8 @@ struct Rig {
     state: PathBuf,
     cargo: PathBuf,
     log: PathBuf,
+    /// Where a waiting build tells the host it waits.
+    marker: PathBuf,
 }
 impl Rig {
     fn new() -> Result<Self> {
@@ -53,6 +55,7 @@ impl Rig {
         )?;
         fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700))?;
         Ok(Self {
+            marker: root.join("build-slot-wait"),
             _temp: temp,
             state,
             cargo,
@@ -75,6 +78,7 @@ impl Rig {
             .env("PROVENANT_BUILD_SLOT_STATE", &self.state)
             .env("PROVENANT_BUILD_SLOTS", slots.to_string())
             .env("PROVENANT_BUILD_WAIT_SECS", wait_secs.to_string())
+            .env("PROVENANT_BUILD_WAIT_MARKER", &self.marker)
             .env_remove("PROVENANT_BUILD_SLOT")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -202,6 +206,10 @@ fn a_killed_build_releases_its_slot_and_the_wait_is_reported() -> Result {
         !rig.started("start"),
         "the second build waits while the first holds the slot"
     );
+    // The host reads this to show the lane as waiting in `lanes` and `status`.
+    assert!(until(Duration::from_secs(20), || {
+        fs::read_to_string(&rig.marker).is_ok_and(|text| text.starts_with("slot "))
+    }));
     // SIGKILL leaves no chance to release anything: the kernel does.
     holder.kill()?;
     holder.wait()?;
@@ -209,6 +217,7 @@ fn a_killed_build_releases_its_slot_and_the_wait_is_reported() -> Result {
     // descriptor is close-on-exec, so only the dead shim held it.
     assert!(finish(&mut waiter, Duration::from_secs(30))?);
     assert!(rig.started("end"));
+    assert!(!rig.marker.exists(), "the marker goes once the wait ends");
     let stderr = stderr_of(&mut waiter)?;
     assert!(
         stderr.contains("waiting for a build slot (1 of 1 in use)"),
@@ -481,8 +490,8 @@ fn read_only_slot_files_cannot_be_unlinked_or_created_by_the_build() -> Result {
 fn an_unusable_slot_directory_does_not_stop_the_build() -> Result {
     let rig = Rig::new()?;
     // A regular file where the slot directory belongs.
-    let fabric = rig.state.join("fabric");
-    fs::write(&fabric, b"not a directory")?;
+    let slots = rig.state.join(DIRECTORY.join("/"));
+    fs::write(&slots, b"not a directory")?;
     let mut child = rig.shim(1, &["build"])?;
     assert!(finish(&mut child, Duration::from_secs(10))?);
     assert!(rig.started("end"));

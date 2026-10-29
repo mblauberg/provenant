@@ -213,7 +213,8 @@ impl RunStore {
                 let ticket = call.retry(|| self.ticket(&self.db, lane.attempt_id)).ok()?;
                 let class = ticket.lane_class;
                 let waiting_for = if matches!(lane.state, AttemptState::Running { .. }) {
-                    self.disk_pause_wait(lane)?
+                    self.disk_pause_wait(lane)
+                        .or_else(|| self.build_slot_wait(lane, call))?
                 } else if matches!(lane.state, AttemptState::Queued { .. }) {
                     "launch: not yet handed to a guardian".to_owned()
                 } else {
@@ -260,6 +261,30 @@ impl RunStore {
                 })
             })
             .collect()
+    }
+    /// A gated build in the lane says it waits by writing a marker in the
+    /// lane's private temporary directory. The lane writes it, so it is read
+    /// without following links, bounded, and trusted only for which of two
+    /// fixed waits it names and that it is fresh.
+    fn build_slot_wait(&self, lane: &AttemptRecord, call: &Request<'_>) -> Option<String> {
+        use provenant_os::build_slots::{WAIT_MARKER, WaitKind};
+        let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
+        match attempt.metadata_at("process-exit.json".as_ref(), false) {
+            Err(error) if error.is_not_found() => {}
+            _ => return None,
+        }
+        let temporary = attempt.open_directory("tmp".as_ref()).ok()?;
+        let raw = temporary.read_stable(WAIT_MARKER.as_ref(), 64).ok()?;
+        let now = call.clock.wall_now().ok()?.as_micros() / 1_000_000;
+        match WaitKind::from_marker(std::str::from_utf8(&raw).ok()?, u64::try_from(now).ok()?)? {
+            WaitKind::Slot => {
+                Some("build slot: a cargo build waits for one of the host's build slots".to_owned())
+            }
+            WaitKind::CargoLock => Some(
+                "build slot: a cargo build waits for another build's lock in its target directory"
+                    .to_owned(),
+            ),
+        }
     }
     /// The running guardian publishes this lane's pause in its checkpoint.
     fn disk_pause_wait(&self, lane: &AttemptRecord) -> Option<String> {

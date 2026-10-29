@@ -758,6 +758,7 @@ fn prepare_candidates(
             &build_settings,
             &home,
             scratch,
+            &paths.temporary,
             &provenant_executable,
             roots.state.as_path(),
         )?;
@@ -1064,6 +1065,7 @@ fn prepare_command(
         &settings,
         &home,
         &scratch,
+        &paths.temporary,
         &runtime,
         roots.state.as_path(),
     )?;
@@ -1152,6 +1154,7 @@ fn configure_build_slots(
     settings: &provenant_config::LaneBuildSettings,
     home: &Path,
     scratch: &Path,
+    temporary: &Path,
     runtime: &Path,
     state: &Path,
 ) -> Result<(), String> {
@@ -1173,6 +1176,8 @@ fn configure_build_slots(
                         slots,
                         wait_seconds: settings.build_wait().as_secs(),
                         cargo: &cargo,
+                        // The lane's own $TMPDIR, which the host reads back.
+                        wait_marker: &temporary.join(provenant_os::build_slots::WAIT_MARKER),
                     },
                 )
                 .map_err(|error| error.to_string())?,
@@ -3590,17 +3595,102 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
         );
-        // The writer plan the CLI prepares, with its grant list, must leave the
-        // build slot directory out of reach: a lane cannot create, unlink or
-        // replace a slot file.
+        // The writer plan the CLI prepares must leave the build slot directory
+        // out of reach once an adapter adds its grants: a lane cannot create,
+        // unlink or replace a slot file. Cursor never runs `LaneRuntime::grant`
+        // or sets up build slots, so Codex, which does both, takes the plan.
         let confinement = launch.confinement.as_ref().ok_or("confinement")?;
-        let slots = confinement
-            .state_root
-            .join(provenant_os::build_slots::DIRECTORY.join("/"));
-        let grants = provenant_confinement::write_grants(
-            confinement.plan.permissions(),
-            &confinement.profile,
+        let cargo = home.join(".cargo/bin/cargo");
+        for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+            std::fs::create_dir_all(home.join(path))?;
+        }
+        std::fs::write(home.join(".rustup/settings.toml"), "")?;
+        std::fs::write(&cargo, b"#!/bin/sh\n")?;
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o700))?;
+        let codex_route = provenant_records::ResolvedRoute {
+            extra: Default::default(),
+            adapter: "codex".into(),
+            model: "fixture-model".into(),
+            effort: None,
+            catalogue_revision: "fixture".into(),
+            account_key: Some("local".into()),
+            host: "fixture".into(),
+            alternatives: Default::default(),
+            exclusions: Vec::new(),
+            eligibility: provenant_records::RouteEligibility::Eligible,
+            readiness: provenant_records::RouteReadiness::Ready {
+                extra: Default::default(),
+                availability_ref: "fixture".into(),
+                expires_unix_seconds: 100,
+            },
+            confidentiality: provenant_records::RouteConfidentiality {
+                extra: Default::default(),
+                evidence_ref: "fixture".into(),
+            },
+            pool_selection: None,
+        };
+        let codex_account = provenant_providers::identity::RegisteredAccount::new(
+            "codex",
+            "local",
+            home.join(".codex"),
+        )?;
+        let codex_prompt = provenant_providers::Prompt::new("grants".into());
+        let codex_runtime = assets.join("provenant");
+        let mut codex = provenant_providers::Adapter::prepare(
+            &provenant_providers::codex::Codex,
+            provenant_providers::PrepareInput {
+                command: None,
+                route: &codex_route,
+                confined: &confinement.plan,
+                prompt: &codex_prompt,
+                continuation: None,
+                grant_digest: "fixture",
+                executable: &executable,
+                home: &home,
+                user: "fixture".as_ref(),
+                host_var: &|_| None,
+                account: Some(&codex_account),
+                token: None,
+                cwd: &project.join(".worktrees/writer"),
+                git_context: false,
+                nonce: [9; 16],
+                provenant: provenant_providers::LaneRuntime {
+                    executable: &codex_runtime,
+                    git: &git,
+                    state: &state,
+                    child_state: &state.join("children"),
+                    home: &home,
+                    depth: 1,
+                    attempt: attempt_id,
+                    assets: &assets,
+                },
+            },
+        )?;
+        assert!(
+            codex.env.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"),
+            "the lane builds into its own target"
         );
+        configure_build_slots(
+            &mut codex,
+            &provenant_config::LaneBuildSettings::default(),
+            &home,
+            &paths.scratch,
+            &paths.temporary,
+            &codex_runtime,
+            &state,
+        )?;
+        let slots = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
+        assert!(
+            codex
+                .profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|grant| grant.path == slots && grant.scope == PathScope::Subtree),
+            "build slots were set up for this lane"
+        );
+        let grants =
+            provenant_confinement::write_grants(confinement.plan.permissions(), &codex.profile);
         assert!(!grants.is_empty(), "the profile lists its write grants");
         for grant in &grants {
             let reaches = match grant.scope {
