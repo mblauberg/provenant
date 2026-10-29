@@ -481,6 +481,7 @@ pub enum ErrorKind {
     BranchExists,
     LaneCoordinationRefused,
     UpgradeRefused,
+    UpgradeRequired,
     Timeout,
     Peer,
 }
@@ -527,6 +528,7 @@ impl ErrorKind {
             Self::BranchExists => "BRANCH_EXISTS",
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::UpgradeRefused => "UPGRADE_REFUSED",
+            Self::UpgradeRequired => "upgrade_required",
             Self::Timeout => "TIMEOUT",
             Self::Peer => "PEER",
         }
@@ -558,6 +560,9 @@ impl From<&RunError> for ErrorKind {
             RunError::DepthExceeded { .. } | RunError::DepthOverflow => Self::LaneDepth,
             RunError::Capacity => Self::QueueFull,
             RunError::Contention => Self::Contention,
+            RunError::Decode(provenant_records::DecodeError::UnsupportedVersion {
+                found, ..
+            }) if *found > 1 => Self::UpgradeRequired,
             RunError::Decode(_) | RunError::ArtifactMismatch => Self::StateCorrupt,
             _ => Self::Io,
         }

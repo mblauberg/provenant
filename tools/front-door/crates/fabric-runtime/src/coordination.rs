@@ -47,9 +47,6 @@ pub enum CoordinationError {
     ResponseEncoding(#[source] serde_json::Error),
     #[error("Fabric store operation failed")]
     Store(#[source] provenant_fabric_store::Error),
-    /// The store refused an upgrade; its message names the data and remedy.
-    #[error(transparent)]
-    UpgradeRefused(provenant_fabric_store::Error),
     #[error("clock operation failed")]
     Time(#[from] provenant_core::TimeError),
 }
@@ -65,9 +62,6 @@ impl From<provenant_fabric_store::Error> for CoordinationError {
         match error {
             provenant_fabric_store::Error::Busy => Self::Busy,
             provenant_fabric_store::Error::Cancelled => Self::Cancelled,
-            error @ provenant_fabric_store::Error::LegacyImportData { .. } => {
-                Self::UpgradeRefused(error)
-            }
             other => Self::Store(other),
         }
     }
@@ -1164,21 +1158,6 @@ mod tests {
             CoordinationError::Time(provenant_core::TimeError::WallRange).code(),
             "state_corrupt"
         );
-    }
-
-    #[test]
-    fn refused_upgrade_has_its_own_code_and_names_the_data() {
-        let error = CoordinationError::from(provenant_fabric_store::Error::LegacyImportData {
-            table: "tasks",
-            rows: 2,
-        });
-        assert_eq!(error.code(), "upgrade_refused");
-        let text = error.to_string();
-        assert!(
-            text.contains("2 row(s) of legacy import data in table tasks"),
-            "{text}"
-        );
-        assert_eq!(facade::FacadeError::from(&error).code(), "upgrade_refused");
     }
 
     #[test]

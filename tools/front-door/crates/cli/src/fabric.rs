@@ -985,6 +985,7 @@ pub fn coordination_outcome(
         | FacadeError::Conflict
         | FacadeError::LaneCoordinationRefused
         | FacadeError::UpgradeRefused
+        | FacadeError::UpgradeRequired { .. }
         | FacadeError::PeerVersion
         | FacadeError::PeerProtocolMismatch { .. } => Outcome::Refused,
         FacadeError::Timeout => Outcome::Timeout,

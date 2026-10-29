@@ -167,7 +167,7 @@ room for the block or the selected data does not fit, the node fails before its
 next attempt is admitted and reports an advance error. A failure before a
 fallback preserves the previous attempt without creating a fallback attempt.
 An admitted node without selected inputs replays its full prompt even if the
-limit is lowered. Increase the limit within the host ceiling and start a new graph to
+limit is lowered. Increase the limit in the host configuration and start a new graph to
 retry a failed node. A document prompt over a structural limit instead pauses
 the graph, which can be resumed after the limit is extended. Inspect node
 outputs with `provenant fabric graph status --json`.
@@ -259,16 +259,11 @@ Malformed optional handoffs are ignored with an output warning. The writer
 still needs its configured completion verdict unless it emits a valid handoff.
 
 The graph allows two continuations by default. Configure `continuations` in
-the graph's `limits` or host graph policy; 0 disables them. To extend a paused
-graph within its host ceiling:
-
-```sh
-provenant fabric graph resume --document graph.json --extend limits.continuations=3
-```
+the host graph policy; 0 disables them. To extend a paused graph, raise the
+host limit and resume the graph.
 
 Planner fragments refused for a structural limit are retained in the
-checkpoint. Extend the named limit, for example `--extend limits.nodes=64`,
-to retry admission after reopening the graph. Invalid fragments still require
+checkpoint. Raise the named host limit to retry admission after reopening the graph. Invalid fragments still require
 a corrected plan in a new graph; increasing a limit cannot repair their JSON.
 
 Invalid planner output pauses with an explicit reason; correct the brief or
@@ -321,20 +316,17 @@ negative `until` verdict starts the next round.
 
 Configure host limits for the full expansion before running. This example
 requires seven nodes and a dependency depth of six. The default host depth and
-ceiling are four, so this example needs explicit host configuration before it
+limit is four, so this example needs explicit host configuration before it
 runs. To run two rounds and permit an extension to four, set:
 
 ```toml
 [domains.fabric.graph.limits]
-expansion_depth = 6
-
-[domains.fabric.graph.limit_ceiling]
 expansion_depth = 12
 ```
 
 All allowed rounds count
 towards structural and prompt limits even if the first round passes. An
-extension adds to that expansion and must fit host ceilings. The safety bounds
+extension adds to that expansion and must fit host limits. The safety bounds
 are 1024 rounds, 16384 expanded nodes and 64 bytes per expanded node ID.
 
 Inspect rounds with `provenant fabric graph status GRAPH_ID --json`. Body IDs
@@ -348,8 +340,7 @@ allowance to four:
 
 ```sh
 provenant fabric graph resume --document graph.json \
-  --extend loop.repair-review.rounds=4 \
-  --extend limits.expansion_depth=12
+  --extend loop.repair-review.rounds=4
 ```
 
 Loop extensions and decisions require an exhausted loop. A decision adds at most
@@ -457,8 +448,6 @@ Graph policy is configured separately from peer transport limits. For example:
 nodes = 512
 edges = 4096
 
-[domains.fabric.graph.limit_ceiling]
-nodes = 1024
 
 [domains.fabric.graph.budget]
 unknown_usage = "warn" # or "pause"
@@ -480,24 +469,14 @@ The defaults are 16 routes, 256 KiB per node prompt, 4 MiB per graph,
 expansion depth 4 and fan-out 32. Set concurrency to 0 to use host lane caps.
 Fan-out counts direct dependants of a node; expansion depth is the longest
 dependency chain in edges, with root nodes at depth 0.
-Each omitted ceiling defaults to its configured limit and can be raised to
-allow a graph document to request a higher value. Budget fields are optional;
-unset fields have no budget. Costs are in US dollars.
-
-A graph document can set a `limits` object with any of these fields. Values
-must be positive, except that `continuations` may be 0. Values above the current configured ceiling are clamped to
-that ceiling and recorded in a note.
+Budget fields are optional; unset fields have no budget. Costs are in US dollars.
+Document `limits` are ignored with a warning; host limits always apply.
 When a structural limit or budget is reached, graph status reports `paused` and
 the checkpoint records the reason. A paused command exits successfully; scripts
-should inspect the status. Running attempts can finish. Resume with,
-for example, `provenant fabric graph resume --document graph.json --extend limits.nodes=600`
-or `--extend per_graph.tokens=2000000`. Repeat `--extend` for multiple values.
-Extensions set absolute ceilings and are recorded in the checkpoint. The
-effective value is the greater of the configured value and the extension, so
-replaying an extension or retrying the same `--extend` is a no-op. Limit
-extensions must also fit the configured ceiling. Budget extensions require
-the corresponding budget to be configured; extending concurrency requires a
-nonzero configured concurrency limit. Token counts and estimated
+should inspect the status. Running attempts can finish. Raise the host limit and
+resume the graph, or extend a configured budget with `--extend per_graph.tokens=2000000`.
+Budget extensions are recorded in the checkpoint and use absolute values.
+Token counts and estimated
 cost use attempt telemetry. Missing or partial usage is reported as unknown
 in graph status and the checkpoint's usage events. By default,
 `unknown_usage = "warn"` continues with a visible warning; set it to `"pause"`
@@ -830,54 +809,6 @@ provenant workflow session handoff --to workshop --account work \
 
 Drop `--dry-run` once the plan looks right. Follow the peer's lanes from here
 with `provenant lanes --host workshop`.
-
-## Legacy import data
-
-A newer release cannot upgrade a store that still holds data from the removed
-legacy import. Opening it fails with `upgrade_refused`; the message names the
-table and its row count, and the store stays at a version the previous release
-still opens. An import that brought nothing over does not block the upgrade.
-When the refusing store is a project's home, a peer's events read receives
-`upgrade_refused`: the home tries to pull events before opening coordination
-and returns the refusal in an error frame. Other read-only calls report the
-home as unavailable; changes report `launch_unknown`, and no receipt will
-exist for them. For those failures, the reason and remedy are in the home's
-`~/.local/share/provenant/v1/peer-agent/agent.log` while the peer agent runs.
-With in-process handling, other read-only calls include the reason from SSH
-stderr. Changes discard that captured stderr, so their callers see no reason.
-
-Keep the previous release while you need that data. To move to the newer
-release, archive the store and let Fabric create a fresh one:
-
-1. On the previous release, record what you still need from
-   `provenant fabric task list` and `provenant fabric mail read`, settle every
-   unresolved landing push with `provenant fabric landing reconcile`, and
-   resolve any peer operation that still reports `launch_unknown`, except calls
-   refused before the store opened as described above: those have no receipt
-   to reconcile. Active claims and landing leases do not survive the archive.
-2. Stop every process that holds the store: MCP servers in open sessions, the
-   `fabric peer-agent` LaunchAgent and running lanes.
-3. Move the store files out of the state directory (here the default):
-
-   ```sh
-   state=~/.local/share/provenant/v1
-   archive=~/fabric-store-archive-$(date +%Y%m%d)
-   mkdir -m 700 "$archive"
-   mv "$state"/fabric/fabric.sqlite3* "$archive"/
-   # Include the host-owned chair index when present.
-   for file in "$state"/fabric/host.sqlite3 "$state"/fabric/host.sqlite3-wal "$state"/fabric/host.sqlite3-shm "$state"/fabric/host.sqlite3-journal; do
-     if [ -e "$file" ]; then mv "$file" "$archive"/; fi
-   done
-   ```
-
-4. Run the newer release. It starts with no tasks, mail, events, claims or peer
-   journal. The host chair association index also starts empty, so retained runs
-   display as unbound until an explicit root replay repairs their association;
-   create again any coordination work you still need.
-
-On a project's home host, the archive removes that project's tasks and mail for
-every peer, and their in-flight operations against it report `launch_unknown`.
-Archive the home only when its peers have no work in flight.
 
 ## Verify targeted changes
 

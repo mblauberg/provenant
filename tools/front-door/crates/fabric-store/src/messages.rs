@@ -23,7 +23,6 @@ pub enum TaskRef {
     Remote { host: HostId, id: TaskId },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Message {
     pub header: RecordHeader,
     pub project: ProjectId,

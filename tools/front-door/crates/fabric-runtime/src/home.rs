@@ -295,6 +295,7 @@ fn is_definitive_refusal(error: &facade::FacadeError) -> bool {
             | FacadeError::PeerVersion
             | FacadeError::PeerProtocolMismatch { .. }
             | FacadeError::UpgradeRefused
+            | FacadeError::UpgradeRequired { .. }
             | FacadeError::HomeUnavailable
     )
 }

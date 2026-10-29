@@ -45,7 +45,6 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
         let mut doc = planner(2);
         doc.graph_id = format!("planned-{field}");
         let limits = serde_json::from_value(json!({field:cap})).unwrap();
-        let ceiling = crate::config::GraphLimits::default();
         let mut first = slice("a", &["src"]);
         first["goal"] = json!("detail ".repeat(700));
         let output = result(vec![first, slice("b", &["docs"])]);
@@ -53,19 +52,20 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
         {
             let mut journal = FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
             journal.bind(GraphExecution { integration_base: None, directory: base.clone(), document: doc.clone() }).unwrap();
-            let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &ceiling, &Default::default()).unwrap();
+            let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
             assert_eq!(run.status, GraphStatus::Paused);
             assert!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().result.as_ref().unwrap().truncated);
             assert!(run.checkpoint.nodes[0].fragment.as_ref().unwrap().len() > 4096);
         }
         owner.observations.extend(["a", "b", "checked"].map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)));
         let mut journal = FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
-        let run = resume_with_budget(&doc, &mut owner, &mut journal, &limits, &ceiling, &Default::default(), &[format!("limits.{field}={}", cap * 2)]).unwrap();
+        let limits = serde_json::from_value(json!({field:cap * 2})).unwrap();
+        let run = resume_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default(), &[]).unwrap();
         assert_eq!(run.status, GraphStatus::Complete, "{field}: {:?}", run.checkpoint.pause_reason);
         assert!(run.checkpoint.successful());
         assert_eq!(run.checkpoint.expansions.len(), 1);
         assert_eq!(owner.calls.len(), 4);
-        assert_eq!(advance_with_budget(&doc, &mut owner, &mut journal, &limits, &ceiling, &Default::default()).unwrap().checkpoint, run.checkpoint);
+        assert_eq!(advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap().checkpoint, run.checkpoint);
     }
 }
 
@@ -192,17 +192,15 @@ fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
 }
 
 #[test]
-fn plan_validates_effective_limits_and_ceiling_before_saving() {
+fn plan_validates_host_limits_before_saving() {
     let output = result(vec![slice("a", &["src"]), slice("b", &["docs"])]);
     for (field, cap) in [("nodes", 3), ("edges", 3), ("fan_out_width", 2), ("expansion_depth", 1)] {
         let mut doc = planner(2);
         doc.limits = Some(serde_json::from_value(json!({field: 999})).unwrap());
-        let ceiling: crate::config::GraphLimits = serde_json::from_value(json!({field:cap})).unwrap();
-        let config = crate::config::GraphConfig { limits: ceiling.clone(), limit_ceiling: ceiling, ..Default::default() };
-        let limits = doc.limits.as_ref().unwrap().resolve(&config).unwrap();
+        let limits = serde_json::from_value(json!({field:cap})).unwrap();
         let mut owner = fixture_owner(&[&output]);
         let mut journal = MemoryJournal::default();
-        let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &config.limit_ceiling, &Default::default()).unwrap();
+        let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
         assert!(run.checkpoint.pause_reason.as_ref().unwrap().contains(field));
         assert!(run.checkpoint.expansions.is_empty());
@@ -298,25 +296,25 @@ fn honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract
 fn continuation_budget_pauses_then_extends_without_duplicating_prior_work() {
     let doc = writer_graph();
     let mut limits = crate::config::GraphLimits { continuations: 1, ..Default::default() };
-    let ceiling = crate::config::GraphLimits::default();
     let mut owner = fixture_owner(&[STOP, STOP]);
     let mut journal = MemoryJournal::default();
-    let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &ceiling, &Default::default()).unwrap();
+    let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert!(!run.checkpoint.successful());
     assert_eq!(run.checkpoint.expansions.len(), 1);
     assert_eq!(run.checkpoint.remaining.as_ref().unwrap().continuations, 0);
     assert!(run.checkpoint.pause_reason.unwrap().contains("limits.continuations=1"));
     assert_eq!(owner.calls.len(), 2);
-    assert_eq!(advance_with_budget(&doc, &mut owner, &mut journal, &limits, &ceiling, &Default::default()).unwrap().status, GraphStatus::Paused);
+    assert_eq!(advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap().status, GraphStatus::Paused);
     owner.observations.extend(["VERDICT: PASS", "checked"].map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)));
-    let resumed = resume_with_budget(&doc, &mut owner, &mut journal, &limits, &ceiling, &Default::default(), &["limits.continuations=2".into()]).unwrap();
+    limits.continuations = 2;
+    let resumed = resume_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default(), &[]).unwrap();
     assert_eq!(resumed.status, GraphStatus::Complete);
     assert_eq!(resumed.checkpoint.expansions.len(), 2);
     assert_eq!(owner.calls.len(), 4);
     limits.continuations = 0;
     let mut owner = super::FakeOwner { observations: [terminal_with_result(AttemptOutcome::Succeeded, STOP)].into(), ..Default::default() };
-    let disabled = advance_with_budget(&doc, &mut owner, &mut MemoryJournal::default(), &limits, &ceiling, &Default::default()).unwrap();
+    let disabled = advance_with_budget(&doc, &mut owner, &mut MemoryJournal::default(), &limits, &Default::default()).unwrap();
     assert_eq!(disabled.status, GraphStatus::Paused);
     assert!(disabled.checkpoint.expansions.is_empty());
     assert_eq!(owner.calls.len(), 1);
@@ -433,7 +431,7 @@ fn expansion_at_node_budget_reads_journal_once() {
     let mut owner = fixture_owner(&vec![output.as_str(); count]);
     owner.observations.extend((0..count).map(|_| terminal_with_result(AttemptOutcome::Succeeded, "done")));
     let mut journal = CountingJournal::default();
-    let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &limits, &Default::default()).unwrap();
+    let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!(run.checkpoint.nodes.len(), limits.nodes);
     assert_eq!(run.checkpoint.expansions.len(), count);

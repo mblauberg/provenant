@@ -143,7 +143,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
             &mut journal,
             &Default::default(),
             &Default::default(),
-            &Default::default(),
         )?;
         assert_eq!(run.status, graph::GraphStatus::Pending);
         settle_owned_worktree(holder, &fixture.roots, &FreeWorkers, None)?;
@@ -164,7 +163,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         &mut journal,
         &Default::default(),
         &Default::default(),
-        &Default::default(),
     )?;
     assert_eq!(exhausted.status, graph::GraphStatus::Paused);
     for round in 1..=2 {
@@ -180,7 +178,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         &document,
         &mut owner,
         &mut journal,
-        &Default::default(),
         &Default::default(),
         &Default::default(),
         &["loop.revise.decision=accept".into()],

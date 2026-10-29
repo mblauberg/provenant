@@ -347,7 +347,6 @@ fn pending_ci_does_not_consume_attempt_concurrency() {
         &mut Journal::default(),
         &limits,
         &Default::default(),
-        &Default::default(),
     )
     .unwrap();
     assert_eq!(result.checkpoint.nodes[0].state, NodeState::Running);

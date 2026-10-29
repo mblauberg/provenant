@@ -212,6 +212,15 @@ pub enum FacadeError {
     OutputTooLarge,
     #[error("stored state is corrupt")]
     StateCorrupt,
+    #[error(
+        "upgrade required: reader release {reader_release}, writer release {writer_release}, {record} version {version}"
+    )]
+    UpgradeRequired {
+        reader_release: String,
+        writer_release: String,
+        record: String,
+        version: u64,
+    },
     #[error("Fabric store upgrade was refused")]
     UpgradeRefused,
     #[error("output publication failed")]
@@ -253,6 +262,7 @@ impl FacadeError {
             Self::BranchExists => "branch_exists",
             Self::OutputTooLarge => "output_too_large",
             Self::StateCorrupt => "state_corrupt",
+            Self::UpgradeRequired { .. } => "upgrade_required",
             Self::UpgradeRefused => "upgrade_refused",
             Self::PublicationFailed => "publication_failed",
             Self::Cancelled => "cancelled",
@@ -342,7 +352,6 @@ impl From<&super::CoordinationError> for FacadeError {
             CoordinationError::Entropy(_) | CoordinationError::EntropyEncoding => {
                 Self::io("generate entropy")
             }
-            CoordinationError::UpgradeRefused(_) => Self::UpgradeRefused,
             CoordinationError::Store(error) => Self::from(error),
         }
     }
@@ -363,13 +372,32 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::Invalid(_) | Error::PathEncoding | Error::ViewerLimit | Error::ViewerNotOpen => {
                 Self::InvalidInput
             }
+            Error::Decode(provenant_records::DecodeError::UnsupportedVersion { found, .. })
+                if *found > 1 =>
+            {
+                Self::UpgradeRequired {
+                    reader_release: env!("CARGO_PKG_VERSION").into(),
+                    writer_release: "unknown".into(),
+                    record: "record schema".into(),
+                    version: *found,
+                }
+            }
+            Error::SchemaVersion(version)
+                if *version > provenant_fabric_store::CURRENT_SCHEMA_VERSION as i64 =>
+            {
+                Self::UpgradeRequired {
+                    reader_release: env!("CARGO_PKG_VERSION").into(),
+                    writer_release: "unknown".into(),
+                    record: "database schema".into(),
+                    version: *version as u64,
+                }
+            }
             Error::Decode(_)
             | Error::Encode(_)
             | Error::SchemaVersion(_)
             | Error::UnversionedDatabase
             | Error::JournalMode(_)
             | Error::Time(_) => Self::StateCorrupt,
-            Error::LegacyImportData { .. } => Self::UpgradeRefused,
             // checked_directory's device refusal names only the child component.
             Error::Filesystem(provenant_os::fs::FsError::CrossDevice { .. }) => {
                 Self::io("verify Fabric filesystem device")
@@ -394,6 +422,30 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::FacadeError;
+
+    #[test]
+    fn future_schema_requires_upgrade_with_version_diagnostics() {
+        use provenant_fabric_store::Error;
+        let errors = [
+            Error::SchemaVersion(99),
+            Error::Decode(provenant_records::DecodeError::UnsupportedVersion {
+                found: 2,
+                line: 1,
+                column: 1,
+            }),
+        ];
+        for error in errors {
+            let facade = FacadeError::from(&error);
+            assert_eq!(facade.code(), "upgrade_required");
+            let message = facade.to_string();
+            assert!(message.contains(env!("CARGO_PKG_VERSION")));
+            assert!(message.contains("writer release unknown"));
+        }
+        assert_eq!(
+            FacadeError::from(&Error::SchemaVersion(1)),
+            FacadeError::StateCorrupt
+        );
+    }
 
     #[test]
     fn resume_preserves_no_fallback_and_defaults_for_older_senders()

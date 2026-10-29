@@ -3068,6 +3068,14 @@ fn graph_attempt_usage(
 fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> FacadeError {
     use provenant_fabric_runtime::graph::JournalError;
     match error {
+        JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
+            found, ..
+        }) if found > 1 => FacadeError::UpgradeRequired {
+            reader_release: env!("CARGO_PKG_VERSION").into(),
+            writer_release: "unknown".into(),
+            record: "graph checkpoint schema".into(),
+            version: found,
+        },
         JournalError::TooLarge => FacadeError::DispatchRefused {
             reason: "graph checkpoint exceeds its byte limit".into(),
         },
@@ -3167,19 +3175,11 @@ fn advance_graphs_after_settlement(
                 prices: None,
             };
             let graph_config = &factory.context.config.graph;
-            let limits = execution
-                .document
-                .limits
-                .as_ref()
-                .cloned()
-                .unwrap_or_default()
-                .resolve(graph_config)?;
             advance_with_budget(
                 &execution.document,
                 &mut owner,
                 &mut journal,
-                &limits,
-                &graph_config.limit_ceiling,
+                &graph_config.limits,
                 &graph_config.budget,
             )?;
             Ok(())
@@ -4229,7 +4229,19 @@ impl Factory {
                     bytes.as_slice(),
                     provenant_records::Limits::default(),
                 )
-                .map_err(|_| FacadeError::InvalidInput)?;
+                .map_err(|error| match error {
+                    provenant_records::DecodeError::UnsupportedVersion { found, .. }
+                        if found > 1 =>
+                    {
+                        FacadeError::UpgradeRequired {
+                            reader_release: env!("CARGO_PKG_VERSION").into(),
+                            writer_release: "unknown".into(),
+                            record: "graph document schema".into(),
+                            version: found,
+                        }
+                    }
+                    _ => FacadeError::InvalidInput,
+                })?;
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
                         &self.cwd, branch,
@@ -4352,13 +4364,6 @@ impl Factory {
                 prices: None,
             };
             let graph_config = &self.context.config.graph;
-            let limits = document
-                .limits
-                .as_ref()
-                .cloned()
-                .unwrap_or_default()
-                .resolve(graph_config)
-                .map_err(|reason| FacadeError::DispatchRefused { reason })?;
             let run = if resume {
                 let extensions = match &input {
                     GraphInput::Resume { extend, .. } => extend.as_slice(),
@@ -4368,8 +4373,7 @@ impl Factory {
                     document,
                     &mut owner,
                     &mut journal,
-                    &limits,
-                    &graph_config.limit_ceiling,
+                    &graph_config.limits,
                     &graph_config.budget,
                     extensions,
                 )
@@ -4378,8 +4382,7 @@ impl Factory {
                     document,
                     &mut owner,
                     &mut journal,
-                    &limits,
-                    &graph_config.limit_ceiling,
+                    &graph_config.limits,
                     &graph_config.budget,
                 )
             };
@@ -5868,7 +5871,6 @@ mod peer_tests {
                 &mut journal,
                 &Default::default(),
                 &Default::default(),
-                &Default::default(),
             )?;
             assert_eq!(seeded.checkpoint.nodes[0].state, NodeState::Running);
         }
@@ -6025,7 +6027,6 @@ mod peer_tests {
                 &mut journal,
                 &Default::default(),
                 &Default::default(),
-                &Default::default(),
             )?;
             let mut owner = BoundGraphOwner {
                 factory: &factory,
@@ -6038,7 +6039,6 @@ mod peer_tests {
                 &document,
                 &mut owner,
                 &mut journal,
-                &Default::default(),
                 &Default::default(),
                 &Default::default(),
             )?;
@@ -6134,7 +6134,6 @@ mod peer_tests {
             &mut journal,
             &Default::default(),
             &Default::default(),
-            &Default::default(),
         )?;
         let mut owner = BoundGraphOwner {
             factory: &factory,
@@ -6147,7 +6146,6 @@ mod peer_tests {
             &document,
             &mut owner,
             &mut journal,
-            &Default::default(),
             &Default::default(),
             &Default::default(),
         )?;
@@ -6193,13 +6191,11 @@ mod peer_tests {
             &mut journal,
             &Default::default(),
             &Default::default(),
-            &Default::default(),
         )?;
         let run = graph::advance_with_budget(
             &missing_document,
             &mut owner,
             &mut journal,
-            &Default::default(),
             &Default::default(),
             &Default::default(),
         )?;

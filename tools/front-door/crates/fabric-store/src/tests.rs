@@ -1087,25 +1087,41 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
 }
 
 #[test]
-fn retired_members_written_after_migration_are_refused() {
+fn newer_stored_task_header_reports_unsupported_version() {
+    let f = Fixture::new();
+    let store = f.open();
+    let (_, task) = seed_records(&f, &store);
+    store.db.execute(
+        "UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.header.schema_version',2) AS BLOB)",
+        [],
+    ).unwrap();
+    assert!(matches!(
+        store.task(project(), task.id, &f.request()),
+        Err(Error::Decode(
+            provenant_records::DecodeError::UnsupportedVersion { found: 2, .. }
+        ))
+    ));
+}
+
+#[test]
+fn retired_members_written_after_migration_are_ignored() {
     let f = Fixture::new();
     let store = f.open();
     let (_, t) = seed_records(&f, &store);
     write_null_members(&store, &t);
     let request = f.request();
     let id = provenant_core::OperationId::parse("create-1").unwrap();
-    assert!(matches!(
-        store.coordination_receipt::<TaskReceipt>(project(), actor(2), &id, &request),
-        Err(Error::Decode(_))
-    ));
-    assert!(matches!(
-        store.task(project(), t.id, &request),
-        Err(Error::Decode(_))
-    ));
-    assert!(matches!(
-        store.read_mail(project(), actor(3), Some(0), 100, &request),
-        Err(Error::Decode(_))
-    ));
+    assert!(
+        store
+            .coordination_receipt::<TaskReceipt>(project(), actor(2), &id, &request)
+            .is_ok()
+    );
+    assert_eq!(store.task(project(), t.id, &request).unwrap(), t);
+    assert!(
+        store
+            .read_mail(project(), actor(3), Some(0), 100, &request)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -1209,109 +1225,18 @@ fn empty_committed_peer_response_upgrades_unchanged() {
 }
 
 #[test]
-fn legacy_import_data_refuses_the_upgrade_and_keeps_every_row() {
-    let reference = r#"json('{"id":"i","project":"p","source":"s"}')"#;
-    let cases = [
-        (
-            "imports",
-            "INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,1,0,X'7B7D');".to_owned(),
-        ),
-        (
-            "imports",
-            "INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,0,1,X'7B7D');".to_owned(),
-        ),
-        (
-            "events",
-            format!(
-                "INSERT INTO imports VALUES('/old/fabric.db','{}','lp',0,0,0,X'7B7D'); \
-                 UPDATE events SET record=CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) \
-                 WHERE seq=1;",
-                ProjectId::from_bytes([9; 16])
-            ),
-        ),
-        (
-            "events",
-            "UPDATE events SET record=CAST(json_set(CAST(record AS TEXT),'$.kind','imported') AS BLOB) \
-             WHERE seq=1;"
-                .to_owned(),
-        ),
-        (
-            "messages",
-            format!(
-                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',{reference}) AS BLOB);"
-            ),
-        ),
-        (
-            "messages",
-            "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy_output_path','out.md') AS BLOB);"
-                .to_owned(),
-        ),
-        (
-            "messages",
-            format!(
-                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.conversation',\
-                 json_object('reference',{reference},'scope','legacy')) AS BLOB);"
-            ),
-        ),
-        (
-            "messages",
-            format!(
-                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.reply_to',\
-                 json_object('reference',{reference},'scope','legacy')) AS BLOB);"
-            ),
-        ),
-        (
-            "messages",
-            format!(
-                "UPDATE messages SET record=CAST(json_set(CAST(record AS TEXT),'$.task',\
-                 json_object('reference',{reference},'scope','legacy')) AS BLOB);"
-            ),
-        ),
-        (
-            "tasks",
-            format!(
-                "UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',{reference}) AS BLOB);"
-            ),
-        ),
-        (
-            "coordination_operations",
-            format!(
-                "UPDATE coordination_operations SET result=CAST(json_set(CAST(result AS TEXT),'$.task.legacy',{reference}) AS BLOB);"
-            ),
-        ),
-        (
-            "peer_operations",
-            format!(
-                "UPDATE peer_operations SET response=CAST(json_set(CAST(response AS TEXT),'$.result.data.result.task.legacy',{reference}) AS BLOB);"
-            ),
-        ),
-    ];
-    for (table, rows) in cases {
-        let f = Fixture::new();
-        let store = f.open();
-        seed_records(&f, &store);
-        downgrade_to_six(&store, &rows);
-        let before = stored_records(&store.db);
-        drop(store);
-        let refused = Store::open(&f.root, &f.request());
-        let error = refused.err().unwrap();
-        assert!(
-            matches!(error, Error::LegacyImportData { table: found, rows: 1 } if found == table),
-            "{table}: {error:?}"
-        );
-        let text = error.to_string();
-        assert!(
-            text.contains(&format!("1 row(s) of legacy import data in table {table}"))
-                && text.contains("docs/runbooks/fabric-hosts.md"),
-            "{text}"
-        );
-        let db = rusqlite::Connection::open(f.path()).unwrap();
-        let version: i64 = db
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap();
-        assert_eq!(version, 6, "{table}");
-        assert_eq!(stored_records(&db), before, "{table}");
-    }
+fn legacy_import_markers_do_not_block_upgrade() {
+    let f = Fixture::new();
+    let store = f.open();
+    let (_, task) = seed_records(&f, &store);
+    downgrade_to_six(
+        &store,
+        "INSERT INTO imports VALUES('/old/fabric.db','p','lp',0,1,0,X'7B7D'); \
+         UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.legacy',json_object('id','old')) AS BLOB);",
+    );
+    drop(store);
+    let store = f.open();
+    assert_eq!(store.task(project(), task.id, &f.request()).unwrap(), task);
 }
 
 #[test]

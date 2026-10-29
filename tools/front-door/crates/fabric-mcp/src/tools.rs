@@ -1071,6 +1071,12 @@ impl ServiceError {
     /// Stable structured error data. Uncertain mutations carry their
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
+        if let Self::Coordination(CoordinationError::Store(error)) = self {
+            let facade = FacadeError::from(error);
+            if matches!(facade, FacadeError::UpgradeRequired { .. }) {
+                return Self::Facade(facade).structured_error();
+            }
+        }
         if let Self::Mutation {
             operation_id,
             source,
@@ -1092,6 +1098,7 @@ impl ServiceError {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
             }
             Self::Facade(FacadeError::DispatchRefused { .. })
+            | Self::Facade(FacadeError::UpgradeRequired { .. })
             | Self::Facade(FacadeError::PeerProtocolMismatch { .. })
             | Self::Coordination(CoordinationError::Peer(
                 provenant_fabric_runtime::hosts::PeerError::ProtocolMismatch { .. },
