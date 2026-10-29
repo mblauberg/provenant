@@ -603,7 +603,19 @@ and the agent runs it in a fresh `fabric peer --in-process` child inside the
 login session, where the keychain is readable. When the agent is not
 listening, `fabric peer` handles the request itself as before. A request that
 reached the agent is never retried in process; a lost reply surfaces as an
-error and, for a mutation, as `launch_unknown`.
+error and, for a mutation, as `launch_unknown`. The agent has no concurrency
+cap or busy reply: each connection runs on its own thread, and the SSH
+server's session limits (`MaxSessions`, `MaxStartups`) bound how many arrive.
+
+Committed code moves between hosts with `git fetch`, never a bundle file.
+The sending checkout must be clean, with the head as its `HEAD`; it binds
+`refs/provenant/transport/<operation>/export`. The receiver fetches that ref
+into `refs/provenant/transport/<operation>/incoming` with `fetch.fsckObjects`,
+`transfer.fsckObjects` and `unpackLimit=1`, so `index-pack --strict` checks
+every object and connectivity before the ref moves. It then promotes
+`<operation>/verified-head` once the OID and ancestry match. A refused fetch
+leaves neither ref nor objects behind. There is no size limit; a fetch may run
+for 30 minutes. Remove finished transport refs with `git update-ref -d`.
 
 Re-running install is idempotent: it rewrites the plist only when it changed
 and restarts the agent so it serves the new binary. The plist's PATH starts

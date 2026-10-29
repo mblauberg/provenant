@@ -1080,26 +1080,6 @@ pub fn peer(
             let reply =
                 match provenant_fabric_runtime::peer_agent::forward(state.as_path(), &bytes)? {
                     provenant_fabric_runtime::peer_agent::Forward::Replied(reply) => Some(reply),
-                    // Refused unread at the agent's cap: nothing ran, so say busy.
-                    provenant_fabric_runtime::peer_agent::Forward::Busy => {
-                        let request = decode_request(&bytes)?;
-                        let mut busy = serde_json::to_vec(&PeerResponse {
-                            extra: Default::default(),
-                            version: 1,
-                            protocol: request.protocol,
-                            host: request.target_host,
-                            project: request.project.key,
-                            result: PeerResult::Error {
-                                data: provenant_fabric_runtime::hosts::PeerResultError {
-                                    extra: Default::default(),
-                                    error: FacadeError::Busy,
-                                },
-                                extra: Default::default(),
-                            },
-                        })?;
-                        busy.push(b'\n');
-                        Some(busy)
-                    }
                     provenant_fabric_runtime::peer_agent::Forward::Unreachable => None,
                 };
             if let Some(reply) = reply {
@@ -1614,12 +1594,11 @@ fn landing_error(error: &(dyn std::error::Error + 'static)) -> FacadeError {
             }
             E::Store(error) => FacadeError::from(error),
             E::PushNotFound { .. } => FacadeError::NotFound,
-            E::Invalid(_) | E::InvalidRemote | E::BundleTooLarge => FacadeError::InvalidInput,
+            E::Invalid(_) | E::InvalidRemote => FacadeError::InvalidInput,
             E::DirtyWorktree
             | E::IncompleteRepository
             | E::OidMismatch
             | E::NonFastForward
-            | E::BundleHeadMismatch
             | E::TransportConflict
             | E::RemoteMoved => FacadeError::Conflict,
             _ => FacadeError::io("landing"),
@@ -1655,7 +1634,6 @@ fn landing_local(
         executor,
         std::env::var_os("SSH_AUTH_SOCK").map(Into::into),
         context.config.ssh_executable.as_deref(),
-        context.config.limits.bundle_bytes,
     )?;
     let cwd = context.identity.cwd.to_path_buf()?;
     if reconcile {

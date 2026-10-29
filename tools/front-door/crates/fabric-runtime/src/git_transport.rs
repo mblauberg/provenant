@@ -1,9 +1,11 @@
 //! Bounded Git transport for committed writer results and fenced landing.
 //!
 //! Every Git child uses bounded OS execution with a fixed executable,
-//! explicit environment, disabled hooks and bounded capture. Bundle refs are
-//! operation-scoped under `refs/provenant/transport/`; no caller supplied ref
-//! or command string reaches Git.
+//! explicit environment, disabled hooks and bounded capture. Transport refs
+//! are operation-scoped under `refs/provenant/transport/`; no caller supplied
+//! ref or command string reaches Git. Peer objects arrive only through `git
+//! fetch` with `fsckObjects` and a forced `index-pack`, so Git's own receive
+//! path refuses corrupt, missing, duplicate or malformed objects.
 use provenant_core::{CancelToken, GitOid, OperationId, ProjectId};
 use provenant_fabric_store::{
     ClaimFence, Error as StoreError, LandingGuard, PushAction, PushOperation, PushPhase,
@@ -11,23 +13,23 @@ use provenant_fabric_store::{
 };
 use provenant_os::{
     exec::{ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
-    fs::{self, Directory, FileKind, FsError, LockGuard, PublishMode},
+    fs::{self, Directory, FsError, LockGuard},
 };
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
     time::Duration,
 };
 use thiserror::Error;
 
-pub const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STATUS_BYTES: usize = 64 * 1024;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// A peer fetch has no size cap, so its wall-clock bound is the only limit.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_HOME: &str = "/nonexistent";
 const PATH_VALUE: &str = "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin";
-const BUNDLE_DIR_MODE: u32 = 0o700;
 const LANDING_REMOTE: &str = "origin";
 
 #[derive(Debug, Error)]
@@ -52,12 +54,6 @@ pub enum GitTransportError {
     OidMismatch,
     #[error("candidate is not a fast-forward from the expected commit")]
     NonFastForward,
-    #[error("Git bundle exceeds the configured transport bound")]
-    BundleTooLarge,
-    #[error("Git bundle publication is visible but its directory sync failed")]
-    BundleDurabilityUnconfirmed,
-    #[error("Git bundle did not advertise exactly the requested head")]
-    BundleHeadMismatch,
     #[error("operation already has a different isolated Git object")]
     TransportConflict,
     #[error("remote `origin` has moved from the expected commit")]
@@ -86,98 +82,6 @@ impl GitTransportError {
 
 type Result<T> = std::result::Result<T, GitTransportError>;
 
-/// A private, durable directory for bundles. Files remain for explicit
-/// maintenance; retries with the same operation ID verify the existing bundle.
-pub struct BundleArea {
-    directory: Directory,
-    path: PathBuf,
-}
-impl BundleArea {
-    /// Open or create the final directory component beneath an existing private
-    /// parent. The parent and child are held through no-follow descriptors.
-    pub fn open_or_create(path: &Path) -> Result<Self> {
-        if !path.is_absolute() {
-            return Err(GitTransportError::Invalid("bundle area path"));
-        }
-        let name = path
-            .file_name()
-            .ok_or(GitTransportError::Invalid("bundle area path"))?;
-        if name.as_bytes().is_empty() || name.as_bytes().contains(&0) {
-            return Err(GitTransportError::Invalid("bundle area path"));
-        }
-        let parent_path = path
-            .parent()
-            .ok_or(GitTransportError::Invalid("bundle area parent"))?;
-        let parent = Directory::open_anchor(parent_path)?;
-        require_private(&parent)?;
-        match parent.mkdir(name, BUNDLE_DIR_MODE) {
-            Ok(()) => parent.sync()?,
-            Err(error) if error.is_exists() => {}
-            Err(error) => return Err(error.into()),
-        }
-        let directory = parent.open_verified_directory(name)?;
-        require_private(&directory)?;
-        let canonical_parent = fs::canonicalize(parent_path)?;
-        let rebound_parent = Directory::open_anchor(&canonical_parent)?;
-        if !rebound_parent
-            .metadata()?
-            .same_identity(&parent.metadata()?)
-        {
-            return Err(GitTransportError::Invalid("bundle area parent changed"));
-        }
-        Ok(Self {
-            directory,
-            path: canonical_parent.join(name),
-        })
-    }
-
-    fn bundle_path(&self, name: &OsStr) -> PathBuf {
-        self.path.join(name)
-    }
-
-    fn read_bundle(&self, name: &OsStr, max_bytes: usize) -> Result<Vec<u8>> {
-        let mut file = self.directory.open_read(name)?;
-        let metadata = file.metadata()?;
-        let area = self.directory.metadata()?;
-        if metadata.kind != FileKind::Regular
-            || metadata.links != 1
-            || metadata.device != area.device
-        {
-            return Err(GitTransportError::Invalid("bundle file identity"));
-        }
-        let bytes = file
-            .read_bounded(max_bytes as u64)
-            .map_err(|error| match error {
-                FsError::TooLarge { .. } => GitTransportError::BundleTooLarge,
-                other => GitTransportError::Filesystem(other),
-            })?;
-        if bytes.is_empty() {
-            return Err(GitTransportError::Invalid("empty Git bundle"));
-        }
-        Ok(bytes)
-    }
-}
-
-fn require_private(directory: &Directory) -> Result<()> {
-    let metadata = directory.metadata()?;
-    if metadata.kind != FileKind::Directory
-        || metadata.uid != fs::effective_uid()
-        || metadata.mode & 0o077 != 0
-    {
-        return Err(GitTransportError::Invalid(
-            "Git transport directory permissions",
-        ));
-    }
-    Ok(())
-}
-
-pub struct GitBundle {
-    pub operation: OperationId,
-    pub base: GitOid,
-    pub head: GitOid,
-    pub bytes: Vec<u8>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportedHead {
     pub operation: OperationId,
@@ -194,7 +98,6 @@ pub struct GitTransport<'a> {
     git_executable: PathBuf,
     ssh_executable: PathBuf,
     ssh_auth_sock: Option<PathBuf>,
-    max_bundle_bytes: usize,
 }
 impl<'a> GitTransport<'a> {
     pub fn new(
@@ -204,21 +107,14 @@ impl<'a> GitTransport<'a> {
     ) -> Result<Self> {
         let ssh_executable = crate::hosts::discover_ssh_executable(None)
             .map_err(|_| GitTransportError::SshUnavailable)?;
-        Self::new_with_policy(
-            executor,
-            git_executable,
-            ssh_executable,
-            ssh_auth_sock,
-            MAX_BUNDLE_BYTES,
-        )
+        Self::new_with_ssh(executor, git_executable, ssh_executable, ssh_auth_sock)
     }
 
-    fn new_with_policy(
+    fn new_with_ssh(
         executor: &'a dyn Executor,
         git_executable: PathBuf,
         ssh_executable: PathBuf,
         ssh_auth_sock: Option<PathBuf>,
-        max_bundle_bytes: usize,
     ) -> Result<Self> {
         if !git_executable.is_absolute() || !provenant_os::sys::is_executable(&git_executable) {
             return Err(GitTransportError::GitUnavailable);
@@ -227,9 +123,6 @@ impl<'a> GitTransport<'a> {
             || !provenant_os::sys::is_executable(&ssh_executable)
         {
             return Err(GitTransportError::SshUnavailable);
-        }
-        if max_bundle_bytes == 0 || max_bundle_bytes > MAX_BUNDLE_BYTES {
-            return Err(GitTransportError::Invalid("Git bundle limit"));
         }
         if ssh_auth_sock
             .as_ref()
@@ -242,23 +135,18 @@ impl<'a> GitTransport<'a> {
             git_executable,
             ssh_executable,
             ssh_auth_sock,
-            max_bundle_bytes,
         })
     }
 
     pub fn discover(executor: &'a dyn Executor, ssh_auth_sock: Option<PathBuf>) -> Result<Self> {
-        Self::discover_with_policy(executor, ssh_auth_sock, None, MAX_BUNDLE_BYTES as u64)
+        Self::discover_with_policy(executor, ssh_auth_sock, None)
     }
 
     pub fn discover_with_policy(
         executor: &'a dyn Executor,
         ssh_auth_sock: Option<PathBuf>,
         ssh_executable: Option<&Path>,
-        bundle_bytes: u64,
     ) -> Result<Self> {
-        if bundle_bytes == 0 || bundle_bytes > MAX_BUNDLE_BYTES as u64 {
-            return Err(GitTransportError::Invalid("Git bundle limit"));
-        }
         let git = provenant_os::git::git_executable().ok_or(GitTransportError::GitUnavailable)?;
         let ssh = crate::hosts::discover_ssh_executable(ssh_executable).map_err(|_| {
             if ssh_executable.is_some() {
@@ -267,219 +155,151 @@ impl<'a> GitTransport<'a> {
                 GitTransportError::SshUnavailable
             }
         })?;
-        Self::new_with_policy(executor, git, ssh, ssh_auth_sock, bundle_bytes as usize)
+        Self::new_with_ssh(executor, git, ssh, ssh_auth_sock)
     }
 
-    /// Create and retain a bounded bundle containing the exact committed range
-    /// `base..head`. The checkout must be clean and `head` must be its HEAD.
-    pub fn create_bundle(
+    /// Bind the exact committed range `base..head` to the operation's export
+    /// ref, which a peer then fetches by name. The checkout must be clean and
+    /// `head` must be its HEAD.
+    pub fn export(
         &self,
         repository: &Path,
-        area: &BundleArea,
         operation: &OperationId,
         base: GitOid,
         head: GitOid,
         cancel: &CancelToken,
-    ) -> Result<GitBundle> {
+    ) -> Result<String> {
         self.ensure_clean_worktree(repository, cancel)?;
         self.ensure_commit(repository, base, cancel)?;
         self.ensure_commit(repository, head, cancel)?;
+        if base == head {
+            return Err(GitTransportError::Invalid("empty Git transport range"));
+        }
         if !self.is_ancestor(repository, base, head, cancel)? {
             return Err(GitTransportError::NonFastForward);
         }
         if self.head(repository, cancel)? != head {
             return Err(GitTransportError::OidMismatch);
         }
-        let name = bundle_name(operation);
-        match area.directory.metadata_at(&name, false) {
-            Ok(_) => {
-                let bytes = area.read_bundle(&name, self.max_bundle_bytes)?;
-                self.verify_bundle(repository, area, &name, base, head, cancel)?;
-                return Ok(GitBundle {
-                    operation: operation.clone(),
-                    base,
-                    head,
-                    bytes,
-                });
-            }
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
-        }
-        if base == head {
-            return Err(GitTransportError::Invalid("empty Git transport range"));
-        }
-        let mut args = vec![
-            OsString::from("bundle"),
-            OsString::from("create"),
-            OsString::from("--quiet"),
-            OsString::from("-"),
-        ];
         let exported = isolated_ref(operation, "export")?;
-        match self.read_ref(repository, &exported, cancel)? {
-            Some(existing) if existing == head => {}
-            Some(_) => return Err(GitTransportError::TransportConflict),
-            None => {
-                self.require_success(
-                    "bind bundle head",
-                    repository,
-                    &[
-                        "update-ref".into(),
-                        exported.clone().into(),
-                        head.to_string().into(),
-                        "0".repeat(head.to_string().len()).into(),
-                    ],
-                    None,
-                    MAX_TEXT_BYTES,
-                    cancel,
-                )?;
-            }
-        }
-        args.push(exported.into());
-        args.push(format!("^{base}").into());
-        let outcome = self.run_git(
-            "bundle create",
-            repository,
-            &args,
-            None,
-            self.max_bundle_bytes,
-            cancel,
-        )?;
-        if outcome.termination != Termination::Exit(0) {
-            return Err(GitTransportError::GitCommand {
-                command: "bundle create",
-            });
-        }
-        if outcome.stdout.bytes.is_empty() || outcome.stdout.bytes.len() > self.max_bundle_bytes {
-            return Err(GitTransportError::BundleTooLarge);
-        }
-        match area.directory.atomic_write(
-            &name,
-            ".provenant-bundle.",
-            &outcome.stdout.bytes,
-            PublishMode::NoReplace,
-        ) {
-            Ok(publication) => publication
-                .require_durable()
-                .map_err(|_| GitTransportError::BundleDurabilityUnconfirmed)?,
-            Err(error) if error.is_exists() => {
-                if area.read_bundle(&name, self.max_bundle_bytes)? != outcome.stdout.bytes {
-                    return Err(GitTransportError::TransportConflict);
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
-        self.verify_bundle(repository, area, &name, base, head, cancel)?;
-        let bytes = outcome.stdout.bytes;
-        Ok(GitBundle {
-            operation: operation.clone(),
-            base,
-            head,
-            bytes,
-        })
+        self.bind_ref("bind export ref", repository, &exported, head, cancel)?;
+        Ok(exported)
     }
 
-    /// Verify and fetch a received bundle to an operation-scoped quarantine
-    /// ref. Promotion to `verified-head` happens only after the exact OIDs and
-    /// ancestry are checked. `writer` must be run's held checkout writer lock.
+    /// Fetch a peer's export ref into an operation-scoped quarantine ref.
+    /// `fsckObjects` and a forced `index-pack` check every received object
+    /// and connectivity before the ref moves. Promotion to `verified-head`
+    /// happens only after the exact OIDs and ancestry are checked. `writer`
+    /// must be the run's held checkout writer lock.
     // Keep the held custody proof explicit at this I/O boundary.
     #[allow(clippy::too_many_arguments)]
-    pub fn receive_bundle(
+    pub fn fetch(
         &self,
         repository: &Path,
-        area: &BundleArea,
         writer: &LockGuard,
+        remote: &str,
         operation: &OperationId,
         base: GitOid,
         head: GitOid,
-        bytes: &[u8],
         cancel: &CancelToken,
     ) -> Result<TransportedHead> {
         // LockGuard's safe acquisition verifies the persistent private lock
         // inode and retains its descriptor. The owner never unlinks these
         // lock files; Store separately binds the landing guard to its directory.
         let _held_writer = writer;
-        if bytes.is_empty() || bytes.len() > self.max_bundle_bytes {
-            return Err(GitTransportError::BundleTooLarge);
-        }
-        self.ensure_clean_worktree(repository, cancel)?;
-        self.ensure_commit(repository, base, cancel)?;
-        let name = bundle_name(operation);
-        match area.directory.atomic_write(
-            &name,
-            ".provenant-bundle.",
-            bytes,
-            PublishMode::NoReplace,
-        ) {
-            Ok(publication) => publication
-                .require_durable()
-                .map_err(|_| GitTransportError::BundleDurabilityUnconfirmed)?,
-            Err(error) if error.is_exists() => {
-                if area.read_bundle(&name, self.max_bundle_bytes)? != bytes {
-                    return Err(GitTransportError::TransportConflict);
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
-        self.verify_bundle(repository, area, &name, base, head, cancel)?;
+        validate_remote_url(remote)?;
+        let repository = self.ensure_clean_worktree(repository, cancel)?;
+        self.ensure_commit(&repository, base, cancel)?;
         let incoming = isolated_ref(operation, "incoming")?;
         let verified = isolated_ref(operation, "verified-head")?;
-        match self.read_ref(repository, &incoming, cancel)? {
+        match self.read_ref(&repository, &incoming, cancel)? {
             Some(existing) if existing == head => {}
             Some(_) => return Err(GitTransportError::TransportConflict),
             None => {
-                let path = area.bundle_path(&name);
-                let refspec = format!("{head}:{incoming}");
-                let args = vec![
-                    OsString::from("fetch"),
-                    OsString::from("--no-tags"),
-                    OsString::from("--no-write-fetch-head"),
-                    path.into_os_string(),
-                    refspec.into(),
-                ];
-                self.require_success(
-                    "fetch bundle",
-                    repository,
+                self.refuse_url_rewrites(&repository, cancel)?;
+                let refspec = format!("{}:{incoming}", isolated_ref(operation, "export")?);
+                let mut args = Vec::new();
+                for setting in [
+                    "fetch.fsckObjects=true",
+                    "transfer.fsckObjects=true",
+                    "fetch.unpackLimit=1",
+                    "transfer.unpackLimit=1",
+                    "gc.auto=0",
+                    "maintenance.auto=false",
+                ] {
+                    args.push(OsString::from("-c"));
+                    args.push(OsString::from(setting));
+                }
+                args.extend(strings(&[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--no-recurse-submodules",
+                    "--",
+                    remote,
+                    &refspec,
+                ]));
+                let outcome = self.run_git_for(
+                    "fetch transport ref",
+                    &repository,
                     &args,
-                    None,
                     MAX_TEXT_BYTES,
+                    FETCH_TIMEOUT,
                     cancel,
                 )?;
+                if outcome.termination != Termination::Exit(0) {
+                    return Err(GitTransportError::GitCommand {
+                        command: "fetch transport ref",
+                    });
+                }
             }
         }
-        if self.read_ref(repository, &incoming, cancel)? != Some(head) {
+        if self.read_ref(&repository, &incoming, cancel)? != Some(head) {
             return Err(GitTransportError::OidMismatch);
         }
-        self.ensure_commit(repository, head, cancel)?;
-        if !self.is_ancestor(repository, base, head, cancel)? {
+        self.ensure_commit(&repository, head, cancel)?;
+        if !self.is_ancestor(&repository, base, head, cancel)? {
             return Err(GitTransportError::NonFastForward);
         }
-        match self.read_ref(repository, &verified, cancel)? {
-            Some(existing) if existing == head => {}
-            Some(_) => return Err(GitTransportError::TransportConflict),
-            None => {
-                let zero = "0".repeat(head.to_string().len());
-                let args = vec![
-                    OsString::from("update-ref"),
-                    verified.clone().into(),
-                    head.to_string().into(),
-                    zero.into(),
-                ];
-                self.require_success(
-                    "promote verified transport ref",
-                    repository,
-                    &args,
-                    None,
-                    MAX_TEXT_BYTES,
-                    cancel,
-                )?;
-            }
-        }
+        self.bind_ref(
+            "promote verified transport ref",
+            &repository,
+            &verified,
+            head,
+            cancel,
+        )?;
         Ok(TransportedHead {
             operation: operation.clone(),
             base,
             head,
             reference: verified,
         })
+    }
+
+    /// Create `reference` at `oid`, or accept it when it already names `oid`.
+    fn bind_ref(
+        &self,
+        command: &'static str,
+        repository: &Path,
+        reference: &str,
+        oid: GitOid,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        match self.read_ref(repository, reference, cancel)? {
+            Some(existing) if existing == oid => Ok(()),
+            Some(_) => Err(GitTransportError::TransportConflict),
+            None => {
+                let zero = "0".repeat(oid.to_string().len());
+                let args = vec![
+                    OsString::from("update-ref"),
+                    reference.into(),
+                    oid.to_string().into(),
+                    zero.into(),
+                ];
+                self.require_success(command, repository, &args, None, MAX_TEXT_BYTES, cancel)?;
+                Ok(())
+            }
+        }
     }
 
     /// Push the acquired landing candidate through the durable store phases.
@@ -613,7 +433,34 @@ impl<'a> GitTransport<'a> {
         output_limit: usize,
         cancel: &CancelToken,
     ) -> Result<ExecOutcome> {
-        if output_limit == 0 || output_limit > MAX_BUNDLE_BYTES {
+        self.execute(command, cwd, args, stdin, output_limit, GIT_TIMEOUT, cancel)
+    }
+
+    fn run_git_for(
+        &self,
+        command: &'static str,
+        cwd: &Path,
+        args: &[OsString],
+        output_limit: usize,
+        timeout: Duration,
+        cancel: &CancelToken,
+    ) -> Result<ExecOutcome> {
+        self.execute(command, cwd, args, None, output_limit, timeout, cancel)
+    }
+
+    // One bounded Git child; the arguments mirror ExecOptions.
+    #[allow(clippy::too_many_arguments)]
+    fn execute(
+        &self,
+        command: &'static str,
+        cwd: &Path,
+        args: &[OsString],
+        stdin: Option<&[u8]>,
+        output_limit: usize,
+        timeout: Duration,
+        cancel: &CancelToken,
+    ) -> Result<ExecOutcome> {
+        if output_limit == 0 || output_limit > MAX_STATUS_BYTES.max(MAX_TEXT_BYTES) {
             return Err(GitTransportError::Invalid("Git output limit"));
         }
         let mut argv = vec![
@@ -683,7 +530,7 @@ impl<'a> GitTransport<'a> {
                 socket.as_os_str().to_owned(),
             ));
         }
-        let mut options = ExecOptions::new(&argv, cwd, GIT_TIMEOUT);
+        let mut options = ExecOptions::new(&argv, cwd, timeout);
         options.env = Some(&env);
         options.stdin = stdin;
         options.stdout = StreamPolicy::Capture {
@@ -693,9 +540,6 @@ impl<'a> GitTransport<'a> {
         options.cancel = Some(cancel);
         options.stop_on_output_limit = true;
         let outcome = self.executor.execute(options)?;
-        if command == "bundle create" && outcome.overflow_stopped {
-            return Err(GitTransportError::BundleTooLarge);
-        }
         if outcome.timed_out
             || outcome.cancelled
             || outcome.overflow_stopped
@@ -878,53 +722,6 @@ impl<'a> GitTransport<'a> {
         }
     }
 
-    fn verify_bundle(
-        &self,
-        repository: &Path,
-        area: &BundleArea,
-        name: &OsStr,
-        base: GitOid,
-        head: GitOid,
-        cancel: &CancelToken,
-    ) -> Result<()> {
-        let path = area.bundle_path(name);
-        let path_arg = path.into_os_string();
-        let verify = vec![
-            OsString::from("bundle"),
-            OsString::from("verify"),
-            path_arg.clone(),
-        ];
-        self.require_success(
-            "bundle verify",
-            repository,
-            &verify,
-            None,
-            MAX_TEXT_BYTES,
-            cancel,
-        )?;
-        let list = vec![
-            OsString::from("bundle"),
-            OsString::from("list-heads"),
-            path_arg,
-        ];
-        let output = self.require_success(
-            "bundle head listing",
-            repository,
-            &list,
-            None,
-            MAX_TEXT_BYTES,
-            cancel,
-        )?;
-        let advertised = parse_bundle_heads(&output.stdout.bytes)?;
-        if advertised.len() != 1 || advertised[0] != head {
-            return Err(GitTransportError::BundleHeadMismatch);
-        }
-        // The base prerequisite must already exist. The head enters the object
-        // database only on fetch; receive_bundle checks its ancestry afterwards.
-        self.ensure_commit(repository, base, cancel)?;
-        Ok(())
-    }
-
     fn read_ref(
         &self,
         repository: &Path,
@@ -1080,43 +877,6 @@ fn parse_oid_line(bytes: &[u8], command: &'static str) -> Result<GitOid> {
     GitOid::parse(text).map_err(|_| GitTransportError::InvalidOutput { command })
 }
 
-fn parse_bundle_heads(bytes: &[u8]) -> Result<Vec<GitOid>> {
-    let text = std::str::from_utf8(bytes).map_err(|_| GitTransportError::InvalidOutput {
-        command: "bundle head listing",
-    })?;
-    let mut heads = Vec::new();
-    for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let mut fields = line.split_ascii_whitespace();
-        let oid = fields.next().ok_or(GitTransportError::InvalidOutput {
-            command: "bundle head listing",
-        })?;
-        let reference = fields.next().ok_or(GitTransportError::InvalidOutput {
-            command: "bundle head listing",
-        })?;
-        if fields.next().is_some() || reference.is_empty() {
-            return Err(GitTransportError::InvalidOutput {
-                command: "bundle head listing",
-            });
-        }
-        heads.push(
-            GitOid::parse(oid).map_err(|_| GitTransportError::InvalidOutput {
-                command: "bundle head listing",
-            })?,
-        );
-    }
-    if heads.len() != 1 {
-        return Err(GitTransportError::BundleHeadMismatch);
-    }
-    Ok(heads)
-}
-
-fn bundle_name(operation: &OperationId) -> OsString {
-    format!("bundle-{}.bundle", operation.as_str()).into()
-}
-
 fn isolated_ref(operation: &OperationId, leaf: &str) -> Result<String> {
     let value = format!("refs/provenant/transport/{}/{leaf}", operation.as_str());
     if value.len() > 1024 || value.contains("..") {
@@ -1258,12 +1018,13 @@ mod tests {
         exec::{CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, SystemExecutor},
         fs::Directory,
     };
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt};
 
     struct Fixture {
         root: tempfile::TempDir,
         clock: TestClock,
         cancel: CancelToken,
+        executor: SystemExecutor,
     }
     impl Fixture {
         fn new() -> Self {
@@ -1276,37 +1037,73 @@ mod tests {
                     MonoTime::from_micros(0),
                 ),
                 cancel: CancelToken::new(),
+                executor: SystemExecutor::new(2).unwrap(),
             }
         }
-        fn area(&self, name: &str) -> BundleArea {
-            BundleArea::open_or_create(&self.root.path().join(name)).unwrap()
+
+        fn transport(&self) -> GitTransport<'_> {
+            GitTransport::discover(&self.executor, None).unwrap()
         }
-    }
 
-    fn transport_with_executor(executor: &SystemExecutor) -> GitTransport<'_> {
-        GitTransport::discover(executor, None).unwrap()
-    }
+        /// A fresh repository. Git children get the transport's explicit
+        /// environment, so the test process's `GIT_*` variables never leak in.
+        fn repo(&self, name: &str) -> PathBuf {
+            let path = self.root.path().join(name);
+            fs::create_dir(&path).unwrap();
+            git(
+                &self.transport(),
+                self.root.path(),
+                &["init", "-b", "main", path.to_str().unwrap()],
+            );
+            path
+        }
 
-    struct OverflowBundleExecutor {
-        inner: SystemExecutor,
-    }
-    impl Executor for OverflowBundleExecutor {
-        fn execute(&self, options: ExecOptions<'_>) -> std::result::Result<ExecOutcome, ExecError> {
-            if options.argv.iter().any(|arg| arg == "bundle")
-                && options.argv.iter().any(|arg| arg == "create")
-            {
-                return Ok(ExecOutcome {
-                    termination: Termination::Exit(1),
-                    stdout: CapturedStream::default(),
-                    stderr: CapturedStream::default(),
-                    timed_out: false,
-                    drain_truncated: false,
-                    overflow_stopped: true,
-                    cancelled: false,
-                    elapsed_micros: 0,
-                });
-            }
-            self.inner.execute(options)
+        fn writer(&self) -> LockGuard {
+            let path = self.root.path().join("writer-locks");
+            fs::create_dir_all(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            Directory::open_anchor(&path)
+                .unwrap()
+                .lock(
+                    OsStr::new("writer.lock"),
+                    provenant_os::fs::LockMode::Exclusive,
+                    WaitBudget::cli(self.clock.mono_now(), 1).unwrap(),
+                    &self.cancel,
+                    &self.clock,
+                )
+                .unwrap()
+        }
+
+        /// A receiver that already holds `base`, as a peer with the shared
+        /// remote does.
+        fn receiver(&self, sender: &Path, base: GitOid) -> PathBuf {
+            let receiver = self.repo("receiver");
+            let refspec = format!("{base}:refs/provenant/base");
+            git(
+                &self.transport(),
+                &receiver,
+                &["fetch", "-q", sender.to_str().unwrap(), &refspec],
+            );
+            receiver
+        }
+
+        fn fetch(
+            &self,
+            receiver: &Path,
+            sender: &Path,
+            operation: &str,
+            base: GitOid,
+            head: GitOid,
+        ) -> Result<TransportedHead> {
+            self.transport().fetch(
+                receiver,
+                &self.writer(),
+                sender.to_str().unwrap(),
+                &OperationId::parse(operation).unwrap(),
+                base,
+                head,
+                &self.cancel,
+            )
         }
     }
 
@@ -1329,13 +1126,13 @@ mod tests {
         }
     }
 
-    fn git(transport: &GitTransport<'_>, cwd: &Path, args: &[&str]) -> String {
+    fn git_with(transport: &GitTransport<'_>, cwd: &Path, args: &[&str], stdin: &[u8]) -> String {
         let output = transport
             .require_success(
                 "test setup",
                 cwd,
                 &strings(args),
-                None,
+                Some(stdin),
                 MAX_TEXT_BYTES,
                 &CancelToken::new(),
             )
@@ -1346,235 +1143,316 @@ mod tests {
             .to_owned()
     }
 
-    #[test]
-    fn committed_bundle_round_trip_is_verified_and_isolated() {
-        let fixture = Fixture::new();
-        let executor = SystemExecutor::new(2).unwrap();
-        let transport = transport_with_executor(&executor);
-        let repo = fixture.root.path().join("repo");
-        fs::create_dir(&repo).unwrap();
-        git(
-            &transport,
-            fixture.root.path(),
-            &["init", "-b", "main", repo.to_str().unwrap()],
-        );
-        git(
-            &transport,
-            &repo,
-            &[
-                "-c",
-                "user.name=Fabric Test",
-                "-c",
-                "user.email=fabric@example.test",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "base",
-            ],
-        );
-        let base = transport.head(&repo, &fixture.cancel).unwrap();
-        git(
-            &transport,
-            &repo,
-            &[
-                "-c",
-                "user.name=Fabric Test",
-                "-c",
-                "user.email=fabric@example.test",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "head",
-            ],
-        );
-        let head = transport.head(&repo, &fixture.cancel).unwrap();
-        let operation = OperationId::parse("lane-c-1").unwrap();
-        let bundle = transport
-            .create_bundle(
-                &repo,
-                &fixture.area("bundles"),
-                &operation,
-                base,
-                head,
-                &fixture.cancel,
-            )
-            .unwrap();
+    fn git(transport: &GitTransport<'_>, cwd: &Path, args: &[&str]) -> String {
+        git_with(transport, cwd, args, b"")
+    }
 
-        let receiver = fixture.root.path().join("receiver");
-        fs::create_dir(&receiver).unwrap();
-        git(
-            &transport,
-            fixture.root.path(),
-            &["init", "-b", "main", receiver.to_str().unwrap()],
-        );
-        // The receiver already has the base prerequisite, imported as a local bundle first.
-        let base_text = base.to_string();
-        let fetch_args = vec![
-            OsString::from("fetch"),
-            repo.as_os_str().to_owned(),
-            format!("{base_text}:refs/provenant/base").into(),
+    fn commit(transport: &GitTransport<'_>, repo: &Path, args: &[&str]) -> GitOid {
+        let mut argv = vec![
+            "-c",
+            "user.name=Fabric Test",
+            "-c",
+            "user.email=fabric@example.test",
+            "commit",
+            "-q",
         ];
+        argv.extend_from_slice(args);
+        git(transport, repo, &argv);
+        transport.head(repo, &CancelToken::new()).unwrap()
+    }
+
+    /// Write `bytes` as an object Git would refuse to create itself.
+    fn literal(transport: &GitTransport<'_>, repo: &Path, kind: &str, bytes: &[u8]) -> String {
+        git_with(
+            transport,
+            repo,
+            &["hash-object", "-t", kind, "-w", "--literally", "--stdin"],
+            bytes,
+        )
+    }
+
+    fn tree_entry(name: &str, oid: &str) -> Vec<u8> {
+        let mut entry = format!("100644 {name}\0").into_bytes();
+        entry.extend(
+            (0..oid.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&oid[i..i + 2], 16).unwrap()),
+        );
+        entry
+    }
+
+    fn has_object(transport: &GitTransport<'_>, repo: &Path, oid: &str) -> bool {
         transport
-            .require_success(
-                "seed receiver",
-                &receiver,
-                &fetch_args,
+            .run_git(
+                "test object lookup",
+                repo,
+                &strings(&["cat-file", "-e", oid]),
                 None,
                 MAX_TEXT_BYTES,
-                &fixture.cancel,
+                &CancelToken::new(),
             )
+            .unwrap()
+            .termination
+            == Termination::Exit(0)
+    }
+
+    fn writable(path: &Path) {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn committed_head_round_trip_is_fetched_verified_and_isolated() {
+        let fixture = Fixture::new();
+        let transport = fixture.transport();
+        let sender = fixture.repo("sender");
+        let base = commit(&transport, &sender, &["--allow-empty", "-m", "base"]);
+        let head = commit(&transport, &sender, &["--allow-empty", "-m", "head"]);
+        let operation = OperationId::parse("lane-c-1").unwrap();
+        assert!(matches!(
+            transport.export(&sender, &operation, base, base, &fixture.cancel),
+            Err(GitTransportError::Invalid(_))
+        ));
+        let exported = transport
+            .export(&sender, &operation, base, head, &fixture.cancel)
             .unwrap();
-        let writer_path = fixture.root.path().join("writer-locks");
-        fs::create_dir(&writer_path).unwrap();
-        fs::set_permissions(&writer_path, fs::Permissions::from_mode(0o700)).unwrap();
-        let writer_dir = Directory::open_anchor(&writer_path).unwrap();
-        let writer = writer_dir
-            .lock(
-                OsStr::new("writer.lock"),
-                provenant_os::fs::LockMode::Exclusive,
-                WaitBudget::cli(fixture.clock.mono_now(), 1).unwrap(),
-                &fixture.cancel,
-                &fixture.clock,
-            )
-            .unwrap();
-        let transported = transport
-            .receive_bundle(
-                &receiver,
-                &fixture.area("received"),
-                &writer,
-                &operation,
-                base,
-                head,
-                &bundle.bytes,
-                &fixture.cancel,
-            )
+        assert_eq!(exported, "refs/provenant/transport/lane-c-1/export");
+
+        let receiver = fixture.receiver(&sender, base);
+        let transported = fixture
+            .fetch(&receiver, &sender, "lane-c-1", base, head)
             .unwrap();
         assert_eq!(transported.head, head);
+        assert_eq!(
+            transported.reference,
+            "refs/provenant/transport/lane-c-1/verified-head"
+        );
         assert_eq!(
             transport
                 .read_ref(&receiver, &transported.reference, &fixture.cancel)
                 .unwrap(),
             Some(head)
         );
-    }
-
-    #[test]
-    fn bundle_output_overflow_maps_to_bundle_too_large() {
-        let fixture = Fixture::new();
-        let executor = SystemExecutor::new(2).unwrap();
-        let setup = transport_with_executor(&executor);
-        let repo = fixture.root.path().join("repo");
-        fs::create_dir(&repo).unwrap();
-        git(
-            &setup,
-            fixture.root.path(),
-            &["init", "-b", "main", repo.to_str().unwrap()],
+        // A retry with the same operation is idempotent; another head is not.
+        assert_eq!(
+            fixture
+                .fetch(&receiver, &sender, "lane-c-1", base, head)
+                .unwrap(),
+            transported
         );
-        git(
-            &setup,
-            &repo,
-            &[
-                "-c",
-                "user.name=Fabric Test",
-                "-c",
-                "user.email=fabric@example.test",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "base",
-            ],
-        );
-        let base = setup.head(&repo, &fixture.cancel).unwrap();
-        git(
-            &setup,
-            &repo,
-            &[
-                "-c",
-                "user.name=Fabric Test",
-                "-c",
-                "user.email=fabric@example.test",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "head",
-            ],
-        );
-        let head = setup.head(&repo, &fixture.cancel).unwrap();
-        let overflow = OverflowBundleExecutor {
-            inner: SystemExecutor::new(2).unwrap(),
-        };
-        let transport = GitTransport::discover(&overflow, None).unwrap();
-
         assert!(matches!(
-            transport.create_bundle(
-                &repo,
-                &fixture.area("bundles"),
-                &OperationId::parse("overflow").unwrap(),
-                base,
-                head,
-                &fixture.cancel,
-            ),
-            Err(GitTransportError::BundleTooLarge)
+            fixture.fetch(&receiver, &sender, "lane-c-1", base, base),
+            Err(GitTransportError::TransportConflict)
         ));
     }
 
     #[test]
-    fn configured_bundle_byte_limit_is_enforced() {
+    fn commits_over_64_mib_transport() {
         let fixture = Fixture::new();
-        let executor = SystemExecutor::new(2).unwrap();
-        let setup = transport_with_executor(&executor);
-        let repo = fixture.root.path().join("repo");
-        fs::create_dir(&repo).unwrap();
-        git(
-            &setup,
-            fixture.root.path(),
-            &["init", "-b", "main", repo.to_str().unwrap()],
-        );
-        git(
-            &setup,
-            &repo,
-            &[
-                "-c",
-                "user.name=Fabric Test",
-                "-c",
-                "user.email=fabric@example.test",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "base",
-            ],
-        );
-        let base = setup.head(&repo, &fixture.cancel).unwrap();
-        git(
-            &setup,
-            &repo,
-            &[
-                "-c",
-                "user.name=Fabric Test",
-                "-c",
-                "user.email=fabric@example.test",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "head",
-            ],
-        );
-        let head = setup.head(&repo, &fixture.cancel).unwrap();
-        let transport = GitTransport::discover_with_policy(&executor, None, None, 1).unwrap();
+        let transport = fixture.transport();
+        let sender = fixture.repo("sender");
+        let base = commit(&transport, &sender, &["--allow-empty", "-m", "base"]);
+        // Incompressible content, so the pack itself exceeds the old bound.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let bytes: Vec<u8> = (0..(65 << 20) / 8)
+            .flat_map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()
+            })
+            .collect();
+        fs::write(sender.join("large.bin"), bytes).unwrap();
+        git(&transport, &sender, &["add", "large.bin"]);
+        let head = commit(&transport, &sender, &["-m", "large"]);
+        transport
+            .export(
+                &sender,
+                &OperationId::parse("large").unwrap(),
+                base,
+                head,
+                &fixture.cancel,
+            )
+            .unwrap();
 
-        let result = transport.create_bundle(
-            &repo,
-            &fixture.area("bundles"),
-            &OperationId::parse("small-limit").unwrap(),
-            base,
-            head,
-            &fixture.cancel,
+        let receiver = fixture.receiver(&sender, base);
+        let transported = fixture
+            .fetch(&receiver, &sender, "large", base, head)
+            .unwrap();
+        assert_eq!(transported.head, head);
+        let size = git(
+            &transport,
+            &receiver,
+            &["cat-file", "-s", &format!("{head}:large.bin")],
         );
+        assert_eq!(size, (65 << 20).to_string());
+    }
+
+    #[test]
+    fn fetch_refuses_corrupt_missing_duplicate_and_malformed_objects() {
+        let fixture = Fixture::new();
+        let transport = fixture.transport();
+        let sender = fixture.repo("sender");
+        let base = commit(&transport, &sender, &["--allow-empty", "-m", "base"]);
+        let receiver = fixture.receiver(&sender, base);
+        let base_tree = git(&transport, &sender, &["rev-parse", "HEAD^{tree}"]);
+        let child = |tree: &str, message: &str| {
+            git(
+                &transport,
+                &sender,
+                &[
+                    "-c",
+                    "user.name=Fabric Test",
+                    "-c",
+                    "user.email=fabric@example.test",
+                    "commit-tree",
+                    tree,
+                    "-p",
+                    &base.to_string(),
+                    "-m",
+                    message,
+                ],
+            )
+        };
+
+        // Malformed: a commit whose author line has no valid date.
+        let malformed = literal(
+            &transport,
+            &sender,
+            "commit",
+            format!(
+                "tree {base_tree}\nparent {base}\nauthor A <a@example.test> never +0000\n\
+                 committer A <a@example.test> 1 +0000\n\nmalformed\n"
+            )
+            .as_bytes(),
+        );
+        // Duplicate: a tree naming the same path twice.
+        let blob = git_with(
+            &transport,
+            &sender,
+            &["hash-object", "-w", "--stdin"],
+            b"x\n",
+        );
+        let duplicate = literal(
+            &transport,
+            &sender,
+            "tree",
+            &[tree_entry("a", &blob), tree_entry("a", &blob)].concat(),
+        );
+        let duplicate = child(&duplicate, "duplicate");
+        // Missing: a tree naming a blob the sender does not have.
+        let missing = literal(
+            &transport,
+            &sender,
+            "tree",
+            &tree_entry("a", &"1".repeat(40)),
+        );
+        let missing = child(&missing, "missing");
+        // Corrupt: a loose object whose content hashes to another name.
+        let named = git_with(
+            &transport,
+            &sender,
+            &["hash-object", "-w", "--stdin"],
+            b"named\n",
+        );
+        let other = git_with(
+            &transport,
+            &sender,
+            &["hash-object", "-w", "--stdin"],
+            b"other\n",
+        );
+        let loose = |oid: &str| sender.join(format!(".git/objects/{}/{}", &oid[..2], &oid[2..]));
+        writable(&loose(&named));
+        fs::copy(loose(&other), loose(&named)).unwrap();
+        let tree = git_with(
+            &transport,
+            &sender,
+            &["mktree"],
+            format!("100644 blob {named}\tf\n").as_bytes(),
+        );
+        let mismatched = child(&tree, "mismatched");
+
+        for (index, head) in [malformed, duplicate, missing, mismatched]
+            .iter()
+            .enumerate()
+        {
+            let operation = format!("refused-{index}");
+            let export = isolated_ref(&OperationId::parse(&operation).unwrap(), "export").unwrap();
+            // A hostile peer advertises the object directly.
+            git(&transport, &sender, &["update-ref", &export, head]);
+            let head = GitOid::parse(head).unwrap();
+            let result = fixture.fetch(&receiver, &sender, &operation, base, head);
+            assert!(
+                matches!(
+                    result,
+                    Err(GitTransportError::GitCommand {
+                        command: "fetch transport ref"
+                    })
+                ),
+                "{operation}: {result:?}"
+            );
+            assert!(
+                !has_object(&transport, &receiver, &head.to_string()),
+                "{operation}"
+            );
+            let incoming =
+                isolated_ref(&OperationId::parse(&operation).unwrap(), "incoming").unwrap();
+            assert_eq!(
+                transport
+                    .read_ref(&receiver, &incoming, &fixture.cancel)
+                    .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_refuses_a_corrupt_pack() {
+        let fixture = Fixture::new();
+        let transport = fixture.transport();
+        let sender = fixture.repo("sender");
+        let base = commit(&transport, &sender, &["--allow-empty", "-m", "base"]);
+        let receiver = fixture.receiver(&sender, base);
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let noise: Vec<u8> = (0..512)
+            .flat_map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()
+            })
+            .collect();
+        fs::write(sender.join("noise.bin"), noise).unwrap();
+        git(&transport, &sender, &["add", "noise.bin"]);
+        let head = commit(&transport, &sender, &["-m", "noise"]);
+        transport
+            .export(
+                &sender,
+                &OperationId::parse("corrupt-pack").unwrap(),
+                base,
+                head,
+                &fixture.cancel,
+            )
+            .unwrap();
+        // Upload-pack reuses packed bytes verbatim, so a flipped byte in the
+        // sender's pack reaches the receiver's index-pack unchanged.
+        git(&transport, &sender, &["repack", "-q", "-a", "-d"]);
+        let pack = fs::read_dir(sender.join(".git/objects/pack"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension() == Some(OsStr::new("pack")))
+            .unwrap();
+        writable(&pack);
+        let mut bytes = fs::read(&pack).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        fs::write(&pack, bytes).unwrap();
+
+        let result = fixture.fetch(&receiver, &sender, "corrupt-pack", base, head);
         assert!(
-            matches!(result, Err(GitTransportError::BundleTooLarge)),
-            "{:?}",
-            result.err()
+            matches!(result, Err(GitTransportError::GitCommand { .. })),
+            "{result:?}"
         );
+        assert!(!has_object(&transport, &receiver, &head.to_string()));
     }
 
     #[test]
@@ -1582,13 +1460,9 @@ mod tests {
         let executor = CaptureCommandExecutor {
             argv: std::sync::Mutex::new(None),
         };
-        let transport = GitTransport::discover_with_policy(
-            &executor,
-            None,
-            Some(Path::new("/bin/sh")),
-            MAX_BUNDLE_BYTES as u64,
-        )
-        .unwrap();
+        let transport =
+            GitTransport::discover_with_policy(&executor, None, Some(Path::new("/bin/sh")))
+                .unwrap();
 
         transport
             .run_git(
@@ -1616,15 +1490,8 @@ mod tests {
     #[test]
     fn dirty_worktree_and_untrusted_remote_inputs_refuse_before_transfer() {
         let fixture = Fixture::new();
-        let executor = SystemExecutor::new(1).unwrap();
-        let transport = transport_with_executor(&executor);
-        let repo = fixture.root.path().join("repo");
-        fs::create_dir(&repo).unwrap();
-        git(
-            &transport,
-            fixture.root.path(),
-            &["init", "-b", "main", repo.to_str().unwrap()],
-        );
+        let transport = fixture.transport();
+        let repo = fixture.repo("repo");
         fs::write(repo.join("untracked"), b"dirty").unwrap();
         assert!(matches!(
             transport.ensure_clean_worktree(&repo, &fixture.cancel),
@@ -1639,20 +1506,6 @@ mod tests {
             assert!(validate_remote_url(remote).is_err(), "{remote}");
         }
         assert!(validate_remote_url("git@example.test:org/repo.git").is_ok());
-    }
-
-    #[test]
-    fn bundle_head_parser_refuses_multiple_or_wrong_advertised_oids() {
-        let head = "a".repeat(40);
-        let other = "b".repeat(40);
-        assert_eq!(
-            parse_bundle_heads(format!("{head} HEAD\n").as_bytes()).unwrap(),
-            vec![GitOid::parse(&head).unwrap()]
-        );
-        assert!(matches!(
-            parse_bundle_heads(format!("{head} HEAD\n{other} refs/heads/other\n").as_bytes()),
-            Err(GitTransportError::BundleHeadMismatch)
-        ));
     }
 }
 
