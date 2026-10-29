@@ -1476,7 +1476,6 @@ mod tests {
             vec!["--deliver-branch", "branch"],
             vec!["--open-pr"],
             vec!["--write-root", "dir"],
-            vec!["--network", "off"],
             vec!["--capability", "postgres"],
             vec!["--knob", "x=y"],
             vec!["--task-id", "0123456789abcdef0123456789abcdef"],
@@ -1496,6 +1495,26 @@ mod tests {
                 matches!(parsed(&args), ParseOutcome::Invalid { .. }),
                 "accepted {flag:?}"
             );
+        }
+    }
+    #[test]
+    fn preset_runs_keep_an_explicit_network_restriction() {
+        for args in [
+            &[
+                "run",
+                "--preset",
+                "single",
+                "--prompt-file",
+                "brief",
+                "--network",
+                "off",
+            ][..],
+            &["run", "--prompt-file", "brief", "--network", "off"][..],
+        ] {
+            let Command::Run(request) = valid(args).command else {
+                panic!("run");
+            };
+            assert!(matches!(request.access.network, Some(Switch::Off)));
         }
     }
     #[test]

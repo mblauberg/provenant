@@ -2048,6 +2048,13 @@ pub(crate) fn bind_run_context(
         }
         expansion.document["limits"]["concurrency"] = json!(concurrency);
     }
+    // An explicit network reach binds every node lane the graph launches.
+    if let Some(network) = request.access.network {
+        expansion.document["network"] = json!(match network {
+            provenant_cli::Switch::On => "on",
+            provenant_cli::Switch::Off => "off",
+        });
+    }
     let nodes = expansion.document["nodes"]
         .as_array_mut()
         .ok_or("missing graph nodes")?;

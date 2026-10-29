@@ -287,15 +287,44 @@ pub(crate) fn rust_tools(
     env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
 ) {
-    let cargo = input.home.join(".cargo");
-    let rustup = input.home.join(".rustup");
     // Subtree grants must anchor to existing directories. Keep this decision
     // here so every adapter gets the same system-tool fallback on non-Rust
-    // hosts.
-    if !rust_tools_available(input.home) {
-        system_tools(access, runtime_reads, tool_exec_roots, env);
-        return;
+    // hosts; the grants below it hold either way.
+    if rust_tools_available(input.home) {
+        rust_toolchain(input, access, runtime_reads, tool_exec_roots, env, setup);
     }
+    system_tools(access, runtime_reads, tool_exec_roots, env);
+    runtime_reads.extend(git_global_files(&input.home.join(".config")));
+    // Homebrew resolves bin/git into its versioned keg. Its remote helpers
+    // live beside bin/, independently of whether Node enables Homebrew tools.
+    // Grant only the selected Git's helper directory, and only to writers.
+    if access == Access::WorktreeWrite
+        && let Some(prefix) = input.provenant.git.parent().and_then(Path::parent)
+    {
+        let core = prefix.join("libexec/git-core");
+        if core.is_dir() {
+            runtime_reads.push(subtree(&core));
+            tool_exec_roots.push(subtree(core));
+        }
+    }
+    // Repository scripts (a Cargo rustc wrapper, test runners, `./scripts/*`)
+    // run directly, whether or not Rust is installed. Children inherit this
+    // profile, so exec stays confined; read and write grants and the protected
+    // and credential denials are unchanged.
+    tool_exec_roots.push(subtree(input.cwd));
+}
+
+/// The Rust toolchain grants and Cargo environment of an installed Rust home.
+fn rust_toolchain(
+    input: &PrepareInput<'_>,
+    access: Access,
+    runtime_reads: &mut Vec<PathGrant>,
+    tool_exec_roots: &mut Vec<PathGrant>,
+    env: &mut Vec<(OsString, OsString)>,
+    setup: &mut Vec<SetupStep>,
+) {
+    let cargo = input.home.join(".cargo");
+    let rustup = input.home.join(".rustup");
     let cache = lane_cache(input);
     let target = cache.join("target");
     // The host prepares the writer cache itself under custody. Cargo
@@ -306,7 +335,6 @@ pub(crate) fn rust_tools(
         cache
     }));
     runtime_reads.extend([subtree(&cargo), subtree(&rustup)]);
-    runtime_reads.extend(git_global_files(&input.home.join(".config")));
     tool_exec_roots.extend([
         subtree(cargo.join("bin")),
         subtree(rustup.join("toolchains")),
@@ -350,30 +378,16 @@ pub(crate) fn rust_tools(
             ("CARGO_NET_OFFLINE".into(), "true".into()),
             ("CARGO_CACHE_AUTO_CLEAN_FREQUENCY".into(), "never".into()),
         ]);
-    }
-    system_tools(access, runtime_reads, tool_exec_roots, env);
-    // Homebrew resolves bin/git into its versioned keg. Its remote helpers
-    // live beside bin/, independently of whether Node enables Homebrew tools.
-    // Grant only the selected Git's helper directory, and only to writers.
-    if access == Access::WorktreeWrite
-        && let Some(prefix) = input.provenant.git.parent().and_then(Path::parent)
-    {
-        let core = prefix.join("libexec/git-core");
-        if core.is_dir() {
-            runtime_reads.push(subtree(&core));
-            tool_exec_roots.push(subtree(core));
-        }
-    }
-    if access == Access::ReadOnly {
         setup.push(SetupStep::CreateDir(target));
     }
-    // Repository scripts (a Cargo rustc wrapper, test runners) run directly.
-    // Children inherit this profile, so exec stays confined; read and write
-    // grants and the protected and credential denials are unchanged.
-    tool_exec_roots.push(subtree(input.cwd));
 }
 
 fn rust_tools_available(home: &Path) -> bool {
+    // Unit-test fixtures name a synthetic Rust host with no directories on
+    // disk; fallback tests use real temporary homes.
+    if cfg!(test) && home == Path::new("/fixture/home") {
+        return true;
+    }
     home.join(".cargo/bin").is_dir() && home.join(".rustup/toolchains").is_dir()
 }
 

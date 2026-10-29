@@ -464,6 +464,14 @@ the host's `[domains.fabric.graph] allowed_read_roots` list. A planner
 fragment may not add `read_roots`, change `source` or change `role` relative
 to its planner node.
 
+A graph document may set a top-level `network` of `"on"` or `"off"`. Every
+node lane the graph launches receives that network reach; without it, lanes
+default to open network. `run --network` binds it into a preset graph, with an
+explicit `--preset` or under automatic selection. Automatic selection refuses
+single-lane flags a graph cannot apply, such as `--account`, `--effort`,
+`--write-root` and `--host`, before it selects a preset, and its `next:` names
+`--model` or `--route`.
+
 An optional `source` pins a node's subject before its first attempt:
 
 ```json
@@ -491,7 +499,10 @@ it takes every transitive dependency's attempt, composite members included. It g
 attempt refs, and the owner excludes their model families from route
 selection. `distinct_strength` is `prefer` (default) or `require`. Under
 prefer, when no route outside the families is ready the owner substitutes one;
-under require the attempt is refused before launch. After each terminal
+under require the attempt is refused before launch. An exact `model` route
+has no substitute: under require, a model in an excluded family, or of unknown
+family, is refused before submission as `adapter_unavailable`, so a later
+route in the node's list may still run. After each terminal
 attempt the scheduler resolves the applied family and stores a `separation`
 record on the node (`strength`, `excluded`, `applied`, `outcome` of
 `separated`, `unavailable` or `unconstrained`). With no known upstream family

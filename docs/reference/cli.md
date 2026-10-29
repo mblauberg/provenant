@@ -1897,7 +1897,7 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
 | `--set` | `{"name": "preset_set", "repeatable": true}` |
 | `--params-file` | `{"name": "preset_params_file"}` |
 | `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
@@ -2112,7 +2112,7 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"], "name": "preset"}` |
 | `--set` | `{"name": "preset_set", "repeatable": true}` |
 | `--params-file` | `{"name": "preset_params_file"}` |
 | `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
