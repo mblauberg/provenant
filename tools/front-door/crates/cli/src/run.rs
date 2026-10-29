@@ -1799,6 +1799,9 @@ pub fn submit_with_host(
 
 /// The main CLI path reuses admission, managed worktrees and bounded waits.
 pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
+    if let Err(fail) = require_explicit_target(&command, edge.cwd) {
+        return reply("run", Err(fail));
+    }
     if command.host.is_none()
         && let Some(path) = &command.access.worktree
     {
@@ -1849,6 +1852,69 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
         }
     }
     render_run(dispatch(command, edge), edge)
+}
+
+// A run that names neither a mode nor a target, from a linked worktree, is the
+// ambiguous case: the agent may have forgotten `--worktree`. Refuse before
+// dispatch so it cannot silently become a read-only lane. An explicit mode
+// (including `--mode read-only`) or a target is an intent and passes.
+fn require_explicit_target(command: &Dispatch, cwd: &Path) -> Result<(), Fail> {
+    if command.access.mode.is_some()
+        || command.access.worktree.is_some()
+        || command.branch.is_some()
+        || command.worktree_branch.is_some()
+    {
+        return Ok(());
+    }
+    require_worktree_target(cwd)
+}
+
+fn require_worktree_target(cwd: &Path) -> Result<(), Fail> {
+    let cwd = provenant_os::fs::canonicalize(cwd)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Invalid, error.to_string()))?;
+    for path in cwd.ancestors() {
+        match std::fs::symlink_metadata(path.join(".git")) {
+            Ok(marker) if marker.is_file() => {
+                if !is_linked_gitfile(path)? {
+                    return Ok(());
+                }
+                return Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Refused,
+                    format!(
+                        "run from a linked worktree needs an explicit target: use --worktree {} for a writer, or --mode read-only for a reader",
+                        path.display()
+                    ),
+                ));
+            }
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Fail::new(
+                    Status::Error,
+                    ErrorKind::Invalid,
+                    error.to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+// Git writes `gitdir: <common>/worktrees/<name>` into a linked checkout's
+// gitfile. A submodule's gitfile names its own `.git/modules/<name>` instead.
+fn is_linked_gitfile(checkout: &Path) -> Result<bool, Fail> {
+    let contents = std::fs::read_to_string(checkout.join(".git"))
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Invalid, error.to_string()))?;
+    let Some(gitdir) = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))
+    else {
+        return Ok(false);
+    };
+    // A relative gitdir is resolved against the checkout that holds the gitfile.
+    let gitdir = checkout.join(gitdir.trim());
+    Ok(gitdir.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("worktrees")))
 }
 
 fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
@@ -2414,7 +2480,7 @@ pub(crate) fn check_flag_capabilities(
         .iter()
         .any(|name| name == "postgres");
     let flag_network = network_access(command.access.network, postgres);
-    let write = matches!(command.access.mode, Mode::WorktreeWrite);
+    let write = matches!(command.access.mode(), Mode::WorktreeWrite);
     let check = |provider: &str,
                  model: Option<&str>,
                  effort: Option<&str>,
@@ -2529,7 +2595,7 @@ fn dispatch_inner(
     // that does not depend on the tree runs before it and a refusal leaves
     // no tree behind.
     let owned = if let Some(branch) = command.worktree_branch.clone() {
-        if !matches!(command.access.mode, Mode::WorktreeWrite) || crate::fabric::in_lane() {
+        if !matches!(command.access.mode(), Mode::WorktreeWrite) || crate::fabric::in_lane() {
             return Err(Fail::new(
                 Status::Refused,
                 ErrorKind::Refused,
@@ -2560,7 +2626,7 @@ fn dispatch_inner(
         })
     } else {
         worktree_access(
-            matches!(command.access.mode, Mode::WorktreeWrite) && command.branch.is_none(),
+            matches!(command.access.mode(), Mode::WorktreeWrite) && command.branch.is_none(),
             command.access.worktree.as_deref(),
         )?;
         None
@@ -2585,7 +2651,7 @@ fn dispatch_inner(
     if let Some(host) = command.host.as_deref() {
         if remote::names_local_host(edge, host)? {
             command.host = None;
-        } else if matches!(command.access.mode, Mode::WorktreeWrite) {
+        } else if matches!(command.access.mode(), Mode::WorktreeWrite) {
             if !remote::names_peer(edge, host)? {
                 return Err(remote::unknown_host(host));
             }
@@ -7779,6 +7845,190 @@ mod lane_depth_tests {
 mod tests {
     use super::*;
 
+    /// A project with a linked worktree `writer` and a `nested` directory in it.
+    /// The fixture's Git runs without the lane's `GIT_*` variables.
+    struct LinkedFixture {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+        project: PathBuf,
+        tree: PathBuf,
+    }
+
+    fn linked_fixture() -> Result<LinkedFixture, Box<dyn std::error::Error>> {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let project = root.join("project");
+        let tree = root.join("writer");
+        std::fs::create_dir_all(&project)?;
+        let executor = SystemExecutor::new(1)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+            .collect();
+        env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
+        env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+        for args in [
+            vec!["init", "-q", "-b", "fixture-base"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "base",
+            ],
+            vec![
+                "worktree",
+                "add",
+                "-qb",
+                "writer",
+                tree.to_str().ok_or("path")?,
+            ],
+        ] {
+            let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
+                .chain(args.into_iter().map(std::ffi::OsString::from))
+                .collect();
+            let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
+            options.env = Some(&env);
+            let output = executor.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+        }
+        std::fs::create_dir(tree.join("nested"))?;
+        Ok(LinkedFixture {
+            _temp: temp,
+            root,
+            project,
+            tree,
+        })
+    }
+
+    /// Runs `check` with the edge that `run` would see from `cwd`.
+    fn with_edge<T>(
+        root: &Path,
+        cwd: &Path,
+        check: impl FnOnce(&Edge<'_>) -> T,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        use provenant_core::RootInputs;
+        let home = root.join("home");
+        let project = root.join("project");
+        std::fs::create_dir_all(&home)?;
+        let mut inputs = RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        Ok(check(&Edge {
+            roots: &roots,
+            home: &home,
+            assets: &project,
+            cwd,
+        }))
+    }
+
+    fn parsed_run(args: &[&str]) -> Result<Dispatch, Box<dyn std::error::Error>> {
+        let argv = std::iter::once("run")
+            .chain(args.iter().copied())
+            .map(std::ffi::OsString::from);
+        let crate::ParseOutcome::Invocation(invocation) = crate::parse(argv) else {
+            return Err("parse failed".into());
+        };
+        let crate::Command::Run(command) = invocation.command else {
+            return Err("not run".into());
+        };
+        Ok(*command)
+    }
+
+    #[test]
+    fn run_in_linked_worktree_requires_explicit_target() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = linked_fixture()?;
+        let nested = fixture.tree.join("nested");
+        let command = parsed_run(&["--prompt-stdin"])?;
+        let result = with_edge(&fixture.root, &nested, |edge| super::run(command, edge))?;
+        let error = result.result.error.ok_or("expected refusal")?;
+        assert_eq!(error.code, "REFUSED");
+        assert_eq!(
+            error.message,
+            format!(
+                "run from a linked worktree needs an explicit target: use --worktree {} for a writer, or --mode read-only for a reader",
+                fixture.tree.display()
+            )
+        );
+        assert!(super::require_worktree_target(&fixture.project).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_target_or_mode_passes_the_linked_worktree_guard()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = linked_fixture()?;
+        let nested = fixture.tree.join("nested");
+        let tree = fixture.tree.to_string_lossy().into_owned();
+        for args in [
+            vec!["--prompt-stdin", "--worktree", tree.as_str()],
+            vec!["--prompt-stdin", "--mode", "read-only"],
+            vec!["--prompt-stdin", "--branch", "feature"],
+            vec!["--prompt-stdin", "--worktree-branch", "feature"],
+        ] {
+            let command = parsed_run(&args)?;
+            assert!(
+                super::require_explicit_target(&command, &nested).is_ok(),
+                "{args:?}"
+            );
+        }
+        let refused = parsed_run(&["--prompt-stdin"])?;
+        assert!(super::require_explicit_target(&refused, &nested).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_read_only_from_a_linked_worktree_dispatches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = linked_fixture()?;
+        let nested = fixture.tree.join("nested");
+        let prompt = fixture.root.join("prompt.md");
+        std::fs::write(&prompt, "Summarise the repository.")?;
+        let prompt = prompt.to_string_lossy().into_owned();
+        // Without a model or route, dispatch stops at task validation before
+        // any provider is launched.
+        let command = parsed_run(&["--prompt-file", prompt.as_str(), "--mode", "read-only"])?;
+        let result = with_edge(&fixture.root, &nested, |edge| super::run(command, edge))?;
+        // The guard refuses with no data. Dispatch always assigns an operation.
+        assert!(
+            result.result.data.get("operation_id").is_some(),
+            "{:?}",
+            result.result.error
+        );
+        assert!(
+            result
+                .result
+                .error
+                .as_ref()
+                .is_none_or(|error| error.code != "REFUSED"),
+            "{:?}",
+            result.result.error
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn submodule_gitfile_is_not_a_linked_worktree() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let submodule = root.join("super").join("vendor");
+        let nested = submodule.join("src");
+        std::fs::create_dir_all(&nested)?;
+        // A submodule's gitfile names its own administrative directory.
+        std::fs::write(
+            submodule.join(".git"),
+            "gitdir: ../../.git/modules/vendor\n",
+        )?;
+        assert!(super::require_worktree_target(&nested).is_ok());
+        let command = parsed_run(&["--prompt-stdin"])?;
+        assert!(super::require_explicit_target(&command, &nested).is_ok());
+        Ok(())
+    }
+
     #[test]
     fn graph_quality_counts_only_executed_repair_rounds_and_leaf_findings() {
         use provenant_fabric_runtime::graph::NodeProgress;
@@ -10424,7 +10674,7 @@ mod tests {
         std::fs::create_dir_all(&state)?;
         std::fs::create_dir_all(&project)?;
         let access = |mode, network, capability: &[&str], write_root: Vec<PathBuf>| crate::Access {
-            mode,
+            mode: Some(mode),
             worktree: None,
             read_root: Vec::new(),
             write_root,
@@ -10489,7 +10739,7 @@ mod tests {
         std::fs::create_dir_all(&state)?;
         std::fs::create_dir_all(&inside)?;
         let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
-            mode: Mode::WorktreeWrite,
+            mode: Some(Mode::WorktreeWrite),
             worktree: Some(worktree.clone()),
             read_root,
             write_root,

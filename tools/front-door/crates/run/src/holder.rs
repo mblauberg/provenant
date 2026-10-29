@@ -1047,8 +1047,10 @@ impl RunStore {
                 });
             }
         }
-        // A finish that settled well can still be a partial one. Flag it for
-        // the chair, who decides whether to resume; the outcome stays as is.
+        // Delivery keys off the outcome before a declared stop, so partial work
+        // is still delivered. The stop changes only the settled state.
+        let succeeded_before_stop = decoded.outcome == Outcome::Succeeded;
+        // A declared stop requires review even when the provider succeeded.
         let mut partial = std::mem::take(&mut decoded.partial_signals);
         if matches!(
             decoded.outcome,
@@ -1057,6 +1059,9 @@ impl RunStore {
             let mut notes = Vec::new();
             if let Some(handoff) = handoff.as_ref().filter(|handoff| handoff.unfinished()) {
                 partial.push(PartialSignal::DeclaredStop);
+                if decoded.outcome == Outcome::Succeeded {
+                    decoded.outcome = Outcome::ReviewRequired;
+                }
                 notes.push(format!(
                     "lane stopped early: {}",
                     bounded_note(&handoff.note)
@@ -1084,7 +1089,7 @@ impl RunStore {
         // the sealed stdout, so no live frame observation is required.
         let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
         if !result_orphan
-            && decoded.outcome == Outcome::Succeeded
+            && succeeded_before_stop
             && !cancelled
             && exit.stop_reason.is_none()
             && !exit.unresolved_cleanup

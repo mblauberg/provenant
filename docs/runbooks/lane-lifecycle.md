@@ -23,6 +23,10 @@ shapes before storage. Result digests identify the stored bytes, and
 Unknown secret formats, earlier run files and provider-owned session state
 still need care when sharing. See [output redaction and identity](../specs/run.md#output-redaction-and-identity).
 
+A valid final handoff declaring `stopped_early` or `blocked` makes an otherwise
+successful lane settle as `review_required`. `run --wait` and `lanes` show the
+state, so the unfinished work is visible without inspecting partial signals.
+
 On macOS, the host selects a nice value for the lane, and the guardian applies
 it to the provider process before confinement. Its descendants inherit that
 value.
@@ -44,6 +48,11 @@ value is null before it is known and for older records without this evidence.
 If the guardian already has a higher nice value, the provider inherits that
 lower scheduling priority. If changing priority fails, the provider still
 launches at its inherited priority and the reason is recorded as a warning.
+
+When run from a linked Git worktree with no `--mode` and no target
+(`--worktree`, `--branch` or `--worktree-branch`), `run` refuses with `REFUSED`
+and names both repairs: `--worktree <path>` for a writer, or `--mode read-only`
+for a reader.
 
 The receipt names the worktree. `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned
