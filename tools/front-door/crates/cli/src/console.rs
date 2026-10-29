@@ -9,6 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 
 mod board;
 mod detail;
+mod detail_inbox;
 mod overview;
 pub mod peer;
 mod search;

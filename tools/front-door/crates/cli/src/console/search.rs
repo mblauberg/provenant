@@ -185,3 +185,181 @@ pub(super) fn read(
         json!({"schema_version":1,"snapshot":snapshot,"query":query,"part":part,"matches":&matches[offset..end],"next_cursor":next_cursor,"truncated":truncated || end < matches.len(),"coverage":{"scope":"local","files_scanned":scanned,"bytes_scanned":scan_bytes,"file_limit":FILE_LIMIT,"per_artifact_bytes":ARTIFACT_BYTES,"total_bytes":TOTAL_BYTES,"artifact_errors":artifact_errors,"restart":"If the cursor is invalid or stale, restart with the same query and filters without --cursor."}}),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_core::{AttemptId, Clock, Digest, OperationId, RootInputs, RunId, TaskId};
+    use provenant_run::{CanonicalRequest, NewAttempt, PreparedRun};
+    use std::time::Instant;
+
+    #[test]
+    #[allow(clippy::disallowed_methods, clippy::print_stderr)] // This test measures real elapsed time.
+    fn search_bounds_and_detail_performance() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let checkout = base.join("checkout");
+        let state = base.join("state");
+        std::fs::create_dir(&home)?;
+        std::fs::create_dir(&checkout)?;
+        std::fs::create_dir(checkout.join(".git"))?;
+        std::fs::create_dir(&state)?;
+        std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+        let mut inputs = RootInputs::new(home, checkout.clone());
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(checkout.join(".git"))?,
+        )?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = RunStore::open(
+            &ExecutionContext {
+                state_root: roots.state.clone(),
+                project_id: binding.project_id(),
+                actor_id: ActorId::from_bytes([2; 16]),
+                read_prompts: false,
+            },
+            &call,
+        )?;
+        let mut ids = Vec::new();
+        for batch in 0..16u16 {
+            let mut tasks = Vec::new();
+            let mut attempts = Vec::new();
+            for index in 0..64u16 {
+                let n = batch * 64 + index;
+                if n == 1001 {
+                    break;
+                }
+                let mut bytes = [0u8; 16];
+                bytes[..2].copy_from_slice(&n.to_be_bytes());
+                let task = TaskId::from_bytes(bytes);
+                let attempt = AttemptId::from_bytes(bytes);
+                let prompt = "searchable fixture";
+                tasks.push(json!({"task_id":task,"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}));
+                attempts.push(NewAttempt {
+                    task_id: task,
+                    attempt_id: attempt,
+                    prompt: prompt.into(),
+                });
+                ids.push(attempt);
+            }
+            let request: CanonicalRequest = serde_json::from_value(
+                json!({"schema_version":1,"tasks":tasks,"concurrency":1,"parent":null,"lane_depth":1}),
+            )?;
+            let mut run_bytes = [0u8; 16];
+            run_bytes[..2].copy_from_slice(&batch.to_be_bytes());
+            store.create(
+                &PreparedRun {
+                    run_id: RunId::from_bytes(run_bytes),
+                    operation_id: OperationId::parse(&format!("search-{batch}"))?,
+                    created_at: clock.wall_now()?,
+                    request,
+                    attempts,
+                },
+                &call,
+            )?;
+            // This fixture retains attempts but does not model scheduler admission.
+            rusqlite::Connection::open(state.join("run.sqlite3"))?
+                .execute("DELETE FROM admission", [])?;
+        }
+        let page = read(&roots, "searchable", "prompt", None, 100, None)?;
+        assert_eq!(page["matches"].as_array().ok_or("matches")?.len(), 100);
+        assert_eq!(page["coverage"]["files_scanned"], 1000);
+        assert_eq!(page["truncated"], true);
+        let cursor = page["next_cursor"].as_str().ok_or("cursor")?;
+        assert!(read(&roots, "different", "prompt", None, 100, Some(cursor)).is_err());
+        let second = read(&roots, "searchable", "prompt", None, 100, Some(cursor))?;
+        assert_ne!(
+            page["matches"][0]["lane_id"],
+            second["matches"][0]["lane_id"]
+        );
+        assert!(read(&roots, "searchable", "prompt", None, 101, None).is_err());
+        assert!(read(&roots, "searchable", "transcript", None, 50, None).is_err());
+        let mut details = Vec::new();
+        let mut searches = Vec::new();
+        for _ in 0..20 {
+            let start = Instant::now();
+            for id in ids.iter().take(100) {
+                assert_eq!(
+                    super::super::detail::read(&roots, &id.to_string())?["status"],
+                    "found"
+                );
+            }
+            details.push(start.elapsed());
+            let start = Instant::now();
+            let result = read(&roots, "searchable", "prompt", None, 100, None)?;
+            assert_eq!(result["coverage"]["files_scanned"], 1000);
+            searches.push(start.elapsed());
+        }
+        details.sort();
+        searches.sort();
+        eprintln!(
+            "100-detail p95: {:?}; 1000-attempt search p95: {:?}",
+            details[18], searches[18]
+        );
+        let credential = base.join("credential");
+        std::fs::write(&credential, "searchable fixture")?;
+        let prompt = state
+            .join("runs")
+            .join(RunId::from_bytes([0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).to_string())
+            .join("attempts")
+            .join(ids[1000].to_string())
+            .join("prompt.txt");
+        std::fs::remove_file(&prompt)?;
+        std::os::unix::fs::symlink(&credential, &prompt)?;
+        let guarded = read(&roots, "searchable", "prompt", None, 100, None)?;
+        assert!(
+            guarded["coverage"]["artifact_errors"]
+                .as_array()
+                .ok_or("errors")?
+                .iter()
+                .any(|error| error["attempt_id"] == json!(ids[1000]))
+        );
+        assert!(
+            !guarded["matches"]
+                .as_array()
+                .ok_or("matches")?
+                .iter()
+                .any(|item| item["lane_id"]["attempt_id"] == json!(ids[1000]))
+        );
+        std::fs::remove_file(&prompt)?;
+        std::fs::write(&prompt, "searchable fixture")?;
+        std::fs::set_permissions(&prompt, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        let db = rusqlite::Connection::open(state.join("run.sqlite3"))?;
+        for (index, id) in ids.iter().enumerate().rev().take(130) {
+            let mut record = serde_json::to_value(store.record(*id, &call)?)?;
+            let content = if index == 1000 {
+                format!("oversizedmarker{}", "x".repeat(ARTIFACT_BYTES as usize))
+            } else {
+                "x".repeat(ARTIFACT_BYTES as usize)
+            };
+            let mut run_bytes = [0u8; 16];
+            run_bytes[..2].copy_from_slice(&((index / 64) as u16).to_be_bytes());
+            let path = state
+                .join("runs")
+                .join(RunId::from_bytes(run_bytes).to_string())
+                .join("attempts")
+                .join(id.to_string())
+                .join("prompt.txt");
+            std::fs::write(path, &content)?;
+            record["prompt"]["bytes"] = json!(content.len());
+            record["prompt"]["digest"] = json!(CanonicalV1::file_digest(content.as_bytes()));
+            db.execute(
+                "UPDATE attempts SET record=?1 WHERE id=?2",
+                rusqlite::params![serde_json::to_vec(&record)?, id.to_string()],
+            )?;
+        }
+        let byte_limited = read(&roots, "oversizedmarker", "prompt", None, 100, None)?;
+        assert_eq!(byte_limited["matches"], json!([]));
+        assert_eq!(byte_limited["truncated"], true);
+        assert_eq!(byte_limited["coverage"]["bytes_scanned"], TOTAL_BYTES);
+        Ok(())
+    }
+}

@@ -1064,7 +1064,9 @@ pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObser
 fn peer_read_only(action: &PeerAction) -> bool {
     use provenant_fabric_runtime::inbox::InboxInput;
     match action {
-        PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. } => true,
+        PeerAction::ConsoleBoard { .. }
+        | PeerAction::ConsoleTree { .. }
+        | PeerAction::ConsoleDetail { .. } => true,
         PeerAction::Inbox { input, .. } => !matches!(
             input,
             InboxInput::Answer {
@@ -1344,6 +1346,22 @@ pub fn peer(
                             extra: Default::default(),
                         },
                     }
+                }
+            }
+            PeerAction::ConsoleDetail { id, .. } => {
+                let command = provenant_cli::console::Console::Detail { id: id.clone() };
+                match provenant_cli::console::read(&context.roots, None, &command) {
+                    Ok(value) => PeerResult::Console {
+                        data: value,
+                        extra: Default::default(),
+                    },
+                    Err(_) => PeerResult::Error {
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::InvalidInput,
+                        },
+                        extra: Default::default(),
+                    },
                 }
             }
             PeerAction::RunStatuses { targets, .. } => {

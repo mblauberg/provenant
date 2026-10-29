@@ -336,6 +336,18 @@ mod tests {
         request.parent = Some(AttemptId::from_bytes([2; 16]));
         request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
         child_store.create(&prepared(3, 3, request.clone())?, &call)?;
+        let local_detail =
+            super::super::detail::read(&roots, &AttemptId::from_bytes([1; 16]).to_string())?;
+        assert_eq!(local_detail["status"], "found");
+        assert_eq!(local_detail["artifacts"][0]["bytes"], 4);
+        assert_eq!(local_detail["usage"]["reasoning"], serde_json::Value::Null);
+        let nested_detail =
+            super::super::detail::read(&roots, &AttemptId::from_bytes([2; 16]).to_string())?;
+        assert_eq!(nested_detail["status"], "found");
+        assert_eq!(
+            nested_detail["lane_id"]["attempt_id"],
+            json!(AttemptId::from_bytes([2; 16]))
+        );
         let missing = read(&roots, None, 3, 100, false)?;
         assert_eq!(missing["identity_conflicts"], json!([]));
         assert_eq!(missing["unfetched_children"], json!([]));
