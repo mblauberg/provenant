@@ -32,6 +32,10 @@ struct Launch {
 struct Owner {
     launches: Vec<Launch>,
     lands: Vec<(String, String, LandAuthority)>,
+    /// Observe-only requests while a tier asks: branch and head.
+    observed: Vec<(String, String)>,
+    /// Whether the chair has merged by hand, which observation reports.
+    chair_merged: bool,
     outcomes: VecDeque<LandObservation>,
     policy: Option<LandChoice>,
     reply: Option<String>,
@@ -96,10 +100,24 @@ impl AttemptOwner for Owner {
             .unwrap_or_else(|| crate::config::GraphLand::default().choose(None, tier))
     }
     fn land(&mut self, request: LandRequest<'_>) -> Result<LandObservation, Self::Error> {
+        let Some(authority) = request.authority else {
+            self.observed
+                .push((request.branch.into(), request.head.into()));
+            return Ok(if self.chair_merged {
+                LandObservation::Merged {
+                    pull_request: Some(7),
+                    note: None,
+                }
+            } else {
+                LandObservation::Pending {
+                    reason: "not merged yet".into(),
+                }
+            });
+        };
         self.lands.push((
             request.branch.into(),
             request.head.into(),
-            request.authority.clone(),
+            authority.clone(),
         ));
         Ok(self
             .outcomes
@@ -288,7 +306,7 @@ fn an_auto_tier_lands_the_newest_delivered_head_through_the_host() {
 }
 
 #[test]
-fn a_crucial_tier_raises_a_land_ask_and_lands_on_its_answer() {
+fn a_crucial_tier_asks_and_succeeds_only_once_the_chair_merges_by_hand() {
     let document = document("crucial", Some("chair"));
     let mut owner = owner();
     let mut journal = Journal::default();
@@ -296,31 +314,33 @@ fn a_crucial_tier_raises_a_land_ask_and_lands_on_its_answer() {
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Running);
     assert!(owner.lands.is_empty());
+    assert!(
+        owner
+            .observed
+            .iter()
+            .all(|observed| *observed == ("feature/x".to_owned(), REPAIR_HEAD.to_owned()))
+    );
     let ask = &checkpoint.asks[0];
     assert_eq!(
         (ask.ask_id.as_str(), ask.kind, ask.session.as_str()),
         ("land.ask-1", AskKind::Land, "chair")
     );
     let options: Vec<_> = ask.options.iter().map(|o| o.id.as_str()).collect();
-    assert_eq!(options, ["land", "hold"]);
+    assert_eq!(options, ["hold"]);
     assert!(ask.body.contains(REPAIR_HEAD) && ask.body.contains("crucial tier asks first"));
-
-    owner.reply = Some("land".into());
-    let checkpoint = run(&document, &mut owner, &mut journal);
-    let authority = LandAuthority::Ask {
-        ask_id: "land.ask-1".into(),
-        actor: "chair".into(),
-    };
-    assert_eq!(
-        owner.lands,
-        [(
-            "feature/x".to_owned(),
-            REPAIR_HEAD.to_owned(),
-            authority.clone()
-        )]
+    assert!(
+        ask.body
+            .contains(&format!("provenant land N --head {REPAIR_HEAD}"))
     );
+
+    owner.chair_merged = true;
+    let checkpoint = run(&document, &mut owner, &mut journal);
+    assert!(owner.lands.is_empty(), "the graph never merges an ask tier");
     let land = node(&checkpoint, "land");
     assert_eq!(land.state, NodeState::Succeeded);
+    let authority = LandAuthority::Chair {
+        ask_id: "land.ask-1".into(),
+    };
     assert_eq!(land.land.as_ref().unwrap().authorised_by, Some(authority));
     assert!(
         land.outputs
@@ -330,9 +350,26 @@ fn a_crucial_tier_raises_a_land_ask_and_lands_on_its_answer() {
             .as_ref()
             .unwrap()
             .excerpt
-            .contains("chair answered land to land.ask-1")
+            .contains("the chair landed it by hand after land.ask-1")
     );
     assert!(checkpoint.asks[0].resolved);
+}
+
+#[test]
+fn an_inbox_answer_of_land_never_approves_a_land() {
+    let mut owner = owner();
+    owner.reply = Some("land".into());
+    let checkpoint = run(
+        &document("crucial", Some("chair")),
+        &mut owner,
+        &mut Journal::default(),
+    );
+    let land = node(&checkpoint, "land");
+    assert_eq!(land.state, NodeState::Failed);
+    assert!(owner.lands.is_empty(), "{:?}", owner.lands);
+    let error = land.advance_error.as_deref().unwrap();
+    assert!(error.contains("cannot approve a land"), "{error}");
+    assert!(land.land.as_ref().unwrap().authorised_by.is_none());
 }
 
 #[test]
@@ -516,6 +553,29 @@ fn a_failed_review_routed_to_land_never_calls_the_host() {
 }
 
 #[test]
+fn ci_output_never_substitutes_for_review() {
+    // write, CI, a verdict gate on CI's own PASS, land: no reviewer ran.
+    let (owner, land) = land_outcome(
+        json!([
+            {"id":"write", "access":"worktree_write", "worktree":"/wt/feature", "delivery":"pr",
+             "prompt":"write it", "route":{"alias":"senior"}},
+            {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["write"],
+             "condition":{"type":"ci", "target":"feature/x"}},
+            {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["ci"],
+             "inputs":[{"node":"ci", "outputs":["verdict"]}],
+             "condition":{"type":"verdict", "expected":"PASS", "threshold":"all"}},
+            {"id":"land", "kind":"land", "access":"read_only", "depends_on":["accepted"],
+             "land":{"node":"write", "tier":"substantial"}}
+        ]),
+        "VERDICT: PASS",
+    );
+    assert!(owner.lands.is_empty(), "{:?}", owner.lands);
+    assert_eq!(land.state, NodeState::Failed);
+    let error = land.advance_error.unwrap();
+    assert!(error.contains("accepted passed no head"), "{error}");
+}
+
+#[test]
 fn a_review_of_an_earlier_head_never_lands_a_continuation() {
     // write H1, review H1, PASS, repair H2, CI, land: H2 was never reviewed.
     let (owner, land) = land_outcome(
@@ -640,7 +700,7 @@ fn a_loop_body_cannot_land() {
 fn land_records_keep_unknown_fields() {
     let value = json!({"tier":"crucial", "policy":"ask", "policy_source":"project",
         "branch":"feature/x", "head":REPAIR_HEAD,
-        "authorised_by":{"type":"ask", "ask_id":"land.ask-1", "actor":"chair"},
+        "authorised_by":{"type":"chair", "ask_id":"land.ask-1"},
         "receipt":"future"});
     let record: LandRecord = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(record).unwrap(), value);

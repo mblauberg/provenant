@@ -728,12 +728,14 @@ pub(crate) fn run(
 }
 
 /// Land a graph node's pull request: the same head-pinned merge and cleanup
-/// as `provenant land`, for the open PR whose head is `branch`.
+/// as `provenant land`, for the PR whose head is `branch`. Without `merge`,
+/// only observe whether the chair has merged it at `head` by hand.
 pub(crate) fn graph_land(
     project: &Path,
     state: &Path,
     branch: &str,
     head: &str,
+    merge: bool,
     workers: &dyn WorkerObserver,
 ) -> provenant_fabric_runtime::graph::LandObservation {
     use provenant_fabric_runtime::graph::LandObservation;
@@ -747,14 +749,36 @@ pub(crate) fn graph_land(
             reason: format!("{branch} is not a plain branch name"),
         };
     }
-    let number = match super::number_for_branch(project, branch) {
-        Ok(number) => number,
+    let pull = match super::pull_for_branch(project, branch, head) {
+        Ok(pull) => pull,
         Err(error) => {
             return LandObservation::Pending {
                 reason: format!("no pull request found for {branch} yet: {error}"),
             };
         }
     };
+    let number = pull.number;
+    if !merge {
+        let next = format!("next: provenant land {number} --head {head}");
+        return match pull.state.as_str() {
+            "MERGED" if pull.head == head => LandObservation::Merged {
+                pull_request: Some(number),
+                note: None,
+            },
+            _ if pull.head != head => LandObservation::Refused {
+                reason: format!(
+                    "HEAD_MOVED: pull request #{number} head moved to {}",
+                    pull.head
+                ),
+            },
+            "OPEN" => LandObservation::Pending {
+                reason: format!("pull request #{number} awaits the chair; {next}"),
+            },
+            state => LandObservation::Refused {
+                reason: format!("PR_CLOSED: pull request #{number} is {state} without merging"),
+            },
+        };
+    }
     let globals = provenant_cli::Globals {
         json: true,
         full: false,

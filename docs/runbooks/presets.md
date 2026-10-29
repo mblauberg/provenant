@@ -326,13 +326,21 @@ The graph is `write`, then `ci` (a CI gate and its repair loop), `review`
    failed review stops the graph before land.
 6. `land` merges that exact head under the host's land policy for
    `land_tier`. By default `routine` and `substantial` land automatically, and
-   `crucial` and `terminal` ask the decision session first. The session is
-   bound to the land node itself, so it still applies when `deliver` runs
-   inside another preset. Without a `decision_session`, a tier that asks fails
-   the land node, which names the branch and head to land by hand with
-   `provenant land`; it does not pause. The land node refuses a head other
-   than the one the passing verdict reviewed, including a council pinned to an
-   earlier head, and needs the CI gate green.
+   `crucial` and `terminal` ask the decision session. The ask names the
+   command to run, `provenant land N --head SHA`; the land node waits and
+   succeeds once it sees the pull request merged at that head. An inbox
+   answer never approves the land: `hold`, or any other answer, fails the
+   node. The session is bound to the land node itself, so it still applies
+   when `deliver` runs inside another preset. Without a `decision_session`, a
+   tier that asks fails the land node, which names the branch and head to land
+   by hand with `provenant land`; it does not pause. The land node refuses a
+   head other than the one the passing verdict reviewed, including a council
+   pinned to an earlier head, and needs the CI gate green.
+
+A repository `deliver.toml` cannot lower `land_tier` or turn on `land` beyond
+your user configuration: each land node takes the stricter tier, and a land
+your configuration turned off takes `terminal`. Set a lower tier explicitly
+with `--set parameters.land_tier=...` when you mean it.
 
 Knobs: `checks` names the required checks (empty uses the branch's required
 checks), `ci_timeout_seconds` bounds each gate, `repair_tier` routes the

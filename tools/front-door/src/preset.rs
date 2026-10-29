@@ -40,6 +40,8 @@ pub struct Layers {
     entries: BTreeMap<String, Vec<(String, Value)>>,
     errors: BTreeMap<String, Vec<String>>,
     repo_files: BTreeSet<String>,
+    /// Resolve without repository layers, for the landing floor.
+    exclude_repo: std::cell::Cell<bool>,
 }
 
 #[derive(Debug)]
@@ -339,10 +341,16 @@ impl Layers {
         if let Some(errors) = self.errors.get(name) {
             return Err(errors.join("; "));
         }
-        let entries = self
+        let entries: Vec<&(String, Value)> = self
             .entries
             .get(name)
-            .ok_or_else(|| format!("unknown preset: {name}"))?;
+            .into_iter()
+            .flatten()
+            .filter(|(origin, _)| !self.exclude_repo.get() || !self.repo_files.contains(origin))
+            .collect();
+        if entries.is_empty() {
+            return Err(format!("unknown preset: {name}"));
+        }
         let parent = entries
             .iter()
             .rev()
@@ -773,6 +781,17 @@ pub fn expand_with(
     params: &[(String, Value)],
     overrides: &[String],
 ) -> Result<Expansion, String> {
+    // Landing floor: the same expansion without repository layers, so they
+    // never lower a land tier or add a land that user configuration and the
+    // command line did not set.
+    let trusted = (!layers.repo_files.is_empty() && !layers.exclude_repo.get()).then(|| {
+        layers.exclude_repo.set(true);
+        let trusted = expand_with(layers, name, prompt, params, overrides);
+        layers.exclude_repo.set(false);
+        trusted
+            .ok()
+            .map(|expansion| expansion.document["nodes"].clone())
+    });
     layers.used_shapes.borrow_mut().clear();
     layers.used_roles.borrow_mut().clear();
     layers.substitutions.borrow_mut().clear();
@@ -822,6 +841,11 @@ pub fn expand_with(
         &mut origins,
         &mut repo_files,
     )?;
+    if let Some(trusted) = trusted
+        && !repo_files.is_empty()
+    {
+        floor_land_tiers(&mut nodes, trusted.as_ref());
+    }
     let digest = provenant_records::CanonicalV1::file_digest(
         &serde_json::to_vec(&nodes).map_err(|e| e.to_string())?,
     )
@@ -889,6 +913,56 @@ pub fn expand_with(
         roles,
         substitutions,
     })
+}
+
+const LAND_TIERS: [&str; 4] = ["routine", "substantial", "crucial", "terminal"];
+
+/// Land nodes keyed by their composite path, with their tier rank.
+fn land_tiers(nodes: &[Value], prefix: &str, tiers: &mut BTreeMap<String, usize>) {
+    for node in nodes {
+        let path = format!("{prefix}{}", node["id"].as_str().unwrap_or_default());
+        if let Some(rank) = node
+            .pointer("/land/tier")
+            .and_then(Value::as_str)
+            .and_then(|tier| LAND_TIERS.iter().position(|known| *known == tier))
+        {
+            tiers.insert(path.clone(), rank);
+        }
+        if let Some(children) = node.pointer("/composite/nodes").and_then(Value::as_array) {
+            land_tiers(children, &format!("{path}/"), tiers);
+        }
+    }
+}
+
+/// Raise each land tier to the stricter of this expansion and `trusted`, the
+/// expansion without repository layers. A land with no trusted counterpart,
+/// or any land when no trusted expansion exists, takes the strictest tier.
+fn floor_land_tiers(nodes: &mut [Value], trusted: Option<&Value>) {
+    let mut floors = BTreeMap::new();
+    if let Some(trusted) = trusted.and_then(Value::as_array) {
+        land_tiers(trusted, "", &mut floors);
+    }
+    fn raise(nodes: &mut [Value], prefix: &str, floors: &BTreeMap<String, usize>) {
+        for node in nodes {
+            let path = format!("{prefix}{}", node["id"].as_str().unwrap_or_default());
+            let floor = floors.get(&path).copied().unwrap_or(LAND_TIERS.len() - 1);
+            if let Some(tier) = node.pointer_mut("/land/tier")
+                && let Some(rank) = tier
+                    .as_str()
+                    .and_then(|tier| LAND_TIERS.iter().position(|known| *known == tier))
+                && rank < floor
+            {
+                *tier = json!(LAND_TIERS[floor]);
+            }
+            if let Some(children) = node
+                .pointer_mut("/composite/nodes")
+                .and_then(Value::as_array_mut)
+            {
+                raise(children, &format!("{path}/"), floors);
+            }
+        }
+    }
+    raise(nodes, "", &floors);
 }
 
 #[allow(

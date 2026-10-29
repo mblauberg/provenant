@@ -266,6 +266,27 @@ fn plan_overlapping_writers_share_one_worktree_integrate_and_deliver_once() {
 }
 
 #[test]
+fn planner_integrate_delivery_needs_the_documents_integration_branch() {
+    let mut writer = slice("w", &["src"]);
+    writer["access"] = json!("worktree_write");
+    writer["worktree"] = json!(".worktrees/w");
+    writer["delivery"] = json!("integrate:origin/release/1.3");
+    let output = result(vec![writer]);
+    let run = advance(&planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert!(run.checkpoint.pause_reason.unwrap().contains("names no integration_branch"));
+    assert!(run.checkpoint.expansions.is_empty());
+
+    // With one, the destination comes from the document, never the planner.
+    let mut doc = planner(1);
+    doc.integration_branch = Some("integration".into());
+    let mut owner = fixture_owner(&[&output]);
+    owner.observations.push_back(AttemptObservation::Pending { attempt_ref: Some("w".into()) });
+    advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(owner.delivery_modes[1], Some(provenant_records::run::DeliveryMode::Integrate("integration".into())));
+}
+
+#[test]
 fn plan_disjoint_writers_are_admitted_while_a_peer_is_running() {
     let mut doc = planner(2);
     doc.integration_branch = Some("integration".into());

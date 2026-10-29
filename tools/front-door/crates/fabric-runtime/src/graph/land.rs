@@ -5,7 +5,7 @@
 //! so a repair updates the same pull request. A `land` node merges a writer's
 //! pull request once a verdict gate and a CI gate downstream of the writer have
 //! passed. The host's risk-tier policy decides whether it lands at once or
-//! raises a node ask first; the record keeps who or what authorised it.
+//! asks the chair, who lands by hand; the record keeps who or what authorised it.
 use super::*;
 use crate::config::{LandChoice, LandPolicy, LandSource};
 use provenant_records::run::DeliveryMode;
@@ -31,8 +31,10 @@ pub struct LandSpec {
 pub enum LandAuthority {
     /// The tier policy was `auto`.
     Policy,
-    /// An answer of `land` to this node ask.
-    Ask { ask_id: String, actor: String },
+    /// The tier asked in `ask_id`, and the chair merged the pull request at the
+    /// pinned head with `provenant land`, which the node observed. An inbox
+    /// answer never authorises a land: lanes and peers can write answers.
+    Chair { ask_id: String },
 }
 
 /// A land node's pinned subject and decision, kept as the receipt.
@@ -60,7 +62,7 @@ pub struct LandRecord {
     pub pending_observations: u64,
 }
 
-/// One authorised land, pinned to the head the reviews and CI saw.
+/// One land, pinned to the head the reviews and CI saw.
 #[derive(Clone, Copy, Debug)]
 pub struct LandRequest<'a> {
     pub graph_id: &'a str,
@@ -68,7 +70,9 @@ pub struct LandRequest<'a> {
     pub branch: &'a str,
     pub head: &'a str,
     pub tier: RiskTier,
-    pub authority: &'a LandAuthority,
+    /// `None` while the tier asks: the host only observes whether the chair
+    /// merged the pull request at `head`, and never merges.
+    pub authority: Option<&'a LandAuthority>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,7 +87,6 @@ pub enum LandObservation {
     Refused { reason: String },
 }
 
-pub(super) const LAND: &str = "land";
 pub(super) const HOLD: &str = "hold";
 pub(super) const LANDED: &str = "LANDED";
 const PUSH: DeliveryMode = DeliveryMode::Push;
@@ -266,7 +269,8 @@ fn delivered_within(
         .map(|(_, branch, commit)| (branch, commit))
 }
 
-/// The head a reviewer judged: its pinned source commit or, without one, the
+/// The head a reviewer judged, or `None` for a node that is not a reviewer.
+/// The head is its pinned source commit or, without one, the
 /// newest head of `writer`'s chain among its own upstream nodes. A review that
 /// ran before a continuation therefore never judges the continuation's head.
 /// A composite boundary has no subject of its own, so its verdict resolves to
@@ -280,12 +284,25 @@ fn reviewed_head(
     writer: &str,
 ) -> Option<String> {
     let index = *positions.get(reviewer)?;
-    if let Some(spec) = &plan.nodes[index].composite {
+    let node = &plan.nodes[index];
+    if let Some(spec) = &node.composite {
         let producer = spec
             .exports
             .iter()
             .find(|export| export.outputs.contains(&OutputKind::Verdict))?;
         return reviewed_head(plan, checkpoint, positions, &producer.node, writer);
+    }
+    // Only an agent attempt outside the writer's chain reviews. A gate, loop,
+    // decision or land output, such as CI's PASS, is never review evidence.
+    if node.condition.is_some()
+        || node.loop_body.is_some()
+        || node.decide.is_some()
+        || node.land.is_some()
+        || node.id == writer
+        || node.continues.as_deref() == Some(writer)
+        || checkpoint.nodes[index].attempts.is_empty()
+    {
+        return None;
     }
     if let Some(commit) = &checkpoint.nodes[index].source_commit {
         return Some(commit.clone());
@@ -421,14 +438,9 @@ pub(super) fn land_ask(
     node: &PlannedNode,
     record: &LandRecord,
     session: &str,
-    sequence: u64,
-    previous: Option<&str>,
 ) -> NodeAsk {
-    let previous = previous
-        .map(|reason| format!("\n\nThe previous answer was not applied: {reason}"))
-        .unwrap_or_default();
     let mut ask = asks::ask(
-        format!("{}.ask-{sequence}", node.id),
+        format!("{}.ask-1", node.id),
         AskKind::Land,
         session,
         format!(
@@ -436,19 +448,22 @@ pub(super) fn land_ask(
             prefix(node.title.as_deref().unwrap_or(&node.id), 200)
         ),
         format!(
-            "Graph {graph_id}, node {} is ready to land {} at {}.\n\nThe {} tier asks first ({}). Choose land to merge through the repository's land workflow, pinned to this head, or hold to stop.{previous}\n\nThis decision does not replace review or CI.",
+            "Graph {graph_id}, node {} is ready to land {} at {}.\n\nThe {} tier asks first ({}). To land, run `provenant land N --head {}` for the pull request N whose head is {}; the node observes the merge at this head and succeeds. Answer hold to stop. An answer cannot approve the land: any answer fails the node.\n\nThis decision does not replace review or CI.",
             node.id,
             record.branch,
             record.head,
             tier_name(record.tier),
             source_name(record.policy_source),
+            record.head,
+            record.branch,
         ),
     );
     ask.node = Some(node.id.clone());
-    ask.options = vec![
-        asks::option(LAND, "Land", "Merge the pull request at the pinned head."),
-        asks::option(HOLD, "Hold", "Do not merge; the land node fails."),
-    ];
+    ask.options = vec![asks::option(
+        HOLD,
+        "Hold",
+        "Do not merge; the land node fails.",
+    )];
     ask
 }
 
@@ -467,7 +482,9 @@ fn fail<R: AttemptOwner, J: GraphJournal>(
 
 fn outputs(record: &LandRecord) -> NodeOutputs {
     let authority = match &record.authorised_by {
-        Some(LandAuthority::Ask { ask_id, actor }) => format!("{actor} answered land to {ask_id}"),
+        Some(LandAuthority::Chair { ask_id }) => {
+            format!("the chair landed it by hand after {ask_id}")
+        }
         _ => format!(
             "the {} tier policy is auto ({})",
             tier_name(record.tier),
@@ -559,19 +576,14 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
         .land
         .clone()
         .ok_or(GraphError::BadCheckpoint)?;
-    if record.authorised_by.is_none() {
-        if !authorise(index, node, spec, plan, &record, checkpoint, owner, journal)? {
-            return Ok(());
-        }
-        record = checkpoint.nodes[index]
-            .land
-            .clone()
-            .ok_or(GraphError::BadCheckpoint)?;
-    }
-    let authority = record
-        .authorised_by
-        .clone()
-        .ok_or(GraphError::BadCheckpoint)?;
+    // A tier that asks only observes: the chair lands by hand.
+    let asked = match record.authorised_by {
+        Some(_) => None,
+        None => match ask_chair(index, node, spec, plan, &record, checkpoint, owner, journal)? {
+            Some(ask_id) => Some(ask_id),
+            None => return Ok(()),
+        },
+    };
     let observation = owner
         .land(LandRequest {
             graph_id: &plan.graph_id,
@@ -579,12 +591,15 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
             branch: &record.branch,
             head: &record.head,
             tier: record.tier,
-            authority: &authority,
+            authority: record.authorised_by.as_ref(),
         })
         .map_err(GraphError::Run)?;
     record.wake_at = None;
     match observation {
         LandObservation::Merged { pull_request, note } => {
+            if let Some(ask_id) = asked {
+                record.authorised_by = Some(LandAuthority::Chair { ask_id });
+            }
             record.pull_request = pull_request;
             record.note = note.map(|note| bounded(&note, MAX_ADVANCE_ERROR_BYTES));
             let progress = &mut checkpoint.nodes[index];
@@ -633,9 +648,11 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
     }
 }
 
-/// Raise or poll the land ask. True once an answer of `land` is saved.
+/// Raise or poll the land ask, returning its ID while it stays open. An
+/// answer never approves a land, because lanes and peers can write inbox
+/// answers: any answer, `hold` or otherwise, fails the node closed.
 #[allow(clippy::too_many_arguments)]
-fn authorise<R: AttemptOwner, J: GraphJournal>(
+fn ask_chair<R: AttemptOwner, J: GraphJournal>(
     index: usize,
     node: &PlannedNode,
     spec: &LandSpec,
@@ -644,14 +661,11 @@ fn authorise<R: AttemptOwner, J: GraphJournal>(
     checkpoint: &mut GraphCheckpoint,
     owner: &mut R,
     journal: &mut J,
-) -> Result<bool, GraphError<R::Error, J::Error>> {
+) -> Result<Option<String>, GraphError<R::Error, J::Error>> {
     let mine = |ask: &NodeAsk| ask.node.as_deref() == Some(node.id.as_str());
-    let latest = checkpoint.asks.iter().rposition(mine);
-    let position = match latest {
-        Some(position) if !checkpoint.asks[position].resolved => position,
-        // A rejected answer is replaced once its inbox request is closed.
-        Some(position) if !checkpoint.asks[position].closed => return Ok(false),
-        _ => {
+    let position = match checkpoint.asks.iter().rposition(mine) {
+        Some(position) => position,
+        None => {
             let Some(session) = session(spec, plan).map(str::to_owned) else {
                 fail::<R, J>(
                     index,
@@ -665,70 +679,48 @@ fn authorise<R: AttemptOwner, J: GraphJournal>(
                     checkpoint,
                     journal,
                 )?;
-                return Ok(false);
+                return Ok(None);
             };
             asks::identity::<R, J::Error>(checkpoint, owner)?;
-            let previous = latest.map(|position| &checkpoint.asks[position]);
-            let next = previous
-                .and_then(|ask| sequence(ask, &node.id))
-                .unwrap_or(0)
-                .saturating_add(1);
-            let rejected = previous
-                .and_then(|ask| ask.answer.as_ref())
-                .and_then(|answer| answer.rejected.as_deref());
-            let ask = land_ask(&plan.graph_id, node, record, &session, next, rejected);
-            checkpoint.asks.retain(|ask| !mine(ask));
-            checkpoint.asks.push(ask);
+            checkpoint
+                .asks
+                .push(land_ask(&plan.graph_id, node, record, &session));
             asks::refresh_wake(checkpoint);
             journal.save(checkpoint).map_err(GraphError::Journal)?;
             checkpoint.asks.len() - 1
         }
     };
+    let ask_id = checkpoint.asks[position].ask_id.clone();
+    if checkpoint.asks[position].resolved {
+        return Ok(None);
+    }
     let before = checkpoint.asks[position].inbox_error.clone();
     let reply = asks::poll(checkpoint, position, owner);
     let Ok(Some(reply)) = reply else {
         if checkpoint.asks[position].inbox_error != before {
             journal.save(checkpoint).map_err(GraphError::Journal)?;
         }
-        return Ok(false);
+        return Ok(Some(ask_id));
     };
-    let mut answer = asks::answered(reply);
-    let chosen = answer
-        .option
-        .clone()
-        .or_else(|| answer.text.as_deref().map(|text| text.trim().to_owned()))
-        .filter(|id| id == LAND || id == HOLD);
-    if answer.rejected.is_none() && chosen.is_none() {
-        answer.rejected = Some("answer must choose land or hold".into());
-    }
-    let ask_id = checkpoint.asks[position].ask_id.clone();
+    let answer = asks::answered(reply);
     let actor = answer.actor.clone().unwrap_or_default();
-    let mut authorised = false;
-    if answer.rejected.is_none() {
-        answer.option = chosen.clone();
-        if chosen.as_deref() == Some(LAND) {
-            if let Some(land) = checkpoint.nodes[index].land.as_mut() {
-                land.authorised_by = Some(LandAuthority::Ask {
-                    ask_id: ask_id.clone(),
-                    actor,
-                });
-            }
-            authorised = true;
-        } else {
-            let progress = &mut checkpoint.nodes[index];
-            progress.state = NodeState::Failed;
-            progress.advance_error = Some(bounded(
-                &format!("node {}: land held by {actor} in {ask_id}", node.id),
-                MAX_ADVANCE_ERROR_BYTES,
-            ));
-        }
-    }
+    let reason = if answer.option.as_deref() == Some(HOLD) {
+        format!("node {}: land held by {actor} in {ask_id}", node.id)
+    } else {
+        format!(
+            "node {}: {actor} answered {ask_id}, but an answer cannot approve a land; land {} at {} by hand with provenant land",
+            node.id, record.branch, record.head
+        )
+    };
+    let progress = &mut checkpoint.nodes[index];
+    progress.state = NodeState::Failed;
+    progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
     let ask = &mut checkpoint.asks[position];
     ask.answer = Some(answer);
     ask.resolved = true;
     asks::refresh_wake(checkpoint);
     journal.save(checkpoint).map_err(GraphError::Journal)?;
-    Ok(authorised)
+    Ok(None)
 }
 
 pub(super) fn validate_progress(
@@ -740,15 +732,18 @@ pub(super) fn validate_progress(
         .as_ref()
         .and_then(|record| record.authorised_by.as_ref());
     let authority_valid = match authority {
-        Some(LandAuthority::Ask { ask_id, .. }) => checkpoint.asks.iter().any(|ask| {
-            &ask.ask_id == ask_id
-                && ask.kind == AskKind::Land
-                && ask.node.as_deref() == Some(progress.id.as_str())
-                && ask
-                    .answer
-                    .as_ref()
-                    .is_some_and(|answer| answer.option.as_deref() == Some(LAND))
-        }),
+        Some(LandAuthority::Chair { ask_id }) => {
+            progress
+                .land
+                .as_ref()
+                .is_some_and(|record| record.policy == LandPolicy::Ask)
+                && checkpoint.asks.iter().any(|ask| {
+                    &ask.ask_id == ask_id
+                        && ask.kind == AskKind::Land
+                        && ask.node.as_deref() == Some(progress.id.as_str())
+                        && ask.answer.is_none()
+                })
+        }
         Some(LandAuthority::Policy) => progress
             .land
             .as_ref()

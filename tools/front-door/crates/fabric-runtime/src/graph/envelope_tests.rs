@@ -132,8 +132,6 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 node,
                 &filled_land(spec.tier),
                 land::session(spec, plan).unwrap(),
-                u64::MAX,
-                Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
             )));
         }
         if let Some(spec) = &node.decide {
@@ -171,9 +169,8 @@ fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
         policy_source: crate::config::LandSource::Project,
         branch: worst(OUTPUT_FIELD_BYTES),
         head: worst(OUTPUT_FIELD_BYTES),
-        authorised_by: Some(LandAuthority::Ask {
+        authorised_by: Some(LandAuthority::Chair {
             ask_id: format!("{}.ask-{}", "l".repeat(64), u64::MAX),
-            actor: worst(HOST_ID_BYTES),
         }),
         pull_request: Some(u64::MAX),
         note: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
