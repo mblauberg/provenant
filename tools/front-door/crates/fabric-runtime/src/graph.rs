@@ -1658,6 +1658,10 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
             .experiment_arm
             .clone()
             .or_else(|| graph.experiment_arm.clone()),
+        shadow_of: context
+            .shadow_of
+            .clone()
+            .or_else(|| graph.shadow_of.clone()),
         selection_source: context
             .selection_source
             .clone()

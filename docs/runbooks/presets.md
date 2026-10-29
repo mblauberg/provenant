@@ -62,13 +62,45 @@ values for those selectors; prompt size is measured from the prompt input.
 ## Experiment with preset arms
 
 Experiments are opt-in and live in project configuration under
-`[domains.fabric.pipelines.experiment.NAME]`. A work item with `--task-id`
-receives a stable hash assignment when no explicit `--preset` is given.
-Terminal-tier work is excluded. Expired or budget-exhausted assignments fall
-back to the ordinary preset rules. `shadow = true` records the selected arm
-while executing the control preset, so the arm cannot decide graph acceptance.
-The graph context retains the experiment ID, seed, arm and shadow setting;
-`experiment_arm` is also a work-context telemetry label.
+`[domains.fabric.pipelines.experiment.NAME]`. They apply to a work item: run
+with `--task-id` and automatic preset selection. The CLI rejects `--preset`
+with `--task-id`, so an explicit preset never reads experiments. Experiments
+are checked in name order, and the first one that accepts the work item
+assigns it.
+
+- `control` must be the preset the selection rules choose for this run. If it
+  is not, the experiment is skipped.
+- Each arm must be a preset that the same selection can use with this run's
+  inputs. An arm that cannot run is skipped, and the run uses the control.
+- `tiers` defaults to `routine`, `substantial` and `crucial`. A run without
+  `--risk-tier` is never assigned, and terminal work is never assigned.
+- `assign = "hash"` (the default) derives the assignment from the work-item ID.
+  `assign = "epsilon"` assigns a candidate with probability `epsilon`, which
+  defaults to `0.1`. Setting `epsilon` with `hash` is rejected.
+- `expires` is an RFC 3339 instant after which the experiment stops assigning.
+- `budget_usd` skips the experiment once its observed spend reaches the budget.
+- `max_cost_ratio` sends a candidate back to control while its mean cost per
+  row exceeds the ratio times the control's mean. Candidates wait until control
+  rows exist.
+
+Observed spend is the experiment's outcome rows from the last 14 days. It is
+read at most once per run, and only when `budget_usd` or `max_cost_ratio` is
+set. The report reads outcomes from the `main` branch, so a repository without
+`main` cannot use a budget or ratio. If the report cannot be read, or a row's
+cost cannot be read, the experiment is skipped and the run uses the ordinary
+rules. Runs started concurrently read the same spend, so they can
+overshoot a budget or ratio.
+
+`shadow = true` assigns the candidate for comparison, but the run executes the
+control graph, so the candidate cannot decide acceptance. The graph is the same
+as a plain control run. Its context records `experiment_arm = "control"`, the
+pattern `experiment:NAME:control`, and `shadow_of = "candidate"`. Shadow runs
+therefore count as control outcomes.
+
+An experiment with invalid settings prints `warning: experiment NAME skipped:`
+with the reason on stderr, and the other experiments still apply. When an
+experiment is valid but declines this work item, its reason is recorded under
+`provenance.experiments` in the retained graph document.
 
 ```toml
 [domains.fabric.pipelines.experiment.review-shape]
@@ -84,7 +116,8 @@ expires = "2027-01-01T00:00:00Z"
 
 Use `provenant telemetry experiments show review-shape` to compare mature,
 measured outcomes within risk-tier and task-kind strata. It uses offline
-pipeline outcome and ranking inputs; comparisons remain advisory.
+pipeline outcome and ranking inputs; comparisons remain advisory. It cannot yet
+pair shadow runs with their candidate, so shadow runs appear under control.
 
 Inspect the resolved defaults and explain the exact graph before a run:
 

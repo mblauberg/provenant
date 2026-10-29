@@ -293,12 +293,16 @@ read-event source for that measurement.
   `crates/cli/src/run.rs`
 
 Experiment assignments add `experiment_arm` to retained work context. Their
-pattern label is `experiment:ID:ARM`, so `telemetry experiments show ID` uses
-the same mature outcomes, cost coverage, CI and risk-tier/task-kind strata as
-the pipeline ranking report. Shadow graphs carry the selected arm label while
-executing the control shape. Comparisons are advisory and do not change preset
-defaults. Assignment stops on expiry or when observed experiment spend reaches
-`budget_usd`; absent spend evidence is not treated as zero by the report.
+pattern label names the executed arm, `experiment:ID:ARM`, so
+`telemetry experiments show ID` uses the same mature outcomes, cost coverage,
+CI and risk-tier/task-kind strata as the pipeline ranking report. A shadow
+graph executes the control, so its label is `experiment:ID:control`, and its
+retained context carries the candidate as `shadow_of`. The report does not yet
+read `shadow_of`, so shadow outcomes count toward control. Comparisons are
+advisory and do not change preset defaults. Observed spend is read from the
+last 14 days of outcome rows, at most once per run. Absent or unreadable spend
+is not treated as zero: an experiment with a budget or cost ratio that cannot
+read its spend is skipped for that run.
 
 ## Demand counters are lossy and private
 

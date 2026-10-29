@@ -222,7 +222,6 @@ fn preset_ignored_flags(request: &provenant_cli::Dispatch) -> Vec<&'static str> 
         ("--write-root", !access.write_root.is_empty()),
         ("--capability", !access.capability.is_empty()),
         ("--knob", !request.knobs.is_empty()),
-        ("--task-id", request.task_id.is_some()),
         ("--delivery-id", request.delivery_id.is_some()),
         ("--head", request.head.is_some()),
         ("--base", request.base.is_some()),

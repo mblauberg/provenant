@@ -10,6 +10,20 @@ pub(crate) struct PresetChoice {
     pub parameters: BTreeMap<String, Value>,
 }
 
+impl PresetChoice {
+    /// The choice for `preset`. Parameters belong to the preset that declared
+    /// them, so a different preset starts with none.
+    pub(crate) fn for_preset(self, preset: &str) -> Self {
+        if self.preset == preset {
+            return self;
+        }
+        Self {
+            preset: preset.to_owned(),
+            parameters: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RuleOverrides {
@@ -205,6 +219,22 @@ large = { preset = "big-batch" }
         let override_selection = select(Some(&file), &context, Some("single")).unwrap();
         assert_eq!(override_selection.choice.preset, "single");
         assert_eq!(override_selection.source, PresetSelectionSource::Override);
+    }
+
+    #[test]
+    fn a_different_preset_drops_the_rule_parameters() {
+        let rule = super::PresetChoice {
+            preset: "review-council".into(),
+            parameters: std::collections::BTreeMap::from([(
+                "lenses".into(),
+                serde_json::json!(["security"]),
+            )]),
+        };
+        let kept = rule.clone().for_preset("review-council");
+        assert_eq!(kept, rule);
+        let swapped = rule.for_preset("chain");
+        assert_eq!(swapped.preset, "chain");
+        assert!(swapped.parameters.is_empty());
     }
 
     #[test]

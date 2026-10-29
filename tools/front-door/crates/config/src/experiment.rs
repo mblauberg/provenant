@@ -12,7 +12,21 @@ pub struct FabricExperiments {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PipelineExperiments {
-    pub experiment: BTreeMap<String, ExperimentConfig>,
+    /// Raw tables, so one malformed experiment cannot stop the others from being read.
+    pub experiment: BTreeMap<String, serde_json::Value>,
+}
+
+impl PipelineExperiments {
+    /// Each experiment's typed settings, or the reason its table is malformed.
+    pub fn parsed(&self) -> Vec<(&str, Result<ExperimentConfig, String>)> {
+        self.experiment
+            .iter()
+            .map(|(name, value)| {
+                let config = serde_json::from_value(value.clone()).map_err(|e| e.to_string());
+                (name.as_str(), config)
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
