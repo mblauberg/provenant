@@ -9,15 +9,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 # These are required output formats, not prose punctuation.
-EXACT_FORMATS = {
-    "skills/prototype/SKILL.md": {
-        "**Answer:** yes/no/partial — <one paragraph, numbers where measured>",
-    },
-    "skills/code-review/references/finding-contract.md": {
-        "[P1][introduced] path/file.ts:42 — Short title",
-        "[P1][introduced] path/file.ts:42 — problem; mechanism/impact; fix; evidence.",
-    },
-}
+EXACT_FORMATS = {}
 US_BEHAVIOUR = re.compile(r"\bbehavi[o]rs?\b", re.IGNORECASE)
 
 

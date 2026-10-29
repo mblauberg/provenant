@@ -27,10 +27,10 @@
       "expected": {
         "primary_skill": "skill-craft",
         "companion_skills": [
-          "tdd"
+          "test-design"
         ]
       },
-      "note": "skill-craft owns the skill revision and its fixtures; tdd supplies the boundary that answers no, because prose carries no machine-enforced invariant. If the invariant has no enforcing script, the correct output is an enforcing script or nothing."
+      "note": "skill-craft owns the skill revision and its fixtures; test-design supplies the boundary that answers no, because prose carries no machine-enforced invariant. If the invariant has no enforcing script, the correct output is an enforcing script or nothing."
     },
     {
       "id": "r125",
