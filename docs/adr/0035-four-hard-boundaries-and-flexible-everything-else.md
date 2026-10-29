@@ -33,7 +33,6 @@ promise before then.
 
 ## Consequences
 
-Reviews block only on these boundaries, data loss or a broken main path. New
-guards need an observed failure in one of the four classes. See
+New guards need an observed failure in one of the four classes. See
 [Simple first](../specs/rust-workspace.md#simple-first) and the
 [supervisor spec](../specs/supervisor.md).
