@@ -1965,9 +1965,11 @@ fn composite(
 }
 
 /// Output kinds a node can supply. Every node reports a result, findings, a
-/// verdict and the remaining window; `branch` and `commit` need a worktree,
-/// a pinned source or write access. A composite supplies what it exports.
-fn produced(node: &Value) -> Vec<String> {
+/// verdict and the remaining window. `commit` needs write access or a pinned
+/// source (its own or inherited from an enclosing composite); `branch` needs
+/// write access, since a read-only node has no delivery receipt. Loops settle
+/// with a verdict only, and a composite supplies what it exports.
+fn produced(node: &Value, inherited: bool) -> Vec<String> {
     if let Some(exports) = node.pointer("/composite/exports").and_then(Value::as_array) {
         let mut kinds: Vec<String> = Vec::new();
         for kind in exports
@@ -1985,27 +1987,34 @@ fn produced(node: &Value) -> Vec<String> {
     let mut kinds: Vec<String> = ["result", "findings", "verdict", "remaining"]
         .map(String::from)
         .into();
+    if node["kind"] == "loop" {
+        return kinds;
+    }
     let writes = node["access"] != "read_only" && !node["access"].is_null();
-    if writes
-        || node["kind"] == "land"
-        || node["kind"] == "loop"
-        || node.get("worktree").is_some_and(|w| !w.is_null())
-        || node.get("source").is_some_and(|s| !s.is_null())
-    {
-        kinds.extend(["branch", "commit"].map(String::from));
+    let sourced = inherited || node.get("source").is_some_and(|s| !s.is_null());
+    if writes || node["kind"] == "land" {
+        kinds.push("branch".into());
+    }
+    if writes || sourced || node["kind"] == "land" {
+        kinds.push("commit".into());
     }
     kinds
 }
 
-fn check_selection(owner: &str, selected: &Value, siblings: &[Value]) -> Result<(), String> {
+/// Nodes visible to a selection: the sibling list first, then enclosing scopes,
+/// each node paired with whether it inherits a pinned source.
+type Scope<'a> = Vec<(&'a Value, bool)>;
+
+fn check_selection(owner: &str, selected: &Value, scope: &Scope) -> Result<(), String> {
     let Some(target) = selected["node"].as_str() else {
         return Ok(());
     };
-    // Only siblings are typed here; outer names resolve at the enclosing level.
-    let Some(source) = siblings.iter().find(|node| node["id"] == target) else {
+    // `previous.X` names body node X of the loop's earlier round.
+    let target = target.strip_prefix("previous.").unwrap_or(target);
+    let Some((source, inherited)) = scope.iter().find(|(node, _)| node["id"] == target) else {
         return Ok(());
     };
-    let available = produced(source);
+    let available = produced(source, *inherited);
     for kind in selected["outputs"].as_array().into_iter().flatten() {
         let kind = kind.as_str().unwrap_or_default();
         if !available.iter().any(|known| known == kind) {
@@ -2021,24 +2030,32 @@ fn check_selection(owner: &str, selected: &Value, siblings: &[Value]) -> Result<
 /// Refuse an input or export that selects an output its source cannot
 /// supply, naming both nodes.
 fn check_selections(nodes: &[Value]) -> Result<(), String> {
+    check_scope(nodes, &Vec::new(), false)
+}
+
+fn check_scope<'a>(nodes: &'a [Value], outer: &Scope<'a>, inherited: bool) -> Result<(), String> {
+    let mut scope: Scope = nodes.iter().map(|node| (node, inherited)).collect();
+    scope.extend(outer.iter().copied());
     for node in nodes {
         let id = node["id"].as_str().unwrap_or_default();
         for input in node["inputs"].as_array().into_iter().flatten() {
-            check_selection(&format!("node {id}"), input, nodes)?;
+            check_selection(&format!("node {id}"), input, &scope)?;
         }
+        let pinned = inherited || node.get("source").is_some_and(|s| !s.is_null());
         if let Some(children) = node.pointer("/composite/nodes").and_then(Value::as_array) {
+            let inner: Scope = children.iter().map(|child| (child, pinned)).collect();
             for export in node
                 .pointer("/composite/exports")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
             {
-                check_selection(&format!("composite {id} export"), export, children)?;
+                check_selection(&format!("composite {id} export"), export, &inner)?;
             }
-            check_selections(children)?;
+            check_scope(children, &scope, pinned)?;
         }
         if let Some(children) = node.pointer("/loop/body").and_then(Value::as_array) {
-            check_selections(children)?;
+            check_scope(children, &scope, pinned)?;
         }
     }
     Ok(())

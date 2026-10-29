@@ -2033,3 +2033,71 @@ prompt = "Look at ${prompt}"
     assert!(error.contains("composite"), "{error}");
     assert!(error.contains("commit"), "{error}");
 }
+
+fn selection(stages: &str) -> Result<Expansion, String> {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "sel",
+            &format!("stages = {stages}\n[roles.scout]\nprompt = \"Look at ${{prompt}}\""),
+        )
+        .unwrap();
+    expand(&layers, "sel", "brief", &[])
+}
+
+#[test]
+fn composite_children_inherit_the_pinned_source_for_commit() {
+    let pinned = r#"[{ id = "grp", source = { type = "commit", commit = "abc" },
+        stages = [{ id = "look", role = "scout" }],
+        exports = [{ node = "look", outputs = ["commit"] }] }]"#;
+    selection(pinned).unwrap();
+    let error = selection(&pinned.replace("source = { type = \"commit\", commit = \"abc\" },", ""))
+        .err()
+        .unwrap();
+    assert!(error.contains("commit from look"), "{error}");
+}
+
+#[test]
+fn selections_resolve_against_enclosing_scopes_and_branch_needs_a_writer() {
+    let error = selection(
+        r#"[{ id = "scope", role = "scout" },
+        { id = "run", stages = [{ id = "x", role = "scout", inputs = [{ node = "scope", outputs = ["commit"] }] }] }]"#,
+    )
+    .err()
+    .unwrap();
+    assert!(
+        error.contains("node x selects commit from scope"),
+        "{error}"
+    );
+    let error = selection(
+        r#"[{ id = "grp", source = { type = "commit", commit = "abc" },
+        stages = [{ id = "look", role = "scout" }],
+        exports = [{ node = "look", outputs = ["branch"] }] }]"#,
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("branch from look"), "{error}");
+}
+
+#[test]
+fn loops_supply_no_commit_or_branch() {
+    let error = selection(
+        r#"[{ id = "again", loop = { stages = [{ id = "look", role = "scout" }], until = "look", max_rounds = 2 } },
+        { id = "after", role = "scout", inputs = [{ node = "again", outputs = ["commit"] }] }]"#,
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("commit from again"), "{error}");
+}
+
+#[test]
+fn previous_round_selections_resolve_against_the_loop_body() {
+    let error = selection(
+        r#"[{ id = "again", loop = { stages = [{ id = "look", role = "scout" },
+        { id = "fix", role = "scout", inputs = [{ node = "previous.look", outputs = ["commit"] }] }], until = "look", max_rounds = 2 } }]"#,
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("commit from look"), "{error}");
+}

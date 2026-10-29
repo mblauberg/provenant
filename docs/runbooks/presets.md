@@ -141,7 +141,7 @@ acceptance_checks = ["Every proposed change cites a relevant call site"]
 
 An `exports` or `inputs` entry may select only outputs its node supplies:
 every node supplies `result`, `findings`, `verdict` and `remaining`, while
-`branch` and `commit` need write access, a worktree or a pinned source.
+`commit` needs write access or a pinned source (inherited from an enclosing composite), `branch` needs write access, and loops supply neither.
 Expansion refuses a mismatch and names both nodes.
 
 Stages run in order and receive the preceding result. An entry can select
