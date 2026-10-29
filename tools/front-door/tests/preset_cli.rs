@@ -289,7 +289,10 @@ fn show_validates_and_list_reports_bad_files() -> Result<(), Box<dyn std::error:
     let temp = tempfile::tempdir()?;
     let presets = temp.path().join("provenant/presets");
     std::fs::create_dir_all(&presets)?;
-    std::fs::write(presets.join("single.toml"), "[parameters]\nunknown = 1\n")?;
+    std::fs::write(
+        presets.join("single.toml"),
+        "[parameters.extra]\ntype = 'string'\n",
+    )?;
     std::fs::write(presets.join("broken.toml"), "[invalid")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let run = |args: &[&str]| -> std::io::Result<std::process::Output> {
@@ -305,14 +308,14 @@ fn show_validates_and_list_reports_bad_files() -> Result<(), Box<dyn std::error:
     assert!(!shown.status.success());
     let error = String::from_utf8_lossy(&shown.stdout);
     assert!(
-        error.contains("parameters.unknown") && error.contains("single.toml"),
+        error.contains("parameters.extra") && error.contains("single.toml"),
         "{error}"
     );
     let listed = run(&["preset", "list"])?;
     assert!(listed.status.success());
     let output = String::from_utf8_lossy(&listed.stdout);
     assert!(
-        output.contains("broken.toml") && output.contains("parameters.unknown"),
+        output.contains("broken.toml") && output.contains("parameters.extra"),
         "{output}"
     );
     assert!(run(&["preset", "show", "chain"])?.status.success());

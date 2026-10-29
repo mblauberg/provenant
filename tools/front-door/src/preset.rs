@@ -346,22 +346,7 @@ impl Layers {
                 .map_err(|error| format!("preset {name}: extends ({origin}): {error}"))?,
             None => (json!({}), BTreeMap::new()),
         };
-        let declared = entries
-            .first()
-            .filter(|(origin, _)| origin == "bundled")
-            .and_then(|(_, layer)| layer.get("parameters").and_then(Value::as_object));
         for (origin, layer) in entries {
-            if let Some(declared) = declared
-                && let Some(extra) = layer
-                    .get("parameters")
-                    .and_then(Value::as_object)
-                    .and_then(|map| map.keys().find(|key| !declared.contains_key(*key)))
-            {
-                return Err(format!(
-                    "preset {name}: parameters.{extra} ({origin}): unknown parameter; declared: {}",
-                    declared.keys().cloned().collect::<Vec<_>>().join(", ")
-                ));
-            }
             if self.repo_files.contains(origin) && !repo_files.contains(origin) {
                 repo_files.push(origin.clone());
             }

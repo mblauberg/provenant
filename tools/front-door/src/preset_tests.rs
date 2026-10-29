@@ -733,12 +733,15 @@ fn malformed_files_are_isolated_and_name_the_path() -> Result<(), Box<dyn std::e
             .unwrap_err()
             .contains(&bad.to_string_lossy().to_string())
     );
-    std::fs::write(repo.join("single.toml"), "[parameters]\nunknown=1\n")?;
+    std::fs::write(
+        repo.join("single.toml"),
+        "[parameters.extra]\ntype='string'\n",
+    )?;
     let layers = Layers::load(&user, &repo)?;
     let error = expand(&layers, "single", "", &[]).unwrap_err();
     assert!(
         error.contains("single")
-            && error.contains("parameters.unknown")
+            && error.contains("parameters.extra")
             && error.contains("single.toml"),
         "{error}"
     );
@@ -1192,16 +1195,18 @@ fn typed_parameters_validate_and_name_the_parameter_and_origin() {
 }
 
 #[test]
-fn a_bundled_override_cannot_add_undeclared_parameters() {
+fn a_bundled_override_may_add_parameters() {
     let mut layers = Layers::empty();
     layers
-        .insert("repo", "fan-out", "[parameters]\nwidth = 3\nsurprise = 1\n")
+        .insert(
+            "repo",
+            "fan-out",
+            "[parameters]\nwidth = 3\nextra = 'kept'\n",
+        )
         .unwrap();
-    let error = expand(&layers, "fan-out", "brief", &[]).unwrap_err();
-    assert!(
-        error.contains("parameters.surprise") && error.contains("(repo)"),
-        "{error}"
-    );
+    let result = expand(&layers, "fan-out", "brief", &[]).unwrap();
+    assert_eq!(result.document["nodes"].as_array().unwrap().len(), 3);
+    assert_eq!(result.origins["parameters.extra"], "repo");
 }
 
 #[test]

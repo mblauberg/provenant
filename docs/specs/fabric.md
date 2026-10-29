@@ -376,8 +376,7 @@ A parameter is either a bare value or a typed table with `type` (`string`,
 (numeric value, or list or text length), `enum` and `doc`. A bare value that
 overrides a typed parameter replaces its default and keeps the schema. A
 refused value names the parameter and the layer it came from. A same-name
-override of a bundled preset cannot add parameters the bundled preset does not
-declare. An optional `[pattern]` table holds `level` (`default`,
+override of a bundled preset may add parameters of its own. An optional `[pattern]` table holds `level` (`default`,
 `recommended` or `experimental`), `summary`, `citations`, `cost`,
 `select_when` and `tags`. Parents pass `risk_tier` and `subject` to a child
 that declares them unless the entry sets them; `prompt` is always available.
