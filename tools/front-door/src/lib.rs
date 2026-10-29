@@ -39,6 +39,7 @@ mod preset_tests;
 mod provider_retention;
 mod release_smoke;
 mod roots;
+mod settlement;
 mod target_seed_build;
 mod usage;
 #[cfg(test)]
@@ -648,18 +649,30 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
         ),
         Command::Internal(provenant_cli::Internal::Settle { request }) => {
+            // Recovery commits terminal state without a live guardian, so it
+            // drains the settlement reactions itself.
+            let drained = provenant_run::settlement::ResumeRequest::parse(&request).map(|parsed| {
+                settlement::Subject {
+                    home: parsed.roots().home.clone(),
+                    checkout: parsed.roots().checkout.clone(),
+                    state_root: parsed.roots().state_root.clone(),
+                    project: parsed.project(),
+                    actor: parsed.actor(),
+                    run: parsed.run(),
+                }
+            });
             match provenant_run::settlement::resume(
                 &request,
                 &provenant_cli::run::Registry::default(),
-            ) {
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                let subject = drained.map_err(|error| error.to_string())?;
+                fabric::settlement_reactions(&subject, None, process.workers())
+                    .map_err(|error| error.to_string())
+            }) {
                 Ok(()) => 0,
-                Err(error) => fail(
-                    &inv.leaf,
-                    Outcome::Error,
-                    "SETTLEMENT",
-                    &error.to_string(),
-                    globals,
-                ),
+                Err(error) => fail(&inv.leaf, Outcome::Error, "SETTLEMENT", &error, globals),
             }
         }
         Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
