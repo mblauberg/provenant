@@ -888,6 +888,87 @@ fn relaxed_wire_text_still_reports_strict_invalid_paths() {
 }
 
 #[test]
+fn near_argument_suggests_only_a_unique_close_name() {
+    assert_eq!(nearest("cut", ["cat", "cot"].into_iter()), None);
+    assert_eq!(nearest("ab", ["xy"].into_iter()), None);
+    assert_eq!(nearest("tmp", ["sessions", "lease"].into_iter()), None);
+    assert_eq!(
+        nearest("sessionId", ["session"].into_iter()),
+        Some("session")
+    );
+    assert_eq!(
+        nearest("Session-ID", ["session_id"].into_iter()),
+        Some("session_id")
+    );
+    assert_eq!(nearest("op", ["ok"].into_iter()), Some("ok"));
+    let value = json!({"op":"summary_show","sessionId":"s"});
+    assert_eq!(
+        near_argument("fabric_chair", &value, "arguments.sessionId").as_deref(),
+        Some("session")
+    );
+    let value = json!({"op":"summary_show","zzz":"s"});
+    assert_eq!(near_argument("fabric_chair", &value, "arguments.zzz"), None);
+}
+
+#[test]
+fn every_tool_names_its_case_folded_keys_and_actions() {
+    for tool in strict_catalogue() {
+        let name = tool["name"].as_str().unwrap();
+        let root = &tool["inputSchema"];
+        let variants: Vec<&Value> = match root["oneOf"].as_array() {
+            Some(options) => options.iter().collect(),
+            None => vec![root],
+        };
+        for variant in variants {
+            let tag = ["op", "kind", "scope"]
+                .into_iter()
+                .find(|tag| variant["properties"][*tag]["const"].is_string());
+            let mut base = Map::new();
+            if let Some(tag) = tag {
+                base.insert(tag.into(), variant["properties"][tag]["const"].clone());
+            }
+            let Some(fields) = variant["properties"].as_object() else {
+                continue;
+            };
+            for key in fields
+                .keys()
+                .filter(|key| !matches!(key.as_str(), "op" | "kind" | "scope"))
+            {
+                let typed = key.to_uppercase();
+                let mut value = base.clone();
+                value.insert(typed.clone(), Value::Null);
+                assert_eq!(
+                    near_argument(name, &Value::Object(value), &format!("arguments.{typed}"))
+                        .as_deref(),
+                    Some(key.as_str()),
+                    "{name}: {key}"
+                );
+            }
+        }
+        if let Some(options) = root["oneOf"].as_array() {
+            let Some(tag) = ["op", "kind", "scope"].into_iter().find(|tag| {
+                options
+                    .iter()
+                    .any(|o| o["properties"][*tag]["const"].is_string())
+            }) else {
+                continue;
+            };
+            for option in options {
+                let Some(action) = option["properties"][tag]["const"].as_str() else {
+                    continue;
+                };
+                let value = json!({ tag: action.to_uppercase() });
+                assert_eq!(
+                    near_argument(name, &value, &format!("arguments.{tag}")).as_deref(),
+                    Some(action),
+                    "{name}: {action}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn rejected_values_describe_expected_constraints() {
     let input = json!({"op":"read", "target":{"attempt":"bad"}, "part":"other"});
     assert!(expected("fabric_output", &input, "arguments.part").contains("result"));
