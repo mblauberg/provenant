@@ -137,7 +137,7 @@ fn write_grant() -> Value {
 fn review_acceptance() -> Value {
     json!({"actor":ID,"protected_paths":[path()]})
 }
-fn writer_delivery_receipt() -> Value {
+fn writer_delivery_record() -> Value {
     json!({"schema_version":1,"remote":"origin","branch":"work","head":null,
         "review_acceptance":review_acceptance(),"state":{"state":"delivered","pull_request":null}})
 }
@@ -149,7 +149,7 @@ fn attempt() -> Value {
         "task_id":ID,"operation_id":"operation","attempt_number":1,"revision":1,"generation":1,
         "requested_route":requested_route(),"resolved_route":route_record(),
         "applied_route":route_record(),"observed_route":route_record(),"authority_digest":digest(),
-        "write_grants":[write_grant()],"protected_paths":[path()],"delivery":writer_delivery_receipt(),
+        "write_grants":[write_grant()],"protected_paths":[path()],"delivery":writer_delivery_record(),
         "queued_at":NOW,"state":terminal_state(),"usage":{},"prompt":artifact(),"result":artifact(),
         "exit_evidence":artifact(),"skipped_routes":[skipped_route()],"trace":{"host":ID,"run":ID}})
 }
@@ -241,7 +241,7 @@ cases! {
     writer_request_preserves_digest: run::WriterRequest => json!({"project":"/repo","worktree":"/repo/work"});
     writer_delivery_request_preserves_digest: run::WriterDeliveryRequest => writer_delivery_request();
     writer_review_acceptance_preserves_digest: run::WriterReviewAcceptance => review_acceptance();
-    writer_delivery_receipt_preserves_digest: run::WriterDeliveryReceipt => writer_delivery_receipt();
+    writer_delivery_record_preserves_digest: run::WriterDeliveryReceipt => writer_delivery_record();
     delivered_state_preserves_digest: run::WriterDeliveryState => json!({"state":"delivered","pull_request":"https://example.test/pr/1"});
     no_new_commits_state_preserves_digest: run::WriterDeliveryState => json!({"state":"no_new_commits"});
     not_attempted_state_preserves_digest: run::WriterDeliveryState => json!({"state":"not_attempted"});
@@ -308,7 +308,7 @@ cases! {
     pending_decision_preserves_digest: workflow::Decision => json!({"status":"pending"});
     accepted_decision_preserves_digest: workflow::Decision => accepted_decision();
     abandoned_decision_preserves_digest: workflow::Decision => json!({"status":"abandoned","actor_id":ID,"at":10,"reason":"closed","user_approval":approval()});
-    delivery_receipt_preserves_digest: workflow::DeliveryReceipt => receipt();
+    workflow_receipt_preserves_digest: workflow::DeliveryReceipt => receipt();
 
     release_file_preserves_digest: ReleaseFile => release_file();
     release_manifest_preserves_digest: ReleaseManifest => release_manifest();
