@@ -736,7 +736,10 @@ fn codex_dispatch_observes_rollout() -> Result {
             let text = String::from_utf8(slow.stdout.bytes)?;
             let id = text
                 .lines()
-                .find_map(|line| line.strip_prefix("attempt "))
+                .find_map(|line| {
+                    line.strip_prefix("next: provenant lanes --id ")
+                        .and_then(|rest| rest.split_whitespace().next())
+                })
                 .ok_or("timeout attempt")?;
             assert!(
                 text.contains(&format!("provenant lanes --id {id} --wait 4m")),
