@@ -6,8 +6,7 @@ use crate::{
     Target, Trace, limits,
 };
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId,
-    WaitBudget, WallTime,
+    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::{clock::SystemClock, fs::entropy_128};
@@ -1118,14 +1117,7 @@ impl Session {
     }
 }
 fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::Request<'a>, Fail> {
-    Ok(run::Request {
-        clock,
-        // Each store transaction gets its own 30-second contention allowance,
-        // so provider launch or a long wait never expires a later write.
-        budget: WaitBudget::per_transaction(clock.mono_now(), 30)
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?,
-        cancel,
-    })
+    Ok(run::Request { clock, cancel })
 }
 /// Shared Fabric identity/config, isolated Run custody for a lane's children.
 pub fn execution_state(
@@ -3338,12 +3330,10 @@ fn with_chair_index<T>(
         &provenant_fabric_runtime::chairs::Request<'_>,
     ) -> Result<T, provenant_fabric_runtime::chairs::Error>,
 ) -> Result<T, Fail> {
-    use provenant_fabric_runtime::chairs::{ChairIndex, Request, ThreadWait};
+    use provenant_fabric_runtime::chairs::{ChairIndex, Request};
     let index_call = Request {
         clock: call.clock,
-        budget: call.transaction_budget(),
         cancel: call.cancel,
-        backoff: &ThreadWait,
     };
     ChairIndex::open(&roots.state, &index_call)
         .and_then(|index| action(&index, &index_call))
@@ -4330,10 +4320,9 @@ fn candidates<'a>(
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
         // The outer wait owns the deadline and retries contention between polls.
-        // Do not let an individual store read spend a separate 30-second budget.
+        // Under WAL a read rarely waits; when it does, the busy timeout bounds it.
         let call = run::Request {
             clock: &clock,
-            budget: WaitBudget::nonblocking(clock.mono_now()),
             cancel: &cancel,
         };
         let ids = match picks.since {
@@ -4375,9 +4364,13 @@ fn render_settled(
 ) -> Result<(Value, String), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let waits = settled_waits(&clock, &cancel, |call| {
-        session.store.lane_waits(lanes, call)
-    });
+    let waits = session.store.lane_waits(
+        lanes,
+        &run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        },
+    );
     Ok(render_lanes(
         lanes,
         &waits,
@@ -4385,19 +4378,6 @@ fn render_settled(
         session.context.state_root.as_path(),
         cooldowns,
     ))
-}
-/// Wait details are optional, and must not extend a completed wait or watch.
-fn settled_waits<T>(
-    clock: &SystemClock,
-    cancel: &CancelToken,
-    read: impl FnOnce(&run::Request<'_>) -> T,
-) -> T {
-    let call = run::Request {
-        clock,
-        budget: WaitBudget::nonblocking(clock.mono_now()),
-        cancel,
-    };
-    read(&call)
 }
 fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, String, bool), Fail> {
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
@@ -4460,7 +4440,6 @@ fn wait_command(
                     let cancel = CancelToken::new();
                     let call = run::Request {
                         clock: &clock,
-                        budget: WaitBudget::nonblocking(clock.mono_now()),
                         cancel: &cancel,
                     };
                     seen = Some(session.store.seen_cursor(&key, true, &call)?);
@@ -4486,7 +4465,6 @@ fn wait_command(
             let cancel = CancelToken::new();
             let entry = run::Request {
                 clock: &clock,
-                budget: WaitBudget::nonblocking(clock.mono_now()),
                 cancel: &cancel,
             };
             let mut latest = 0;
@@ -4655,7 +4633,7 @@ fn lanes_inner(
     let mut projects = std::collections::BTreeSet::new();
     let mut first = None;
     for target in &mut normalised.id {
-        let candidate = targets::resolve_with_budget(edge, target, true, wait_entry.is_some())?;
+        let candidate = targets::resolve(edge, target, true)?;
         if let Some(project) = candidate.project {
             projects.insert(project);
         }
@@ -4685,7 +4663,6 @@ fn lanes_inner(
     let call = if wait_entry.is_some() {
         run::Request {
             clock: &clock,
-            budget: WaitBudget::nonblocking(clock.mono_now()),
             cancel: &cancel,
         }
     } else {
@@ -7182,8 +7159,6 @@ pub fn chair_snapshot(edge: &Edge<'_>) -> Result<(provenant_core::ProjectId, Vec
     let call = run::Request {
         clock: &clock,
         cancel: &cancel,
-        budget: WaitBudget::cli(clock.mono_now(), 1)
-            .map_err(|e| Fail::new(Status::Error, ErrorKind::Time, e.to_string()))?,
     };
     // A handoff only reads lanes. A fresh store has none; avoid paying for
     // database creation, WAL setup and schema migrations just to discover that.
@@ -8986,11 +8961,13 @@ mod tests {
         });
         let (replayed, _) = submit(&session, &edge, replay, &call).map_err(|f| f.message)?;
         assert_eq!(replayed.run_id, first.run_id);
-        let expired = run::Request {
-            budget: WaitBudget::nonblocking(clock.mono_now()),
+        let stopped = CancelToken::new();
+        stopped.cancel();
+        let cancelled = run::Request {
+            cancel: &stopped,
             ..call
         };
-        let failure = with_chair_index(&roots, &expired, |_, _| Ok(())).unwrap_err();
+        let failure = with_chair_index(&roots, &cancelled, |_, _| Ok(())).unwrap_err();
         assert_eq!(failure.status, Status::Error);
         with_chair_index(&roots, &call, |index, call| {
             assert_eq!(
@@ -9879,16 +9856,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn timeout_render_reads_wait_details_without_a_retry_budget() {
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let waits: Vec<run::LaneWait> = settled_waits(&clock, &cancel, |call| {
-            assert_eq!(call.budget.remaining(call.clock.mono_now()).as_micros(), 0);
-            Vec::new()
-        });
-        assert!(waits.is_empty());
-    }
     #[test]
     fn render_lanes_says_what_an_unstarted_lane_waits_for() -> Result<(), Box<dyn std::error::Error>>
     {

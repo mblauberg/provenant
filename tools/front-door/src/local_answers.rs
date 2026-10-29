@@ -171,7 +171,7 @@ mod tests {
             common_dir: provenant_records::AbsolutePath::new(&workspace)?,
             federation: None,
         };
-        let service = InboxService::open(&roots.state, &identity, &clock, budget(), &cancel)?;
+        let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
         let created = service.execute(
             InboxInput::Ask {
                 extra: Default::default(),
@@ -191,7 +191,6 @@ mod tests {
                     proceeding_with: None,
                 }),
             },
-            budget(),
             &cancel,
         )?;
         let InboxResult::Saved { receipt } = created else {
@@ -208,7 +207,6 @@ mod tests {
                 channel: InteractionChannel::Console,
                 operation_id: None,
             },
-            budget(),
             &cancel,
         )?;
         let InboxResult::Saved { receipt } = answered else {
@@ -295,7 +293,6 @@ mod tests {
                 session: "chair-a".into(),
                 operation_id: None,
             },
-            budget(),
             &cancel,
         )?;
         assert!(

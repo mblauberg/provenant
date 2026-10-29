@@ -1199,6 +1199,14 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     // No product installation, Git probe or provider access is needed to count.
     // Read-only catalogue and checkpoint observation must not record demand
     // telemetry, including on an otherwise empty state root.
+    let resolved = roots::resolve(globals, Workspace::Directory, Product::Optional).ok();
+    if let Some(timeout) = resolved.as_ref().and_then(|resolved| {
+        provenant_config::StoreSettings::read(resolved.roots.state.as_path())
+            .ok()?
+            .busy_timeout()
+    }) {
+        provenant_sqlite::set_busy_timeout(timeout);
+    }
     let usage_roots = if matches!(
         verb.as_str(),
         "workflow session show"
@@ -1213,7 +1221,7 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     ) {
         None
     } else {
-        roots::resolve(globals, Workspace::Directory, Product::Optional).ok()
+        resolved
     };
     let usage_project = usage_roots.as_ref().and_then(usage::project_id);
     let status = match parsed {

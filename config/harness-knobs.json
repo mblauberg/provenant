@@ -104,6 +104,12 @@
       "build_dir_survey_interval_seconds": {"type": "int", "allowed": "seconds, 0 or more", "default": "300 (5 minutes)", "effect": "Settlement-triggered collection walks the lane caches at most this often, unless free space is below gc.free_floor or the last walk found the total within 10% of the cap. While free space stays below the floor, every settlement walks. Zero walks on every settlement."}
     }
   },
+  "host_store_settings": {
+    "path": "domains.fabric.limits",
+    "settings": {
+      "store_busy_timeout_ms": {"type": "int", "min": 0, "max": 600000, "default": "30000 (30 seconds)", "effect": "Milliseconds a command waits for a contended local store, both the SQLite busy timeout and the stores' own advisory locks, before it reports contention. Read once when a command starts; zero fails fast"}
+    }
+  },
   "knobs": {
     "routing.workload": {
       "type": "enum", "values": ["general", "read_heavy", "edit_heavy", "review"], "default": "general", "status": "wired",

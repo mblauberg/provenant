@@ -1,7 +1,7 @@
 //! One coordination home. Remote calls never mutate a local mirror.
 use crate::{coordination::*, hosts::*};
 use provenant_core::{ActorId, CancelToken, Clock, OperationId, ProjectId, StateRoot, WaitBudget};
-use provenant_fabric_store::{PeerPhase, PeerPhaseChange, Request, RetryWait, Store};
+use provenant_fabric_store::{PeerPhase, PeerPhaseChange, Request, Store};
 
 pub enum CoordinationService<'a> {
     Local(Box<LocalCoordination<'a>>),
@@ -15,7 +15,7 @@ pub struct RemoteCoordination<'a> {
     pub project: ProjectId,
     pub actor: ActorId,
     pub clock: &'a dyn Clock,
-    pub backoff: &'a dyn RetryWait,
+    pub backoff: &'a dyn Pause,
 }
 impl<'a> CoordinationService<'a> {
     pub fn open(
@@ -23,12 +23,11 @@ impl<'a> CoordinationService<'a> {
         project: ProjectId,
         actor: ActorId,
         clock: &'a dyn Clock,
-        backoff: &'a dyn RetryWait,
-        budget: WaitBudget,
+        backoff: &'a dyn Pause,
         cancel: &CancelToken,
     ) -> Result<Self, CoordinationError> {
         Ok(Self::Local(Box::new(LocalCoordination::open(
-            root, project, actor, clock, backoff, budget, cancel,
+            root, project, actor, clock, backoff, cancel,
         )?)))
     }
     pub fn new(
@@ -36,7 +35,7 @@ impl<'a> CoordinationService<'a> {
         project: ProjectId,
         actor: ActorId,
         clock: &'a dyn Clock,
-        backoff: &'a dyn RetryWait,
+        backoff: &'a dyn Pause,
     ) -> Self {
         Self::Local(Box::new(LocalCoordination::new(
             store, project, actor, clock, backoff,
@@ -128,9 +127,7 @@ impl RemoteCoordination<'_> {
         };
         let store_request = Request {
             clock: self.clock,
-            budget,
             cancel,
-            backoff: self.backoff,
         };
         let response = if let Some(id) = request.operation() {
             let bytes =
@@ -412,8 +409,7 @@ impl<'a> CoordinationService<'a> {
         cwd: &'a std::path::Path,
         executor: &'a dyn provenant_os::exec::Executor,
         clock: &'a dyn Clock,
-        backoff: &'a dyn RetryWait,
-        budget: WaitBudget,
+        backoff: &'a dyn Pause,
         cancel: &CancelToken,
     ) -> Result<Self, CoordinationError> {
         if let Some(project) = &identity.federation
@@ -446,12 +442,7 @@ impl<'a> CoordinationService<'a> {
                 executable,
                 seconds: config.limits.peer_seconds,
             };
-            let store_request = Request {
-                clock,
-                budget,
-                cancel,
-                backoff,
-            };
+            let store_request = Request { clock, cancel };
             let journal = Store::open(root, &store_request)?;
             return Ok(Self::Remote(Box::new(RemoteCoordination {
                 transport: Box::new(transport),
@@ -470,7 +461,6 @@ impl<'a> CoordinationService<'a> {
             identity.inbox.actor,
             clock,
             backoff,
-            budget,
             cancel,
         )
     }
@@ -479,6 +469,7 @@ impl<'a> CoordinationService<'a> {
 #[cfg(test)]
 mod tests {
     use super::RemoteCoordination;
+    use crate::coordination::ThreadPause;
     use crate::coordination::facade;
     use crate::{
         coordination::{CoordinationError, EventsInput, EventsResult},
@@ -492,7 +483,7 @@ mod tests {
         ActorId, CancelToken, Clock, HostId, OperationId, ProjectId, RootInputs, StateRoot,
         WaitBudget,
     };
-    use provenant_fabric_store::{PeerPhase, PeerPhaseChange, Request, Store, ThreadWait};
+    use provenant_fabric_store::{PeerPhase, PeerPhaseChange, Request, Store};
     use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
     use std::{
         os::unix::fs::PermissionsExt,
@@ -631,7 +622,7 @@ mod tests {
         root: StateRoot,
         clock: SystemClock,
         cancel: CancelToken,
-        backoff: ThreadWait,
+        backoff: ThreadPause,
         budget: WaitBudget,
         local_host: HostId,
         remote_host: HostId,
@@ -650,7 +641,7 @@ mod tests {
             let root: StateRoot = inputs.resolve(&SystemPathResolver).unwrap().state;
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
-            let backoff = ThreadWait;
+            let backoff = ThreadPause;
             let budget = WaitBudget::cli(clock.mono_now(), 30).unwrap();
             let local_host = HostId::from_bytes([81; 16]);
             let remote_host = HostId::from_bytes([82; 16]);
@@ -694,9 +685,7 @@ mod tests {
             };
             let store_request = Request {
                 clock: &self.clock,
-                budget: self.budget,
                 cancel: &self.cancel,
-                backoff: &self.backoff,
             };
             let journal = Store::open(&self.root, &store_request).unwrap();
             RemoteCoordination {
@@ -769,9 +758,7 @@ mod tests {
                         PeerPhaseChange::Sent,
                         &Request {
                             clock: &fixture.clock,
-                            budget: fixture.budget,
                             cancel: &fixture.cancel,
-                            backoff: &fixture.backoff,
                         },
                     )
                     .unwrap();
@@ -797,9 +784,7 @@ mod tests {
                     &id,
                     &Request {
                         clock: &fixture.clock,
-                        budget: fixture.budget,
                         cancel: &fixture.cancel,
-                        backoff: &fixture.backoff,
                     },
                 )
                 .unwrap()
@@ -925,9 +910,7 @@ mod tests {
         assert_eq!(error.code(), "state_corrupt");
         let request = Request {
             clock: &fixture.clock,
-            budget: fixture.budget,
             cancel: &fixture.cancel,
-            backoff: &fixture.backoff,
         };
         let pending = remote
             .journal
@@ -965,9 +948,7 @@ mod tests {
         ));
         let journal_request = Request {
             clock: &fixture.clock,
-            budget: fixture.budget,
             cancel: &fixture.cancel,
-            backoff: &fixture.backoff,
         };
         let pending = remote
             .journal

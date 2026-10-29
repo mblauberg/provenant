@@ -17,10 +17,11 @@ use provenant_records::{ArtifactRef, RecordHeader};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use provenant_core::{Pause, ThreadPause};
 use provenant_fabric_store::{ClaimFence, ClaimRequest, LandingRequest, Request, Store, TaskClaim};
 pub use provenant_fabric_store::{
-    Delivery, Event, EventKind, EventRecord, Landing, Message, MessageKind, MessageRef, Page,
-    RetryWait, Task, TaskRef, TaskState, ThreadWait, WorkClaim, WorkScope,
+    Delivery, Event, EventKind, EventRecord, Landing, Message, MessageKind, MessageRef, Page, Task,
+    TaskRef, TaskState, WorkClaim, WorkScope,
 };
 
 #[derive(Debug, Error)]
@@ -440,7 +441,7 @@ pub struct LocalCoordination<'a> {
     project: ProjectId,
     actor: ActorId,
     clock: &'a dyn Clock,
-    backoff: &'a dyn RetryWait,
+    backoff: &'a dyn Pause,
 }
 
 impl<'a> LocalCoordination<'a> {
@@ -449,16 +450,10 @@ impl<'a> LocalCoordination<'a> {
         project: ProjectId,
         actor: ActorId,
         clock: &'a dyn Clock,
-        backoff: &'a dyn RetryWait,
-        budget: WaitBudget,
+        backoff: &'a dyn Pause,
         cancel: &CancelToken,
     ) -> Result<Self, CoordinationError> {
-        let request = Request {
-            clock,
-            budget,
-            cancel,
-            backoff,
-        };
+        let request = Request { clock, cancel };
         let store = Store::open(root, &request)?;
         Ok(Self::new(store, project, actor, clock, backoff))
     }
@@ -468,7 +463,7 @@ impl<'a> LocalCoordination<'a> {
         project: ProjectId,
         actor: ActorId,
         clock: &'a dyn Clock,
-        backoff: &'a dyn RetryWait,
+        backoff: &'a dyn Pause,
     ) -> Self {
         Self {
             store,
@@ -479,12 +474,10 @@ impl<'a> LocalCoordination<'a> {
         }
     }
 
-    fn request<'b>(&'b self, budget: WaitBudget, cancel: &'b CancelToken) -> Request<'b> {
+    fn request<'b>(&'b self, cancel: &'b CancelToken) -> Request<'b> {
         Request {
             clock: self.clock,
-            budget,
             cancel,
-            backoff: self.backoff,
         }
     }
 
@@ -618,7 +611,7 @@ impl CoordinationApi for LocalCoordination<'_> {
     ) -> Result<MailResult, CoordinationError> {
         input.validate_input(WaitTransport::Cli)?;
         self.ensure_active(budget, cancel)?;
-        let request = self.request(budget, cancel);
+        let request = self.request(cancel);
         match input {
             MailInput::Send {
                 recipients,
@@ -688,7 +681,7 @@ impl CoordinationApi for LocalCoordination<'_> {
     ) -> Result<TaskResult, CoordinationError> {
         input.validate_input(WaitTransport::Cli)?;
         self.ensure_active(budget, cancel)?;
-        let request = self.request(budget, cancel);
+        let request = self.request(cancel);
         match input {
             TaskInput::Create {
                 objective, note, ..
@@ -824,7 +817,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 _ => Err(error),
             };
         }
-        let request = self.request(budget, cancel);
+        let request = self.request(cancel);
         match input {
             EventsInput::Read {
                 after,
@@ -836,7 +829,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     Some(ms) => self.observation_budget(budget, ms)?,
                     None => budget,
                 };
-                let read_request = self.request(read_budget, cancel);
+                let read_request = self.request(cancel);
                 // fabric.md CLI and MCP surfaces: events use caller-held cursors.
                 let start = after.unwrap_or(0);
                 let mut page = self
@@ -897,7 +890,7 @@ impl CoordinationApi for LocalCoordination<'_> {
     ) -> Result<ClaimResult, CoordinationError> {
         input.validate_input(WaitTransport::Cli)?;
         self.ensure_active(budget, cancel)?;
-        let request = self.request(budget, cancel);
+        let request = self.request(cancel);
         match input {
             ClaimInput::Acquire {
                 scope,
@@ -989,7 +982,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 _ => Err(error),
             };
         }
-        let request = self.request(budget, cancel);
+        let request = self.request(cancel);
         match input {
             LandingInput::Wait {
                 reference,
@@ -998,7 +991,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 ..
             } => {
                 let poll_budget = self.observation_budget(budget, wait_seconds)?;
-                let poll_request = self.request(poll_budget, cancel);
+                let poll_request = self.request(cancel);
                 let mut current = None;
                 loop {
                     if cancel.is_cancelled() {
@@ -1131,7 +1124,7 @@ impl LocalCoordination<'_> {
         cancel: &CancelToken,
     ) -> Result<MutationResult, CoordinationError> {
         self.ensure_active(budget, cancel)?;
-        let request = self.request(budget, cancel);
+        let request = self.request(cancel);
         let guard = if let Mutation::Landing(value) = &input {
             Some(
                 self.store
@@ -1215,7 +1208,6 @@ pub fn generated_operation_id(prefix: &str) -> Result<String, CoordinationError>
 mod tests {
     use super::*;
     use provenant_core::{MonoTime, PathResolver, RootInputs, StateRoot, TestClock, WallTime};
-    use provenant_fabric_store::ThreadWait;
     use std::path::{Path, PathBuf};
 
     struct Resolver;
@@ -1237,7 +1229,7 @@ mod tests {
         _temp: tempfile::TempDir,
         root: StateRoot,
         clock: TestClock,
-        backoff: ThreadWait,
+        backoff: ThreadPause,
         project: ProjectId,
         actor: ActorId,
     }
@@ -1258,19 +1250,16 @@ mod tests {
                     WallTime::from_micros(2_000_000_000_000_000).expect("wall time"),
                     MonoTime::from_micros(0),
                 ),
-                backoff: ThreadWait,
+                backoff: ThreadPause,
                 project: ProjectId::from_bytes([1; 16]),
                 actor: ActorId::from_bytes([2; 16]),
             }
         }
         fn service(&self) -> LocalCoordination<'_> {
-            let budget = WaitBudget::cli(self.clock.mono_now(), 5).expect("test budget");
             let cancel = CancelToken::new();
             let request = Request {
                 clock: &self.clock,
-                budget,
                 cancel: &cancel,
-                backoff: &self.backoff,
             };
             let store = Store::open(&self.root, &request).expect("isolated store");
             LocalCoordination::new(store, self.project, self.actor, &self.clock, &self.backoff)
@@ -1348,7 +1337,6 @@ mod tests {
             f.actor,
             &f.clock,
             &f.backoff,
-            f.budget(),
             &CancelToken::new(),
         )
         .err()
@@ -1393,7 +1381,7 @@ mod tests {
             .expect("isolated state root")
             .state;
         let clock = TickingClock(std::cell::Cell::new(2_000_000_000_000_000));
-        let backoff = ThreadWait;
+        let backoff = ThreadPause;
         let budget = WaitBudget::cli(clock.mono_now(), 5).expect("test budget");
         let cancel = CancelToken::new();
         let service = LocalCoordination::open(
@@ -1402,7 +1390,6 @@ mod tests {
             ActorId::from_bytes([32; 16]),
             &clock,
             &backoff,
-            budget,
             &cancel,
         )
         .expect("open service");
@@ -1458,7 +1445,7 @@ mod tests {
             Ok(())
         }
     }
-    impl RetryWait for AdvancingClock {
+    impl Pause for AdvancingClock {
         fn wait(&self, duration: DurationMicros, _: &CancelToken) {
             self.wall.set(self.wall.get() + duration.as_micros() as i64);
             self.mono.set(self.mono.get() + duration.as_micros());
@@ -1523,7 +1510,7 @@ mod tests {
                 fixture.project,
                 fixture.actor,
                 &release_id,
-                &service.request(fixture.budget(), &cancel),
+                &service.request(&cancel),
             )
             .unwrap()
             .unwrap();
@@ -1710,9 +1697,7 @@ mod tests {
                 &fixture.root,
                 &Request {
                     clock: &fixture.clock,
-                    budget: fixture.budget(),
                     cancel: &cancel,
-                    backoff: &fixture.backoff,
                 },
             )
             .expect("second connection"),
@@ -1842,7 +1827,6 @@ mod tests {
             fixture.actor,
             &clock,
             &clock,
-            clock.budget(),
             &cancel,
         )
         .expect("open service");
@@ -1898,7 +1882,7 @@ mod tests {
             Ok(())
         }
     }
-    impl RetryWait for SimulatedClock {
+    impl Pause for SimulatedClock {
         fn wait(&self, duration: DurationMicros, _: &CancelToken) {
             self.0.set(self.0.get() + duration.as_micros());
         }
@@ -1915,7 +1899,6 @@ mod tests {
             fixture.actor,
             &clock,
             &clock,
-            budget(),
             &cancel,
         )
         .expect("service");

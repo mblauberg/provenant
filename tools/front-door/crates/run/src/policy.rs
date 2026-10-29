@@ -75,8 +75,9 @@ impl RunStore {
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<u64> {
-        let first: Option<i64> = call.retry(|| {
-            Ok(self.db.query_row(
+        call.check()?;
+        let first: Option<i64> = {
+            self.db.query_row(
                 "SELECT MIN(number) FROM attempts WHERE run=?1 AND task=?2 AND project=?3",
                 params![
                     record.run_id.to_string(),
@@ -84,8 +85,8 @@ impl RunStore {
                     record.project_id.to_string()
                 ],
                 |row| row.get(0),
-            )?)
-        })?;
+            )?
+        };
         record
             .attempt_number
             .checked_sub(
@@ -112,9 +113,8 @@ impl RunStore {
             return Ok(current);
         }
         for _ in 0..POLICY_ATTEMPT_CEILING {
-            let next: Option<String> = call.retry(|| {
-                Ok(self
-                    .db
+            let next: Option<String> = {
+                self.db
                     .query_row(
                         "SELECT id FROM attempts WHERE run=?1 AND task=?2 AND number=?3",
                         params![
@@ -124,8 +124,8 @@ impl RunStore {
                         ],
                         |row| row.get(0),
                     )
-                    .optional()?)
-            })?;
+                    .optional()?
+            };
             let Some(next) = next else {
                 return Ok(current);
             };

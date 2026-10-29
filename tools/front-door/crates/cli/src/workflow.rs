@@ -328,10 +328,8 @@ impl Edge {
         if reviews.is_empty() {
             return Ok(vec![]);
         }
-        let budget = self.budget()?;
         let call = Request {
             clock: &self.clock,
-            budget,
             cancel: &self.cancel,
         };
         let store = RunStore::open(

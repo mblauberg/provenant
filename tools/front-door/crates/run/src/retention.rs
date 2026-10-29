@@ -80,7 +80,7 @@ impl RunStore {
         let lease = run.lock(
             OsStr::new("publication.lock"),
             LockMode::Shared,
-            call.transaction_budget(),
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?;
@@ -170,15 +170,15 @@ impl RunStore {
                 call,
             )?;
         }
-        let rows: Vec<(String, String, String, Vec<u8>)> = call.retry(|| {
+        let rows: Vec<(String, String, String, Vec<u8>)> = {
             let mut query = self.db.prepare(
                 "SELECT id,run,project,record FROM attempts WHERE terminal=1 ORDER BY sequence",
             )?;
             let rows = query.query_map([], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         let mut report = ProviderStateGc::default();
         for (id, run, project, raw) in rows {
             if projects.is_some_and(|projects| !projects.iter().any(|id| id.to_string() == project))
@@ -214,17 +214,9 @@ impl RunStore {
                 };
                 let _publication =
                     run.try_lock_existing(OsStr::new("publication.lock"), LockMode::Exclusive)?;
-                // Collection may spend longer than one DB wait budget
-                // deleting payloads. Bound each new observation separately.
-                let observation = Request {
-                    clock: call.clock,
-                    cancel: call.cancel,
-                    budget: provenant_core::WaitBudget::per_transaction(call.clock.mono_now(), 5)
-                        .map_err(|_| RunError::Contention)?,
-                };
-                let continuing: bool = observation.retry(|| Ok(self.db.query_row(
+                let continuing: bool = self.db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM continuations c JOIN attempts a ON a.run=c.run WHERE c.target=?1 AND a.terminal=0)",
-                    [&id], |row| row.get(0))?))?;
+                    [&id], |row| row.get(0))?;
                 let reservations = self.writer_registry.join("worktrees").join(project);
                 match Directory::open_anchor(&reservations) {
                     Ok(directory) => {
@@ -277,7 +269,7 @@ impl RunStore {
                     let collection = (|| -> Result<()> {
                         collect_temporary(&attempt, &temporary, dry_run, &mut report)?;
                         if !dry_run {
-                            self.write(&observation, |tx| {
+                            self.write(call, |tx| {
                                 tx.execute(
                                     "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND run=?2 AND project=?3 AND terminal=1",
                                     rusqlite::params![id, record.run_id.to_string(), record.project_id.to_string()],
@@ -302,13 +294,13 @@ impl RunStore {
                 if age >= DAY_MICROS.saturating_mul(logs_days as i64) {
                     // A terminal attempt in an open run still contributes to live
                     // diagnostics. Expiry requires every sibling to be terminal.
-                    let open: bool = observation.retry(|| {
-                        Ok(self.db.query_row(
+                    let open: bool = {
+                        self.db.query_row(
                             "SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND terminal=0)",
                             [record.run_id.to_string()],
                             |row| row.get(0),
-                        )?)
-                    })?;
+                        )?
+                    };
                     if !open {
                         collect_logs(
                             &attempt,
@@ -321,21 +313,14 @@ impl RunStore {
                         // Keep the newest event so unseen-settlement cursors and
                         // last_event_sequence still observe terminal attempts.
                         let expired_events = if dry_run {
-                            observation.retry(|| {
-                                Ok(self.db.query_row(
-                                    "SELECT COUNT(*) FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2)",
-                                    rusqlite::params![id, record.project_id.to_string()],
-                                    |row| row.get::<_, i64>(0),
-                                )?)
-                            })
-                            .map(|count| u64::try_from(count).unwrap_or(0))?
+                            let count = self.db.query_row(
+                                "SELECT COUNT(*) FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2)",
+                                rusqlite::params![id, record.project_id.to_string()],
+                                |row| row.get::<_, i64>(0),
+                            )?;
+                            u64::try_from(count).unwrap_or(0)
                         } else {
-                            let update = Request {
-                                budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 5)
-                                    .map_err(|_| RunError::Contention)?,
-                                ..observation
-                            };
-                            self.write(&update, |tx| {
+                            self.write(call, |tx| {
                                 let deleted = tx.execute(
                                     "DELETE FROM events WHERE attempt=?1 AND project=?2 AND sequence < (SELECT MAX(sequence) FROM events WHERE attempt=?1 AND project=?2)",
                                     rusqlite::params![id, record.project_id.to_string()],
@@ -1188,7 +1173,7 @@ mod tests {
         let lease = directory.lock(
             OsStr::new("writer.lock"),
             LockMode::Exclusive,
-            call.budget,
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?;
@@ -1623,7 +1608,7 @@ mod tests {
 
     #[test]
     fn gc_refreshes_the_hint_update_budget_after_collection() -> TestResult {
-        use provenant_core::{Clock, MonoTime, TimeError, WaitBudget};
+        use provenant_core::{Clock, MonoTime, TimeError};
         // Each DB observation completes within its own five-second budget,
         // while time between observations exceeds the original deadline.
         struct AdvancingClock(std::cell::Cell<u64>);
@@ -1654,7 +1639,6 @@ mod tests {
         let call = Request {
             clock: &slow,
             cancel: &cancel,
-            budget: WaitBudget::cli(MonoTime::from_micros(0), 100)?,
         };
         let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
         assert!(report.errors.is_empty(), "{:?}", report.errors);

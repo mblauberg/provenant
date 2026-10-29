@@ -123,6 +123,7 @@ HOST_SECTIONS = (
     ("host_lane_build_settings", "Host lane build settings",
      "Omit a key for its host-dependent default; -1 also selects automatic behaviour."),
     ("host_graph_settings", "Host graph settings", "Omit a key for its default."),
+    ("host_store_settings", "Host store settings", "Omit a key for its default."),
     ("host_model_policy_settings", "Host model policy settings",
      "Omit a key for its bundled or empty default. `rules.policy` takes the same fields as `defaults`."),
 )

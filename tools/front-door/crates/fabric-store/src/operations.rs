@@ -24,12 +24,12 @@ impl Store {
         if !self.db.is_autocommit() {
             return Err(Error::Invalid("nested operation").into());
         }
-        let tx = request.retry(|| {
-            Ok(rusqlite::Transaction::new_unchecked(
-                &self.db,
-                rusqlite::TransactionBehavior::Immediate,
-            )?)
-        })?;
+        request.check()?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(Error::from)?;
         if let Some(result) = replay(&tx, project, actor, id, &frozen)? {
             return Ok(result);
         }
@@ -61,8 +61,9 @@ impl Store {
         input: &impl Serialize,
         request: &Request<'_>,
     ) -> Result<Option<T>> {
+        request.check()?;
         let frozen = encode(input)?;
-        request.retry(|| replay(&self.db, project, actor, id, &frozen))
+        replay(&self.db, project, actor, id, &frozen)
     }
 
     /// Read the home owner's atomic receipt without repeating a mutation.
@@ -88,23 +89,22 @@ impl Store {
         id: &OperationId,
         request: &Request<'_>,
     ) -> Result<Option<(I, T)>> {
-        request.retry(|| {
-            let row: Option<(String, Vec<u8>, Vec<u8>)> = self
-                .db
-                .query_row(
-                    "SELECT actor,request,result FROM coordination_operations WHERE project=?1 AND id=?2",
-                    params![project.to_string(), id.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
-            match row {
-                Some((owner, input, result)) if owner == actor.to_string() => {
-                    Ok(Some((decode(&input)?, decode(&result)?)))
-                },
-                Some(_) => Err(Error::Conflict),
-                None => Ok(None),
+        request.check()?;
+        let row: Option<(String, Vec<u8>, Vec<u8>)> = self
+            .db
+            .query_row(
+                "SELECT actor,request,result FROM coordination_operations WHERE project=?1 AND id=?2",
+                params![project.to_string(), id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        match row {
+            Some((owner, input, result)) if owner == actor.to_string() => {
+                Ok(Some((decode(&input)?, decode(&result)?)))
             }
-        })
+            Some(_) => Err(Error::Conflict),
+            None => Ok(None),
+        }
     }
 }
 

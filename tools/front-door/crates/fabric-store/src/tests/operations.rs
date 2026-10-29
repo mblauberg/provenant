@@ -71,9 +71,7 @@ fn concurrent_duplicate_operations_apply_once_and_share_the_committed_receipt() 
                 let cancel = CancelToken::new();
                 let request = Request {
                     clock: &clock,
-                    budget: WaitBudget::cli(clock.mono_now(), 5).unwrap(),
                     cancel: &cancel,
-                    backoff: &ThreadWait,
                 };
                 let store = Store::open(&root, &request).unwrap();
                 barrier.wait();

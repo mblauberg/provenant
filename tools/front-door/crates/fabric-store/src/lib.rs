@@ -16,7 +16,7 @@ mod viewer;
 
 pub use chairs::*;
 pub use claims::*;
-pub use db::{CURRENT_SCHEMA_VERSION, Request, RetryWait, Store, ThreadWait};
+pub use db::{CURRENT_SCHEMA_VERSION, Request, Store};
 pub use events::*;
 pub use federation::*;
 pub use human_inbox::{
@@ -51,7 +51,7 @@ pub struct Page<T> {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("SQLite operation failed: {}", sqlite_diagnostic(.0))]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(rusqlite::Error),
     #[error("safe filesystem operation failed")]
     Filesystem(#[from] provenant_os::fs::FsError),
     #[error("filesystem I/O failed at {path}")]
@@ -82,7 +82,7 @@ pub enum Error {
     PathEncoding,
     #[error("task ownership fence is stale")]
     StaleFence,
-    #[error("SQLite remained busy until the request deadline")]
+    #[error("SQLite remained busy past its busy timeout")]
     Busy,
     #[error("request cancelled")]
     Cancelled,
@@ -100,6 +100,16 @@ pub enum Error {
     Encode(#[from] provenant_records::CanonicalError),
     #[error("time is outside the supported range")]
     Time(#[from] provenant_core::TimeError),
+}
+
+impl From<rusqlite::Error> for Error {
+    fn from(error: rusqlite::Error) -> Self {
+        if provenant_sqlite::is_busy(&error) {
+            Self::Busy
+        } else {
+            Self::Sqlite(error)
+        }
+    }
 }
 
 // SQLite's detailed message can contain SQL values, paths, or other private

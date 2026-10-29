@@ -1139,6 +1139,7 @@ mod tests {
                 lease_seconds: 3600,
                 peer_seconds: 30,
                 graph_timeout_seconds: 14400,
+                store_busy_timeout_ms: 30_000,
                 bundle_bytes: 67108864,
             },
         };

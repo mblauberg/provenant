@@ -5,10 +5,10 @@
 use super::*;
 use crate::tools::*;
 use provenant_core::{
-    ActorId, CancelToken, Clock, MonoTime, PathResolver, ProjectId, RootInputs, TestClock,
-    WaitBudget, WallTime,
+    ActorId, CancelToken, MonoTime, PathResolver, ProjectId, RootInputs, TestClock, WaitBudget,
+    WallTime,
 };
-use provenant_fabric_runtime::coordination::{CoordinationService, ThreadWait};
+use provenant_fabric_runtime::coordination::{CoordinationService, ThreadPause};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -1016,7 +1016,7 @@ struct FactoryState {
     _temp: tempfile::TempDir,
     root: provenant_core::StateRoot,
     clock: TestClock,
-    backoff: ThreadWait,
+    backoff: ThreadPause,
     gate: Arc<Gate>,
     open_failures: Mutex<usize>,
 }
@@ -1037,18 +1037,16 @@ impl FakeFactory {
             _temp: temp,
             root,
             clock,
-            backoff: ThreadWait,
+            backoff: ThreadPause,
             gate,
             open_failures: Mutex::new(0),
         });
-        let budget = WaitBudget::mcp(state.clock.mono_now(), 5).unwrap();
         let _initialised = CoordinationService::open(
             &state.root,
             ProjectId::from_bytes([1; 16]),
             ActorId::from_bytes([2; 16]),
             &state.clock,
             &state.backoff,
-            budget,
             &CancelToken::new(),
         )
         .unwrap();
@@ -1156,14 +1154,12 @@ impl Factory for FakeFactory {
         if panic_in_open {
             self.0.gate.maybe_panic();
         }
-        let budget = WaitBudget::mcp(self.0.clock.mono_now(), 5)?;
         let coordination = CoordinationService::open(
             &self.0.root,
             ProjectId::from_bytes([1; 16]),
             ActorId::from_bytes([2; 16]),
             &self.0.clock,
             &self.0.backoff,
-            budget,
             &CancelToken::new(),
         )?;
         Ok(Service::new(
@@ -1244,8 +1240,8 @@ impl Output for PipeOutput {
             }
             output.delay
         };
-        provenant_fabric_runtime::coordination::RetryWait::wait(
-            &ThreadWait,
+        provenant_core::Pause::wait(
+            &ThreadPause,
             provenant_core::DurationMicros::from_micros(u64::try_from(delay.as_micros()).unwrap()),
             &CancelToken::new(),
         );

@@ -1907,7 +1907,6 @@ fn persisted_attempt_with(
 ) -> Result<(TestRig, provenant_run::AttemptRecord)> {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
-        WaitBudget,
     };
     use provenant_os::clock::SystemClock;
     use provenant_os::exec::Termination;
@@ -1945,7 +1944,6 @@ fn persisted_attempt_with(
     let cancel = CancelToken::new();
     let call = Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let store = RunStore::open(&execution, &call)?;

@@ -3499,7 +3499,6 @@ mod tests {
         );
         let call = run::Request {
             clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 5)?,
             cancel: &cancel,
         };
         let store = run::RunStore::open(
@@ -4200,7 +4199,7 @@ mod tests {
                     serde_json::json!({"type":"turn_context", "payload":{"model":"fixture-model"}}),
                 );
                 use provenant_core::{
-                    ActorId, CancelToken, MonoTime, RootInputs, TestClock, WaitBudget, WallTime,
+                    ActorId, CancelToken, MonoTime, RootInputs, TestClock, WallTime,
                 };
                 use std::os::unix::fs::DirBuilderExt;
                 let temp = tempfile::tempdir()?;
@@ -4219,7 +4218,6 @@ mod tests {
                 let call = run::Request {
                     clock: &clock,
                     cancel: &cancel,
-                    budget: WaitBudget::cli(MonoTime::from_micros(0), 5)?,
                 };
                 let store = run::RunStore::open(&context, &call)?;
                 let request = run::PreparedRun {

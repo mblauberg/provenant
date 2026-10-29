@@ -1,7 +1,7 @@
 //! Host housekeeping on existing quota events. No background timer or service.
 use provenant_core::{CancelToken, Clock, OperationId, Roots, WaitBudget};
 use provenant_fabric_runtime::coordination::{
-    EventsInput, LocalCoordination, Mutation, ThreadWait,
+    EventsInput, LocalCoordination, Mutation, ThreadPause,
 };
 use provenant_os::{clock::SystemClock, exec::SystemExecutor};
 use std::path::Path;
@@ -157,8 +157,7 @@ fn note_update(
         ctx.identity.project,
         ctx.identity.inbox.actor,
         clock,
-        &ThreadWait,
-        budget,
+        &ThreadPause,
         &cancel,
     )
     .map_err(|e| e.to_string())?;

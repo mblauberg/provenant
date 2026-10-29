@@ -1,9 +1,8 @@
 use crate::*;
-use provenant_core::{CancelToken, Clock, StateRoot, WaitBudget};
+use provenant_core::{CancelToken, Clock, StateRoot};
 use provenant_os::fs::Directory;
 #[cfg(test)]
 use provenant_os::fs::Metadata;
-pub use provenant_sqlite::{RetryWait, ThreadWait};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 #[cfg(test)]
 use std::path::PathBuf;
@@ -53,43 +52,18 @@ fn enable_wal(db: &Connection) -> Result<()> {
 
 pub struct Request<'a> {
     pub clock: &'a dyn Clock,
-    pub budget: WaitBudget,
     pub cancel: &'a CancelToken,
-    pub backoff: &'a dyn RetryWait,
 }
 impl Request<'_> {
     pub fn check(&self) -> Result<()> {
         if self.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        if self.budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-            return Err(Error::Busy);
-        }
         Ok(())
     }
-    pub(crate) fn retry<T>(&self, mut action: impl FnMut() -> Result<T>) -> Result<T> {
-        match provenant_sqlite::retry(
-            self.clock,
-            self.budget,
-            self.cancel,
-            self.backoff,
-            |error: &Error| matches!(error, Error::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)),
-            &mut action,
-        ) {
-            Ok(value) => Ok(value),
-            Err(provenant_sqlite::RetryError::Busy) => Err(Error::Busy),
-            Err(provenant_sqlite::RetryError::Cancelled) => Err(Error::Cancelled),
-            Err(provenant_sqlite::RetryError::Action(error)) => Err(error),
-        }
-    }
-    /// Retry an incomplete observation within the request's budget and cancellation.
-    fn wait<T>(&self, action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
-        provenant_sqlite::observe(self.clock, self.budget, self.cancel, self.backoff, action)
-            .map_err(|error| match error {
-                provenant_sqlite::RetryError::Busy => Error::Busy,
-                provenant_sqlite::RetryError::Cancelled => Error::Cancelled,
-                provenant_sqlite::RetryError::Action(error) => error,
-            })
+    /// The wait for an advisory lock that starts now: SQLite's busy timeout.
+    pub fn lock_budget(&self) -> provenant_core::WaitBudget {
+        provenant_sqlite::lock_budget(self.clock.mono_now())
     }
 }
 
@@ -158,16 +132,9 @@ impl Store {
         let path = root.as_path().join("fabric");
         let names = ["", "-wal", "-shm", "-journal"]
             .map(|suffix| OsString::from(format!("{database}{suffix}")));
-        provenant_sqlite::check_companions(
-            &fabric,
-            &names,
-            |check| {
-                crate::local_delivery::before(deadline)?;
-                check()?.ok_or(Error::Busy)
-            },
-            Into::into,
-            |name, _| Error::UnsafePath(path.join(name)),
-        )?;
+        provenant_sqlite::check_companions(&fabric, &names, Into::into, |name, _| {
+            Error::UnsafePath(path.join(name))
+        })?;
         let path = path.join(database);
         let db = if writable {
             provenant_sqlite::open_connection(&path, false)?
@@ -176,6 +143,12 @@ impl Store {
         } else {
             provenant_sqlite::open_connection(&path, true)?
         };
+        // SQLite runs no progress handler while it waits on a lock, so the
+        // caller's deadline also caps the busy timeout.
+        db.busy_timeout(
+            provenant_sqlite::busy_timeout()
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+        )?;
         db.progress_handler(100, Some(move || std::time::Instant::now() >= deadline))?;
         // Filesystem discovery was validated before this connection opened.
         if writable {
@@ -227,10 +200,9 @@ impl Store {
             Err(error) => return Err(error.into()),
             Ok(_) => {}
         }
-        companions(&fabric, &path, "fabric.sqlite3", request)?;
+        companions(&fabric, &path, "fabric.sqlite3")?;
         let db = provenant_sqlite::open_connection(&path.join("fabric.sqlite3"), true)?;
-        let version = request.retry(|| schema_version(&db))?;
-        companions(&fabric, &path, "fabric.sqlite3", request)?;
+        let version = schema_version(&db)?;
         if version != MIGRATIONS.len() {
             return Err(Error::SchemaVersion(version as i64));
         }
@@ -305,11 +277,11 @@ impl Store {
             Err(error) if error.is_exists() => {}
             Err(error) => return Err(error.into()),
         }
-        companions(&fabric, &path, database, request)?;
+        companions(&fabric, &path, database)?;
         let db = provenant_sqlite::open_connection(&db_path, false)?;
         // Refuse future versions before journal-mode changes or schema writes.
-        request.retry(|| schema_version(&db))?;
-        request.retry(|| enable_wal(&db))?;
+        schema_version(&db)?;
+        enable_wal(&db)?;
         if database == "fabric.sqlite3" {
             provenant_sqlite::retain_read_only_wal(&db)?;
         }
@@ -334,7 +306,7 @@ impl Store {
             locks,
             _owner: PhantomData,
         };
-        while request.retry(|| schema_version(&store.db))? < MIGRATIONS.len() {
+        while schema_version(&store.db)? < MIGRATIONS.len() {
             let done = store.write(request, |tx| {
                 let version = schema_version(tx)?;
                 let Some(sql) = MIGRATIONS.get(version) else {
@@ -348,7 +320,6 @@ impl Store {
                 break;
             }
         }
-        companions(&fabric, &path, database, request)?;
         Ok(store)
     }
     pub(crate) fn write<T>(
@@ -359,14 +330,12 @@ impl Store {
         if !self.db.is_autocommit() {
             return action(&self.db);
         }
-        request.retry(|| {
-            let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-            let value = action(&tx)?;
-            // Only BUSY/LOCKED can replay, after this transaction has rolled back.
-            // All other commit failures surface unchanged, never as fresh writes.
-            tx.commit()?;
-            Ok(value)
-        })
+        request.check()?;
+        // BEGIN IMMEDIATE waits up to the busy timeout for the write lock.
+        let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
+        let value = action(&tx)?;
+        tx.commit()?;
+        Ok(value)
     }
 }
 fn private(directory: &Directory, path: &std::path::Path) -> Result<()> {
@@ -376,34 +345,21 @@ fn private(directory: &Directory, path: &std::path::Path) -> Result<()> {
     }
     Ok(())
 }
-fn companions(
-    directory: &Directory,
-    path: &std::path::Path,
-    database: &str,
-    request: &Request<'_>,
-) -> Result<()> {
+fn companions(directory: &Directory, path: &std::path::Path, database: &str) -> Result<()> {
     let names = ["", "-wal", "-shm", "-journal"]
         .map(|suffix| OsString::from(format!("{database}{suffix}")));
-    provenant_sqlite::check_companions(
-        directory,
-        &names,
-        |check| request.wait(check),
-        Into::into,
-        |name, _| Error::UnsafePath(path.join(name)),
-    )
+    provenant_sqlite::check_companions(directory, &names, Into::into, |name, _| {
+        Error::UnsafePath(path.join(name))
+    })
 }
 #[cfg(test)]
 fn companion(
-    request: &Request<'_>,
     path: PathBuf,
     mut metadata: impl FnMut() -> provenant_os::fs::Result<Metadata>,
 ) -> Result<()> {
-    provenant_sqlite::check_companion(
-        &mut metadata,
-        |check| request.wait(check),
-        Into::into,
-        |_| Error::UnsafePath(path.clone()),
-    )
+    provenant_sqlite::check_companion(&mut metadata, Into::into, |_| {
+        Error::UnsafePath(path.clone())
+    })
 }
 
 // The configured root may live on another local volume than `/`. Once there,
@@ -416,32 +372,13 @@ fn checked_directory(parent: &Directory, name: &OsStr, device: Option<u64>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{DurationMicros, MonoTime, TestClock};
-    use std::cell::Cell;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
-
-    #[derive(Default)]
-    struct CountingWait(Cell<usize>);
-    impl RetryWait for CountingWait {
-        fn wait(&self, _: DurationMicros, _: &CancelToken) {
-            self.0.set(self.0.get() + 1);
-        }
-    }
 
     #[test]
     fn companion_refuses_another_owner() -> TestResult {
         let temp = tempfile::tempdir()?;
         let directory = Directory::open_anchor(temp.path())?;
-        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        let cancel = CancelToken::new();
-        let backoff = CountingWait::default();
-        let request = Request {
-            clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 1)?,
-            cancel: &cancel,
-            backoff: &backoff,
-        };
         for name in [
             "fabric.sqlite3",
             "fabric.sqlite3-wal",
@@ -454,7 +391,7 @@ mod tests {
             };
             let path = temp.path().join(name);
             assert!(matches!(
-                companion(&request, path.clone(), || Ok(metadata)),
+                companion(path.clone(), || Ok(metadata)),
                 Err(Error::UnsafePath(p)) if p == path
             ));
         }
@@ -466,22 +403,13 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let directory = Directory::open_anchor(temp.path())?;
         let path = temp.path().join("fabric.sqlite3-journal");
-        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        let cancel = CancelToken::new();
-        let backoff = CountingWait::default();
-        let request = Request {
-            clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 1)?,
-            cancel: &cancel,
-            backoff: &backoff,
-        };
         // Entering WAL can leave a valid rollback journal for recovery.
         directory.create_new(OsStr::new("fabric.sqlite3-journal"))?;
         std::fs::write(&path, b"rollback journal data")?;
-        companions(&directory, temp.path(), "fabric.sqlite3", &request)?;
+        companions(&directory, temp.path(), "fabric.sqlite3")?;
         directory.unlink(OsStr::new("fabric.sqlite3-journal"))?;
         std::os::unix::fs::symlink(temp.path().join("missing"), &path)?;
-        let error = companions(&directory, temp.path(), "fabric.sqlite3", &request).unwrap_err();
+        let error = companions(&directory, temp.path(), "fabric.sqlite3").unwrap_err();
         assert!(matches!(&error, Error::UnsafePath(p) if p == &path));
         assert!(error.to_string().contains("fabric.sqlite3-journal"));
         Ok(())

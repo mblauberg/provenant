@@ -198,7 +198,7 @@ fn overview_needs_you() -> Result {
     fabric_db.execute("UPDATE human_requests SET record=?1", [&original])?;
 
     // Submit a queued lane through its owner, without starting a provider.
-    use provenant_core::{ActorId, CancelToken, Clock, OperationId, ProjectId, TaskId, WaitBudget};
+    use provenant_core::{ActorId, CancelToken, OperationId, ProjectId, TaskId};
     use provenant_run::{
         DispatchRequest, DispatchTask, ExecutionContext, HarnessProfile, LaneAccess, Request,
         RequestedRoute, RunStore, Service,
@@ -208,7 +208,6 @@ fn overview_needs_you() -> Result {
     let cancel = CancelToken::new();
     let request = Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 5)?,
         cancel: &cancel,
     };
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());

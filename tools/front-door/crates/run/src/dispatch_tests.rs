@@ -72,7 +72,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     let lease = provenant_supervisor::custody::acquire_reader(
         Directory::open_anchor(&writer)?,
         RunStore::scope(&record),
-        call.budget,
+        call.lock_budget(),
         call.cancel,
         call.clock,
     )?;
@@ -1954,8 +1954,12 @@ fn held_children_retain_busy_missing_and_recreated_custody_locks() -> TestResult
         let run = input();
         store.create(&run, &call)?;
         let directory = store.attempt_dir(run.run_id, run.attempts[0].attempt_id, false)?;
-        let reservation =
-            PublicationReservation::prepare(directory.try_clone()?, call.budget, &cancel, &clock)?;
+        let reservation = PublicationReservation::prepare(
+            directory.try_clone()?,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
         let identity = reservation.custody_metadata()?;
         for index in 0..crate::db::HELD_CHILD_LIMIT {
             store.hold_child(
@@ -3388,11 +3392,7 @@ impl Clock for Stepped {
     }
 }
 fn stepped_call<'a>(clock: &'a Stepped, cancel: &'a CancelToken) -> Request<'a> {
-    Request {
-        clock,
-        budget: provenant_core::WaitBudget::cli(MonoTime::from_micros(0), 10).unwrap(),
-        cancel,
-    }
+    Request { clock, cancel }
 }
 /// Writer lanes ready to claim, each a lane of its own run.
 fn writers<const N: usize>(
@@ -4410,7 +4410,7 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
     drop(provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(custody_dir.path())?,
         observed.scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
@@ -4430,7 +4430,7 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
     std::fs::write(reservation, serde_json::to_vec(&value)?)?;
     let recovery = provenant_supervisor::custody::acquire_recovery(
         Directory::open_anchor(custody_dir.path())?,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;
@@ -4728,7 +4728,6 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     let system = provenant_os::clock::SystemClock::new();
     let spent = Request {
         clock: &system,
-        budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&system), 1)?,
         cancel: &cancel,
     };
     // A held custody lock is a live handoff: cancel leaves it untouched.
@@ -4740,7 +4739,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     let held = provenant_supervisor::fixture::acquire_writer(
         store.attempt_dir(batch.run_id, starting, false)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;
@@ -5312,14 +5311,13 @@ fn cancel_requests_then_reconcile_settles_a_prepared_attempt_nobody_holds() -> T
     drop(provenant_supervisor::fixture::acquire_writer(
         store.attempt_dir(batch.run_id, orphan, false)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
     let system = provenant_os::clock::SystemClock::new();
     let spent = Request {
         clock: &system,
-        budget: provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&system), 1)?,
         cancel: &cancel,
     };
     assert_eq!(
@@ -5717,7 +5715,7 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
             drop(provenant_supervisor::fixture::acquire_writer(
                 store.attempt_dir(run.run_id, id, false)?,
                 RunStore::scope(&store.record(id, &call)?),
-                call.budget,
+                call.lock_budget(),
                 &cancel,
                 &clock,
             )?);
@@ -5775,7 +5773,7 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         let held = provenant_supervisor::fixture::acquire_writer(
             Directory::open_anchor(&custody)?,
             RunStore::scope(&store.record(id, &call)?),
-            call.budget,
+            call.lock_budget(),
             &cancel,
             &clock,
         )?;
@@ -5858,7 +5856,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     let held = provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(&custody)?,
         RunStore::scope(&store.record(id, &call)?),
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;
@@ -6089,7 +6087,7 @@ fn reconcile_settles_a_normal_terminal_attempt_after_reboot() -> TestResult {
     drop(provenant_supervisor::fixture::acquire_writer(
         attempt.try_clone()?,
         observed.scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
@@ -6327,7 +6325,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     drop(provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(&custody)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
@@ -6558,7 +6556,7 @@ fn recover_rebooted_writer_inner(
     drop(provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(&custody)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
@@ -6639,7 +6637,7 @@ fn recover_rebooted_writer_inner(
     if interrupted {
         let recovery = provenant_supervisor::custody::acquire_recovery(
             Directory::open_anchor(&custody)?,
-            call.budget,
+            call.lock_budget(),
             &cancel,
             &clock,
         )?;
@@ -6786,7 +6784,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
     drop(provenant_supervisor::fixture::acquire_writer(
         store.attempt_dir(batch.run_id, orphan, false)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
@@ -6866,7 +6864,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
     drop(provenant_supervisor::fixture::acquire_writer(
         Directory::open_anchor(&custody)?,
         scope,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
@@ -7669,7 +7667,6 @@ fn a_policy_retry_launches_for_no_launcher_before_its_sealed_time() -> TestResul
     clock.advance(provenant_core::DurationMicros::from_seconds(60)?)?;
     let later = Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;

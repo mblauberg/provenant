@@ -1098,11 +1098,7 @@ fn writer_call<'a>(
     clock: &'a provenant_os::clock::SystemClock,
     cancel: &'a provenant_core::CancelToken,
 ) -> Result<provenant_run::Request<'a>> {
-    Ok(provenant_run::Request {
-        clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
-        cancel,
-    })
+    Ok(provenant_run::Request { clock, cancel })
 }
 
 pub(super) fn open_writer_store(
@@ -1349,8 +1345,6 @@ fn await_terminal(
         let poll = provenant_run::Request {
             clock: call.clock,
             cancel: call.cancel,
-            budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 30)
-                .expect("valid terminal poll budget"),
         };
         match store.record(attempt, &poll) {
             Ok(record) if matches!(record.state, provenant_run::AttemptState::Terminal { .. }) => {
@@ -1367,7 +1361,6 @@ fn await_terminal(
         let poll = provenant_run::Request {
             clock: call.clock,
             cancel: call.cancel,
-            budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 30)?,
         };
         let temporary = store.temporary_path(attempt, &poll)?;
         let directory = temporary.parent().ok_or("attempt directory")?;
@@ -4718,12 +4711,9 @@ fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
     let (roots, context) = writer_context(&rig)?;
     let clock = provenant_os::clock::SystemClock;
     let cancel = provenant_core::CancelToken::new();
-    let backoff = provenant_fabric_store::ThreadWait;
     let request = provenant_fabric_store::Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 5)?,
         cancel: &cancel,
-        backoff: &backoff,
     };
     let store = provenant_fabric_store::Store::open(&roots.state, &request)?;
     let events = store.events(context.project_id, 0, 100, &request)?;

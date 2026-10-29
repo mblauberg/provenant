@@ -11,7 +11,7 @@ mod gc;
 mod github_policy;
 pub use gc::{
     ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold, ProjectGcSettings,
-    deserialize_auto, parse_cache_size,
+    STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings, deserialize_auto, parse_cache_size,
 };
 pub use github_policy::GithubPolicy;
 mod harness;

@@ -409,9 +409,16 @@ pub struct Limits {
     #[serde(default = "default_graph_timeout_seconds")]
     pub graph_timeout_seconds: u64,
     pub bundle_bytes: u64,
+    /// Milliseconds a store waits for a contended lock; read through
+    /// `provenant_config::StoreSettings` when a command starts.
+    #[serde(default = "default_store_busy_timeout_ms")]
+    pub store_busy_timeout_ms: u64,
 }
 fn default_graph_timeout_seconds() -> u64 {
     14_400
+}
+fn default_store_busy_timeout_ms() -> u64 {
+    30_000
 }
 
 impl DomainConfig for FabricConfig {
@@ -510,6 +517,9 @@ impl DomainConfig for FabricConfig {
         }
         if l.graph_timeout_seconds == 0 || l.graph_timeout_seconds > 14_400 {
             reject("limits.graph_timeout_seconds".into());
+        }
+        if l.store_busy_timeout_ms > provenant_config::STORE_BUSY_TIMEOUT_CEILING_MS {
+            reject("limits.store_busy_timeout_ms".into());
         }
         if self
             .graph
@@ -773,6 +783,7 @@ mod tests {
                 peer_seconds: 30,
                 graph_timeout_seconds: 14400,
                 bundle_bytes: 67108864,
+                store_busy_timeout_ms: 30_000,
             },
         }
     }
@@ -950,6 +961,17 @@ mod tests {
     #[test]
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
+        assert_eq!(config.limits.store_busy_timeout_ms, 30_000);
+        config.limits.store_busy_timeout_ms = 0;
+        assert!(config.validate().is_empty());
+        config.limits.store_busy_timeout_ms = 600_001;
+        assert!(
+            config
+                .validate()
+                .iter()
+                .any(|e| e.field == "limits.store_busy_timeout_ms")
+        );
+        config.limits.store_busy_timeout_ms = 30_000;
         assert_eq!(config.graph.limits.expansion_depth, 64);
         assert_eq!(config.graph.limits.nodes, 512);
         assert_eq!(config.graph.limits.continuations, 2);

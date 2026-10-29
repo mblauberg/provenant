@@ -451,7 +451,6 @@ mod lineage_tests {
             let call = Request {
                 clock: &clock,
                 cancel: &cancel,
-                budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
             };
             let store = RunStore::open(&execution, &call)?;
             let writer = WriterRequest {
@@ -608,7 +607,6 @@ mod lineage_tests {
         let call = Request {
             clock: &clock,
             cancel: &cancel,
-            budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
         };
         let store = RunStore::open(&execution, &call)?;
         original.request.tasks[0].writer = Some(WriterRequest {
@@ -1151,21 +1149,22 @@ impl RunStore {
         target: &str,
         call: &Request<'_>,
     ) -> Result<()> {
+        call.check()?;
         let (project, actor) = (
             self.context.project_id.to_string(),
             self.context.actor_id.to_string(),
         );
-        let bound: String = call.retry(|| {
+        let bound: String = {
             self.db.execute(
                 "INSERT INTO cancellations VALUES (?1,?2,?3,?4) ON CONFLICT DO NOTHING",
                 params![project, actor, operation.as_str(), target],
             )?;
-            Ok(self.db.query_row(
+            self.db.query_row(
                 "SELECT target FROM cancellations WHERE project=?1 AND actor=?2 AND operation=?3",
                 params![project, actor, operation.as_str()],
                 |r| r.get(0),
-            )?)
-        })?;
+            )?
+        };
         if bound != target {
             return Err(RunError::OperationConflict);
         }
@@ -1566,13 +1565,13 @@ impl RunStore {
         // A replay, prepared or accepted, is answered by `create`, which
         // compares the request digest and adopts a prepared operation's IDs.
         if !replay {
-            let generation: i64 = call.retry(|| {
-                Ok(self.db.query_row(
+            let generation: i64 = {
+                self.db.query_row(
                     "SELECT COUNT(*) FROM continuations WHERE target=?1",
                     [input.prior.to_string()],
                     |r| r.get(0),
-                )?)
-            })?;
+                )?
+            };
             if u64::try_from(generation).ok() != Some(input.expected_generation) {
                 return Err(RunError::Conflict);
             }
@@ -1638,14 +1637,18 @@ impl RunStore {
     /// Up to `limit` runs needing recovery or terminal temporary cleanup in
     /// this project. Nonterminal work takes priority over temporary cleanup.
     pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
+        call.check()?;
         let limit = crate::db::sql_int(limit)?;
-        let ids: Vec<String> = call.retry(|| {
+        let ids: Vec<String> = {
             let mut query = self.db.prepare(
                 "SELECT run FROM attempts WHERE project=?1 AND terminal=0 GROUP BY run ORDER BY MIN(sequence) LIMIT ?2",
             )?;
-            let rows = query.query_map(params![self.context.project_id.to_string(), limit], |r| r.get(0))?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+            let rows = query
+                .query_map(params![self.context.project_id.to_string(), limit], |r| {
+                    r.get(0)
+                })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         let mut runs = ids
             .iter()
             .map(|id| RunId::parse(id).map_err(|_| RunError::Validation("run index ID")))
@@ -1656,33 +1659,32 @@ impl RunStore {
             }
         }
         if runs.len() < limit as usize {
-            call.retry(|| {
-                let mut query = self.db.prepare(
-                    "SELECT run FROM attempts WHERE project=?1 AND terminal=1 AND tmp_retained=1 GROUP BY run ORDER BY MIN(sequence) LIMIT ?2",
-                )?;
-                let mut rows = query.query(params![self.context.project_id.to_string(), limit])?;
-                while runs.len() < limit as usize {
-                    let Some(row) = rows.next()? else { break };
-                    let run = RunId::parse(&row.get::<_, String>(0)?)
-                        .map_err(|_| RunError::Validation("run index ID"))?;
-                    if runs.contains(&run) {
-                        continue;
-                    }
-                    runs.push(run);
+            let mut query = self.db.prepare(
+                "SELECT run FROM attempts WHERE project=?1 AND terminal=1 AND tmp_retained=1 GROUP BY run ORDER BY MIN(sequence) LIMIT ?2",
+            )?;
+            let mut rows = query.query(params![self.context.project_id.to_string(), limit])?;
+            while runs.len() < limit as usize {
+                let Some(row) = rows.next()? else { break };
+                let run = RunId::parse(&row.get::<_, String>(0)?)
+                    .map_err(|_| RunError::Validation("run index ID"))?;
+                if runs.contains(&run) {
+                    continue;
                 }
-                Ok(())
-            })?;
+                runs.push(run);
+            }
         }
         // A closed run whose reactions are still owed needs a drain too.
         if runs.len() < limit as usize {
-            let owed: Vec<String> = call.retry(|| {
+            let owed: Vec<String> = {
                 let mut query = self.db.prepare(
                     "SELECT run FROM reactions WHERE project=?1 AND pending=1 GROUP BY run ORDER BY MIN(rowid) LIMIT ?2",
                 )?;
                 let rows = query
-                    .query_map(params![self.context.project_id.to_string(), limit], |r| r.get(0))?;
-                Ok(rows.collect::<std::result::Result<_, _>>()?)
-            })?;
+                    .query_map(params![self.context.project_id.to_string(), limit], |r| {
+                        r.get(0)
+                    })?;
+                rows.collect::<std::result::Result<_, _>>()?
+            };
             for id in owed {
                 let run = RunId::parse(&id).map_err(|_| RunError::Validation("run index ID"))?;
                 if !runs.contains(&run) && runs.len() < limit as usize {
@@ -1724,7 +1726,7 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
-        let mut ids: Vec<String> = call.retry(|| {
+        let mut ids: Vec<String> = {
             let mut query = self
                 .db
                 .prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1) ORDER BY sequence")?;
@@ -1732,8 +1734,8 @@ impl RunStore {
                 params![run.to_string(), self.context.project_id.to_string()],
                 |r| r.get(0),
             )?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         for fence in self.writer_fences()? {
             if fence.scope.run == run && !ids.contains(&fence.scope.attempt.to_string()) {
                 ids.push(fence.scope.attempt.to_string());
@@ -1829,14 +1831,14 @@ impl RunStore {
         // handoff began and keeps a late reservation out.
         let attempt = dir()?;
         let unreserved =
-            custody::prove_unreserved(&attempt, call.transaction_budget(), call.cancel, call.clock)
+            custody::prove_unreserved(&attempt, call.lock_budget(), call.cancel, call.clock)
                 .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
         let _recovery = match unreserved {
             Some(lease) => Held::Unreserved(lease),
             None => {
                 let recovery = match custody::acquire_recovery(
                     dir()?,
-                    call.transaction_budget(),
+                    call.lock_budget(),
                     call.cancel,
                     call.clock,
                 ) {

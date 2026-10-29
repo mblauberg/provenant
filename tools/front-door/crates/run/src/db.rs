@@ -20,45 +20,19 @@ pub struct ExecutionContext {
 }
 pub struct Request<'a> {
     pub clock: &'a dyn Clock,
-    pub budget: WaitBudget,
     pub cancel: &'a CancelToken,
 }
 impl Request<'_> {
-    /// The contention budget for one transaction or lock that starts now. A
-    /// per-transaction allowance restarts here, so slow work between store
-    /// calls never spends it; the cancellation token still ends the call.
-    pub fn transaction_budget(&self) -> WaitBudget {
-        self.budget.for_transaction(self.clock.mono_now())
+    /// The wait for a run-store advisory lock or custody proof that starts
+    /// now: the same allowance as SQLite's busy timeout.
+    pub fn lock_budget(&self) -> WaitBudget {
+        provenant_sqlite::lock_budget(self.clock.mono_now())
     }
-    pub(crate) fn retry<T>(&self, mut action: impl FnMut() -> Result<T>) -> Result<T> {
-        match provenant_sqlite::retry(
-            self.clock,
-            self.transaction_budget(),
-            self.cancel,
-            &provenant_sqlite::ThreadWait,
-            |error: &RunError| matches!(error, RunError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)),
-            &mut action,
-        ) {
-            Ok(value) => Ok(value),
-            Err(provenant_sqlite::RetryError::Busy) => Err(RunError::Contention),
-            Err(provenant_sqlite::RetryError::Cancelled) => Err(RunError::Cancelled),
-            Err(provenant_sqlite::RetryError::Action(error)) => Err(error),
+    pub(crate) fn check(&self) -> Result<()> {
+        if self.cancel.is_cancelled() {
+            return Err(RunError::Cancelled);
         }
-    }
-    /// Retry an incomplete observation within the call's budget and cancellation.
-    fn wait<T>(&self, action: impl FnMut() -> Result<Option<T>>) -> Result<T> {
-        provenant_sqlite::observe(
-            self.clock,
-            self.transaction_budget(),
-            self.cancel,
-            &provenant_sqlite::ThreadWait,
-            action,
-        )
-        .map_err(|error| match error {
-            provenant_sqlite::RetryError::Busy => RunError::Contention,
-            provenant_sqlite::RetryError::Cancelled => RunError::Cancelled,
-            provenant_sqlite::RetryError::Action(error) => error,
-        })
+        Ok(())
     }
 }
 // Leave room below macOS's common 256-descriptor soft limit for SQLite,
@@ -74,8 +48,8 @@ pub(crate) struct Held {
     custody: Metadata,
 }
 
-/// One connection, one owning thread. Call budgets are supplied afresh and no
-/// transaction survives a call or includes filesystem publication.
+/// One connection, one owning thread. No transaction survives a call or
+/// includes filesystem publication.
 pub struct RunStore {
     pub(crate) db: Connection,
     pub(crate) root: Directory,
@@ -206,7 +180,7 @@ impl RunStore {
         request: &Request<'_>,
         disk_report: bool,
     ) -> Result<Option<Self>> {
-        request.retry(|| Ok(()))?;
+        request.check()?;
         let mut root = Directory::root(true)?;
         for component in context.state_root.as_path().components() {
             if let Component::Normal(name) = component {
@@ -225,7 +199,7 @@ impl RunStore {
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         }
-        companions(&root, "run.sqlite3", request)?;
+        companions(&root, "run.sqlite3")?;
         if disk_report {
             match root.metadata_at(OsStr::new("run.sqlite3-journal"), false) {
                 Ok(metadata) if metadata.size > 0 => {
@@ -240,7 +214,7 @@ impl RunStore {
         }
         let path = context.state_root.as_path().join("run.sqlite3");
         let db = provenant_sqlite::open_connection(&path, true)?;
-        if request.retry(|| version(&db))? == 0 {
+        if version(&db)? == 0 {
             return Ok(None);
         }
         Ok(Some(Self {
@@ -259,10 +233,10 @@ impl RunStore {
     }
 
     pub fn open(context: &ExecutionContext, request: &Request<'_>) -> Result<Self> {
-        request.retry(|| Ok(()))?;
+        request.check()?;
         let (root, db, _initialisation) =
             open_database(context.state_root.as_path(), "run.sqlite3", request)?;
-        let schema_version = request.retry(|| version(&db))?;
+        let schema_version = version(&db)?;
         let store = Self {
             db,
             root,
@@ -307,21 +281,19 @@ impl RunStore {
                 Ok(())
             })?;
         }
-        companions(&store.root, "run.sqlite3", request)?;
         Ok(store)
     }
 
     fn terminal_without_temporary(&self, request: &Request<'_>) -> Result<Vec<String>> {
-        let candidates: Vec<(String, String)> = request.retry(|| {
-            let mut query = self
-                .db
-                .prepare("SELECT run,id FROM attempts WHERE terminal=1")?;
-            let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+        let mut query = self
+            .db
+            .prepare("SELECT run,id FROM attempts WHERE terminal=1")?;
+        let candidates: Vec<(String, String)> = query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
         let mut absent = Vec::new();
         for (run, id) in candidates {
-            request.retry(|| Ok(()))?;
+            request.check()?;
             let run = provenant_core::RunId::parse(&run)
                 .map_err(|_| RunError::Validation("run index ID"))?;
             let attempt = provenant_core::AttemptId::parse(&id)
@@ -343,18 +315,17 @@ impl RunStore {
         immediate(&self.db, request, action)
     }
 }
-/// One immediate transaction, retried while SQLite reports the file busy.
+/// One immediate transaction. BEGIN IMMEDIATE waits up to the busy timeout.
 pub(crate) fn immediate<T>(
     db: &Connection,
     request: &Request<'_>,
     action: impl Fn(&Connection) -> Result<T>,
 ) -> Result<T> {
-    request.retry(|| {
-        let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
-        let value = action(&tx)?;
-        tx.commit()?;
-        Ok(value)
-    })
+    request.check()?;
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let value = action(&tx)?;
+    tx.commit()?;
+    Ok(value)
 }
 /// Create the private directory chain and database file, then open it in WAL
 /// mode with full synchronisation. Every component is identity-checked.
@@ -394,7 +365,7 @@ pub(crate) fn open_database(
         .lock(
             OsStr::new(&lock_name),
             LockMode::Exclusive,
-            request.transaction_budget(),
+            request.lock_budget(),
             request.cancel,
             request.clock,
         )
@@ -411,15 +382,15 @@ pub(crate) fn open_database(
         Err(e) if e.is_exists() => {}
         Err(e) => return Err(e.into()),
     }
-    companions(&root, name, request)?;
+    companions(&root, name)?;
     let db = provenant_sqlite::open_connection(&path.join(name), false)?;
-    request.retry(|| match provenant_sqlite::enable_wal(&db) {
-        Ok(()) => Ok(()),
+    match provenant_sqlite::enable_wal(&db) {
+        Ok(()) => {}
         Err(provenant_sqlite::WalError::Unavailable(_)) => {
-            Err(RunError::Validation("WAL unavailable"))
+            return Err(RunError::Validation("WAL unavailable"));
         }
-        Err(provenant_sqlite::WalError::Sqlite(error)) => Err(error.into()),
-    })?;
+        Err(provenant_sqlite::WalError::Sqlite(error)) => return Err(error.into()),
+    }
     Ok((root, db, initialisation))
 }
 fn version(db: &Connection) -> Result<i64> {
@@ -446,16 +417,12 @@ fn private_root(directory: &Directory) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn companions(directory: &Directory, base: &str, request: &Request<'_>) -> Result<()> {
+pub(crate) fn companions(directory: &Directory, base: &str) -> Result<()> {
     let names = ["", "-wal", "-shm", "-journal"]
         .map(|suffix| std::ffi::OsString::from(format!("{base}{suffix}")));
-    provenant_sqlite::check_companions(
-        directory,
-        &names,
-        |check| request.wait(check),
-        Into::into,
-        |name, fault| RunError::unsafe_entry(directory, name, fault.into()),
-    )
+    provenant_sqlite::check_companions(directory, &names, Into::into, |name, fault| {
+        RunError::unsafe_entry(directory, name, fault.into())
+    })
 }
 pub(crate) fn bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
     let bytes = provenant_records::CanonicalV1::bytes(record)?;

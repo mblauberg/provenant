@@ -50,7 +50,7 @@ struct Factory {
     context: Context,
     project_attribution: bool,
     clock: SystemClock,
-    backoff: ThreadWait,
+    backoff: ThreadPause,
     executor: SystemExecutor,
     home: std::path::PathBuf,
     cwd: std::path::PathBuf,
@@ -63,7 +63,6 @@ impl Factory {
     fn coordination(&self) -> Result<CoordinationService<'_>, CoordinationError> {
         let ctx = &self.context;
         let cancel = CancelToken::new();
-        let budget = WaitBudget::mcp(self.clock.mono_now(), 55)?;
         CoordinationService::for_identity(
             &ctx.roots.state,
             &ctx.identity,
@@ -73,7 +72,6 @@ impl Factory {
             &self.executor,
             &self.clock,
             &self.backoff,
-            budget,
             &cancel,
         )
     }
@@ -468,7 +466,7 @@ impl F3Facade for BoundFacade<'_> {
     fn inbox(
         &mut self,
         input: provenant_fabric_runtime::inbox::InboxInput,
-        budget: WaitBudget,
+        _budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<
         provenant_fabric_runtime::inbox::InboxResult,
@@ -482,7 +480,6 @@ impl F3Facade for BoundFacade<'_> {
             ctx.in_lane,
             &self.factory.clock,
             input,
-            budget,
             cancel,
             &|work, call| {
                 provenant_cli::inbox::resolve_work(
@@ -490,7 +487,6 @@ impl F3Facade for BoundFacade<'_> {
                     ctx.identity.project,
                     work,
                     call.clock,
-                    call.budget,
                     call.cancel,
                 )
             },
@@ -827,7 +823,7 @@ fn factory(
         project_attribution: crate::usage::attribution_enabled(&context.roots),
         context,
         clock: SystemClock::new(),
-        backoff: ThreadWait,
+        backoff: ThreadPause,
         executor: SystemExecutor::new(4)?,
         home: resolved.home,
         cwd: resolved.project.clone(),
@@ -905,7 +901,7 @@ pub(crate) fn tick_graphs(
                     project_attribution: crate::usage::attribution_enabled(&context.roots),
                     context,
                     clock: SystemClock::new(),
-                    backoff: ThreadWait,
+                    backoff: ThreadPause,
                     executor: SystemExecutor::new(4)?,
                     home: resolved.home.clone(),
                     cwd: execution.directory,
@@ -1123,14 +1119,14 @@ pub fn peer(
             30
         };
         let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
-        let backoff = ThreadWait;
+        let backoff = ThreadPause;
         context.identity.inbox =
             provenant_fabric_runtime::identity::Address::new(request.source_host, &request.agent)?;
         let peer_factory = Factory {
             project_attribution: crate::usage::attribution_enabled(&context.roots),
             context,
             clock: SystemClock::new(),
-            backoff: ThreadWait,
+            backoff: ThreadPause,
             executor: SystemExecutor::new(4)?,
             home: home.clone(),
             cwd: cwd.clone(),
@@ -1179,7 +1175,6 @@ pub fn peer(
                             false,
                             &clock,
                             input.clone(),
-                            budget,
                             &cancel,
                             &|work, call| {
                                 provenant_cli::inbox::resolve_work(
@@ -1187,7 +1182,6 @@ pub fn peer(
                                     context.identity.project,
                                     work,
                                     call.clock,
-                                    call.budget,
                                     call.cancel,
                                 )
                             },
@@ -1300,7 +1294,7 @@ pub fn peer(
                         extra: Default::default(),
                     }
                 } else {
-                    peer_result(owner.snapshots_local(targets, budget, &cancel), |data| {
+                    peer_result(owner.snapshots_local(targets, &cancel), |data| {
                         PeerResult::RunStatuses {
                             data,
                             extra: Default::default(),
@@ -1333,7 +1327,7 @@ pub fn peer(
                 })
             }
             PeerAction::RunEvents { after, limit, .. } => {
-                peer_result(owner.events(*after, *limit, budget, &cancel), |data| {
+                peer_result(owner.events(*after, *limit, &cancel), |data| {
                     PeerResult::RunEvents {
                         data,
                         extra: Default::default(),
@@ -1341,7 +1335,7 @@ pub fn peer(
                 })
             }
             PeerAction::Lanes { all, limit, .. } => {
-                peer_result(owner.lanes_local(*all, *limit, budget, &cancel), |data| {
+                peer_result(owner.lanes_local(*all, *limit, &cancel), |data| {
                     PeerResult::RunStatuses {
                         data,
                         extra: Default::default(),
@@ -1358,7 +1352,7 @@ pub fn peer(
                         extra: Default::default(),
                     }
                 } else {
-                    peer_result(owner.waits_local(targets, budget, &cancel), |data| {
+                    peer_result(owner.waits_local(targets, &cancel), |data| {
                         PeerResult::LaneWaits {
                             data,
                             extra: Default::default(),
@@ -1419,7 +1413,6 @@ pub fn peer(
                         operation_id,
                         *reconcile,
                         request.actor()?,
-                        budget,
                         &clock,
                         &cancel,
                     ) {
@@ -1440,9 +1433,7 @@ pub fn peer(
             PeerAction::Receipt { operation_id, .. } => {
                 let store_request = provenant_fabric_store::Request {
                     clock: &clock,
-                    budget,
                     cancel: &cancel,
-                    backoff: &backoff,
                 };
                 let store =
                     provenant_fabric_store::Store::open(&context.roots.state, &store_request)?;
@@ -1510,7 +1501,6 @@ pub fn peer(
                                 request.actor()?,
                                 &clock,
                                 &backoff,
-                                budget,
                                 &cancel,
                             )?;
                             match input.execute(&service, operation_id.clone(), budget, &cancel) {
@@ -1619,17 +1609,10 @@ fn landing_local(
     operation_id: &provenant_core::OperationId,
     reconcile: bool,
     actor: provenant_core::ActorId,
-    budget: WaitBudget,
     clock: &SystemClock,
     cancel: &CancelToken,
 ) -> Result<provenant_fabric_store::PushOperation, Box<dyn std::error::Error>> {
-    let backoff = ThreadWait;
-    let request = provenant_fabric_store::Request {
-        clock,
-        budget,
-        cancel,
-        backoff: &backoff,
-    };
+    let request = provenant_fabric_store::Request { clock, cancel };
     let store = provenant_fabric_store::Store::open(&context.roots.state, &request)?;
     let guard = store.lock_landing(context.identity.project, &proof.reference, &request)?;
     let fence = provenant_fabric_store::ClaimFence {
@@ -1754,7 +1737,6 @@ pub fn landing(
                 &operation.operation_id,
                 reconcile,
                 ctx.identity.inbox.actor,
-                budget,
                 &factory.clock,
                 &cancel,
             )
@@ -2015,22 +1997,13 @@ fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
     }
 }
 impl BinaryRunOwner<'_> {
-    fn call<'a>(
-        &'a self,
-        budget: WaitBudget,
-        cancel: &'a CancelToken,
-    ) -> provenant_run::Request<'a> {
+    fn call<'a>(&'a self, cancel: &'a CancelToken) -> provenant_run::Request<'a> {
         provenant_run::Request {
             clock: &self.factory.clock,
-            budget,
             cancel,
         }
     }
-    fn session(
-        &self,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<provenant_cli::run::Session, FacadeError> {
+    fn session(&self, cancel: &CancelToken) -> Result<provenant_cli::run::Session, FacadeError> {
         let ctx = &self.factory.context;
         let context = provenant_run::ExecutionContext {
             state_root: provenant_cli::run::execution_state(
@@ -2043,17 +2016,13 @@ impl BinaryRunOwner<'_> {
             actor_id: self.actor.unwrap_or(ctx.identity.inbox.actor),
             read_prompts: true,
         };
-        let store = provenant_run::RunStore::open(&context, &self.call(budget, cancel))
+        let store = provenant_run::RunStore::open(&context, &self.call(cancel))
             .map_err(run_error)?
             .with_host(ctx.identity.host);
         Ok(provenant_cli::run::Session { store, context })
     }
-    fn store(
-        &self,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<provenant_run::RunStore, FacadeError> {
-        Ok(self.session(budget, cancel)?.store)
+    fn store(&self, cancel: &CancelToken) -> Result<provenant_run::RunStore, FacadeError> {
+        Ok(self.session(cancel)?.store)
     }
     /// Run the shared launch path with this process's resolved roots.
     fn with_edge<T>(
@@ -2170,12 +2139,11 @@ impl BinaryRunOwner<'_> {
                 _ => Err(FacadeError::StateCorrupt),
             };
         }
-        provenant_run::Service::new(&self.store(budget, cancel)?)
+        provenant_run::Service::new(&self.store(cancel)?)
             .status(
                 target.attempt,
                 &provenant_run::Request {
                     clock: &self.factory.clock,
-                    budget,
                     cancel,
                 },
             )
@@ -2184,7 +2152,6 @@ impl BinaryRunOwner<'_> {
     fn snapshots_local(
         &self,
         targets: &[AttemptTarget],
-        budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Vec<provenant_records::run::AttemptRecord>, FacadeError> {
         let host = self.factory.context.identity.host;
@@ -2194,8 +2161,8 @@ impl BinaryRunOwner<'_> {
         {
             return Err(FacadeError::InvalidInput);
         }
-        let session = self.session(budget, cancel)?;
-        let call = self.call(budget, cancel);
+        let session = self.session(cancel)?;
+        let call = self.call(cancel);
         targets
             .iter()
             .map(|target| {
@@ -2212,13 +2179,12 @@ impl BinaryRunOwner<'_> {
         &self,
         all: bool,
         limit: u16,
-        budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Vec<provenant_records::run::AttemptRecord>, FacadeError> {
         if !(1..=100).contains(&limit) {
             return Err(FacadeError::InvalidInput);
         }
-        let store = self.store(budget, cancel)?;
+        let store = self.store(cancel)?;
         let page = provenant_run::Service::new(&store)
             .lanes_for_wait(
                 &provenant_run::LaneQuery {
@@ -2230,7 +2196,7 @@ impl BinaryRunOwner<'_> {
                     owner: None,
                     unseen_after: None,
                 },
-                &self.call(budget, cancel),
+                &self.call(cancel),
             )
             .map_err(run_error)?;
         Ok(page.lanes)
@@ -2239,12 +2205,11 @@ impl BinaryRunOwner<'_> {
     fn waits_local(
         &self,
         targets: &[AttemptTarget],
-        budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Vec<provenant_records::run::LaneWait>, FacadeError> {
-        let lanes = self.snapshots_local(targets, budget, cancel)?;
-        let store = self.store(budget, cancel)?;
-        Ok(store.lane_waits(&lanes, &self.call(budget, cancel)))
+        let lanes = self.snapshots_local(targets, cancel)?;
+        let store = self.store(cancel)?;
+        Ok(store.lane_waits(&lanes, &self.call(cancel)))
     }
     fn peer(
         &self,
@@ -2414,8 +2379,8 @@ impl BinaryRunOwner<'_> {
                 access: access.clone(),
             });
         }
-        let session = self.session(budget, cancel)?;
-        let call = self.call(budget, cancel);
+        let session = self.session(cancel)?;
+        let call = self.call(cancel);
         let (run, started) = self.with_edge(|edge| {
             provenant_cli::run::submit_with_host(
                 &session,
@@ -2454,8 +2419,8 @@ impl BinaryRunOwner<'_> {
         provenant_confinement::repo::GitRevision::new(&spec.base)
             .map_err(|_| FacadeError::InvalidInput)?;
         let replay = self
-            .store(budget, cancel)?
-            .operation(operation_id, &self.call(budget, cancel))
+            .store(cancel)?
+            .operation(operation_id, &self.call(cancel))
             .map_err(run_error)?
             .is_some();
         // Fetch and create each take at most half of what remains, so the
@@ -2549,8 +2514,8 @@ impl BinaryRunOwner<'_> {
                 _ => Err(FacadeError::StateCorrupt),
             };
         }
-        let session = self.session(budget, cancel)?;
-        let call = self.call(budget, cancel);
+        let session = self.session(cancel)?;
+        let call = self.call(cancel);
         let record = session
             .service()
             .status(target.attempt, &call)
@@ -2729,9 +2694,9 @@ impl BinaryRunOwner<'_> {
                 let local_session = if local_indices.is_empty() {
                     None
                 } else {
-                    Some(self.session(budget, cancel)?)
+                    Some(self.session(cancel)?)
                 };
-                let local_call = self.call(budget, cancel);
+                let local_call = self.call(cancel);
                 let mut last_attempts = None;
                 let mut backoff_micros = 50_000_u64;
                 loop {
@@ -2830,7 +2795,7 @@ impl BinaryRunOwner<'_> {
                         });
                     }
                     last_attempts = Some(attempts);
-                    provenant_fabric_store::RetryWait::wait(
+                    provenant_core::Pause::wait(
                         &self.factory.backoff,
                         provenant_core::DurationMicros::from_micros(
                             backoff_micros
@@ -2872,8 +2837,8 @@ impl BinaryRunOwner<'_> {
                         _ => Err(FacadeError::StateCorrupt),
                     };
                 }
-                let store = self.store(budget, cancel)?;
-                let call = self.call(budget, cancel);
+                let store = self.store(cancel)?;
+                let call = self.call(cancel);
                 let reason = format!("cancelled by Fabric operation {operation_id}");
                 let service = provenant_run::Service::new(&store);
                 service
@@ -2932,8 +2897,8 @@ impl BinaryRunOwner<'_> {
                 if !self.capabilities().resume {
                     return Err(FacadeError::ContinuationUnsupported);
                 }
-                let session = self.session(budget, cancel)?;
-                let call = self.call(budget, cancel);
+                let session = self.session(cancel)?;
+                let call = self.call(cancel);
                 let (run, started) = self.with_edge(|edge| {
                     provenant_cli::run::continue_attempt_mode(
                         &session,
@@ -2969,8 +2934,8 @@ impl BinaryRunOwner<'_> {
                 {
                     return Err(FacadeError::OwnerUnavailable);
                 }
-                let store = self.store(budget, cancel)?;
-                let call = self.call(budget, cancel);
+                let store = self.store(cancel)?;
+                let call = self.call(cancel);
                 let after_sequence = after
                     .as_ref()
                     .map(|target| {
@@ -3020,16 +2985,14 @@ impl BinaryRunOwner<'_> {
         &mut self,
         after: u64,
         limit: u16,
-        budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<RunEventsPage, FacadeError> {
         if !(1..=64).contains(&limit) {
             return Err(FacadeError::InvalidInput);
         }
-        let store = self.store(budget, cancel)?;
+        let store = self.store(cancel)?;
         let call = provenant_run::Request {
             clock: &self.factory.clock,
-            budget,
             cancel,
         };
         let requested = usize::from(limit).saturating_add(1).min(64);
@@ -3128,7 +3091,6 @@ fn graph_ask_input(
 fn graph_ask_poll(
     service: &provenant_fabric_runtime::inbox::InboxService<'_>,
     scope: &provenant_fabric_runtime::graph::AskScope<'_>,
-    budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<Option<provenant_fabric_runtime::graph::AskReply>, FacadeError> {
     use provenant_fabric_runtime::inbox::{InboxFilter, InboxInput, InboxResult};
@@ -3140,7 +3102,7 @@ fn graph_ask_poll(
     // The immutable ask and its operation receipt commit together. A crash before
     // saving graph state replays this exact request, including its original ID.
     let InboxResult::Saved { receipt } = service
-        .execute(graph_ask_input(scope)?, budget, cancel)
+        .execute(graph_ask_input(scope)?, cancel)
         .map_err(inbox_error)?
     else {
         return Err(FacadeError::StateCorrupt);
@@ -3155,7 +3117,6 @@ fn graph_ask_poll(
                 limit: 1,
                 cursor: None,
             },
-            budget,
             cancel,
         )
         .map_err(inbox_error)?
@@ -3182,7 +3143,6 @@ fn graph_ask_poll(
                         .map_err(|_| FacadeError::StateCorrupt)?,
                 ),
             },
-            budget,
             cancel,
         )
         .map_err(inbox_error)?;
@@ -3197,7 +3157,6 @@ fn graph_ask_poll(
 
 fn graph_ask_edge(
     factory: &Factory,
-    budget: WaitBudget,
     cancel: &CancelToken,
     scope: provenant_fabric_runtime::graph::AskScope<'_>,
     close: bool,
@@ -3220,19 +3179,13 @@ fn graph_ask_edge(
         &graph_ask_input(&scope)?,
     )
     .map_err(|error| refused(&error))?;
-    let service = InboxService::open(
-        &context.roots.state,
-        &identity,
-        &factory.clock,
-        budget,
-        cancel,
-    )
-    .map_err(|error| refused(&error))?;
+    let service = InboxService::open(&context.roots.state, &identity, &factory.clock, cancel)
+        .map_err(|error| refused(&error))?;
     if close {
-        graph_ask_close(&service, &scope, identity.inbox.actor, budget, cancel)?;
+        graph_ask_close(&service, &scope, identity.inbox.actor, cancel)?;
         Ok(None)
     } else {
-        graph_ask_poll(&service, &scope, budget, cancel)
+        graph_ask_poll(&service, &scope, cancel)
     }
 }
 
@@ -3240,7 +3193,6 @@ fn graph_ask_close(
     service: &provenant_fabric_runtime::inbox::InboxService<'_>,
     scope: &provenant_fabric_runtime::graph::AskScope<'_>,
     actor: provenant_core::ActorId,
-    budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), FacadeError> {
     use provenant_fabric_runtime::inbox::InboxInput;
@@ -3257,7 +3209,6 @@ fn graph_ask_close(
         &operation,
         actor,
         &format!("close graph ask {}", scope.ask.ask_id),
-        budget,
         cancel,
     )
 }
@@ -3270,7 +3221,6 @@ fn graph_inbox_close(
     operation: &provenant_core::OperationId,
     actor: provenant_core::ActorId,
     context: &str,
-    budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), FacadeError> {
     use provenant_fabric_runtime::inbox::{InboxFilter, InboxInput, InboxResult};
@@ -3293,7 +3243,6 @@ fn graph_inbox_close(
                     limit: 50,
                     cursor,
                 },
-                budget,
                 cancel,
             )
             .map_err(map)?
@@ -3323,7 +3272,6 @@ fn graph_inbox_close(
                                 .map_err(|_| FacadeError::StateCorrupt)?,
                         ),
                     },
-                    budget,
                     cancel,
                 )
                 .map_err(map)?;
@@ -3343,7 +3291,6 @@ fn graph_legacy_loop_close(
     service: &provenant_fabric_runtime::inbox::InboxService<'_>,
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     actor: provenant_core::ActorId,
-    budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), FacadeError> {
     let Some(instance_id) = checkpoint.instance_id.as_deref() else {
@@ -3374,7 +3321,6 @@ fn graph_legacy_loop_close(
             &operation,
             actor,
             &format!("close legacy loop ask {}", ask.node_id),
-            budget,
             cancel,
         )?;
     }
@@ -3605,7 +3551,7 @@ fn advance_graphs_after_settlement(
                 project_attribution: crate::usage::attribution_enabled(&context.roots),
                 context,
                 clock: SystemClock::new(),
-                backoff: ThreadWait,
+                backoff: ThreadPause,
                 executor: SystemExecutor::new(4)?,
                 home: settled.roots.home.clone(),
                 cwd: execution.directory,
@@ -3693,7 +3639,6 @@ fn settle_owned_worktree(
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 30)?,
         cancel: &cancel,
     };
     let context = provenant_run::ExecutionContext {
@@ -4086,7 +4031,6 @@ fn record_worktree_settlement(
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 30)?,
         cancel: &cancel,
     };
     store.record_worktree_settlement(id, receipt, &call)?;
@@ -4242,7 +4186,6 @@ fn settle_attempt(
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 30)?,
         cancel: &cancel,
     };
     let execution = provenant_run::ExecutionContext {
@@ -4276,7 +4219,6 @@ fn settle_attempt(
     settle_owned_worktree(&settled, edge.roots, workers, delivery)?;
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 30)?,
         cancel: &cancel,
     };
     Ok(store.worktree_settlement(id, &call)?)
@@ -4449,13 +4391,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         scope: provenant_fabric_runtime::graph::AskScope<'_>,
     ) -> Result<Option<provenant_fabric_runtime::graph::AskReply>, Self::Error> {
-        graph_ask_edge(self.factory, self.budget, self.cancel, scope, false)
+        graph_ask_edge(self.factory, self.cancel, scope, false)
     }
     fn close_node_ask(
         &mut self,
         scope: provenant_fabric_runtime::graph::AskScope<'_>,
     ) -> Result<(), Self::Error> {
-        graph_ask_edge(self.factory, self.budget, self.cancel, scope, true).map(|_| ())
+        graph_ask_edge(self.factory, self.cancel, scope, true).map(|_| ())
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         self.factory.clock.wall_now().ok()
@@ -4510,10 +4452,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             actor: None,
             chair: None,
         }
-        .session(self.budget, self.cancel)?;
+        .session(self.cancel)?;
         let call = provenant_run::Request {
             clock: &self.factory.clock,
-            budget: self.budget,
             cancel: self.cancel,
         };
         let mut body = format!("Graph {}\n\n", document.graph_id);
@@ -4650,8 +4591,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .map_err(|_| FacadeError::StateCorrupt)?,
             );
             let operation_id = graph_operation("graph-attempt-operation", key)?;
-            let store = owner.store(self.budget, self.cancel)?;
-            let call = owner.call(self.budget, self.cancel);
+            let store = owner.store(self.cancel)?;
+            let call = owner.call(self.cancel);
             let operation = store.operation(&operation_id, &call).map_err(run_error)?;
             let accepted = operation.as_ref().is_some_and(|operation| {
                 operation.state != provenant_run::OperationState::Prepared
@@ -4886,9 +4827,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .host
             .is_none_or(|host| host == self.factory.context.identity.host)
         {
-            let store = owner.store(self.budget, self.cancel)?;
+            let store = owner.store(self.cancel)?;
             attempt = store
-                .policy_tail(attempt.attempt_id, &owner.call(self.budget, self.cancel))
+                .policy_tail(attempt.attempt_id, &owner.call(self.cancel))
                 .map_err(run_error)?;
             reference = Some(format!(
                 "{}/{}",
@@ -4898,8 +4839,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => {
-                let store = owner.store(self.budget, self.cancel)?;
-                let call = owner.call(self.budget, self.cancel);
+                let store = owner.store(self.cancel)?;
+                let call = owner.call(self.cancel);
                 match store.custody_released(&attempt, &call) {
                     Ok(true) => {}
                     Ok(false) => {
@@ -5314,7 +5255,7 @@ impl Factory {
             {
                 first_error.get_or_insert_with(|| FacadeError::io("close cancelled graph asks"));
             }
-            if let Err(error) = self.close_legacy_loop_asks(&checkpoint, budget, cancel) {
+            if let Err(error) = self.close_legacy_loop_asks(&checkpoint, cancel) {
                 first_error.get_or_insert(error);
             }
             if let Some(error) = first_error {
@@ -5392,7 +5333,6 @@ impl Factory {
     fn close_legacy_loop_asks(
         &self,
         checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
-        budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<(), FacadeError> {
         let actors: std::collections::BTreeSet<_> =
@@ -5407,13 +5347,12 @@ impl Factory {
                 &self.context.roots.state,
                 &identity,
                 &self.clock,
-                budget,
                 cancel,
             )
             .map_err(|error| FacadeError::DispatchRefused {
                 reason: format!("close legacy loop asks: {error}"),
             })?;
-            graph_legacy_loop_close(&service, checkpoint, identity.inbox.actor, budget, cancel)?;
+            graph_legacy_loop_close(&service, checkpoint, identity.inbox.actor, cancel)?;
         }
         Ok(())
     }
@@ -5440,8 +5379,8 @@ impl Factory {
             }
             None => {
                 let accepted = graph_operation("graph-attempt-operation", &attempt.key)?;
-                let store = owner.store(budget, cancel)?;
-                let call = owner.call(budget, cancel);
+                let store = owner.store(cancel)?;
+                let call = owner.call(cancel);
                 // An operation this actor never accepted launched nothing to stop.
                 match store.operation(&accepted, &call).map_err(run_error)? {
                     Some(record) => store
@@ -5645,7 +5584,7 @@ pub(crate) fn run_preset_graph(
             {
                 return Ok(run);
             }
-            provenant_fabric_store::RetryWait::wait(
+            provenant_core::Pause::wait(
                 &factory.backoff,
                 provenant_core::DurationMicros::from_micros(
                     250_000.min(waiting.remaining(factory.clock.mono_now()).as_micros()),
@@ -5921,9 +5860,7 @@ impl Factory {
         }
         let request = provenant_fabric_store::Request {
             clock: &self.clock,
-            budget,
             cancel,
-            backoff: &self.backoff,
         };
         let store = provenant_fabric_store::Store::open(&ctx.roots.state, &request)
             .map_err(|error| FacadeError::from(&error))?;
@@ -5949,7 +5886,7 @@ impl Factory {
                 .run_event_cursor(ctx.identity.project, host, &request)
                 .map_err(|_| FacadeError::io("read run event cursor"))?;
             let result = if host == ctx.identity.host {
-                owner.events(after, 64, budget, cancel)
+                owner.events(after, 64, cancel)
             } else {
                 owner
                     .peer(
@@ -6069,7 +6006,7 @@ pub fn events(
                     timed_out,
                 ));
             }
-            provenant_fabric_store::RetryWait::wait(
+            provenant_core::Pause::wait(
                 &factory.backoff,
                 provenant_core::DurationMicros::from_micros(
                     500_000.min(budget.remaining(factory.clock.mono_now()).as_micros()),
@@ -6146,8 +6083,7 @@ mod graph_ask_inbox_tests {
         };
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
-        let budget = || WaitBudget::cli(clock.mono_now(), 5);
-        let service = InboxService::open(&roots.state, &identity, &clock, budget()?, &cancel)?;
+        let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
         for (index, (option, text, expected)) in [
             (Some("stop"), None, Some(LoopDecision::Stop)),
             (Some("accept"), None, Some(LoopDecision::Accept)),
@@ -6183,9 +6119,9 @@ mod graph_ask_inbox_tests {
                 actor: &actor,
                 ask: &ask,
             };
-            assert_eq!(graph_ask_poll(&service, &scope, budget()?, &cancel)?, None);
+            assert_eq!(graph_ask_poll(&service, &scope, &cancel)?, None);
             let InboxResult::Saved { receipt } =
-                service.execute(graph_ask_input(&scope)?, budget()?, &cancel)?
+                service.execute(graph_ask_input(&scope)?, &cancel)?
             else {
                 return Err("missing ask receipt".into());
             };
@@ -6204,12 +6140,10 @@ mod graph_ask_inbox_tests {
                     channel: InteractionChannel::Cli,
                     operation_id: None,
                 },
-                budget()?,
                 &cancel,
             )?;
             for _ in 0..2 {
-                let reply = graph_ask_poll(&service, &scope, budget()?, &cancel)?
-                    .ok_or("missing answer")?;
+                let reply = graph_ask_poll(&service, &scope, &cancel)?.ok_or("missing answer")?;
                 assert_eq!(
                     (reply.option.as_deref(), reply.text.as_deref()),
                     (option, text)
@@ -6230,7 +6164,6 @@ mod graph_ask_inbox_tests {
                     limit: 1,
                     cursor: None,
                 },
-                budget()?,
                 &cancel,
             )?
             else {
@@ -6251,11 +6184,11 @@ mod graph_ask_inbox_tests {
                     ..scope
                 };
                 assert_eq!(
-                    graph_ask_poll(&service, &fresh, budget()?, &cancel)?,
+                    graph_ask_poll(&service, &fresh, &cancel)?,
                     None,
                     "same document recreated state must ask again"
                 );
-                graph_ask_close(&service, &fresh, identity.inbox.actor, budget()?, &cancel)?;
+                graph_ask_close(&service, &fresh, identity.inbox.actor, &cancel)?;
             }
             if index == 0 {
                 service.execute(
@@ -6267,18 +6200,17 @@ mod graph_ask_inbox_tests {
                         expect_revision: item.request.revision,
                         operation_id: None,
                     },
-                    budget()?,
                     &cancel,
                 )?;
                 assert_eq!(
-                    graph_ask_poll(&service, &scope, budget()?, &cancel)?,
+                    graph_ask_poll(&service, &scope, &cancel)?,
                     None,
                     "a superseded request reused its historical answer"
                 );
             }
-            graph_ask_close(&service, &scope, identity.inbox.actor, budget()?, &cancel)?;
-            graph_ask_close(&service, &scope, identity.inbox.actor, budget()?, &cancel)?;
-            assert_eq!(graph_ask_poll(&service, &scope, budget()?, &cancel)?, None);
+            graph_ask_close(&service, &scope, identity.inbox.actor, &cancel)?;
+            graph_ask_close(&service, &scope, identity.inbox.actor, &cancel)?;
+            assert_eq!(graph_ask_poll(&service, &scope, &cancel)?, None);
         }
         let InboxResult::Listed { items, .. } = service.execute(
             InboxInput::List {
@@ -6289,7 +6221,6 @@ mod graph_ask_inbox_tests {
                 limit: 50,
                 cursor: None,
             },
-            budget()?,
             &cancel,
         )?
         else {
@@ -6332,11 +6263,11 @@ mod graph_ask_inbox_tests {
             &mut self,
             scope: AskScope<'_>,
         ) -> Result<Option<provenant_fabric_runtime::graph::AskReply>, FacadeError> {
-            graph_ask_poll(self.service, &scope, self.budget()?, self.cancel)
+            graph_ask_poll(self.service, &scope, self.cancel)
         }
         fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), FacadeError> {
             let actor = scope.actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
-            graph_ask_close(self.service, &scope, actor, self.budget()?, self.cancel)
+            graph_ask_close(self.service, &scope, actor, self.cancel)
         }
         fn observe_or_start(
             &mut self,
@@ -6395,13 +6326,7 @@ mod graph_ask_inbox_tests {
         };
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
-        let service = InboxService::open(
-            &roots.state,
-            &identity,
-            &clock,
-            WaitBudget::cli(clock.mono_now(), 5)?,
-            &cancel,
-        )?;
+        let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
         let mut owner = InboxOwner {
             service: &service,
             clock: &clock,
@@ -6444,7 +6369,6 @@ mod graph_ask_inbox_tests {
                 limit: 50,
                 cursor: None,
             },
-            WaitBudget::cli(clock.mono_now(), 5)?,
             &cancel,
         )?
         else {
@@ -6468,7 +6392,6 @@ mod graph_ask_inbox_tests {
                 channel: InteractionChannel::Cli,
                 operation_id: None,
             },
-            WaitBudget::cli(clock.mono_now(), 5)?,
             &cancel,
         )?;
         let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &graph_budget)?;
@@ -6504,8 +6427,7 @@ mod graph_ask_inbox_tests {
         };
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
-        let budget = || WaitBudget::cli(clock.mono_now(), 5);
-        let service = InboxService::open(&roots.state, &identity, &clock, budget()?, &cancel)?;
+        let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
         let mut owner = InboxOwner {
             service: &service,
             clock: &clock,
@@ -6584,7 +6506,6 @@ mod graph_ask_inbox_tests {
                 }),
                 operation_id: Some(operation),
             },
-            budget()?,
             &cancel,
         )?;
         let states = || -> Result<Vec<RequestState>, Box<dyn std::error::Error>> {
@@ -6597,7 +6518,6 @@ mod graph_ask_inbox_tests {
                     limit: 50,
                     cursor: None,
                 },
-                budget()?,
                 &cancel,
             )?
             else {
@@ -6607,13 +6527,7 @@ mod graph_ask_inbox_tests {
         };
         assert_eq!(states()?, [RequestState::Open]);
         for _ in 0..2 {
-            graph_legacy_loop_close(
-                &service,
-                &checkpoint,
-                identity.inbox.actor,
-                budget()?,
-                &cancel,
-            )?;
+            graph_legacy_loop_close(&service, &checkpoint, identity.inbox.actor, &cancel)?;
             assert_eq!(states()?, [RequestState::Superseded]);
         }
         Ok(())
@@ -7100,7 +7014,7 @@ mod peer_tests {
         drop(directory.lock(
             std::ffi::OsStr::new("custody.lock"),
             provenant_os::fs::LockMode::Exclusive,
-            call.budget,
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?);
@@ -7156,7 +7070,6 @@ mod peer_tests {
             let call = provenant_run::Request {
                 clock: &clock,
                 cancel: &cancel,
-                budget: WaitBudget::cli(clock.mono_now(), 30)?,
             };
             let context = provenant_run::ExecutionContext {
                 state_root: roots.state.clone(),
@@ -7314,7 +7227,7 @@ mod peer_tests {
             context: Context::open(roots, &rig.home, &rig.project)?,
             project_attribution: false,
             clock: SystemClock,
-            backoff: ThreadWait,
+            backoff: ThreadPause,
             executor: SystemExecutor::new(1)?,
             home: rig.home.clone(),
             cwd: rig.project.clone(),
@@ -7358,12 +7271,12 @@ mod peer_tests {
         let route = serde_json::from_value(
             serde_json::json!({"adapter":"fixture", "model":"fixture/model"}),
         )?;
-        let store = run_owner.store(budget, &cancel)?;
+        let store = run_owner.store(&cancel)?;
         for prepared in [false, true] {
             if prepared {
                 // Reserve the legacy digest without the canonical request file,
                 // as a crash between row reservation and publication would leave it.
-                let call = run_owner.call(budget, &cancel);
+                let call = run_owner.call(&cancel);
                 let mut operation = store
                     .operation(&receipt.operation_id, &call)?
                     .ok_or("operation")?;
@@ -7417,7 +7330,7 @@ mod peer_tests {
                     factory.context.identity.host, target.attempt
                 ))
             );
-            let record = store.record(target.attempt, &run_owner.call(budget, &cancel))?;
+            let record = store.record(target.attempt, &run_owner.call(&cancel))?;
             assert!(record.context.is_none());
         }
         Ok(())
@@ -7437,7 +7350,7 @@ mod peer_tests {
             )?,
             project_attribution: false,
             clock: SystemClock,
-            backoff: ThreadWait,
+            backoff: ThreadPause,
             executor: SystemExecutor::new(1)?,
             home: fixture.rig.home.clone(),
             cwd: fixture.rig.project.clone(),
@@ -7580,7 +7493,6 @@ mod peer_tests {
         let call = provenant_run::Request {
             clock: &clock,
             cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
         };
         let identity = Context::open(
             fixture.roots.clone(),
@@ -7620,7 +7532,7 @@ mod peer_tests {
                 &fixture.roots.state,
                 fixture.settled.project_id,
                 id,
-                call.budget,
+                call.lock_budget(),
                 &cancel,
                 &clock,
             )?;
@@ -7745,7 +7657,7 @@ mod peer_tests {
             )?,
             project_attribution: false,
             clock: SystemClock,
-            backoff: ThreadWait,
+            backoff: ThreadPause,
             executor: SystemExecutor::new(1)?,
             home: fixture.rig.home.clone(),
             cwd: fixture.rig.project.clone(),
@@ -7842,7 +7754,6 @@ mod peer_tests {
         let call = provenant_run::Request {
             clock: &factory.clock,
             cancel: &cancel,
-            budget,
         };
         let continuation = provenant_run::Resume {
             prior: fixture.settled.attempt_id,
@@ -8034,7 +7945,7 @@ mod peer_tests {
             )?,
             project_attribution: false,
             clock: SystemClock,
-            backoff: ThreadWait,
+            backoff: ThreadPause,
             executor: SystemExecutor::new(1)?,
             home: fixture.rig.home.clone(),
             cwd: fixture.rig.project.clone(),
@@ -8048,7 +7959,6 @@ mod peer_tests {
         let call = provenant_run::Request {
             clock: &factory.clock,
             cancel: &cancel,
-            budget,
         };
         // The upstream attempt ran in the OpenAI family.
         let upstream = provenant_run::Resume {
@@ -8184,7 +8094,7 @@ mod peer_tests {
             )?,
             project_attribution: false,
             clock: SystemClock,
-            backoff: ThreadWait,
+            backoff: ThreadPause,
             executor: SystemExecutor::new(1)?,
             home: fixture.rig.home.clone(),
             cwd: fixture.rig.project.clone(),
@@ -8244,7 +8154,7 @@ mod peer_tests {
             )?,
             project_attribution: false,
             clock: SystemClock,
-            backoff: ThreadWait,
+            backoff: ThreadPause,
             executor: SystemExecutor::new(1)?,
             home: fixture.rig.home.clone(),
             cwd: fixture.rig.project.clone(),
@@ -8335,7 +8245,7 @@ mod peer_tests {
             )?,
             project_attribution: false,
             clock: SystemClock,
-            backoff: ThreadWait,
+            backoff: ThreadPause,
             executor: SystemExecutor::new(1)?,
             home: fixture.rig.home.clone(),
             cwd: fixture.rig.project.clone(),
@@ -8375,19 +8285,17 @@ mod peer_tests {
             actor: None,
             chair: None,
         };
-        let store = owner.store(budget, &cancel)?;
+        let store = owner.store(&cancel)?;
         let operation = graph_operation(
             "graph-attempt-operation",
             &run.checkpoint.nodes[0].attempts[0].key,
         )?;
         let operation = store
-            .operation(&operation, &owner.call(budget, &cancel))?
+            .operation(&operation, &owner.call(&cancel))?
             .ok_or("graph run not admitted")?;
         let index_call = provenant_fabric_runtime::chairs::Request {
             clock: &factory.clock,
-            budget,
             cancel: &cancel,
-            backoff: &ThreadWait,
         };
         let binding = provenant_fabric_runtime::chairs::ChairIndex::open(
             &factory.context.roots.state,
@@ -8420,7 +8328,6 @@ mod peer_tests {
                     &provenant_run::Request {
                         clock: &factory.clock,
                         cancel: &cancel,
-                        budget
                     }
                 )?
                 .head
@@ -8543,7 +8450,6 @@ mod peer_tests {
         let call = provenant_run::Request {
             clock: &clock,
             cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
         };
         let busy = fixture
             .store
@@ -8696,7 +8602,6 @@ mod peer_tests {
         let call = provenant_run::Request {
             clock: &clock,
             cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
         };
         settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
         assert!(
@@ -8739,7 +8644,6 @@ mod peer_tests {
         let call = provenant_run::Request {
             clock: &clock,
             cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
         };
         let receipt = fixture
             .store
@@ -8764,7 +8668,6 @@ mod peer_tests {
         let call = provenant_run::Request {
             clock: &clock,
             cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
         };
         let receipt = fixture
             .store

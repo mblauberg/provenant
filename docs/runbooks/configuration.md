@@ -354,6 +354,23 @@ provider on waking. The attempt settles as `timed_out`, releases its worktree
 and lock, and `lanes` shows the deadline of each running lane and a
 `provenant resume` hint for a timed-out one.
 
+## Store busy timeout
+
+Every local SQLite store sets one busy timeout when it opens. A command that
+finds a store locked by another writer waits inside SQLite for up to that long,
+then reports contention (exit 3). The stores' own advisory locks wait for the
+same bound. The default is 30 seconds; set it per host in `config.toml`:
+
+```toml
+[domains.fabric.limits]
+store_busy_timeout_ms = 10000
+```
+
+The value is read once when a command starts and accepts 0 to 600000. Zero
+fails fast on any contention. A hook or another reader with its own deadline
+waits no longer than that deadline. Cancellation still stops a wait loop
+between store operations.
+
 ## OpenCode Go monthly allowance floor
 
 OpenCode Go models must have a documented monthly allowance at or above the
