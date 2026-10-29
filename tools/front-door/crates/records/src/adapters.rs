@@ -403,10 +403,7 @@ mod launch_tests {
                 write: false,
                 ..ADAPTER_SPECS[0].launch
             },
-            ..AdapterSpec {
-                id: Harness::Claude,
-                ..clone_spec(&ADAPTER_SPECS[0])
-            }
+            ..ADAPTER_SPECS[0]
         };
         for (request, field) in [
             (
@@ -433,9 +430,5 @@ mod launch_tests {
         ] {
             assert_eq!(narrow.check_launch(&request).unwrap_err().field, field);
         }
-    }
-
-    fn clone_spec(spec: &AdapterSpec) -> AdapterSpec {
-        AdapterSpec { ..*spec }
     }
 }

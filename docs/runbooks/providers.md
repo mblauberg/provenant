@@ -25,8 +25,10 @@ catalogue still apply on top.
 | agy      | yes    | yes    | no       | provider, local, open  | no          | yes   |
 | opencode | yes    | yes    | no       | provider, local, open  | no          | yes   |
 
-Steering (input into a live session) and image input are declared so a future
-adapter can claim them; no request surface exists for either yet. Cursor has no
+Only effort can refuse today. Resume, network and write never refuse for any
+adapter; they are declared so a future adapter can narrow them. Steering (input
+into a live session) and image input are declared likewise, and no request
+surface exists for either yet. Cursor has no
 effort control on its command line, so its catalogue models record none.
 
 ## Claude network access

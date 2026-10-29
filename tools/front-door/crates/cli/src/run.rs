@@ -2080,6 +2080,33 @@ fn check_delivery_branch(project: &Path, branch: &str) -> Result<(), Fail> {
 /// Refuse flags outside the named adapters' launch tables before the first
 /// side effect, including `--worktree-branch` creation. Manifest tasks and
 /// named routes are checked again where their adapter is known.
+fn refused(error: provenant_records::UnsupportedLaunch) -> Fail {
+    Fail::new(Status::Refused, ErrorKind::Unsupported, error.to_string())
+}
+/// A pool is refused an effort only when no member's adapter can take it.
+fn pool_effort_refusal(
+    adapters: &[&str],
+    effort: &str,
+) -> Option<provenant_records::UnsupportedLaunch> {
+    let request = provenant_records::LaunchRequest {
+        effort: Some(effort),
+        ..Default::default()
+    };
+    let refusals: Vec<_> = adapters
+        .iter()
+        .filter_map(|name| provenant_records::AdapterSpec::get(name))
+        .map(|spec| spec.check_launch(&request))
+        .collect();
+    let refused: Vec<_> = refusals.into_iter().filter_map(Result::err).collect();
+    let known = adapters
+        .iter()
+        .filter(|name| provenant_records::AdapterSpec::get(name).is_some())
+        .count();
+    (known > 0 && refused.len() == known)
+        .then(|| refused.into_iter().next())
+        .flatten()
+}
+
 pub(crate) fn check_flag_capabilities(
     command: &Dispatch,
     roots: Option<&Roots>,
@@ -2105,7 +2132,7 @@ pub(crate) fn check_flag_capabilities(
             network,
             write,
         })
-        .map_err(|error| Fail::new(Status::Refused, ErrorKind::Unsupported, error.to_string()))
+        .map_err(refused)
     };
     let check_route = |route: run::RequestedRoute| -> Result<(), Fail> {
         match run::Service::route(route) {
@@ -2121,33 +2148,35 @@ pub(crate) fn check_flag_capabilities(
                 if let Some(roots) = roots
                     && let Ok(members) = crate::route::effective_members(roots, &name)
                 {
-                    let refusals: Vec<Fail> = members
+                    let adapters: Vec<&str> = members
                         .iter()
-                        .filter_map(|member| check(member.model.adapter(), Some(&effort)).err())
+                        .map(|member| member.model.adapter())
                         .collect();
-                    if !members.is_empty() && refusals.len() == members.len() {
-                        return Err(refusals
-                            .into_iter()
-                            .next()
-                            .unwrap_or_else(|| unreachable!()));
-                    }
+                    pool_effort_refusal(&adapters, &effort)
+                        .map_or(Ok(()), |error| Err(refused(error)))?;
                 }
             }
             _ => {}
         }
         Ok(())
     };
-    let check_fallback = |model: &str| -> Result<(), Fail> {
+    let check_fallback = |model: &str, effort: Option<&str>| -> Result<(), Fail> {
         match model.split_once('/') {
-            Some((provider, _)) => check(provider, None),
+            Some((provider, _)) => check(provider, effort),
             None => Ok(()),
         }
     };
+    let effort_of = |route: &run::RequestedRoute| match route {
+        run::RequestedRoute::Model { effort, .. }
+        | run::RequestedRoute::Named { effort, .. }
+        | run::RequestedRoute::Review { effort, .. } => effort.clone(),
+    };
     if let Ok(route) = route {
+        let effort = effort_of(&route);
         check_route(route)?;
-    }
-    for model in &command.route.fallback {
-        check_fallback(&model.0)?;
+        for model in &command.route.fallback {
+            check_fallback(&model.0, effort.as_deref())?;
+        }
     }
     // Manifest tasks carry their own routes; read them before any worktree exists.
     // A malformed manifest is reported later by the normal path.
@@ -2162,9 +2191,10 @@ pub(crate) fn check_flag_capabilities(
         )
     {
         for task in manifest.tasks {
+            let effort = effort_of(&task.route);
             check_route(task.route)?;
             for model in &task.fallback {
-                check_fallback(model)?;
+                check_fallback(model, effort.as_deref())?;
             }
         }
     }

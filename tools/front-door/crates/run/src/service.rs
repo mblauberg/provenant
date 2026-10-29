@@ -72,9 +72,13 @@ impl<'a> Service<'a> {
         let mut requests = Vec::new();
         let mut attempts = Vec::new();
         let mut contribution_branches = std::collections::BTreeMap::new();
+        // Refuse every task's unsupported launch before any task prepares a writer.
+        for task in &input.tasks {
+            let route = Self::route(task.route.clone())?;
+            check_launch_capabilities(task, &route)?;
+        }
         for mut task in input.tasks {
             task.route = Self::route(task.route)?;
-            check_launch_capabilities(&task)?;
             Self::scan(&task.prompt)?;
             if let Some(title) = &task.title {
                 provenant_core::validate_task_title(title)
@@ -650,7 +654,7 @@ fn fresh<T>(make: impl FnOnce([u8; 16]) -> T) -> Result<T> {
 /// Refuse a request outside an adapter's declared launch table. This runs
 /// before any writer is prepared or any run, reservation or receipt exists.
 /// Named routes resolve their adapter later, where routing checks effort.
-fn check_launch_capabilities(task: &DispatchTask) -> Result<()> {
+fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Result<()> {
     let write = task.worktree.is_some() || !task.access.write_roots.is_empty();
     let check = |provider: &str, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
@@ -666,7 +670,7 @@ fn check_launch_capabilities(task: &DispatchTask) -> Result<()> {
     };
     if let RequestedRoute::Model {
         provider, effort, ..
-    } = &task.route
+    } = route
     {
         check(provider, effort.as_deref())?;
     }

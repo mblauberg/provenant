@@ -491,3 +491,32 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn every_task_is_checked_before_any_writer_is_prepared() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = submission("two tasks");
+    let operation = input.operation_id.clone();
+    // The first task names a writer path that cannot resolve, so reaching its
+    // preparation would fail with a different error than the second task's.
+    input.tasks[0].worktree = Some(temp.path().join("no-such-writer"));
+    let mut second = submission("second").tasks.remove(0);
+    second.task_id = TaskId::from_bytes([4; 16]);
+    second.worktree = None;
+    second.route = RequestedRoute::Model {
+        extra: Default::default(),
+        provider: "cursor".into(),
+        model: "cursor/m".into(),
+        effort: Some("high".into()),
+    };
+    input.tasks.push(second);
+    let error = Service::new(&store)
+        .dispatch(input, temp.path(), &call)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "cursor does not support effort");
+    assert!(store.operation(&operation, &call)?.is_none());
+    Ok(())
+}
