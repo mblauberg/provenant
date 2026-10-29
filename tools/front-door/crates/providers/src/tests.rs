@@ -3,7 +3,7 @@ use provenant_records::ResolvedRoute;
 use serde::Deserialize;
 
 #[test]
-fn prepared_git_objects_are_repository_scoped_for_every_adapter() -> Result<(), ProviderError> {
+fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), ProviderError> {
     use provenant_confinement::plan::ReadOnlyGrants;
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let prompt = Prompt::new("fixture".into());
@@ -38,43 +38,28 @@ fn prepared_git_objects_are_repository_scoped_for_every_adapter() -> Result<(), 
                 Path::new("/fixture/repo"),
                 (id == "claude").then_some(&token),
             ))?;
-            // A lane-global override would replace every other repository's store.
-            assert!(
-                !spec
-                    .env
-                    .iter()
-                    .any(|(key, _)| key == "GIT_OBJECT_DIRECTORY"),
-                "{id} {access:?}"
-            );
-            let object_setup: Vec<_> = spec
-                .setup
-                .iter()
-                .filter(|step| match step {
-                    SetupStep::CreateDir(path) | SetupStep::WriteFile { path, .. } => {
-                        path.starts_with("/fixture/scratch/git-objects")
-                    }
-                    _ => false,
-                })
-                .collect();
-            assert_eq!(
-                object_setup,
-                vec![
-                    &SetupStep::CreateDir("/fixture/scratch/git-objects/info".into()),
-                    &SetupStep::WriteFile {
-                        path: "/fixture/scratch/git-objects/info/alternates".into(),
-                        bytes: b"\"/fixture/repo/.git/objects\"\n".to_vec(),
-                    },
-                ],
-                "{id}"
-            );
-            assert!(spec.setup.iter().any(|step| matches!(step,
-                    SetupStep::WriteExecutable { path, .. } if path == Path::new("/fixture/scratch/bin/git")
-                )), "{id} must route shell Git through the scoped wrapper");
-            let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
-            assert_eq!(
-                std::env::split_paths(path).next().unwrap(),
-                Path::new("/fixture/scratch/bin")
-            );
+            for (key, path) in [
+                ("GIT_DIR", "/fixture/scratch/git-common"),
+                ("GIT_COMMON_DIR", "/fixture/scratch/git-common"),
+                ("GIT_WORK_TREE", "/fixture/repo"),
+                ("GIT_OBJECT_DIRECTORY", "/fixture/scratch/git-objects"),
+            ] {
+                assert_eq!(
+                    spec.env
+                        .iter()
+                        .find(|(name, _)| name == key)
+                        .map(|(_, value)| value.as_os_str()),
+                    (access == Access::WorktreeWrite).then_some(std::ffi::OsStr::new(path)),
+                    "{id} {key}"
+                );
+            }
+            if access == Access::WorktreeWrite {
+                let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
+                assert_eq!(
+                    std::env::split_paths(path).next().unwrap(),
+                    Path::new("/fixture/scratch/bin")
+                );
+            }
         }
     }
     Ok(())
@@ -114,7 +99,8 @@ fn prepared_git_accepts_non_utf8_scratch() -> Result<(), ProviderError> {
 
 #[test]
 #[allow(clippy::disallowed_methods)]
-fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std::error::Error>> {
+fn prepared_private_git_supports_commits_fetch_merge_and_push()
+-> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::{PathGrant, PathScope};
     use provenant_confinement::plan::ReadOnlyGrants;
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
@@ -123,7 +109,7 @@ fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std:
     use std::process::Command;
 
     for (entry, access) in REGISTRY.iter().flat_map(|entry| {
-        [Access::ReadOnly, Access::WorktreeWrite]
+        [Access::WorktreeWrite]
             .into_iter()
             .map(move |access| (entry, access))
     }) {
@@ -279,6 +265,20 @@ fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std:
             }
         }
         if access == Access::WorktreeWrite {
+            let objects = scratch.join("git-objects");
+            std::fs::create_dir_all(objects.join("info"))?;
+            std::fs::write(
+                objects.join("info/alternates"),
+                format!(
+                    "\"{}\"\n",
+                    repo.join(".git/objects")
+                        .to_str()
+                        .ok_or("alternate path")?
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\n")
+                ),
+            )?;
             let private_common = scratch.join("git-common");
             std::fs::create_dir_all(private_common.join("objects"))?;
             std::fs::create_dir_all(private_common.join("refs"))?;
@@ -287,6 +287,18 @@ fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std:
                 std::fs::read(repo.join(".git/config"))?,
             )?;
             std::fs::write(private_common.join("HEAD"), b"ref: refs/heads/linked\n")?;
+            let index = host_git(
+                &linked,
+                &[
+                    "rev-parse".as_ref(),
+                    "--git-path".as_ref(),
+                    "index".as_ref(),
+                ],
+            );
+            std::fs::copy(
+                std::str::from_utf8(&index)?.trim(),
+                private_common.join("index"),
+            )?;
             let refs = host_git(
                 &repo,
                 &[
@@ -333,71 +345,20 @@ fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std:
         );
         lane_git(&["cat-file".as_ref(), "-e".as_ref(), "HEAD^{commit}".as_ref()]);
         let other_head = host_git(&other, &["rev-parse".as_ref(), "HEAD".as_ref()]);
-        let old_global = Command::new(git)
+        // Native Git can inspect a second repository by explicitly removing
+        // the lane's repository selectors; no command-routing parser is needed.
+        let other_read = Command::new(git)
             .current_dir(&other)
             .env_clear()
             .envs(spec.env.iter().cloned())
-            .env("GIT_OBJECT_DIRECTORY", scratch.join("git-objects"))
-            .args(["cat-file", "-e", "HEAD^{commit}"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .args(["log", "-1", "--format=%H"])
             .output()?;
-        assert!(
-            !old_global.status.success(),
-            "fixture must reproduce the lane-global override defect"
-        );
-        // Real reads, not rev-parse alone, detect a missing object database.
-        for selectors in [
-            vec!["-C".into(), other.clone().into_os_string()],
-            vec!["--git-dir".into(), other.join(".git").into_os_string()],
-            vec![format!("--git-dir={}", other.join(".git").display()).into()],
-            vec![
-                "-C".into(),
-                root.clone().into_os_string(),
-                "-C".into(),
-                "other".into(),
-                "-c".into(),
-                "core.abbrev=40".into(),
-            ],
-        ] {
-            let args: Vec<_> = selectors
-                .iter()
-                .map(|arg: &std::ffi::OsString| arg.as_os_str())
-                .chain(["log".as_ref(), "-1".as_ref(), "--format=%H".as_ref()])
-                .collect();
-            assert_eq!(lane_git(&args), other_head, "{id}");
-        }
-        assert_eq!(
-            lane_git(&[
-                "-C".as_ref(),
-                repo.as_os_str(),
-                "-C".as_ref(),
-                "vendor/lib".as_ref(),
-                "log".as_ref(),
-                "-1".as_ref(),
-                "--format=%H".as_ref()
-            ]),
-            other_head
-        );
-        // Git itself exports linked-worktree selectors to shell aliases. Clear
-        // those while deliberately retaining any leaked object-dir override.
-        let alias = format!(
-            "alias.other=!unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE; git -C '{}' log -1 --format=%H",
-            other.display()
-        );
-        assert_eq!(
-            lane_git(&["-c".as_ref(), alias.as_ref(), "other".as_ref()]),
-            other_head
-        );
-        assert_eq!(
-            lane_git(&[
-                "-C".as_ref(),
-                repo.as_os_str(),
-                "submodule".as_ref(),
-                "foreach".as_ref(),
-                "--quiet".as_ref(),
-                "git log -1 --format=%H".as_ref()
-            ]),
-            other_head
-        );
+        assert!(other_read.status.success());
+        assert_eq!(other_read.stdout, other_head);
         let input = scratch.join("input");
         std::fs::write(&input, "lane scratch object")?;
         let oid = lane_git(&["hash-object".as_ref(), "-w".as_ref(), input.as_os_str()]);
@@ -409,18 +370,6 @@ fn prepared_git_reads_linked_and_other_repositories() -> Result<(), Box<dyn std:
         );
         assert!(!repo.join(".git/objects").join(&relative).exists(), "{id}");
         if access == Access::WorktreeWrite {
-            assert_eq!(
-                lane_git(&["config".as_ref(), "--get".as_ref(), "gc.auto".as_ref()]),
-                b"0\n"
-            );
-            assert_eq!(
-                lane_git(&[
-                    "config".as_ref(),
-                    "--get".as_ref(),
-                    "maintenance.auto".as_ref()
-                ]),
-                b"false\n"
-            );
             std::fs::write(linked.join("lane-blob"), "private committed blob")?;
             lane_git(&["add".as_ref(), "lane-blob".as_ref()]);
             lane_git(&[

@@ -6,8 +6,9 @@ and process effects use supervisor; callers use supervisor locks/publication
 directly rather than a second confinement filesystem API.
 
 Permission compilation consumes typed provider specifications and enforcement
-observations constructed by the providers owner. Git write grants derive from a
-held linked `VerifiedWorktree` and `GitRefName`; records retain their digest.
+observations constructed by the providers owner. Writer authority binds a held
+linked `VerifiedWorktree`, `GitRefName` and the shared Git directory boundaries;
+records retain their digest.
 `WorktreeWriteAuthority::for_worktree` also takes the host home to derive the
 single `Library/Caches/provenant-lane-cargo/<sha256>` cache. Codex writer
 preparation sets `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` to its
@@ -21,12 +22,21 @@ same-named and recreated worktrees do not share a lane cache. Host builds use
 separate target directories outside this namespace.
 Before collecting `required_anchors`, call `prepare_writer_directories` under
 writer custody; pass the same independently resolved home in `Anchors.home`.
-This prepares the exact cache and other derived directories. Shared branch refs
-and reflogs are host-owned; lane Git uses private refs. Existing cache and lane-parent directories
+This prepares the exact cache and other derived directories. Each writer uses a
+complete Git directory under attempt scratch, including its index, HEAD, refs,
+merge and rebase state. Its private object store reads the shared store through
+`objects/info/alternates`. Stash, rebase, merge and private garbage collection
+need no individual file grants. The linked admin directory and shared Git
+directory stay read-only throughout their subtrees, including refs, config,
+hooks and info. The host refuses symlinked object stores and foreign alternates,
+then imports through Git receive quarantine before publishing the real branch.
+The published tip must descend from its launch base or the current origin
+default branch. Restored index flags cannot hide uncommitted edits. The
+[lane Git spec](../../../../docs/specs/run.md#lane-git-and-import) owns import
+limits and terminal ref cleanup. Existing cache and lane-parent directories
 must belong to the effective user with mode 0700; setup refuses mismatches
 without changing their metadata. Compilation rechecks the held cache.
-Common config, remote tracking and packed
-refs stay immutable: host fetch/upstream composition is required. Hard links
+Shared config, tracking refs and packed refs stay host-owned. Hard links
 are denied; symlinks are denied only in provider and private state. Toolchain, network and write-root
 policy is in the [supervisor spec](../../../../docs/specs/supervisor.md#permission-policy).
 

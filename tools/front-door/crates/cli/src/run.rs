@@ -3413,7 +3413,7 @@ fn candidates<'a>(
         };
         let mut lanes = Vec::with_capacity(ids.len());
         for id in ids {
-            let lane = session.service().status(id, &call)?;
+            let lane = session.service().status_for_wait(id, &call)?;
             if picks.label.is_none() || lane.verified_owner == Some(picks.owner) {
                 lanes.push(lane);
             }
@@ -7374,6 +7374,19 @@ mod tests {
         );
         let mut reads = 0;
         let finished_at = clock.wall_now()?;
+        let attempt_path = session
+            .context
+            .state_root
+            .as_path()
+            .join("runs")
+            .join(prepared.run_id.to_string())
+            .join("attempts")
+            .join(id.to_string());
+        let directory = provenant_os::fs::Directory::open_anchor(&attempt_path)?;
+        let mut custody = Some(directory.try_lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?);
         let waited = watch::wait(
             |remaining| {
                 reads += 1;
@@ -7386,6 +7399,9 @@ mod tests {
                         finished_at,
                         &call,
                     )?;
+                }
+                if reads == 3 {
+                    drop(custody.take());
                 }
                 fetch(remaining)
             },
@@ -7404,7 +7420,8 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(reads, 2);
+        assert_eq!(reads, 3, "terminal state must wait for custody release");
+        assert!(session.store.custody_released(&waited.lanes[0], &call)?);
         Ok(())
     }
 

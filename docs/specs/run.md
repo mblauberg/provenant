@@ -349,7 +349,8 @@ Normal pressure still requires the memory floor. An unavailable or unknown
 pressure sample is logged and falls back to the floor; Linux uses the floor.
 Disk and memory floors apply to both classes. Writers also require a host-wide
 build slot, defaulting to one at or below 16 GiB of RAM and two above that;
-read-only lanes do not consume one. At expiry, disk floor, known pressure and
+read-only lanes do not consume one. The provider-exit callback releases this
+slot before Git import or terminal bookkeeping, including on cancellation. At expiry, disk floor, known pressure and
 full build slots have distinct refusal reasons. Disk-floor refusal takes precedence
 when disk and pressure are both insufficient; otherwise Warning or Critical
 pressure is named before build-slot contention. A failed memory sample or a
@@ -489,23 +490,60 @@ never share a worktree.
 ## Publication order
 
 1. One transaction reserves the operation, digest, IDs and tickets.
-2. The scheduler samples resources outside the transaction, takes writer custody and
-   passes the plan to supervisor. A lost acknowledgement records
-   `launch_unknown`, keeps capacity and the reservation, and is never
-   replayed.
-3. Result and exit evidence are sealed first; then one commit writes the
-   terminal attempt, summary, operation state, released capacity and event.
-4. Recovery retries a pending commit without replacing a committed outcome.
+2. The scheduler samples resources outside the transaction, takes writer custody
+   and passes the plan to supervisor. A lost acknowledgement records
+   `launch_unknown`, keeps capacity and the reservation, and is never replayed.
+3. Supervisor observes provider exit and releases host build capacity. Once
+   cleanup proves quiescence, it releases the live writer lock before settlement.
+   The durable reservation still excludes another writer from this worktree.
+4. Settlement imports objects, publishes the branch, records the outcome and
+   releases the reservation through the durable phases below.
 5. A run closes only when every task and registered child is terminal.
 
-If publication keeps failing, the attempt stays `settling` with
-`publication_pending: true` and keeps custody; run never reports success or
-frees a writer early to hide a bookkeeping failure.
-- Why: each step is the evidence the next recovers from.
-- Test: `crates/run/src/tests.rs::publication_crashes_preserve_committed_records_and_allow_retry`;
+`settlement-progress.json` binds the attempt scope, pinned branch base and head,
+current phase, native process owner, retry deadline and one import attempt counter. A live owner
+excludes a second driver. A dead owner can be replaced after checking its boot,
+PID and start identity. An unknown process observation protects its owner for
+at most ten minutes from the claim. The replacement continues the recorded phase; it does
+not restart the provider. Journal locks cover only short reads and durable
+updates. No settlement lock or writer lock spans an external command.
+
+| Phase | Durable effect and replay |
+| --- | --- |
+| `import` | Import the pinned head through Git's quarantined receive path. Repeating the same staging ref is harmless. |
+| `publish` | Compare-and-swap the real branch from its pinned base; the same head already published counts as success. |
+| `record` | Seal result and exit evidence, remove the attempt's base and import refs, then commit the terminal attempt, summary, operation state and event. Recover an interrupted terminal commit from its pending evidence. |
+| `release` | Verify the committed outcome and release evidence, then remove the settling reservation. Repeated release accepts the same committed attempt. |
+| `complete` | Settlement is finished; ordinary terminal cleanup may reclaim disposable scratch. Import refusals retain private Git for host recovery. |
+
+Settlement permits three attempts that reach object import. Contention and
+pre-import checks do not consume this counter; resuming a later phase does not
+consume another import attempt. Import claims back off for 5 seconds, 30 seconds
+and 2 minutes instead of retrying immediately. Exhaustion records a terminal
+failure naming the limit and retained private Git. Rejected objects and failed
+publication never certify success. A pending terminal commit remains `settling`
+with `publication_pending: true` and keeps the worktree reservation, while its
+provider has already stopped consuming host build capacity and live custody.
+
+`cancel` durably records the request and signals the supervisor without waiting
+for a writer lock. The settlement driver checks it between phases and polls it
+every 50 ms during import, instruction checks and optional automatic delivery,
+stopping the owned Git child before recording `cancelled`.
+Public `reconcile` starts the same binary's detached `internal settle` worker
+only when a non-terminal attempt needs settlement. A run-scoped queued claim
+and worker exclusion deduplicate concurrent requests; a queued claim expires
+after ten minutes if no worker starts. Reconcile promptly reports pending
+settlement. Neither CLI waits for object transfer
+or an existing settlement owner; the supervisor owns this work after return.
+- Why: each phase records enough evidence to resume without holding a writer
+  lock through Git, and cancellation must remain available during import.
+- Test: `crates/run/src/settlement.rs::tests`;
+  `crates/run/src/objects_tests.rs::cancellation_kills_a_blocking_import_within_two_seconds`;
+  `crates/run/src/tests.rs::publication_crashes_preserve_committed_records_and_allow_retry`;
   `::prelaunch_refusal_publishes_durable_never_launched_evidence`.
   No run-level test asserts that `launch_unknown` is never replayed (gap).
-- Owner: `crates/run/src/launch.rs`, `crates/run/src/store.rs`
+- Owner: `crates/run/src/settlement.rs`, `crates/run/src/holder.rs`,
+  `crates/run/src/launch.rs`, `crates/run/src/store.rs`
 
 ## Success needs proof
 
@@ -579,129 +617,112 @@ refused, and the attempt records every granted path.
   `crates/run/src/dispatch_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
 - Owner: `crates/confinement/src/plan/read_only.rs`
 
-Read-only runs with a verified Git binding prepare `scratch/git-objects` with
-the bound common directory's `objects` as an alternate. The shell Git wrapper
-sets `GIT_OBJECT_DIRECTORY` for `show`, `log`, `diff`, `merge-tree` and
-`hash-object` only when Git resolves that common directory, including linked
-worktrees. Aliases and external subcommands receive no override. The launch
-environment has no lane-wide override, so other repositories and submodules
-retain their own object stores. The wrapper honours recognised Git global
-options; unknown options and direct
-absolute-path Git calls run without this temporary-object convenience.
-Configured callbacks of those builtins inherit their repository-local Git
-environment; callbacks entering another repository must clear Git-local
-variables.
-The shared Git directories remain write-denied, and symlink creation in the
-scratch object store is denied. No quarantine write exception is granted.
-The lane can alter its scratch objects and alternates; lane Git output must
-never serve as trusted host evidence. The host uses its own Git environment.
-- Why: `show --remerge-diff` needs temporary objects, while #1532 requires the
-  shared store to remain unwritable. Repository scoping preserves other reads.
-- Test: `crates/providers/src/tests.rs::prepared_git_objects_are_repository_scoped_for_every_adapter`;
-  `::prepared_git_reads_linked_and_other_repositories`;
-  `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_linked_worktree_git_directories_are_not_writable`
+Read-only runs use their bound repository with its Git metadata read-only.
+Lane Git output is never trusted host evidence; the host uses its own pinned
+Git and environment for evidence and settlement.
+- Why: a read grant must not permit mutations of shared Git metadata.
+- Test: `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_linked_worktree_git_directories_are_not_writable`
 - Owner: `crates/providers/src/launch.rs`, `crates/confinement/src/permissions.rs`
 
-## Writer object isolation
+## Lane Git and import
 
-Writer lanes also use `scratch/git-objects`, with the shared store as a
-read-only alternate. Their repository-scoped shell Git wrapper uses a private
-Git directory at `scratch/git-common` and the actual linked worktree's index.
-The host prepares its config and ref snapshot under the Git setup lock. Commits,
-merge state and `FETCH_HEAD` stay private; pushes use these private objects and
-refs. The shared lane branch stays at its launch base while the lane runs, so
-host and sibling fetches never encounter refs pointing into private stores.
-Seatbelt makes the shared Git metadata immutable except for the selected
-worktree's index and index lock, and denies every write operation on the common
-`objects` subtree, including its root, loose objects, packs and indices. The
-lane Git environment disables automatic GC and maintenance with `gc.auto=0`
-and `maintenance.auto=false`.
+Every writer gets a complete Git directory at `scratch/git-common`: its own
+index, HEAD, refs, config, temporary files, merge and rebase state. The host
+copies the initial linked index and ref snapshot before launch. Plain
+`GIT_DIR` and `GIT_COMMON_DIR` select that directory, `GIT_WORK_TREE` selects
+the lane checkout, and `GIT_OBJECT_DIRECTORY` selects `scratch/git-objects`.
+That private object store reads the shared store through
+`objects/info/alternates`. Stash, rebase, merge and garbage collection operate
+on private Git state without individual metadata grants. Launch pins the base
+as `refs/provenant/lane-base/<attempt>` until terminal publication, so shared
+garbage collection cannot discard a base that a private rebase no longer names.
 
-The host seals the chosen attempt candidate before launch. At settlement it
-requires absent custody, reads the selected private branch as raw metadata
-without executing its mutable config, and copies canonical loose objects and
-packs into a fresh host-owned snapshot. Traversal
-refuses symlinks and non-regular object files; it copies neither lane alternates
-nor pack indices. The host rebuilds indices with `index-pack --strict` and pins
-the shared store as the only alternate. `fsck --full --strict --no-reflogs --no-dangling
-<head>` checks object contents and connectivity before any instruction recovery,
-diff or ancestry read of the branch. Shared-store verification uses a fresh bare
-view with an empty primary object directory and the shared store as its sole
-alternate. This avoids inspecting another live lane's refs, index or unfinished
-operation markers, and prevents private objects from shadowing corrupt shared
-objects. Ref and unfinished-operation validation remain separate settlement
-checks. A non-commit head or any verification failure
-refuses settlement certification and delivery.
+The original worktree gitfile stays unchanged so the host retains its verified
+repository identity. Seatbelt denies writes throughout both the shared Git
+directory and the linked admin directory, including refs, config, hooks, info
+and the original index. These environment selectors intentionally select the lane
+repository. To inspect a second repository, run the pinned native Git executable
+with GIT_DIR, GIT_COMMON_DIR, GIT_WORK_TREE and GIT_OBJECT_DIRECTORY unset.
+The small Git wrapper has one source and restores
+scrubbed environment or supplies publishing credentials; it does not inspect
+Git commands or route their objects.
 
-Copying, indexing and snapshot verification run in host-owned staging before
-taking the exclusive object-store lock. Only a verified snapshot is published,
-without replacing existing shared files. The exclusive lock covers publication
-and the final shared-store check, excluding concurrent verification while a
-loose graph is being published. Verification holds the shared side of the same
-lock.
-The snapshot lives in the common Git directory, so publication uses atomic
-creation on the repository volume even when lane scratch is on another volume.
-After taking the exclusive lock, the host rechecks every staged file's device,
-inode, size, ctime and other read-relevant metadata against the snapshot taken
-before hashing. Files up to 1 MiB also carry a SHA-256 digest. A change refuses
-publication, including a swap by a still-live lane using a pre-v11 policy.
-The final shared-store check uses `fsck --connectivity-only --strict` and checks
-each newly published file again, avoiding a second full hash. Existing object
-files retain their contents, inode and permissions. SHA-1 and SHA-256 repositories
-use the same boundary. Only the host's trusted shallow boundary is preserved;
-lane-supplied boundaries cannot excuse missing history. Import is bounded by
-100,000 directory entries, 2 GiB of source objects, 64 packs and a 120-second
-wall-clock budget for copying and `index-pack`, including initialisation and
-preflight. Each verification phase has a separate deadline: 120 seconds plus
-60 seconds per started GiB of object files (shared plus staged for import),
-capped at one hour. Delivery cache misses get a fresh verification deadline.
-Exclusive or shared lock waiting has its own 120-second limit. A lock-wait
-timeout leaves settlement non-terminal with a retry reason, retaining custody
-and private evidence. Verification deadlines also leave settlement retryable.
-Exceeding either the pack limit or the copy/index budget terminally refuses
-the import with the limit named in the reason. Import snapshots are
-removed after each attempt; a later import attempts to sweep at most 32 exact
-import staging names older than 24 hours, with bounded traversal. Generic
-staging names are preserved. Sweeping ignores vanished entries, logs all other
-errors and never prevents settlement. A pack-count or import-time
-refusal retains writer custody and private scratch for recovery. Other ordinary
-terminal cleanup owns lane scratch.
+The host seals the selected attempt candidate before launch. After provider
+exit and quiescence, it reads the selected private branch as raw metadata and
+pins its OID in the settlement journal. It never runs host commands with the
+lane's mutable Git config. Before import, a recursive census refuses symlinks
+anywhere in `git-objects`. A foreign `info/alternates` entry is refused; the
+host's original shared alternate is removed along with HTTP alternates,
+commit graphs and multi-pack indices. A clean host-owned bare sender view
+then selects only the bound private objects and shared store as alternates,
+with `GIT_ALTERNATE_OBJECT_DIRECTORIES` explicitly empty. It preserves only the
+host's trusted shallow boundary. Lane metadata cannot declare missing parents
+to be a valid shallow boundary. Custody must still be absent immediately before
+Git re-resolves the private object path.
 
-After verification, the host publishes the lane branch with a compare-and-swap
-against its launch base. A replay may retain the same verified head; a divergent
-shared ref refuses publication. Private HEAD must still select the authorised
-branch. Shared ref publication precedes the host's instruction recovery and
-ancestry reads. A hash-verified rewind is quarantined before ancestry
-certification refuses it, so its evidence can be sealed and the failed attempt
-can release custody. Object verification failure or a competing shared ref
-change keeps custody and scratch for recovery.
+The host pushes the pinned head into the shared repository using its pinned
+Git executable for both processes. In shell notation the receive operation is:
 
-Host integration and delivery hash-check the lane and target graphs before
-reading commit messages, merging or pushing. Remote refresh checks the advertised
-OID and full object contents; existence or connectivity-only checks do not prove
-content integrity. Within one settlement or delivery, a successful check is
-reused only for the same head and shared-store generation. The generation
-includes object and shallow-file identities, sizes, permissions, mtime and
-ctime, so restoring mtime cannot hide a write. Stores with external alternates
-receive a fresh check because their external generation is not tracked. Cached
-results never cross a handoff or a new delivery. A concurrent host change during
-verification triggers one fresh verification; another change leaves settlement
-retryable. Older attempts without a private-store binding use the host's verified common Git directory
-directly; lane-writable worktree metadata cannot select the store. Lanes whose
-compiled confinement policy predates v11 retain their old write grants until
-they exit. Settlement and delivery name that legacy policy, run and attempt in
-a diagnostic. Settlement also records the warning in its terminal run event.
-Both run full strict verification against the shared store. Operators
-should [drain writers before upgrading](../runbooks/install.md#bootstrap-and-upgrade);
-the host does not force-cancel running lanes.
-- Why: Git's ordinary reads do not prove that stored content matches its OID.
+```sh
+git push --no-verify \
+  --receive-pack='git -c core.hooksPath=/dev/null -c receive.fsckObjects=true -c transfer.fsckObjects=true -c receive.unpackLimit=1 -c transfer.unpackLimit=1 -c receive.maxInputSize=CAP receive-pack' \
+  SHARED_GIT_DIR HEAD:refs/provenant/import/OID
+```
+
+The production sender selects the pinned OID rather than trusting lane HEAD.
+The receive path is preferred to fetch because `receive-pack` quarantines the
+incoming objects before promotion. Git checks new object contents and pack
+integrity with fsck enabled, then checks connectivity against existing refs.
+Both unpack limits force `index-pack` for a non-empty transfer, including a
+small duplicate-entry pack. The input cap is four times the sanitised private
+object bytes plus 16 MiB. The receive timeout is 120 seconds plus one second
+per MiB of that cap, rounded up. Oversized input receives an explicit size
+refusal. Before import, a sweep removes abandoned quarantine and Provenant
+staging directories only when their contents are all older than 24 hours.
+A refusal keeps incoming corrupt or disconnected objects out of the shared
+store. Import work follows the new transfer and its connectivity frontier;
+it does not hash or enumerate unrelated shared history. Shared objects are
+trusted host-owned data because lanes cannot write them. An unused malformed
+private object omitted from the transfer never enters the shared store.
+
+A local Git 2.53.0 probe used a 32 MiB random shared blob and one new text-file
+commit. Receive took 0.0738 seconds and added three objects totalling 290 bytes;
+the sender's private store used 471 bytes including its alternates file. This
+checks transfer scope on a small fixture. It is not a 50 GB seal benchmark or
+a peak-disk measurement.
+
+Git owns hashing, parsing, pack checks and quarantine. There is no custom
+object verifier, full-store generation scan, verification cache or separate
+verification deadline/retry mechanism. SHA-1 and SHA-256 repositories use the
+same Git receive boundary. The host restores the private index for instruction
+quarantine only after import succeeds, clearing skip-worktree and
+assume-unchanged flags so an uncommitted edit remains visible. The host
+publishes the real branch with a
+compare-and-swap against the pinned launch base. Replaying the same head is
+idempotent; a competing shared ref change refuses publication. A published tip
+must descend from the lane base or the current `origin` default branch, which
+allows rebases while refusing unrelated and orphan histories. Success,
+cancellation and failure remove `refs/provenant/import/<head>` and the lane's
+base pin. Host integration and delivery check connectivity with
+`rev-list --objects --missing=error` excluding the lane base, then read those
+delta objects through `cat-file --batch` to refuse corrupt reachable payloads.
+They do not rescan unrelated shared history.
+
+[Drain writers before upgrading](../runbooks/install.md#bootstrap-and-upgrade).
+An older interrupted settlement with its bound private object directory can
+resume through this import path. An attempt without that source is refused
+with instructions to recover its commits on the host and start a fresh run.
+There is no legacy verifier or separate settlement path. Terminal refusals
+release live custody and the reservation while preserving private Git evidence
+for host recovery.
+- Why: Git already owns the receive boundary; private Git state removes the
+  fragile list of individual write exceptions under the shared repository.
 - Test: `crates/confinement/tests/lane_git_conformance.rs`;
-  `crates/providers/src/tests.rs::prepared_git_reads_linked_and_other_repositories`;
   `crates/run/src/objects_tests.rs`;
-  `crates/run/src/delivery_tests.rs::terminal_imports_private_objects_before_quarantine_reads_the_lane`;
-  `::delivery_refuses_corrupt_reachable_content_before_log_or_integration`
+  `crates/run/src/delivery_tests.rs::terminal_imports_private_objects_before_quarantine_reads_the_lane`
 - Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/launch.rs`,
-  `crates/run/src/objects.rs`, `crates/run/src/writer.rs`, `crates/run/src/delivery.rs`
+  `crates/providers/src/lane.rs`, `crates/run/src/objects.rs`,
+  `crates/run/src/writer.rs`, `crates/run/src/delivery.rs`
 
 ## Project GitHub policy
 
@@ -732,8 +753,10 @@ rebuild it if it is disposable output before retrying.
 
 ## Reconcile and temporary cleanup
 
-`reconcile` recovers queued and orphaned work idempotently and never replays
-an uncertain launch. If a writer guardian commits a terminal record and releases
+`reconcile` queues bounded background recovery of queued and orphaned work
+and never replays an uncertain launch. The supervisor resumes the durable
+settlement phase; the CLI does not wait for import or take the writer lock.
+If a writer guardian commits a terminal record and releases
 its reservation while recovery is preparing, recovery re-reads the canonical
 attempt and accepts absence only for that same attempt and generation. A
 missing reservation on a nonterminal attempt or unreadable retained custody
@@ -866,15 +889,17 @@ Accepted operations compare and replay their immutable inputs before checking
 current branch protection; later protection changes do not invalidate replay.
 Actual delivery still rechecks protection.
 
-Integration serialises by destination using a stable lock in the common Git
-directory. It fast-forwards when possible, otherwise uses `merge-tree` and
-`commit-tree` to prepare a merge commit without switching checkouts. A conflict
-or configured custom merge driver refuses before publishing a ref. A local
-integration branch checked out in any worktree is refused. Publication uses
-expected-old ref comparison locally or an explicit remote lease after an
-ancestry proof. Before resolving an origin integration target, the host refreshes
-the exact remote branch under the repository setup lock and refuses delivery if
-the refresh fails. Final graph PR delivery follows the same rule.
+Integration prepares objects without holding an application lock through Git.
+It fast-forwards when possible, otherwise uses merge-tree and commit-tree to
+prepare a merge commit without switching checkouts. A conflict or configured
+custom merge driver refuses before publishing a ref. A local integration branch
+checked out in any worktree is refused. Publication uses expected-old ref
+comparison locally or an explicit remote lease after an ancestry proof.
+A concurrent publisher can win; the losing delivery records an integration
+failure for explicit host pickup rather than adding another retry counter.
+Before resolving an origin integration target, the host refreshes the exact
+remote branch and refuses delivery if the refresh fails. Final graph PR
+delivery follows the same refresh rule.
 
 `lane deliver ATTEMPT [--deliver MODE]` uses the recorded destination, or
 origin push when the settled lane recorded none. It requires a succeeded

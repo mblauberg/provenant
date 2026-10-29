@@ -1911,7 +1911,7 @@ impl BinaryRunOwner<'_> {
             .map(|target| {
                 session
                     .service()
-                    .status(target.attempt, &call)
+                    .status_for_wait(target.attempt, &call)
                     .map_err(run_error)
             })
             .collect()
@@ -1930,7 +1930,7 @@ impl BinaryRunOwner<'_> {
         }
         let store = self.store(budget, cancel)?;
         let page = provenant_run::Service::new(&store)
-            .lanes(
+            .lanes_for_wait(
                 &provenant_run::LaneQuery {
                     targets: Vec::new(),
                     all,
