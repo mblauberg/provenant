@@ -73,17 +73,34 @@ impl Store {
         id: &OperationId,
         request: &Request<'_>,
     ) -> Result<Option<T>> {
+        self.coordination_receipt_with_input::<serde::de::IgnoredAny, T>(
+            project, actor, id, request,
+        )
+        .map(|value| value.map(|(_, result)| result))
+    }
+
+    /// Recover the frozen input alongside its result, so overlapping result
+    /// shapes can be decoded according to the operation's recorded domain.
+    pub fn coordination_receipt_with_input<I: DeserializeOwned, T: DeserializeOwned>(
+        &self,
+        project: ProjectId,
+        actor: ActorId,
+        id: &OperationId,
+        request: &Request<'_>,
+    ) -> Result<Option<(I, T)>> {
         request.retry(|| {
-            let row: Option<(String, Vec<u8>)> = self
+            let row: Option<(String, Vec<u8>, Vec<u8>)> = self
                 .db
                 .query_row(
-                    "SELECT actor,result FROM coordination_operations WHERE project=?1 AND id=?2",
+                    "SELECT actor,request,result FROM coordination_operations WHERE project=?1 AND id=?2",
                     params![project.to_string(), id.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?;
             match row {
-                Some((owner, bytes)) if owner == actor.to_string() => Ok(Some(decode(&bytes)?)),
+                Some((owner, input, result)) if owner == actor.to_string() => {
+                    Ok(Some((decode(&input)?, decode(&result)?)))
+                },
                 Some(_) => Err(Error::Conflict),
                 None => Ok(None),
             }

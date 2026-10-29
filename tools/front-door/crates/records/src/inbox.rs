@@ -15,8 +15,9 @@ pub const MAX_LOCAL_OFFER_BYTES: usize = MAX_OFFER_BYTES * MAX_LOCAL_OFFER_ITEMS
 
 /// Exact registered destination. An actor label alone never selects a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AnswerTarget {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub host: HostId,
     pub project: ProjectId,
     pub session: String,
@@ -25,8 +26,9 @@ pub struct AnswerTarget {
 
 /// A local service offer is not proof of provider injection or consumption.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AnswerOffer {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub answer: HumanAnswer,
     pub delivery: AnswerDelivery,
 }
@@ -92,8 +94,9 @@ pub enum InteractionChannel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RequestOption {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub id: String,
     pub label: String,
     pub description: String,
@@ -101,8 +104,9 @@ pub struct RequestOption {
 
 /// Claimed links. Repository is a canonical Git common directory, not a checkout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RequestWork {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub run_id: RunId,
     pub task_id: Option<TaskId>,
     pub attempt_id: Option<AttemptId>,
@@ -125,16 +129,18 @@ pub enum WorkCoverage {
 
 /// Explicit replacement of a viewed request revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RequestReplacement {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub id: HumanRequestId,
     pub expect_revision: u64,
 }
 
 /// Caller-authored content only. The service binds project, host and actor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RequestDraft {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<RequestReplacement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,8 +159,9 @@ pub struct RequestDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HumanRequest {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub schema_version: u64,
     pub id: HumanRequestId,
     pub revision: u64,
@@ -196,8 +203,9 @@ impl HumanRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HumanAnswer {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub schema_version: u64,
     pub id: HumanAnswerId,
     pub request_id: HumanRequestId,
@@ -231,8 +239,9 @@ pub enum AnswerTransport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AnswerDelivery {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub schema_version: u64,
     pub answer_id: HumanAnswerId,
     pub target_host: HostId,
@@ -253,8 +262,9 @@ pub struct AnswerDelivery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InboxItem {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub request: HumanRequest,
     pub answer: Option<HumanAnswer>,
     pub delivery: Option<AnswerDelivery>,

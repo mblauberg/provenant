@@ -13,6 +13,8 @@ pub mod identity;
 pub mod inbox;
 pub mod peer_agent;
 pub use provenant_records::result_capture;
+#[cfg(test)]
+mod forward_compatibility;
 pub mod runs;
 #[cfg(test)]
 mod test_support;

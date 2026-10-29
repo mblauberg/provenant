@@ -229,6 +229,7 @@ fn account_placement() -> Result {
             },
         })?;
         let route = ResolvedRoute {
+            extra: Default::default(),
             adapter: "codex".into(),
             model: "fixture".into(),
             effort: None,
@@ -239,10 +240,12 @@ fn account_placement() -> Result {
             exclusions: vec![],
             eligibility: RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: i64::MAX,
             },
             confidentiality: RouteConfidentiality {
+                extra: Default::default(),
                 evidence_ref: "fixture".into(),
             },
             pool_selection: None,

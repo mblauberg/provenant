@@ -361,6 +361,7 @@ struct Run {
 
 fn route(args: &Args, account_key: &str) -> ResolvedRoute {
     ResolvedRoute {
+        extra: Default::default(),
         adapter: args.adapter.clone(),
         model: args.model.clone(),
         effort: args.effort.clone(),
@@ -371,9 +372,11 @@ fn route(args: &Args, account_key: &str) -> ResolvedRoute {
         exclusions: Vec::new(),
         eligibility: provenant_records::RouteEligibility::Eligible,
         readiness: provenant_records::RouteReadiness::Unavailable {
+            extra: Default::default(),
             reason: provenant_records::RouteExclusionReason::Disabled,
         },
         confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
             evidence_ref: "recording".into(),
         },
         pool_selection: None,

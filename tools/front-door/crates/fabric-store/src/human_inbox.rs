@@ -113,6 +113,7 @@ impl Store {
             rusqlite::TransactionBehavior::Immediate,
         )?;
         let mut offered = Page {
+            extra: Default::default(),
             items: Vec::new(),
             truncated: candidates.truncated,
         };
@@ -289,6 +290,7 @@ impl Store {
                 MAX_HUMAN_REQUESTS + 1
             ])?;
             let mut batch = Page {
+                extra: Default::default(),
                 items: Vec::new(),
                 truncated: false,
             };
@@ -324,7 +326,11 @@ impl Store {
                     .checked_add(1)
                     .ok_or(Error::Invalid("offer attempts"))?;
                 delivery.last_attempt_at = Some(at);
-                batch.items.push(AnswerOffer { answer, delivery });
+                batch.items.push(AnswerOffer {
+                    extra: Default::default(),
+                    answer,
+                    delivery,
+                });
                 // Reserve the entire JSON envelope, including escaping and the
                 // longer `false` spelling of the final truncation flag.
                 if encode(&batch)?.len() > max_bytes {
@@ -417,7 +423,7 @@ impl Store {
                 bytes += record.len();
                 items.push(view(value, at));
             }
-            Ok(Page { items, truncated })
+            Ok(Page { extra: Default::default(),  items, truncated })
         })
     }
 
@@ -652,6 +658,7 @@ fn item(db: &rusqlite::Connection, project: ProjectId, id: HumanRequestId) -> Re
         return Err(Error::Invalid("request history limit"));
     }
     Ok(InboxItem {
+        extra: Default::default(),
         request: value,
         answer,
         delivery,

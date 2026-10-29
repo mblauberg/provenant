@@ -23,8 +23,9 @@ impl LandingGuard {
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LandingRequest {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub id: ClaimId,
     pub project: ProjectId,
     pub actor: ActorId,
@@ -35,8 +36,9 @@ pub struct LandingRequest {
     pub lease: DurationMicros,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Landing {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub header: RecordHeader,
     pub project: ProjectId,
     pub id: ClaimId,
@@ -72,7 +74,7 @@ impl PushPhase {
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "action", rename_all = "snake_case")]
 pub enum PushAction {
     Begin,
     Uncertain,
@@ -80,8 +82,9 @@ pub enum PushAction {
     Reconcile { remote: Option<GitOid> },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PushRequest {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub header: RecordHeader,
     pub project: ProjectId,
     pub claim: ClaimId,
@@ -93,8 +96,9 @@ pub struct PushRequest {
     pub remote: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PushOperation {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub header: RecordHeader,
     pub id: OperationId,
     pub digest: Digest,
@@ -273,6 +277,7 @@ impl Store {
                         return Err(Error::Conflict);
                     }
                     return Ok(ClaimFence {
+                        extra: Default::default(),
                         id: row.id,
                         actor: claim.actor,
                         generation: row.generation,
@@ -289,12 +294,19 @@ impl Store {
             let id = previous.as_ref().map_or(claim.id, |r| r.id);
             let generation = next_generation(previous.as_ref())?;
             let fence = ClaimFence {
+                extra: Default::default(),
                 id,
                 actor: claim.actor,
                 generation,
                 token: claim.token,
             };
             let value = Landing {
+                extra: previous
+                    .as_ref()
+                    .filter(|row| !row.bytes.is_empty())
+                    .map(|row| decode::<Landing>(&row.bytes).map(|value| value.extra))
+                    .transpose()?
+                    .unwrap_or_default(),
                 header: RecordHeader::V1,
                 project: claim.project,
                 id,
@@ -427,6 +439,7 @@ impl Store {
                 return Err(Error::Conflict);
             }
             let frozen = PushRequest {
+                extra: Default::default(),
                 header: RecordHeader::V1,
                 project: guard.project,
                 claim: fence.id,
@@ -445,6 +458,7 @@ impl Store {
                 Err(error) => return Err(error),
             }
             let operation = PushOperation {
+                extra: Default::default(),
                 header: RecordHeader::V1,
                 id: id.clone(),
                 digest,

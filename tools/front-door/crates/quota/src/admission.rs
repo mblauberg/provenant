@@ -1,14 +1,15 @@
-//! Admission facts are constructed from current validated evidence, never decoded.
+//! Admission checks use validated evidence, including persisted provider refusals.
 use crate::*;
-use provenant_records::{ResolvedRoute, RouteReadiness};
+use provenant_records::{ExtraFields, ResolvedRoute, RouteReadiness};
 use serde::{Deserialize, Serialize};
 
 /// A newer reading clears a refusal only below this use (95%).
 const CLEAR_HEADROOM_BASIS_POINTS: u64 = 9500;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Refusal {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub account: AccountScope,
     pub model: String,
     pub pool: Option<String>,
@@ -17,8 +18,9 @@ pub struct Refusal {
 }
 /// Short-lived provider capacity evidence, separate from quota admission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CapacityCooldown {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub account: AccountScope,
     pub model: String,
     pub observed_unix_seconds: i64,
@@ -60,6 +62,12 @@ pub fn record_capacity_cooldown(
         .revision
         .checked_add(1)
         .ok_or(QuotaError::NumberOutOfRange)?;
+    let extra = record
+        .capacity_cooldowns
+        .iter()
+        .find(|cooldown| cooldown.model == model)
+        .map(|cooldown| cooldown.extra.clone())
+        .unwrap_or_default();
     record
         .capacity_cooldowns
         .retain(|c| c.model != model && c.expires_unix_seconds > now);
@@ -67,6 +75,7 @@ pub fn record_capacity_cooldown(
         return Err(QuotaError::Invalid("capacity bound"));
     }
     record.capacity_cooldowns.push(CapacityCooldown {
+        extra,
         account: account.clone(),
         model: model.into(),
         observed_unix_seconds: now,
@@ -248,6 +257,12 @@ pub fn record_refusal(
         .revision
         .checked_add(1)
         .ok_or(QuotaError::NumberOutOfRange)?;
+    let extra = record
+        .refusals
+        .iter()
+        .find(|refusal| refusal.model == model && refusal.pool.as_deref() == pool)
+        .map(|refusal| refusal.extra.clone())
+        .unwrap_or_default();
     record
         .refusals
         .retain(|refusal| refusal.model != model || refusal.pool.as_deref() != pool);
@@ -255,6 +270,7 @@ pub fn record_refusal(
         return Err(QuotaError::Invalid("provider refusal bound"));
     }
     record.refusals.push(Refusal {
+        extra,
         account: account.clone(),
         model: model.into(),
         pool: pool.map(Into::into),
@@ -286,6 +302,50 @@ fn matches_pool(adapter: &str, window: &str, pool: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn persisted_admission_evidence_preserves_unknown_fields_on_refresh() {
+        let account = AccountScope {
+            adapter: "codex".into(),
+            account_key: "key".into(),
+            label: "label".into(),
+        };
+        let future = serde_json::json!({"nested": [null, true, u64::MAX]});
+        let refusal: Refusal = serde_json::from_value(serde_json::json!({
+            "account": account, "model": "model", "pool": null,
+            "observed_unix_seconds": 100, "resets_unix_seconds": 500,
+            "future": future,
+        }))
+        .unwrap();
+        let cooldown: CapacityCooldown = serde_json::from_value(serde_json::json!({
+            "account": account, "model": "model",
+            "observed_unix_seconds": 100, "expires_unix_seconds": 500,
+            "future": future,
+        }))
+        .unwrap();
+        let mut record = AccountRecord::empty(account.clone());
+        record.refusals.push(refusal);
+        record.capacity_cooldowns.push(cooldown);
+        let record = record_refusal(Some(&record), &account, "codex/model", None, 200, Some(600))
+            .unwrap()
+            .replacement
+            .unwrap();
+        let record = record_capacity_cooldown(Some(&record), &account, "codex/model", 200, 600)
+            .unwrap()
+            .unwrap()
+            .replacement
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&record.refusals[0]).unwrap()["future"],
+            future
+        );
+        assert_eq!(
+            serde_json::to_value(&record.capacity_cooldowns[0]).unwrap()["future"],
+            future
+        );
+        assert_eq!(record.refusals[0].observed_unix_seconds, 200);
+        assert_eq!(record.capacity_cooldowns[0].observed_unix_seconds, 200);
+    }
+
     #[test]
     fn capacity_evidence_is_scoped_and_replaced_after_expiry() {
         let account = AccountScope {
@@ -333,6 +393,7 @@ mod admission_tests {
     use super::*;
     fn route() -> ResolvedRoute {
         ResolvedRoute {
+            extra: Default::default(),
             adapter: "claude".into(),
             model: "exact/model".into(),
             effort: None,
@@ -343,10 +404,12 @@ mod admission_tests {
             exclusions: vec![],
             eligibility: provenant_records::RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 9999,
             },
             confidentiality: provenant_records::RouteConfidentiality {
+                extra: Default::default(),
                 evidence_ref: "fixture".into(),
             },
             pool_selection: None,
@@ -384,6 +447,7 @@ mod admission_tests {
         route.model = "opencode-go/mimo-v2.6-flash".into();
         route.account_key = Some("go".into());
         route.pool_selection = Some(provenant_records::RouteSelectionReceipt {
+            extra: Default::default(),
             pool: "senior".into(),
             candidates: vec![],
             roll: 0,
@@ -442,6 +506,7 @@ mod admission_tests {
         route.adapter = "opencode".into();
         route.model = "opencode/second-free".into();
         let refusal = Refusal {
+            extra: Default::default(),
             account: AccountScope {
                 adapter: "opencode".into(),
                 account_key: "opaque".into(),
@@ -514,6 +579,7 @@ mod admission_tests {
             resets_unix_seconds: Some(303400),
         });
         record.refusals.push(Refusal {
+            extra: Default::default(),
             account: record.account.clone(),
             model: route().model,
             pool: None,
@@ -540,6 +606,7 @@ mod admission_tests {
         let account = record(QuotaStatus::Available).account;
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99_999,
         };
@@ -570,6 +637,7 @@ mod admission_tests {
         let account = record(QuotaStatus::Available).account;
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99_999,
         };
@@ -615,6 +683,7 @@ mod admission_tests {
             snapshot.windows[0].used_basis_points = used;
             snapshot.windows[0].resets_unix_seconds = Some(1400);
             record.refusals.push(Refusal {
+                extra: Default::default(),
                 account: record.account.clone(),
                 model: route().model,
                 pool: Some("pool-a".into()),
@@ -640,6 +709,7 @@ mod admission_tests {
         let mut record = record(QuotaStatus::Exhausted);
         record.snapshot.as_mut().unwrap().observed_unix_seconds = 960;
         record.refusals.push(Refusal {
+            extra: Default::default(),
             account: record.account.clone(),
             model: "exact/model".into(),
             pool: Some("pool-a".into()),
@@ -713,6 +783,7 @@ mod admission_tests {
             .is_ok()
         );
         records[0].refusals.push(Refusal {
+            extra: Default::default(),
             account: records[0].account.clone(),
             model: r.model.clone(),
             pool: Some("pool-a".into()),
@@ -749,6 +820,7 @@ mod refusal_scope_tests {
     #[test]
     fn refusals_expire_only_for_matching_identity_pool_observation_or_reset() {
         let route = ResolvedRoute {
+            extra: Default::default(),
             adapter: "claude".into(),
             model: "exact".into(),
             effort: None,
@@ -759,10 +831,12 @@ mod refusal_scope_tests {
             exclusions: vec![],
             eligibility: provenant_records::RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 5000,
             },
             confidentiality: provenant_records::RouteConfidentiality {
+                extra: Default::default(),
                 evidence_ref: "fixture".into(),
             },
             pool_selection: None,
@@ -773,6 +847,7 @@ mod refusal_scope_tests {
             label: "work".into(),
         };
         let refusal = Refusal {
+            extra: Default::default(),
             account: account.clone(),
             model: "exact".into(),
             pool: Some("pool".into()),

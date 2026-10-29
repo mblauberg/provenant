@@ -106,6 +106,7 @@ fn applied_write_grants(
         .into_iter()
         .map(|grant| {
             Ok(WriteGrantRecord {
+                extra: Default::default(),
                 source: grant.source,
                 path: provenant_records::AbsolutePath::new(&grant.path)
                     .map_err(|_| "invalid write grant path".to_owned())?,
@@ -459,7 +460,7 @@ impl RunStore {
             .any(|task| task.task_id == record.task_id)
         {
             Some("child attempt task missing from request")
-        } else if record.state == AttemptState::Queued
+        } else if matches!(record.state, AttemptState::Queued { .. })
             && self
                 .launched_tasks
                 .borrow()
@@ -570,10 +571,12 @@ impl RunStore {
         })?;
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            if self.record(id, call)?.state == AttemptState::Queued {
+            if matches!(self.record(id, call)?.state, AttemptState::Queued { .. }) {
                 self.withdraw(
                     id,
-                    AttemptState::Queued,
+                    AttemptState::Queued {
+                        extra: Default::default(),
+                    },
                     Outcome::Rejected,
                     reason,
                     call.clock
@@ -598,7 +601,7 @@ impl RunStore {
         let mut runs = std::collections::BTreeSet::new();
         for raw in records {
             let record: AttemptRecord = crate::db::decode(&raw)?;
-            if record.state == AttemptState::Queued {
+            if matches!(record.state, AttemptState::Queued { .. }) {
                 runs.insert(record.run_id);
             }
         }
@@ -851,7 +854,7 @@ impl RunStore {
                 }
                 Err(error) => return Err(error),
             };
-            if record.state != AttemptState::Queued {
+            if !matches!(record.state, AttemptState::Queued { .. }) {
                 continue;
             }
             let now = || {
@@ -877,7 +880,9 @@ impl RunStore {
             if let Some(reason) = child_reason {
                 match self.withdraw(
                     id,
-                    AttemptState::Queued,
+                    AttemptState::Queued {
+                        extra: Default::default(),
+                    },
                     Outcome::Rejected,
                     reason,
                     now()?,
@@ -933,7 +938,9 @@ impl RunStore {
                     let reason = format!("stored prompt unreadable: {error}");
                     match self.withdraw(
                         id,
-                        AttemptState::Queued,
+                        AttemptState::Queued {
+                            extra: Default::default(),
+                        },
                         Outcome::Rejected,
                         &reason,
                         now()?,
@@ -1002,7 +1009,9 @@ impl RunStore {
                 Err((kind, reason)) => {
                     match self.withdraw(
                         id,
-                        AttemptState::Queued,
+                        AttemptState::Queued {
+                            extra: Default::default(),
+                        },
                         Outcome::Rejected,
                         &reason,
                         now()?,
@@ -1037,7 +1046,9 @@ impl RunStore {
                 Err(reason) => {
                     match self.withdraw(
                         id,
-                        AttemptState::Queued,
+                        AttemptState::Queued {
+                            extra: Default::default(),
+                        },
                         Outcome::Rejected,
                         &reason,
                         now()?,
@@ -1106,7 +1117,9 @@ impl RunStore {
                         };
                         self.withdraw(
                             id,
-                            AttemptState::Starting,
+                            AttemptState::Starting {
+                                extra: Default::default(),
+                            },
                             Outcome::Rejected,
                             &reason,
                             now()?,

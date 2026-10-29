@@ -163,6 +163,7 @@ mod tests {
         let path = project.join("sess-1848.jsonl");
         std::fs::write(&path, "{}\n")?;
         let mut grant = WriteGrantRecord {
+            extra: Default::default(),
             source: WriteSource::StateWrite,
             scope: PathScope::Exact,
             path: provenant_records::AbsolutePath::new(&path)?,

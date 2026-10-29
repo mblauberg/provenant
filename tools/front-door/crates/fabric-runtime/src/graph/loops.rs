@@ -3,8 +3,9 @@ use super::*;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LoopSpec {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub body: Vec<GraphNode>,
     pub until: String,
     pub max_rounds: usize,
@@ -35,8 +36,9 @@ pub struct LoopScope<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LoopAsk {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub rounds: usize,
     pub session: String,
     pub resolved: bool,
@@ -44,8 +46,9 @@ pub struct LoopAsk {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LoopRound {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub loop_id: String,
     pub round: usize,
     pub node_id: String,
@@ -313,6 +316,7 @@ pub(super) fn expand(
                     return Err("expanded loop node id exceeds 64 bytes");
                 }
                 child.round = Some(LoopRound {
+                    extra: Default::default(),
                     loop_id: node.id.clone(),
                     round,
                     node_id: local.clone(),
@@ -402,6 +406,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
         .iter()
         .map(|n| {
             prior.remove(&n.id).unwrap_or_else(|| NodeProgress {
+                extra: Default::default(),
                 fragment: None,
                 handoff: None,
                 expansion_pause: None,
@@ -582,6 +587,7 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
                 .any(|ask| ask.rounds == rounds)
             {
                 checkpoint.nodes[index].loop_asks.push(LoopAsk {
+                    extra: Default::default(),
                     rounds,
                     session: session.clone(),
                     resolved: false,
@@ -698,7 +704,7 @@ pub(super) fn prepare_decision_extension(
     let expanded =
         plans::expand(document, &extensions, &checkpoint.expansions).map_err(str::to_owned)?;
     let (plan, _) = validate_flat_plan(&expanded, limits).map_err(str::to_owned)?;
-    if let Some(reason) = structural_limit_reason(&expanded, &plan, limits, &extensions) {
+    if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
         return Err(reason);
     }
     Ok(())

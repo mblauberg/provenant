@@ -205,7 +205,7 @@ pub(crate) fn review_availability(
             }
             _ => {
                 let reason = match &route.readiness {
-                    RouteReadiness::Unavailable { reason } => reason.clone(),
+                    RouteReadiness::Unavailable { reason, .. } => reason.clone(),
                     _ => RouteExclusionReason::StaleAvailability,
                 };
                 blockers.push(ReviewBlocker::Route {

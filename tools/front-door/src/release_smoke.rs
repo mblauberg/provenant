@@ -113,6 +113,7 @@ impl SystemSmoke {
         }
         let data = version.data;
         Ok(VersionInfo {
+            extra: Default::default(),
             source_digest: provenant_records::SourceDigest::parse(&data.source_digest)
                 .map_err(|_| io::Error::other("release source digest is invalid"))?,
             asset_digest: provenant_records::SourceDigest::parse(&data.asset_digest)
