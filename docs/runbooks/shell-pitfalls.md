@@ -34,6 +34,10 @@ clean when the command in fact never ran, or ran on the wrong input.
   command's own output to a file, check its exit code immediately after it
   runs, and read the log for the tool's own summary line before reporting a
   result as green.
+  Enable `set -o pipefail` when using pipelines so a failing command is not
+  hidden by a successful filter. Without it, the status after a pipe is the
+  filter's status. For an unpiped check, run `status; echo exit=$?` and read
+  the printed exit code immediately.
 - **A verification gate run inside a backgrounded command is not verification
   you have read.** Appending a check to a command launched to run in the
   background sends the check's output to that background task's own log
