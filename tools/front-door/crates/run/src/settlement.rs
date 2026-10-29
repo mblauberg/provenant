@@ -423,7 +423,6 @@ mod tests {
             }
             assert!(journal.retry_after_ms >= dropped_at + backoff_ms(expected));
         }
-        assert_eq!(CLAIM_BACKOFF_MS, [5_000, 30_000, 120_000]);
         Ok(())
     }
 

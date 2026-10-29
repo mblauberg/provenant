@@ -28,9 +28,10 @@ generate them instead:
   from `crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
 - Config keys: [`docs/reference/config-keys.md`](../reference/config-keys.md),
   from `config/harness-knobs.json`.
-- Seatbelt profiles: `docs/reference/seatbelt/<provider>-<mode>.sb`.
+- Seatbelt profiles: `crates/providers/tests/snapshots/seatbelt/`.
 
-`scripts/generate-reference` writes them and `--check` diffs them in CI.
+`scripts/generate-reference` writes the CLI, MCP and configuration references;
+provider goldens are checked by the Rust snapshot test.
 
 ## Area specs
 

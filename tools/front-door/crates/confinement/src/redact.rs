@@ -469,6 +469,53 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     Ok(safe)
 }
 
+/// Redact delivery diagnostics, including every URL or scp-style remote
+/// username. Those fields can contain credentials even when no password is
+/// present. The common filter handles the other credential shapes first.
+pub fn delivery_diagnostics(detail: &str) -> String {
+    let filtered = match known_shapes(detail.as_bytes()) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(FilterError) => return "[REDACTED]".into(),
+    };
+    let mut result = String::with_capacity(filtered.len());
+    let mut rest = filtered.as_str();
+    while let Some(scheme_end) = rest.find("://") {
+        let authority_start = scheme_end + 3;
+        result.push_str(&rest[..authority_start]);
+        rest = &rest[authority_start..];
+        let token_end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')'))
+            .unwrap_or(rest.len());
+        let token = &rest[..token_end];
+        if let Some(at) = token.rfind('@') {
+            result.push_str("[REDACTED]");
+            result.push_str(&token[at..]);
+            rest = &rest[token_end..];
+        } else {
+            // A malformed or truncated authority may have lost its '@'.
+            result.push_str("[REDACTED]");
+            let authority_end = token.find(['/', '?', '#']).unwrap_or(token.len());
+            rest = &rest[authority_end..];
+        }
+    }
+    result.push_str(rest);
+    let mut safe = String::with_capacity(result.len());
+    for token in result.split_inclusive(|c: char| {
+        c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')')
+    }) {
+        if let Some(at) = token.rfind('@')
+            && token[at + 1..].contains(':')
+            && !token.contains("://")
+        {
+            safe.push_str("[REDACTED]");
+            safe.push_str(&token[at..]);
+        } else {
+            safe.push_str(token);
+        }
+    }
+    safe
+}
+
 /// A one-line excerpt of lane or server text, redacted with the known
 /// credential shapes before it is bounded, so a cut never leaves part of a
 /// secret that no longer matches a shape. Text that cannot be filtered is

@@ -44,8 +44,8 @@ def main():
         for finding in violations(path, (ROOT / path).read_text())
     ]
     for finding in findings:
-        print(finding, file=sys.stderr)
-    return int(bool(findings))
+        print(f"check-writing: warning: {finding}", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":

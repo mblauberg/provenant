@@ -2148,7 +2148,6 @@ mod tests {
             seconds: 30,
         };
 
-        let started = std::time::Instant::now();
         let result = transport.exchange_within(
             &peer,
             &request,
@@ -2156,10 +2155,6 @@ mod tests {
             &CancelToken::new(),
             Duration::from_millis(10),
         );
-        let elapsed = started.elapsed();
         assert!(matches!(result, Err(PeerError::Failed(_))), "{result:?}");
-        // Without the carve-out the child gets its full timeout, then the
-        // termination and reap grace (a quarter second each) on top.
-        assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
     }
 }

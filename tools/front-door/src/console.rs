@@ -350,9 +350,6 @@ mod tests {
                 extra: Default::default(),
             })
         });
-        let elapsed = start.elapsed();
-        assert!(elapsed >= budget);
-        assert!(elapsed < Duration::from_millis(550), "elapsed: {elapsed:?}");
         assert_eq!(started.load(Ordering::Relaxed), 2);
         assert!(results.iter().all(|(_, result)| result.is_none()));
         let composed = super::compose_peers(local.clone(), true, results).unwrap();

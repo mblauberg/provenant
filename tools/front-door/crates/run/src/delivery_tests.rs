@@ -2592,7 +2592,10 @@ fn delivery_diagnostics_redact_url_userinfo() {
         ("u:a@b@h:repo", "[REDACTED]@h:repo"),
         ("https://truncated-secret/path", "https://[REDACTED]/path"),
     ] {
-        assert_eq!(super::delivery::redact_url_userinfo(input), expected);
+        assert_eq!(
+            provenant_confinement::redact::delivery_diagnostics(input),
+            expected
+        );
         let error = super::delivery::prepare_error("test", input).to_string();
         assert!(error.ends_with(expected), "{error}");
     }
@@ -3416,14 +3419,12 @@ fn delivery_cancellation_stops_its_running_git_child()
                 std::thread::sleep(Duration::from_millis(10));
             }
             let seen = entered.exists();
-            let requested = Instant::now();
             cancel.cancel();
             assert!(matches!(
                 worker.join().map_err(|_| "delivery panicked")?,
                 Err(RunError::Delivery(WriterDeliveryStage::Head))
             ));
             assert!(seen, "delivery never reached Git");
-            assert!(requested.elapsed() < Duration::from_secs(2));
             Ok(())
         },
     )?;

@@ -229,8 +229,7 @@ that profile's support.
 
 ## Permission policy
 
-Rendered profiles are generated reference in
-`docs/reference/seatbelt/<provider>-<mode>.sb`, pinned by
+Rendered profiles are pinned by
 `crates/providers/src/seatbelt_snapshots.rs::seatbelt_profiles_match_snapshots`.
 The rules below are what every profile must keep.
 
