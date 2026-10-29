@@ -166,15 +166,12 @@ impl GraphNode {
 impl GraphDocument {
     /// Host preflight sees the same bounded static composite/loop expansion as
     /// the scheduler. Planner additions are checked separately before admission.
-    pub fn expanded(&self) -> Result<Self, &'static str> {
-        loops::expand(self, &[])
+    pub fn expanded(&self, limits: &crate::config::GraphLimits) -> Result<Self, String> {
+        loops::expand(self, &[], limits)
     }
 
-    pub fn inspect(
-        &self,
-        limits: &crate::config::GraphLimits,
-    ) -> Result<GraphInspection, &'static str> {
-        let expanded = self.expanded()?;
+    pub fn inspect(&self, limits: &crate::config::GraphLimits) -> Result<GraphInspection, String> {
+        let expanded = self.expanded(limits)?;
         let generous = crate::config::GraphLimits {
             nodes: usize::MAX,
             edges: usize::MAX,
@@ -1255,7 +1252,7 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
     #[error("cannot create graph checkpoint instance identity")]
     Instance(#[source] FsError),
     #[error("invalid graph: {0}")]
-    Invalid(&'static str),
+    Invalid(String),
     #[error("invalid extension: {0}")]
     Extension(String),
     #[error("graph checkpoint does not match the submitted plan")]
@@ -1419,15 +1416,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         .load(&document.graph_id)
         .map_err(GraphError::Journal)?;
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
-    let (base, _) = validate_plan_with_limits(document, &unbounded).map_err(GraphError::Invalid)?;
+    let (base, _) = validate_plan_with_limits(document, &unbounded)
+        .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
     let mut expanded = plans::expand(
         document,
         stored_extensions,
         stored.as_ref().map_or(&[], |c| c.expansions.as_slice()),
+        &unbounded,
     )
-    .map_err(GraphError::Invalid)?;
-    let (mut plan, mut positions) =
-        validate_flat_plan(&expanded, &unbounded).map_err(GraphError::Invalid)?;
+    .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
+    let (mut plan, mut positions) = validate_flat_plan(&expanded, &unbounded)
+        .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
     let plan_digest = CanonicalV1::record_digest("fabric-graph-plan", 1, &base)
         .map_err(GraphError::Canonical)?
         .to_string();
@@ -1515,7 +1514,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }))
     {
         if extension.starts_with("loop.") {
-            loops::validate_extension(document, extension).map_err(GraphError::Extension)?;
+            loops::validate_extension(document, extension, &unbounded)
+                .map_err(GraphError::Extension)?;
         } else if extension.starts_with("limits.") {
             if !replay {
                 return Err(GraphError::Extension(format!(
@@ -1536,9 +1536,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         if extensions.iter().any(|e| e.starts_with("loop.")) {
             let mut prospective = checkpoint.clone();
             for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
-                loops::validate_resume_extension(document, &checkpoint, extension)
+                loops::validate_resume_extension(document, &checkpoint, extension, &unbounded)
                     .map_err(GraphError::Extension)?;
-                loops::validate_resume_extension(document, &prospective, extension)
+                loops::validate_resume_extension(document, &prospective, extension, &unbounded)
                     .map_err(GraphError::Extension)?;
                 if !prospective.extensions.contains(extension) {
                     prospective.extensions.push(extension.clone());
@@ -1556,17 +1556,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     prospective.extensions.push(extension.clone());
                 }
             }
-            let preview = plans::expand(document, &prospective.extensions, &checkpoint.expansions)
-                .map_err(GraphError::Invalid)?;
-            let (preview_plan, _) =
-                validate_flat_plan(&preview, &unbounded).map_err(GraphError::Invalid)?;
+            let preview = plans::expand(
+                document,
+                &prospective.extensions,
+                &checkpoint.expansions,
+                &unbounded,
+            )
+            .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
+            let (preview_plan, _) = validate_flat_plan(&preview, &unbounded)
+                .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
             if let Some(reason) = structural_limit_reason(&preview, &preview_plan, limits) {
                 for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
                     let name = extension
                         .strip_prefix("loop.")
                         .and_then(|e| e.split_once('=').map(|(key, _)| key))
                         .and_then(|key| key.rsplit_once('.').map(|(name, _)| name))
-                        .ok_or(GraphError::Invalid("loop extension"))?;
+                        .ok_or(GraphError::Invalid(String::from("loop extension")))?;
                     loops::pause_invalid_decision(&mut checkpoint, name, &reason, journal)?;
                 }
                 return Ok(GraphRun {
@@ -1587,16 +1592,21 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
         checkpoint.pause_reason = None;
         if extensions.iter().any(|e| e.starts_with("loop.")) {
-            let expanded = plans::expand(document, &checkpoint.extensions, &checkpoint.expansions)
-                .map_err(GraphError::Invalid)?;
-            let (extended, _) =
-                validate_flat_plan(&expanded, &unbounded).map_err(GraphError::Invalid)?;
+            let expanded = plans::expand(
+                document,
+                &checkpoint.extensions,
+                &checkpoint.expansions,
+                &unbounded,
+            )
+            .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
+            let (extended, _) = validate_flat_plan(&expanded, &unbounded)
+                .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
             for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
                 let name = extension
                     .strip_prefix("loop.")
                     .and_then(|e| e.split_once('=').map(|(key, _)| key))
                     .and_then(|key| key.rsplit_once('.').map(|(name, _)| name))
-                    .ok_or(GraphError::Invalid("loop extension"))?;
+                    .ok_or(GraphError::Invalid(String::from("loop extension")))?;
                 if let Some(node) = checkpoint.nodes.iter_mut().find(|n| n.id == name) {
                     node.loop_pause = None;
                     node.loop_inbox_error = None;
@@ -1869,7 +1879,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     graph_id: plan.graph_id.clone(),
                     node_id: node.id.clone(),
                     route_index: u16::try_from(route_index)
-                        .map_err(|_| GraphError::Invalid("route count"))?,
+                        .map_err(|_| GraphError::Invalid(String::from("route count")))?,
                 };
 
                 let needs_record = checkpoint.nodes[node_index]
@@ -2701,15 +2711,17 @@ pub(crate) fn validate_access(
 fn validate_plan(
     document: &GraphDocument,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), &'static str> {
+    // Test-only: leak the rare formatted reason so assertions keep comparing &str.
     validate_plan_with_limits(document, &crate::config::GraphLimits::default())
+        .map_err(|reason| &*Box::leak(reason.into_boxed_str()))
 }
 
 fn validate_plan_with_limits(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
-) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), &'static str> {
-    let expanded = loops::expand(document, &[])?;
-    validate_flat_plan(&expanded, limits)
+) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
+    let expanded = loops::expand(document, &[], limits)?;
+    validate_flat_plan(&expanded, limits).map_err(String::from)
 }
 
 fn validate_flat_plan(

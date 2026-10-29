@@ -39,6 +39,14 @@ fn reviews(results: &[&str]) -> FakeOwner {
     }
 }
 
+/// A host ceiling of four, so a third round is refused.
+fn tight_limits() -> crate::config::GraphLimits {
+    crate::config::GraphLimits {
+        expansion_depth: 4,
+        ..Default::default()
+    }
+}
+
 fn extension(
     document: &GraphDocument,
     owner: &mut FakeOwner,
@@ -49,7 +57,7 @@ fn extension(
         document,
         owner,
         journal,
-        &Default::default(),
+        &tight_limits(),
         &Default::default(),
         values,
     )
@@ -966,9 +974,9 @@ fn loop_default_host_allows_one_to_two_round_extension() {
 }
 
 #[test]
-fn loop_default_host_rejects_third_round_before_saving_and_can_accept() {
+fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
     let document = fixture("exhaust");
-    let limits = crate::config::GraphLimits::default();
+    let limits = tight_limits();
     let mut journal = MemoryJournal::default();
     let paused = advance_with_budget(
         &document,
@@ -1008,7 +1016,7 @@ fn loop_default_host_rejects_third_round_before_saving_and_can_accept() {
 }
 
 #[test]
-fn loop_inbox_extension_respects_default_ceiling_and_closes_rejected_ask() {
+fn loop_inbox_extension_respects_host_ceiling_and_closes_rejected_ask() {
     let mut document = fixture("exhaust");
     document.nodes[0]
         .loop_body
@@ -1020,7 +1028,7 @@ fn loop_inbox_extension_respects_default_ceiling_and_closes_rejected_ask() {
         response: Ok(Some(LoopDecision::Extend { rounds: 1 })),
         closed: vec![],
     };
-    let limits = crate::config::GraphLimits::default();
+    let limits = tight_limits();
     let mut journal = MemoryJournal::default();
     let paused = advance_with_budget(
         &document,

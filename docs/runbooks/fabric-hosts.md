@@ -319,11 +319,12 @@ negative `until` verdict starts the next round.
 
 Configure host limits for the full expansion before running. This example
 requires seven nodes and a dependency depth of six. The default host depth
-limit is four, so start with six for two rounds:
+limit is 32, which covers two rounds. Composite nesting counts against the
+same limit. To allow many more rounds, raise it:
 
 ```toml
 [domains.fabric.graph.limits]
-expansion_depth = 6
+expansion_depth = 64
 ```
 
 Preset and graph `read_roots` must lie inside the project or its linked
@@ -345,8 +346,8 @@ node includes `round` metadata and its typed outputs. Passing the gate skips
 future rounds and lets dependants of `repair-review` continue. After two
 negative rounds the graph reports `paused` with an exhaustion reason.
 
-To allow two more rounds, first raise the host's `expansion_depth` to 12.
-Keep the graph document unchanged and set the total allowance to four:
+To allow two more rounds, keep the graph document unchanged and set the
+total allowance to four. The extension must fit the host limits:
 
 ```sh
 provenant fabric graph resume --document graph.json \
@@ -475,7 +476,7 @@ wall_time_seconds = 7200
 Limits also include `routes_per_node`, `node_prompt_bytes`,
 `graph_prompt_bytes`, `expansion_depth`, `fan_out_width`, `continuations` and `concurrency`.
 The defaults are 16 routes, 256 KiB per node prompt, 4 MiB per graph,
-expansion depth 4 and fan-out 32. Set concurrency to 0 to use host lane caps.
+expansion depth 32 and fan-out 32. Set concurrency to 0 to use host lane caps.
 Fan-out counts direct dependants of a node; expansion depth is the longest
 dependency chain in edges, with root nodes at depth 0.
 Budget fields are optional; unset fields have no budget. Costs are in US dollars.

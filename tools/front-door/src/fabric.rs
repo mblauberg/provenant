@@ -4604,12 +4604,9 @@ impl Factory {
                 )
                 .map_err(graph_journal_error)?;
                 let admitted = checkpoint.is_some();
-                let expanded =
-                    document
-                        .expanded()
-                        .map_err(|reason| FacadeError::DispatchRefused {
-                            reason: reason.into(),
-                        })?;
+                let expanded = document
+                    .expanded(&self.context.config.graph.limits)
+                    .map_err(|reason| FacadeError::DispatchRefused { reason })?;
                 for node in &expanded.nodes {
                     if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
                         &node.delivery

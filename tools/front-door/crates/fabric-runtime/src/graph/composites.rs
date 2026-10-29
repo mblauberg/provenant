@@ -9,19 +9,13 @@ pub struct CompositeSpec {
     pub exports: Vec<GraphInput>,
 }
 
-/// Structural guards used when the document states no limit of its own. The
-/// host ceiling is enforced afterwards against the resolved limits.
-pub(super) const DEFAULT_COMPOSITE_DEPTH: usize = 8;
-pub(super) const DEFAULT_COMPOSITE_NODES: usize = 512;
-
-fn bounds(_document: &GraphDocument) -> (usize, usize) {
-    (DEFAULT_COMPOSITE_DEPTH, DEFAULT_COMPOSITE_NODES)
-}
-
 /// Expand only at the execution boundary. The submitted document remains nested.
-pub(super) fn expand(document: &GraphDocument) -> Result<GraphDocument, &'static str> {
+pub(super) fn expand(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
+) -> Result<GraphDocument, String> {
     let mut expanded = document.clone();
-    let (max_depth, max_nodes) = bounds(document);
+    let (max_depth, max_nodes) = (limits.expansion_depth, limits.nodes);
     expanded.nodes = children(
         &document.nodes,
         "",
@@ -36,7 +30,7 @@ pub(super) fn expand(document: &GraphDocument) -> Result<GraphDocument, &'static
     if expanded.nodes.iter().any(|node| node.composite.is_some())
         && expanded.nodes.len() > max_nodes
     {
-        return Err("composite expansion exceeds 512 nodes");
+        return Err(format!("composite expansion exceeds {max_nodes} nodes"));
     }
     Ok(expanded)
 }
@@ -81,13 +75,13 @@ fn children(
     depth: usize,
     max_depth: usize,
     max_nodes: usize,
-) -> Result<Vec<GraphNode>, &'static str> {
+) -> Result<Vec<GraphNode>, String> {
     if depth > max_depth {
-        return Err("composite expansion depth exceeds the limit");
+        return Err("composite expansion depth exceeds the limit".into());
     }
     let locals: BTreeSet<_> = nodes.iter().map(|node| node.id.as_str()).collect();
     if locals.len() != nodes.len() {
-        return Err("node id");
+        return Err("node id".into());
     }
     let composite_bound = depth > 0 || nodes.iter().any(|node| node.composite.is_some());
     let mut expanded = Vec::new();
@@ -95,7 +89,7 @@ fn children(
         let mut node = original.clone();
         node.id = scoped(prefix, &node.id);
         if !valid_identifier(&node.id) {
-            return Err("expanded composite node id exceeds 64 bytes");
+            return Err("expanded composite node id exceeds 64 bytes".into());
         }
         for parent in &mut node.depends_on {
             *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
@@ -153,14 +147,14 @@ fn children(
         if let Some(spec) = &mut node.loop_body {
             for child in &spec.body {
                 if child.id.starts_with("previous.") {
-                    return Err("previous. is reserved for prior round inputs");
+                    return Err("previous. is reserved for prior round inputs".into());
                 }
                 if child.loop_body.is_some()
                     || child.kind == Some(NodeKind::Loop)
                     || child.on_fail.is_some()
                     || child.delivery.is_some()
                 {
-                    return Err("loop body cannot nest loops or deliver or route on_fail");
+                    return Err("loop body cannot nest loops or deliver or route on_fail".into());
                 }
             }
             spec.body = children(
@@ -176,7 +170,7 @@ fn children(
             )?;
         }
         if (node.kind == Some(NodeKind::Composite)) != node.composite.is_some() {
-            return Err("composite requires nodes and exports");
+            return Err("composite requires nodes and exports".into());
         }
         if let Some(spec) = node.composite.take() {
             if spec.nodes.is_empty()
@@ -194,7 +188,7 @@ fn children(
                 || !node.write_scope.is_empty()
                 || !node.acceptance_checks.is_empty()
             {
-                return Err("composite cannot carry agent configuration");
+                return Err("composite cannot carry agent configuration".into());
             }
             let member_ids: BTreeSet<_> =
                 spec.nodes.iter().map(|child| child.id.as_str()).collect();
@@ -205,12 +199,12 @@ fn children(
                     || export.outputs.is_empty()
                     || !selected.insert(&export.node)
                 {
-                    return Err("composite export must select a unique direct child");
+                    return Err("composite export must select a unique direct child".into());
                 }
                 let mut kinds = Vec::new();
                 for kind in &export.outputs {
                     if kinds.contains(kind) {
-                        return Err("duplicate composite export output");
+                        return Err("duplicate composite export output".into());
                     }
                     kinds.push(*kind);
                     if matches!(
@@ -218,7 +212,7 @@ fn children(
                         OutputKind::Verdict | OutputKind::Branch | OutputKind::Commit
                     ) {
                         if scalar.contains(kind) {
-                            return Err("composite scalar output has multiple sources");
+                            return Err("composite scalar output has multiple sources".into());
                         }
                         scalar.push(*kind);
                     }
@@ -259,7 +253,7 @@ fn children(
         }
         expanded.push(node);
         if composite_bound && expanded.len() > max_nodes {
-            return Err("composite expansion exceeds 512 nodes");
+            return Err(format!("composite expansion exceeds {max_nodes} nodes"));
         }
     }
     Ok(expanded)
@@ -344,7 +338,7 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     let spec = node
         .composite
         .as_ref()
-        .ok_or(GraphError::Invalid("composite boundary"))?;
+        .ok_or(GraphError::Invalid("composite boundary".into()))?;
     let state = state(node, plan, checkpoint, positions);
     let exported = (state == NodeState::Succeeded).then(|| outputs(spec, checkpoint, positions));
     let progress = &mut checkpoint.nodes[index];

@@ -28,6 +28,12 @@
       "effect": "Cap on the wall-clock runtime of any lane on this provider. A dispatch's own --provider-timeout applies when it is shorter. At the deadline the provider is stopped and the attempt settles as timed_out, whatever the host did meanwhile, including sleeping."
     }
   },
+  "host_graph_settings": {
+    "path": "domains.fabric.graph",
+    "settings": {
+      "limits.expansion_depth": {"type": "int", "allowed": "1 or more", "default": "32", "effect": "Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 29. Graph documents cannot raise it."}
+    }
+  },
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {

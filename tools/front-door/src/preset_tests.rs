@@ -196,9 +196,7 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
-        // Composed batches need a host that raises the depth limit; documents cannot.
-        let mut limits = config.limits.clone();
-        limits.expansion_depth = 64;
+        let limits = config.limits.clone();
         let inspection = document
             .inspect(&limits)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -307,9 +305,7 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
-        // Composed batches need a host that raises the depth limit; documents cannot.
-        let mut limits = config.limits.clone();
-        limits.expansion_depth = 64;
+        let limits = config.limits.clone();
         let mut owner = PresetOwner::default();
         let mut journal = PresetJournal::default();
         let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &config.budget)

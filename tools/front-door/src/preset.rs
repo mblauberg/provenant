@@ -1856,7 +1856,7 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
         let document: provenant_fabric_runtime::graph::GraphDocument =
             serde_json::from_value(expansion.document.clone()).map_err(|e| e.to_string())?;
         let limits = config.domains.fabric.graph.limits.clone();
-        let inspection = document.inspect(&limits).map_err(str::to_owned);
+        let inspection = document.inspect(&limits);
         Ok((limits, inspection))
     })();
     let (limits, metrics, validation_error) = match inspection {

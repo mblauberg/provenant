@@ -79,8 +79,12 @@ fn allowance(node: &GraphNode, extensions: &[String]) -> usize {
         )
 }
 
-pub(super) fn validate_extension(document: &GraphDocument, extension: &str) -> Result<(), String> {
-    let flattened = composites::expand(document).map_err(str::to_owned)?;
+pub(super) fn validate_extension(
+    document: &GraphDocument,
+    extension: &str,
+    limits: &crate::config::GraphLimits,
+) -> Result<(), String> {
+    let flattened = composites::expand(document, limits)?;
     let document = &flattened;
     let (key, value) = extension.split_once('=').ok_or("expected KEY=VALUE")?;
     let key = key.strip_prefix("loop.").ok_or("invalid loop extension")?;
@@ -101,9 +105,10 @@ pub(super) fn validate_resume_extension(
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
     extension: &str,
+    limits: &crate::config::GraphLimits,
 ) -> Result<(), String> {
-    validate_extension(document, extension)?;
-    let flattened = composites::expand(document).map_err(str::to_owned)?;
+    validate_extension(document, extension, limits)?;
+    let flattened = composites::expand(document, limits)?;
     let document = &flattened;
     if checkpoint.extensions.iter().any(|saved| saved == extension) {
         return Ok(());
@@ -168,9 +173,16 @@ pub(super) fn validate_resume_extension(
 pub(super) fn expand(
     document: &GraphDocument,
     extensions: &[String],
+    limits: &crate::config::GraphLimits,
+) -> Result<GraphDocument, String> {
+    let flattened = composites::expand(document, limits)?;
+    Ok(expand_loops(&flattened, extensions)?)
+}
+
+fn expand_loops(
+    document: &GraphDocument,
+    extensions: &[String],
 ) -> Result<GraphDocument, &'static str> {
-    let flattened = composites::expand(document)?;
-    let document = &flattened;
     let declared: std::collections::BTreeSet<_> = document.nodes.iter().map(|n| &n.id).collect();
     if document
         .nodes
@@ -736,7 +748,7 @@ pub(super) fn prepare_decision_extension(
     extension: &str,
     limits: &crate::config::GraphLimits,
 ) -> Result<(), String> {
-    validate_resume_extension(document, checkpoint, extension)?;
+    validate_resume_extension(document, checkpoint, extension, limits)?;
     if extension
         .split_once('=')
         .is_some_and(|(key, _)| key.ends_with(".decision"))
@@ -745,8 +757,7 @@ pub(super) fn prepare_decision_extension(
     }
     let mut extensions = checkpoint.extensions.clone();
     extensions.push(extension.to_owned());
-    let expanded =
-        plans::expand(document, &extensions, &checkpoint.expansions).map_err(str::to_owned)?;
+    let expanded = plans::expand(document, &extensions, &checkpoint.expansions, limits)?;
     let (plan, _) = validate_flat_plan(&expanded, limits).map_err(str::to_owned)?;
     if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
         return Err(reason);

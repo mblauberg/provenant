@@ -34,7 +34,7 @@ edges = 4096
 routes_per_node = 16
 node_prompt_bytes = 262144
 graph_prompt_bytes = 4194304
-expansion_depth = 4
+expansion_depth = 32
 fan_out_width = 32
 concurrency = 0 # 0 uses host lane caps
 

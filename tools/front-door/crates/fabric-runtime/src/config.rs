@@ -89,7 +89,7 @@ impl Default for GraphLimits {
             routes_per_node: 16,
             node_prompt_bytes: 256 * 1024,
             graph_prompt_bytes: 4 * 1024 * 1024,
-            expansion_depth: 4,
+            expansion_depth: 32,
             fan_out_width: 32,
             concurrency: None,
         }
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
-        assert_eq!(config.graph.limits.expansion_depth, 4);
+        assert_eq!(config.graph.limits.expansion_depth, 32);
         assert_eq!(config.graph.limits.nodes, 512);
         assert_eq!(config.graph.limits.continuations, 2);
         config.graph.limits.continuations = 0;

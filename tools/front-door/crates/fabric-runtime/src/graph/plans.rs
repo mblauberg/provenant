@@ -139,15 +139,16 @@ pub(super) fn expand(
     document: &GraphDocument,
     extensions: &[String],
     expansions: &[Expansion],
-) -> Result<GraphDocument, &'static str> {
-    let mut expanded = loops::expand(document, extensions)?;
+    limits: &crate::config::GraphLimits,
+) -> Result<GraphDocument, String> {
+    let mut expanded = loops::expand(document, extensions, limits)?;
     let mut sources = std::collections::BTreeSet::new();
     for addition in expansions {
         if addition.nodes.is_empty()
             || !sources.insert(&addition.source)
             || !expanded.nodes.iter().any(|n| n.id == addition.source)
         {
-            return Err("invalid expansion source");
+            return Err("invalid expansion source".into());
         }
         append(&mut expanded, addition);
     }
