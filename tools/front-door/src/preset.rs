@@ -1,3 +1,4 @@
+use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1621,57 +1622,19 @@ fn visit_nodes(
     Ok(())
 }
 
-/// Directories a graph node may read: the project's primary checkout and
-/// registered worktrees, plus the host's explicit allow-list.
-#[derive(Default)]
-pub(crate) struct ReadRoots {
-    project: Vec<std::path::PathBuf>,
-    allowed: Vec<std::path::PathBuf>,
-}
-
-impl ReadRoots {
-    pub(crate) fn new(project: Vec<std::path::PathBuf>, allowed: &[String]) -> Self {
-        let canonical = |path: &std::path::PathBuf| std::fs::canonicalize(path).ok();
-        Self {
-            project: project.iter().filter_map(canonical).collect(),
-            allowed: allowed
-                .iter()
-                .filter_map(|root| canonical(&root.into()))
-                .collect(),
-        }
-    }
-
-    pub(crate) fn discover(directory: &Path, allowed: &[String]) -> Result<Self, String> {
-        // Outside a repository the project is only its own directory.
-        let project = crate::handoff::git_text(directory, &["worktree", "list", "--porcelain"])
-            .map(|listing| {
-                listing
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("worktree "))
-                    .map(std::path::PathBuf::from)
-                    .collect()
-            })
-            .unwrap_or_else(|_| vec![directory.to_path_buf()]);
-        Ok(Self::new(project, allowed))
-    }
-
-    /// Resolve symlinks and `..` before comparing, and return the canonical path.
-    pub(crate) fn confine(&self, path: &Path) -> Result<std::path::PathBuf, String> {
-        let canonical = std::fs::canonicalize(path)
-            .map_err(|e| format!("read root {}: {e}", path.display()))?;
-        if self
-            .project
-            .iter()
-            .chain(&self.allowed)
-            .any(|root| canonical.starts_with(root))
-        {
-            return Ok(canonical);
-        }
-        Err(format!(
-            "read root {} is outside this project's registered worktrees; add it to [domains.fabric.graph] allowed_read_roots to permit it",
-            canonical.display()
-        ))
-    }
+/// The project's primary checkout and registered worktrees, which a graph node
+/// may always read. Outside a repository the project is only its own directory.
+fn discover_read_roots(directory: &Path, allowed: &[String]) -> ReadRoots {
+    let project = crate::handoff::git_text(directory, &["worktree", "list", "--porcelain"])
+        .map(|listing| {
+            listing
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(std::path::PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_else(|_| vec![directory.to_path_buf()]);
+    ReadRoots::new(project, allowed)
 }
 
 /// Bind CLI context before hashing, explaining or retaining the executed graph.
@@ -2026,7 +1989,7 @@ pub fn run(
         layers.shape = Some(hint);
         let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
         let policy =
-            ReadRoots::discover(&directory, &config.domains.fabric.graph.allowed_read_roots)?;
+            discover_read_roots(&directory, &config.domains.fabric.graph.allowed_read_roots);
         bind_run_context(&mut expansion, &request, &directory, &policy)?;
         Ok(expansion)
     })();
