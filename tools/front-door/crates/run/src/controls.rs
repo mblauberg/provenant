@@ -2454,10 +2454,8 @@ mod tests {
         let Reconciled::Uncertain { reason } = found else {
             unreachable!()
         };
-        assert!(matches!(
-            reason,
-            UncertainReason::WriterCustodyUnconfirmed { .. }
-        ));
+        // The display text is the operator's recovery guidance.
+        assert!(reason.to_string().contains("chair recovery required"));
         let unit = serde_json::to_value(UncertainReason::GuardianNotObservable).unwrap();
         assert_eq!(
             unit,
