@@ -993,6 +993,15 @@ fn apply_install(
             }
             combined.findings.extend(inspection.findings);
         }
+        // The plan and the final inspection can name the same finding.
+        let mut seen = std::collections::BTreeSet::new();
+        combined.findings.retain(|finding| {
+            seen.insert((
+                finding.rule.clone(),
+                finding.path.to_path_buf().ok(),
+                finding.detail.clone(),
+            ))
+        });
         Ok(combined)
     })();
     // The release is installed first; the agent then serves the new binary.
@@ -1164,7 +1173,7 @@ fn prune_orphans(globals: &cli::Globals) -> Result<Vec<String>, String> {
         let mut reporter = PreviewReporter {
             home: Some(targets.home.clone()),
         };
-        cli::install::execute_uninstall(
+        let outcome = cli::install::execute_uninstall(
             &cli::Uninstall {
                 harness: vec![record.harness],
             },
@@ -1173,7 +1182,12 @@ fn prune_orphans(globals: &cli::Globals) -> Result<Vec<String>, String> {
             &mut reporter,
         )
         .map_err(|e| e.to_string())?;
-        pruned.push(directory.display().to_string());
+        pruned.push(format!(
+            "{} ({} changes, {} findings)",
+            directory.display(),
+            outcome.actions.len(),
+            outcome.findings.len()
+        ));
     }
     Ok(pruned)
 }

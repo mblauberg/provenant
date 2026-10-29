@@ -520,3 +520,32 @@ fn a_failed_write_mid_sync_reports_exactly_what_completed() {
     assert_eq!(recovery.actions().len(), 1);
     assert_eq!(recovery.actions()[0].selector, "receipt");
 }
+
+#[test]
+fn a_finding_belongs_to_the_account_with_the_longest_matching_directory() {
+    let mut f = Fixture::new();
+    let outer = account(&f, "outer");
+    let inner = AccountHome {
+        harness: Harness::Claude,
+        label: "inner".into(),
+        home: outer.home.join("nested"),
+    };
+    fs::create_dir_all(&inner.home).unwrap();
+    f.targets.accounts = vec![outer.clone(), inner.clone()];
+    // Neither is installed: each is unsynced, and only its own.
+    let statuses = crate::inspect_accounts(&f.targets).unwrap();
+    assert!(statuses.iter().all(|status| status.findings.is_empty()));
+    let claude = default_claude(&f);
+    apply(&mut f, Harness::Claude, &claude, Some(true));
+    apply(&mut f, Harness::Claude, &inner.home, None);
+    fs::remove_file(inner.home.join("skills/example")).unwrap();
+    let statuses = crate::inspect_accounts(&f.targets).unwrap();
+    let by_label = |label: &str| statuses.iter().find(|s| s.label == label).unwrap();
+    assert!(!by_label("inner").findings.is_empty());
+    assert!(
+        by_label("outer")
+            .findings
+            .iter()
+            .all(|finding| { !finding.path.to_path_buf().unwrap().starts_with(&inner.home) })
+    );
+}

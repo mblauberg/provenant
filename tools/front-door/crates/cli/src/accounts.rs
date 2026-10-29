@@ -572,4 +572,29 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn registered_directories_are_canonical_and_counted_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let real = temp.path().canonicalize()?.join(".claude-work");
+        std::fs::create_dir(&real)?;
+        let link = temp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &link)?;
+        let mut settings = Settings::default();
+        for (id, label, directory) in [
+            ("a", "work", real.clone()),
+            ("b", "again", link),
+            ("c", "dotted", real.join("..").join(".claude-work")),
+        ] {
+            settings.entries.insert(
+                id.into(),
+                registration("claude", label, &directory.to_string_lossy()),
+            );
+        }
+        let homes = homes(&settings);
+        assert_eq!(homes.len(), 1, "{homes:?}");
+        assert_eq!(homes[0].home, real);
+        Ok(())
+    }
 }
