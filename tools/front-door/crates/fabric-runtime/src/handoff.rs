@@ -99,6 +99,21 @@ pub enum HandoffError {
     AttachmentSize,
 }
 
+impl HandoffError {
+    /// Stable identifier independent of the displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Account => "account",
+            Self::Model => "model",
+            Self::Branches => "branches",
+            Self::AttachmentName(_) => "attachment_name",
+            Self::AttachmentEncoding(_) => "attachment_encoding",
+            Self::AttachmentSize => "attachment_size",
+        }
+    }
+}
+
 fn label(text: &str, limit: usize, extra: &[u8]) -> bool {
     !text.is_empty()
         && text.len() <= limit

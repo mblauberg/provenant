@@ -390,19 +390,7 @@ fn resets_in(message: &str) -> Option<u64> {
         .trim_end()
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    let mut rest = lower[lower.rfind(MARKER)? + MARKER.len()..].trim_start();
-    let mut total = 0_u64;
-    while !rest.is_empty() {
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        let scale = match rest.as_bytes().get(digits).filter(|_| digits > 0)? {
-            b'd' => 86_400,
-            b'h' => 3_600,
-            b'm' => 60,
-            b's' => 1,
-            _ => return None,
-        };
-        total = total.checked_add(rest[..digits].parse::<u64>().ok()?.checked_mul(scale)?)?;
-        rest = rest[digits + 1..].trim_start();
-    }
+    let rest = lower[lower.rfind(MARKER)? + MARKER.len()..].trim_start();
+    let total = crate::duration::suffix_seconds(rest)?;
     (1..=7 * 86_400).contains(&total).then_some(total)
 }

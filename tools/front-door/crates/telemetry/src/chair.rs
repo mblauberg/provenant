@@ -2,7 +2,7 @@
 //! transcript. The SessionStart hook only learns which account a session runs
 //! under; tokens exist once the session has run, so the report reads them.
 //! Only assistant message IDs, models and usage counts are kept.
-use crate::usage::ChairSession;
+use crate::{claude::Raw, usage::ChairSession};
 use provenant_records::Usage;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -52,39 +52,6 @@ struct Message {
     model: Option<String>,
     usage: Option<Raw>,
 }
-#[derive(Clone, Default, Deserialize)]
-struct Raw {
-    input_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-    cache_creation: Option<Split>,
-    output_tokens: Option<u64>,
-}
-#[derive(Clone, Default, Deserialize)]
-struct Split {
-    ephemeral_1h_input_tokens: Option<u64>,
-}
-impl Raw {
-    /// A message repeats as it streams; the largest count of each field is its
-    /// final one.
-    fn merge(&mut self, other: Self) {
-        let max = |a: Option<u64>, b: Option<u64>| a.max(b);
-        self.input_tokens = max(self.input_tokens, other.input_tokens);
-        self.cache_read_input_tokens =
-            max(self.cache_read_input_tokens, other.cache_read_input_tokens);
-        self.cache_creation_input_tokens = max(
-            self.cache_creation_input_tokens,
-            other.cache_creation_input_tokens,
-        );
-        self.output_tokens = max(self.output_tokens, other.output_tokens);
-        let one_hour = |raw: &Self| raw.cache_creation.as_ref()?.ephemeral_1h_input_tokens;
-        let merged = max(one_hour(self), one_hour(&other));
-        self.cache_creation = merged.map(|n| Split {
-            ephemeral_1h_input_tokens: Some(n),
-        });
-    }
-}
-
 #[derive(Default)]
 struct Tally {
     messages: BTreeMap<String, (String, Raw)>,

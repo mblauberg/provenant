@@ -481,3 +481,57 @@ fn summary_update_carries_a_validated_operation_id() {
     let call = ToolCall::parse("fabric_chair", value);
     assert!(call.is_err() || call.unwrap().operation_id().is_none());
 }
+
+#[test]
+fn control_ops_are_strict_local_mutations_with_bounded_text() {
+    let steer = json!({"op":"steer","attempt":"00000000000000000000000000000001",
+        "text":"slow down","operation_id":"steer-retry-1"});
+    let call = ToolCall::parse("fabric_inbox", steer.clone()).unwrap();
+    assert!(call.is_mutation());
+    assert_eq!(call.operation_id().unwrap().as_str(), "steer-retry-1");
+    let message = json!({"op":"chair_message","session":"chair-a","text":"look at CI",
+        "channel":"console"});
+    assert!(
+        ToolCall::parse("fabric_inbox", message.clone())
+            .unwrap()
+            .is_mutation()
+    );
+    for base in [steer, message] {
+        let mut host = base.clone();
+        host["host"] = json!("peer");
+        assert!(ToolCall::parse("fabric_inbox", host).is_err());
+        let mut forged = base.clone();
+        forged["actor"] = json!("00000000000000000000000000000002");
+        assert!(ToolCall::parse("fabric_inbox", forged).is_err());
+        let mut long = base.clone();
+        long["text"] = json!("x".repeat(provenant_records::control::CONTROL_TEXT_BYTES + 1));
+        assert!(ToolCall::parse("fabric_inbox", long).is_err());
+        let mut blank = base;
+        blank["text"] = json!("");
+        assert!(ToolCall::parse("fabric_inbox", blank).is_err());
+    }
+}
+
+#[test]
+fn coordination_store_errors_include_safe_context() {
+    use provenant_fabric_store::Error;
+    let invalid = ServiceError::Coordination(CoordinationError::Store(Error::Invalid("through")));
+    assert_eq!(invalid.structured_error()["field"], "through");
+    let io = ServiceError::Coordination(CoordinationError::Store(Error::Io {
+        path: "/state/inbox.db".into(),
+        source: std::io::Error::other("private"),
+    }));
+    let detail = io.structured_error();
+    assert_eq!(detail["path"], "/state/inbox.db");
+    assert!(!detail.to_string().contains("private"));
+}
+
+#[test]
+fn continuation_conflict_includes_current_generation() {
+    let error = ServiceError::Facade(FacadeError::GenerationConflict {
+        current_generation: 1,
+    });
+    let detail = error.structured_error();
+    assert_eq!(detail["code"], "conflict");
+    assert_eq!(detail["current_generation"], 1);
+}

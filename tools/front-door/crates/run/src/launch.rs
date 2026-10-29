@@ -111,9 +111,17 @@ pub struct PreparedLaunch {
     pub confinement: Option<crate::LaunchConfinement>,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum WriteGrantError {
+    #[error("invalid write grant path")]
+    InvalidPath,
+    #[error("write grants exceed 1,024 entries or 256 KiB")]
+    Limit,
+}
+
 fn applied_write_grants(
     plan: &PreparedLaunch,
-) -> std::result::Result<admission::AppliedWriteGrants, String> {
+) -> std::result::Result<admission::AppliedWriteGrants, WriteGrantError> {
     let Some(confinement) = &plan.confinement else {
         return Ok(admission::AppliedWriteGrants::default());
     };
@@ -125,13 +133,13 @@ fn applied_write_grants(
                 extra: Default::default(),
                 source: grant.source,
                 path: provenant_records::AbsolutePath::new(&grant.path)
-                    .map_err(|_| "invalid write grant path".to_owned())?,
+                    .map_err(|_| WriteGrantError::InvalidPath)?,
                 scope: grant.scope,
             })
         })
-        .collect::<std::result::Result<Vec<_>, String>>()?;
+        .collect::<std::result::Result<Vec<_>, WriteGrantError>>()?;
     if !crate::reader::write_grants_fit(&grants) {
-        return Err("write grants exceed 1,024 entries or 256 KiB".to_owned());
+        return Err(WriteGrantError::Limit);
     }
     let git_grants_digest = match &permissions.mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => None,
@@ -288,7 +296,11 @@ impl RunStore {
         let plan = providers
             .check_policy(task)
             .and_then(|()| providers.prepare(task, &prompt, &paths, None))
-            .and_then(|plan| applied_write_grants(&plan).map(|_| plan))
+            .and_then(|plan| {
+                applied_write_grants(&plan)
+                    .map(|_| plan)
+                    .map_err(|error| error.to_string())
+            })
             .map_err(|message| RunError::Input {
                 kind: ErrorKind::ContinuationUnsupported,
                 message: format!("fresh fallback refused before admission: {message}"),
@@ -393,6 +405,11 @@ pub enum RefusalKind {
     Policy,
     Preparation,
     WorktreeBusy,
+    PriorityUnavailable,
+    StoredPromptUnreadable,
+    InvalidWriteGrantPath,
+    WriteGrantsLimit,
+    Handoff,
 }
 
 /// A child's network reach may not exceed its parent's, each write root must
@@ -1043,7 +1060,7 @@ impl RunStore {
                     started.push(Started::Refused {
                         attempt: id,
                         reason,
-                        kind: RefusalKind::Preparation,
+                        kind: RefusalKind::StoredPromptUnreadable,
                     });
                     continue;
                 }
@@ -1081,7 +1098,7 @@ impl RunStore {
             };
             let prepared = providers
                 .priority(task)
-                .map_err(|reason| (RefusalKind::Preparation, reason))
+                .map_err(|reason| (RefusalKind::PriorityUnavailable, reason))
                 .and_then(|priority| {
                     providers
                         .check_policy(task)
@@ -1146,7 +1163,12 @@ impl RunStore {
             let write_grants = applied_write_grants(&plan);
             let write_grants = match write_grants {
                 Ok(grants) => grants,
-                Err(reason) => {
+                Err(error) => {
+                    let kind = match error {
+                        WriteGrantError::InvalidPath => RefusalKind::InvalidWriteGrantPath,
+                        WriteGrantError::Limit => RefusalKind::WriteGrantsLimit,
+                    };
+                    let reason = error.to_string();
                     match self.withdraw(
                         id,
                         AttemptState::Queued {
@@ -1167,7 +1189,7 @@ impl RunStore {
                     started.push(Started::Refused {
                         attempt: id,
                         reason,
-                        kind: RefusalKind::Preparation,
+                        kind,
                     });
                     continue;
                 }
@@ -1216,7 +1238,7 @@ impl RunStore {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
                             HandOff::Local(error) => (
                                 format!("launch preparation failed: {error}"),
-                                RefusalKind::Preparation,
+                                RefusalKind::Handoff,
                             ),
                             _ => unreachable!(),
                         };

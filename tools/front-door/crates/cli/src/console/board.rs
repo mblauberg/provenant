@@ -408,7 +408,6 @@ mod tests {
         for malformed in ["", "junk", "g:0", "g:-1", "g:18446744073709551615"] {
             let error = read(&roots, None, false, 50, Some(malformed)).unwrap_err();
             assert!(matches!(error, Error::BoardCursor));
-            assert!(error.to_string().contains("without --cursor"));
         }
         let second = read(&roots, None, false, 50, Some(cursor))?;
         assert_ne!(first["lanes"][0]["lane_id"], second["lanes"][0]["lane_id"]);

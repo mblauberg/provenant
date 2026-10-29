@@ -10,6 +10,33 @@ fn recording(name: &str) -> Result<Vec<u8>> {
     )?)
 }
 #[test]
+fn config_advisories_are_silent_in_pre_tool_hooks() -> Result {
+    let rig = TestRig::new()?;
+    fs::create_dir_all(&rig.state)?;
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.routing]\npacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n[domains.routing.model_policy.defaults.result]\nfallback='codex/not-catalogued'\n",
+    )?;
+    let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
+    input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
+    let state = rig.state.to_str().ok_or("state path")?;
+    for _ in 0..2 {
+        let output = rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["--state-dir", state, "hook", "claude", "pre-tool-use"],
+            Some(&serde_json::to_vec(&input)?),
+        )?;
+        assert_eq!(code(&output), 0);
+        assert!(
+            output.stderr.bytes.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn recorded_claude_events_use_native_protocol_and_never_touch_legacy_state() -> Result {
     let mut rig = TestRig::new()?;
     // Exercise the lane's pinned Git and private temporary directory too.

@@ -18,6 +18,7 @@ pub const PROTOCOL: u64 = 6;
 pub const CONSOLE_PROTOCOL: u64 = 7;
 pub const INBOX_PROTOCOL: u64 = 8;
 pub const DOCTOR_PROTOCOL: u64 = 9;
+pub const CONSOLE_DETAIL_PROTOCOL: u64 = 10;
 pub const MAX_FRAME: usize = 1_048_576;
 
 pub fn discover_ssh_executable(
@@ -347,6 +348,11 @@ pub enum PeerAction {
         detail: bool,
         selected: bool,
     },
+    ConsoleDetail {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        id: String,
+    },
     RunStatuses {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
@@ -444,7 +450,9 @@ impl PeerRequest {
         let mut request = Self {
             extra: Default::default(),
             version: 1,
-            protocol: if matches!(action, PeerAction::Inbox { .. }) {
+            protocol: if matches!(action, PeerAction::ConsoleDetail { .. }) {
+                CONSOLE_DETAIL_PROTOCOL
+            } else if matches!(action, PeerAction::Inbox { .. }) {
                 INBOX_PROTOCOL
             } else if matches!(
                 action,
@@ -629,6 +637,13 @@ pub struct PeerResultError {
     pub extra: provenant_records::ExtraFields,
 }
 
+impl PeerResultError {
+    /// Preserve the refusal code supplied by the peer.
+    pub fn code(&self) -> &'static str {
+        self.error.code()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PeerResponse<R = PeerResult> {
     #[serde(flatten)]
@@ -652,7 +667,9 @@ pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError>
         request.action["action"].as_str(),
         Some("console_board" | "console_tree")
     );
-    let expected = if request.action["action"] == "inbox" {
+    let expected = if request.action["action"] == "console_detail" {
+        CONSOLE_DETAIL_PROTOCOL
+    } else if request.action["action"] == "inbox" {
         INBOX_PROTOCOL
     } else if console {
         CONSOLE_PROTOCOL
@@ -881,6 +898,7 @@ impl SshTransport<'_> {
                     request.action,
                     PeerAction::ConsoleBoard { .. }
                         | PeerAction::ConsoleTree { .. }
+                        | PeerAction::ConsoleDetail { .. }
                         | PeerAction::Inbox { .. }
                         | PeerAction::Doctor { .. }
                 ) && stderr_has_line(
@@ -908,6 +926,7 @@ impl SshTransport<'_> {
                         request.action,
                         PeerAction::ConsoleBoard { .. }
                             | PeerAction::ConsoleTree { .. }
+                            | PeerAction::ConsoleDetail { .. }
                             | PeerAction::Inbox { .. }
                             | PeerAction::Doctor { .. }
                     )
@@ -1146,6 +1165,7 @@ mod tests {
             peers: Default::default(),
             graph: Default::default(),
             lanes: Default::default(),
+            pipelines: Default::default(),
             limits: crate::config::Limits {
                 body_bytes: 65536,
                 input_frame_bytes: 1048576,
@@ -1617,6 +1637,45 @@ mod tests {
                 ..
             }
         ));
+    }
+    #[test]
+    fn console_detail_uses_its_own_protocol() {
+        let host = HostId::from_bytes([2; 16]);
+        let project = ProjectLocator {
+            extra: Default::default(),
+            key: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        let request = PeerRequest::new(
+            host,
+            HostId::from_bytes([1; 16]),
+            "chair".into(),
+            project,
+            PeerAction::ConsoleDetail {
+                extra: Default::default(),
+                id: "attempt".into(),
+            },
+        );
+        assert_eq!(request.protocol, CONSOLE_DETAIL_PROTOCOL);
+        assert!(request.operation().is_none());
+        assert!(
+            protocol_refusal(&serde_json::to_vec(&request).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        let mut old = serde_json::to_value(request).unwrap();
+        old["protocol"] = CONSOLE_PROTOCOL.into();
+        assert_eq!(
+            protocol_refusal(&serde_json::to_vec(&old).unwrap())
+                .unwrap()
+                .unwrap()
+                .protocol,
+            CONSOLE_DETAIL_PROTOCOL
+        );
     }
     #[test]
     fn read_only_failures_name_their_cause_on_the_same_wire_code() {

@@ -22,6 +22,18 @@ pub enum TelemetryError {
     #[error("telemetry arithmetic overflow")]
     Overflow,
 }
+impl TelemetryError {
+    /// Stable machine-readable refusal code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TooLarge(_) => "too_large",
+            Self::InvalidFact(_) => "invalid_fact",
+            Self::InvalidWindow => "invalid_window",
+            Self::InvalidPrice(error) => error.code(),
+            Self::Overflow => "overflow",
+        }
+    }
+}
 pub type Stats = Result<StatsReport, TelemetryError>;
 
 /// Explicit selection supplied by CLI. Bounds are already parsed UTC instants.
@@ -1005,6 +1017,8 @@ pub struct ChairStats {
     pub sessions: u64,
     /// Sessions with no token counts, by reason.
     pub unread: BTreeMap<crate::Unread, u64>,
+    /// False while any session is unread: its tokens are missing from every total.
+    pub complete: bool,
     pub usage: Categories<TokenTotal>,
     pub cache: CacheSummary,
     pub cost: CostTotal,
@@ -1086,14 +1100,21 @@ fn chair_stats(
         });
     }
     let totals = total.finish()?;
+    // An unread session's cost is unknown, so the host total is only a lower bound.
+    let complete = unread.is_empty();
+    let mut cost = totals.cost;
+    if !complete {
+        cost.complete = None;
+    }
     Ok(Some(Chair {
         report: ChairStats {
             scope: "host_chair_sessions",
             sessions: sessions.len() as u64,
             unread,
+            complete,
             usage: totals.usage,
             cache: totals.cache,
-            cost: totals.cost,
+            cost,
             groups: out,
         },
         cache,

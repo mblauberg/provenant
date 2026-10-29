@@ -1,15 +1,9 @@
 //! Account registration at the CLI edge. No credentials enter config or output.
 use clap::{Subcommand, ValueEnum};
 use provenant_core::Roots;
-use provenant_os::{
-    exec::SystemExecutor,
-    fs::{Directory, PublishMode},
-};
+use provenant_os::{exec::SystemExecutor, fs::Directory};
 use provenant_providers::accounts::{Registration, Settings};
-use std::{
-    ffi::OsStr,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 /// Headline window choice; `default` clears a per-account override.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum HeadlineArg {
@@ -151,7 +145,7 @@ pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
 }
 
 pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Settings, String> {
-    let mut settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
         .map_err(|e| e.to_string())?
         .domains
         .accounts;
@@ -166,37 +160,27 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
         if display_name.is_none() && hidden.is_none() && order.is_none() && headline.is_none() {
             return Err("accounts set requires at least one option".into());
         }
-        let root = ensure_state_directory(roots.state.as_path())?;
-        let _lock = root
-            .try_lock(
-                OsStr::new("config.lock"),
-                provenant_os::fs::LockMode::Exclusive,
-            )
-            .map_err(|e| e.to_string())?;
-        settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-            .map_err(|e| e.to_string())?
-            .domains
-            .accounts;
-        let id = resolve(&settings, account)?;
-        let entry = settings.entries.get_mut(&id).ok_or("unknown account")?;
-        if let Some(name) = display_name {
-            let name = name.trim();
-            entry.display_name = (!name.is_empty()).then(|| name.to_owned());
-        }
-        if let Some(hidden) = hidden {
-            entry.hidden = *hidden;
-        }
-        if let Some(order) = order {
-            entry.order = (*order != 0).then_some(*order);
-        }
-        if let Some(headline) = headline {
-            entry.headline = headline.value();
-        }
-        if !provenant_config::DomainConfig::validate(&settings).is_empty() {
-            return Err("invalid account display settings".into());
-        }
-        write_settings(&root, &settings)?;
-        return Ok(settings);
+        return edit_accounts(roots, |mut settings| {
+            let id = resolve(&settings, account)?;
+            let entry = settings.entries.get_mut(&id).ok_or("unknown account")?;
+            if let Some(name) = display_name {
+                let name = name.trim();
+                entry.display_name = (!name.is_empty()).then(|| name.to_owned());
+            }
+            if let Some(hidden) = hidden {
+                entry.hidden = *hidden;
+            }
+            if let Some(order) = order {
+                entry.order = (*order != 0).then_some(*order);
+            }
+            if let Some(headline) = headline {
+                entry.headline = headline.value();
+            }
+            if !provenant_config::DomainConfig::validate(&settings).is_empty() {
+                return Err("invalid account display settings".into());
+            }
+            Ok(settings)
+        });
     }
     if let Accounts::Register {
         label,
@@ -265,44 +249,36 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             settings: Default::default(),
         };
         entry.registered().map_err(|e| e.to_string())?;
-        // The config lock and held parent make the read/edit/replace one operation.
-        let root = ensure_state_directory(roots.state.as_path())?;
-        let _lock = root
-            .try_lock(
-                OsStr::new("config.lock"),
-                provenant_os::fs::LockMode::Exclusive,
-            )
-            .map_err(|e| e.to_string())?;
-        settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-            .map_err(|e| e.to_string())?
-            .domains
-            .accounts;
-        if let Some(previous) = settings
-            .entries
-            .values()
-            .find(|a| a.adapter == *adapter && a.label == *label)
-        {
-            entry.plan = entry.plan.or_else(|| previous.plan.clone());
-            entry.priority = entry.priority.or(previous.priority);
-            entry.billing_anchor = entry
-                .billing_anchor
-                .or_else(|| previous.billing_anchor.clone());
-            entry.limits = previous.limits.clone();
-            entry.plans = previous.plans.clone();
-            entry.directories = previous.directories.clone();
-            entry.display_name = previous.display_name.clone();
-            entry.hidden = previous.hidden;
-            entry.order = previous.order;
-            entry.headline = previous.headline;
-        }
-        settings
-            .entries
-            .retain(|_, a| a.adapter != *adapter || a.label != *label);
-        settings.entries.insert(format!("{adapter}-{label}"), entry);
-        if !provenant_config::DomainConfig::validate(&settings).is_empty() {
-            return Err("conflicting account registration".into());
-        }
-        write_settings(&root, &settings)?;
+        // The config lock and revision check make read/edit/replace one operation.
+        return edit_accounts(roots, |mut settings| {
+            if let Some(previous) = settings
+                .entries
+                .values()
+                .find(|a| a.adapter == *adapter && a.label == *label)
+            {
+                entry.plan = entry.plan.take().or_else(|| previous.plan.clone());
+                entry.priority = entry.priority.or(previous.priority);
+                entry.billing_anchor = entry
+                    .billing_anchor
+                    .take()
+                    .or_else(|| previous.billing_anchor.clone());
+                entry.limits = previous.limits.clone();
+                entry.plans = previous.plans.clone();
+                entry.directories = previous.directories.clone();
+                entry.display_name = previous.display_name.clone();
+                entry.hidden = previous.hidden;
+                entry.order = previous.order;
+                entry.headline = previous.headline;
+            }
+            settings
+                .entries
+                .retain(|_, a| a.adapter != *adapter || a.label != *label);
+            settings.entries.insert(format!("{adapter}-{label}"), entry);
+            if !provenant_config::DomainConfig::validate(&settings).is_empty() {
+                return Err("conflicting account registration".into());
+            }
+            Ok(settings)
+        });
     }
     Ok(settings)
 }
@@ -325,68 +301,55 @@ pub fn set_quota_display(
     if headline.is_none() && icon.is_none() {
         return Ok(());
     }
-    let root = ensure_state_directory(roots.state.as_path())?;
-    let _lock = root
-        .try_lock(
-            OsStr::new("config.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )
-        .map_err(|e| e.to_string())?;
-    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?
-        .domains;
-    let icon = match icon {
-        Some(provenant_quota::MOST_CONSTRAINED) => Some(provenant_quota::MOST_CONSTRAINED.into()),
-        Some(account) => Some(resolve(&domains.accounts, account)?),
-        None => None,
-    };
-    let bytes = match root.read_bounded(OsStr::new("config.toml"), 1024 * 1024) {
-        Ok(b) => b,
-        Err(e) if e.is_not_found() => b"schema_version = 1\n".to_vec(),
-        Err(e) => return Err(e.to_string()),
-    };
-    let text = std::str::from_utf8(&bytes).map_err(|_| "invalid config encoding")?;
-    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| "invalid config")?;
-    if !doc.contains_key("domains") {
-        doc["domains"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    let table = |item: &mut toml_edit::Item| -> Result<(), String> {
-        if item.is_none() {
-            *item = toml_edit::Item::Table(toml_edit::Table::new());
-        }
-        item.as_table_mut()
-            .map(|_| ())
-            .ok_or_else(|| "config domains must be TOML tables".to_owned())
-    };
-    table(&mut doc["domains"])?;
-    table(&mut doc["domains"]["quota"])?;
-    table(&mut doc["domains"]["quota"]["display"])?;
-    let display = &mut doc["domains"]["quota"]["display"];
-    if let Some(headline) = headline {
-        display["headline"] = toml_edit::value(headline_name(headline));
-    }
-    if let Some(icon) = icon {
-        display["icon"] = toml_edit::value(icon);
-    }
-    root.atomic_write(
-        OsStr::new("config.toml"),
-        ".quota-display-",
-        doc.to_string().as_bytes(),
-        PublishMode::Replace,
-    )
-    .map_err(|e| e.to_string())?
-    .require_durable()
-    .map_err(|_| "quota display config durability unconfirmed".into())
+    ensure_state_directory(roots.state.as_path())?;
+    let mut refusal = None;
+    let edited = provenant_config::edit_config(
+        roots,
+        &crate::domains::SECTIONS,
+        &provenant_config::EditOptions::new("cli"),
+        |doc, current| {
+            let icon = match icon {
+                Some(provenant_quota::MOST_CONSTRAINED) => {
+                    Ok(Some(provenant_quota::MOST_CONSTRAINED.into()))
+                }
+                Some(account) => resolve(&current.domains.accounts, account).map(Some),
+                None => Ok(None),
+            }
+            .map_err(|reason| {
+                refusal = Some(reason.clone());
+                provenant_config::ConfigError::Refused(reason)
+            })?;
+            let display = |reason: &'static str| provenant_config::ConfigError::Edit { reason };
+            let domains = table_at(doc.as_item_mut(), "domains")
+                .ok_or(display("config domains must be TOML tables"))?;
+            let quota =
+                table_at(domains, "quota").ok_or(display("config domains must be TOML tables"))?;
+            let section =
+                table_at(quota, "display").ok_or(display("config domains must be TOML tables"))?;
+            if let Some(headline) = headline {
+                section["headline"] = toml_edit::value(headline_name(headline));
+            }
+            if let Some(icon) = icon {
+                section["icon"] = toml_edit::value(icon);
+            }
+            Ok(())
+        },
+    );
+    edited
+        .map(|_| ())
+        .map_err(|error| refusal.unwrap_or_else(|| error.to_string()))
 }
 
-fn write_settings(root: &Directory, settings: &Settings) -> Result<(), String> {
-    let bytes = match root.read_bounded(OsStr::new("config.toml"), 1024 * 1024) {
-        Ok(b) => b,
-        Err(e) if e.is_not_found() => b"schema_version = 1\n".to_vec(),
-        Err(e) => return Err(e.to_string()),
-    };
-    let text = std::str::from_utf8(&bytes).map_err(|_| "invalid config encoding")?;
-    let mut doc: toml_edit::DocumentMut = text.parse().map_err(|_| "invalid config")?;
+/// The child table `key`, created when absent.
+fn table_at<'a>(parent: &'a mut toml_edit::Item, key: &str) -> Option<&'a mut toml_edit::Item> {
+    let item = &mut parent[key];
+    if item.is_none() {
+        *item = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    item.is_table().then_some(item)
+}
+
+fn apply_settings(doc: &mut toml_edit::DocumentMut, settings: &Settings) -> Result<(), String> {
     let mut section = toml_edit::Table::new();
     let mut entries = toml_edit::Table::new();
     for (name, e) in &settings.entries {
@@ -466,42 +429,52 @@ fn write_settings(root: &Directory, settings: &Settings) -> Result<(), String> {
         .and_then(toml_edit::Item::as_table_mut)
         .ok_or("domains must be a TOML table")?;
     domains["accounts"] = toml_edit::Item::Table(section);
-    root.atomic_write(
-        OsStr::new("config.toml"),
-        ".accounts-",
-        doc.to_string().as_bytes(),
-        PublishMode::Replace,
-    )
-    .map_err(|e| e.to_string())?
-    .require_durable()
-    .map_err(|_| "account config durability unconfirmed")?;
     Ok(())
 }
 
 /// Records the organisation first seen for a legacy registration (trust on
 /// first use). Best effort: the next validation retries on any failure.
 pub fn record_org(roots: &Roots, adapter: &str, label: &str, org: &str) -> Result<(), String> {
-    let root = ensure_state_directory(roots.state.as_path())?;
-    let _lock = root
-        .try_lock(
-            OsStr::new("config.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )
-        .map_err(|e| e.to_string())?;
-    let mut settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?
-        .domains
-        .accounts;
-    let entry = settings
-        .entries
-        .values_mut()
-        .find(|a| a.adapter == adapter && a.label == label)
-        .ok_or("account is not registered")?;
-    if entry.org_fingerprint.is_some() {
-        return Ok(());
+    edit_accounts(roots, |mut settings| {
+        let entry = settings
+            .entries
+            .values_mut()
+            .find(|a| a.adapter == adapter && a.label == label)
+            .ok_or("account is not registered")?;
+        if entry.org_fingerprint.is_none() {
+            entry.org_fingerprint = Some(org.to_owned());
+        }
+        Ok(settings)
+    })
+    .map(|_| ())
+}
+
+/// Edit the accounts section under the shared config lock and revision check.
+/// `change` sees the current settings and returns the settings to write.
+fn edit_accounts(
+    roots: &Roots,
+    change: impl FnOnce(Settings) -> Result<Settings, String>,
+) -> Result<Settings, String> {
+    ensure_state_directory(roots.state.as_path())?;
+    let mut refusal = None;
+    let edited = provenant_config::edit_config(
+        roots,
+        &crate::domains::SECTIONS,
+        &provenant_config::EditOptions::new("cli"),
+        |doc, current| match change(current.domains.accounts.clone())
+            .and_then(|settings| apply_settings(doc, &settings))
+        {
+            Ok(()) => Ok(()),
+            Err(reason) => {
+                refusal = Some(reason.clone());
+                Err(provenant_config::ConfigError::Refused(reason))
+            }
+        },
+    );
+    match edited {
+        Ok(edited) => Ok(edited.config.domains.accounts),
+        Err(error) => Err(refusal.unwrap_or_else(|| error.to_string())),
     }
-    entry.org_fingerprint = Some(org.to_owned());
-    write_settings(&root, &settings)
 }
 
 fn ensure_state_directory(path: &Path) -> Result<Directory, String> {

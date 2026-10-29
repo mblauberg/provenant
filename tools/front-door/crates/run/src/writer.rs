@@ -837,7 +837,6 @@ mod cargo_setup_tests {
     use super::*;
 
     #[test]
-    #[allow(clippy::disallowed_methods)]
     fn packed_writer_ref_and_upstream_are_prepared_with_fresh_handles()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -851,7 +850,7 @@ mod cargo_setup_tests {
         let git_dir = project.join(".git");
         let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
         let run = |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
-            let output = std::process::Command::new(&git)
+            let output = provenant_os::fixture::git_command_at(&git)
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
                 .env("HOME", &root)
@@ -1329,7 +1328,7 @@ impl WriterLaunch {
         if std::str::from_utf8(&head).map(str::trim).ok()
             != Some(format!("ref: {}", self.branch.as_str()).as_str())
         {
-            return Err(RunError::Validation("writer HEAD is not the lane branch"));
+            return Err(RunError::WriterHeadNotLaneBranch);
         }
         let import_cancel = settlement.cancellation();
         if settlement.phase() == crate::settlement::Phase::Import {
@@ -1512,7 +1511,7 @@ impl WriterLaunch {
             },
         )? != tip
         {
-            return Err(RunError::Validation("writer HEAD is not the lane branch"));
+            return Err(RunError::WriterHeadNotLaneBranch);
         }
         worktrees::check_writer_terminal(self.worktree.repo())?;
         crate::artifacts::seal(

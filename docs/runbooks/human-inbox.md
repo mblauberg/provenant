@@ -280,6 +280,47 @@ candidates still consume the scan budget and may leave coverage partial. Refresh
 remains available, and a replacement can supersede an unresolved item whose
 deadline has elapsed. Requests without deadlines behave as before.
 
+## Provider control
+
+`provenant help --all --json` publishes `provider_controls`: one row per adapter
+and launch kind (`lane` or `chair`) with `support` (`live_injection`,
+`mail_only`, `continuation_only` or `unsupported`), the `transport` and a
+`reason`. Each row also lists `cancel`, `resume` and `land` with `supported` and
+a `reason`, so a console can disable what a provider cannot take. The table is
+declared per adapter in `LaunchCapabilities::control`.
+
+```
+provenant steer ATTEMPT --text-stdin [--operation-id ID] --json
+provenant chair message SESSION --text-stdin --channel CHANNEL [--operation-id ID] --json
+```
+
+Text is at most 4 KiB and must not be blank. Neither command reads a transcript
+or calls a model, and neither can approve a gate, merge or landing: the text is
+guidance recorded as Fabric mail, labelled as carrying no authority. Both are
+refused inside a lane and are local to the host; the MCP form is `fabric_inbox`
+`steer` and `chair_message`.
+
+`chair message` resolves SESSION to the exact registered host and project, queues
+one Fabric mail message to that session's own mailbox and returns `state: queued`
+with `transport: fabric_mail`. A chair session records no provider, so its path
+is the provider-neutral mail path. Sessions that share an agent label share an
+actor, so the message is not addressed to that actor. The session reads it with
+`provenant fabric mail read --session SESSION` (MCP `fabric_mail` `read` with
+`session`) and marks it read with `mark-read --session`, which keeps its own
+cursor. The agent's default mailbox and other sessions do not show it. The hook
+does not inject these messages.
+
+`steer` reads the attempt's recorded adapter and refuses with
+`state: unsupported`, outcome `refused` and error code `control_unsupported`
+when the lane row does not deliver. Over MCP the same refusal is an error
+response with that code and the receipt as its data, not a successful reply. No lane adapter delivers today (live steering
+is a gap; `resume` is terminal continuation), so `steer` records nothing and its
+receipt names the reason. Nothing is recorded for a refusal, so its operation ID
+stays free.
+
+A recorded request replays its original receipt under the same operation ID and
+input. Reusing the ID with different content returns `operation_conflict`.
+
 ## Limits and recovery
 
 Pages default to 50 and cap at 100. Pass `next_cursor` back as `--cursor` with

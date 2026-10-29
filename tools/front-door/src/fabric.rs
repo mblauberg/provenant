@@ -116,6 +116,7 @@ impl stdio::Factory for Factory {
     }
     type Facade<'a> = BoundFacade<'a>;
     fn preflight(&self, call: &provenant_fabric_mcp::tools::ToolCall) -> Result<(), ServiceError> {
+        use provenant_fabric_mcp::tools::ToolCall;
         if let provenant_fabric_mcp::tools::ToolCall::Inbox(input, _) = call {
             let ctx = &self.context;
             provenant_fabric_runtime::inbox::validate_request(
@@ -124,6 +125,13 @@ impl stdio::Factory for Factory {
                 ctx.in_lane,
                 input,
             )?;
+        }
+        if matches!(
+            call,
+            ToolCall::Submit(SubmitInput::Submit { host: None, .. })
+                | ToolCall::SubmitWait(SubmitInput::Submit { host: None, .. }, ..)
+        ) {
+            provenant_cli::run::nested_dispatch_context(&self.context.roots).map_err(fail_error)?;
         }
         Ok(())
     }
@@ -205,6 +213,31 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                 if let Some(hosts) = hosts {
                     args.extend(["--hosts".into(), hosts]);
                 }
+            }
+            ConsoleInput::Detail { id } => {
+                args.extend(["detail".into(), id]);
+            }
+            ConsoleInput::Search {
+                query,
+                part,
+                session,
+                limit,
+                cursor,
+            } => {
+                args.extend([
+                    "search".into(),
+                    "--part".into(),
+                    part,
+                    "--limit".into(),
+                    limit.to_string(),
+                ]);
+                if let Some(session) = session {
+                    args.extend(["--session".into(), session]);
+                }
+                if let Some(cursor) = cursor {
+                    args.extend(["--cursor".into(), cursor]);
+                }
+                args.extend(["--".into(), query]);
             }
             ConsoleInput::Tree {
                 max_depth,
@@ -513,6 +546,18 @@ impl F3Facade for BoundFacade<'_> {
                     work,
                     call.clock,
                     call.cancel,
+                )
+            },
+            &|input, _| {
+                provenant_cli::inbox::resolve_control(
+                    &provenant_cli::run::Edge {
+                        roots: &ctx.roots,
+                        home: &self.factory.home,
+                        assets: &self.factory.assets,
+                        cwd: &self.factory.cwd,
+                    },
+                    &ctx.identity,
+                    input,
                 )
             },
         )
@@ -1033,6 +1078,7 @@ fn peer_read_only(action: &PeerAction) -> bool {
     match action {
         PeerAction::ConsoleBoard { .. }
         | PeerAction::ConsoleTree { .. }
+        | PeerAction::ConsoleDetail { .. }
         | PeerAction::Doctor { .. } => true,
         PeerAction::Inbox { input, .. } => !matches!(
             input,
@@ -1158,7 +1204,10 @@ pub fn peer(
                 use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
                 if matches!(
                     input,
-                    InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
+                    InboxInput::Close { .. }
+                        | InboxInput::Acknowledge { .. }
+                        | InboxInput::Steer { .. }
+                        | InboxInput::ChairMessage { .. }
                 ) {
                     PeerResult::Inbox {
                         data: InboxReply::Error {
@@ -1195,6 +1244,10 @@ pub fn peer(
                                     call.clock,
                                     call.cancel,
                                 )
+                            },
+                            // Peers carry no control requests; they are local-only.
+                            &|_, _| {
+                                Err(provenant_fabric_runtime::inbox::InboxError::UnsupportedOwner)
                             },
                         )
                     };
@@ -1293,6 +1346,22 @@ pub fn peer(
                             extra: Default::default(),
                         },
                     }
+                }
+            }
+            PeerAction::ConsoleDetail { id, .. } => {
+                let command = provenant_cli::console::Console::Detail { id: id.clone() };
+                match provenant_cli::console::read(&context.roots, None, &command) {
+                    Ok(value) => PeerResult::Console {
+                        data: value,
+                        extra: Default::default(),
+                    },
+                    Err(_) => PeerResult::Error {
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::InvalidInput,
+                        },
+                        extra: Default::default(),
+                    },
                 }
             }
             PeerAction::RunStatuses { targets, .. } => {

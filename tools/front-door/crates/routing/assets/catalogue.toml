@@ -4,7 +4,7 @@
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
-revision = "route-pools-20261029-go-refresh"
+revision = "route-pools-20261030-free-flash"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -27,18 +27,7 @@ evidence_ref = "model-listings/cursor-models.txt"
 trains_on_prompts = false
 
 # Go plan limits: https://opencode.ai/v2/docs/console/go/ accessed 2026-10-28.
-[[models]]
-model = "opencode/opencode-go/beam-free"
-monthly_allowance_usd = "unlimited"
-efforts = []
-evidence_ref = "model-listings/opencode-models.txt"
 
-[[models]]
-model = "opencode/opencode-go/mimo-v2.6-flash"
-monthly_allowance_usd = 60
-efforts = []
-evidence_ref = "docs/research/opencode-go-models.md#mimo-v26; accessed 2026-10-28"
-trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode-go/deepseek-v4.1-flash"
@@ -54,61 +43,14 @@ efforts = []
 evidence_ref = "docs/research/opencode-go-models.md#flash-fallbacks; accessed 2026-10-28"
 trains_on_prompts = false
 
-[[models]]
-model = "opencode/opencode-go/glm-5.2"
-monthly_allowance_usd = 60
-efforts = []
-evidence_ref = "https://opencode.ai/v2/docs/console/go/; IDs: https://models.dev/api.json; accessed 2026-10-28"
 
-[[models]]
-model = "opencode/opencode-go/longcat-2.0"
-monthly_allowance_usd = 60
-efforts = []
-evidence_ref = "https://opencode.ai/v2/docs/console/go/; IDs: https://models.dev/api.json; accessed 2026-10-28"
 
-[[models]]
-model = "opencode/opencode-go/minimax-m3.1-flash"
-monthly_allowance_usd = 20
-efforts = []
-evidence_ref = "https://opencode.ai/v2/docs/console/go/; IDs: `opencode models`; accessed 2026-10-29"
 
-[[models]]
-model = "opencode/opencode-go/muse-spark-1.3-contributor"
-monthly_allowance_usd = 60
-efforts = []
-evidence_ref = "https://opencode.ai/v2/docs/console/go/; IDs: https://models.dev/api.json; accessed 2026-10-28"
 
-[[models]]
-model = "opencode/opencode-go/qwen3.8-flash"
-monthly_allowance_usd = 30
-efforts = []
-evidence_ref = "https://opencode.ai/v2/docs/console/go/; IDs: `opencode models`; accessed 2026-10-29"
 
-[[models]]
-model = "opencode/opencode-go/hy3"
-monthly_allowance_usd = 60
-efforts = []
-evidence_ref = "https://opencode.ai/v2/docs/console/go/; IDs: https://models.dev/api.json; accessed 2026-10-28"
 
-# OpenCode states that Iceman uses prompts and completions to improve the model.
-# Iceman and Beam Free are free for a limited time, with no published end date.
-[[models]]
-model = "opencode/opencode-go/iceman-contributor-free"
-monthly_allowance_usd = "unlimited"
-efforts = []
-evidence_ref = "https://opencode.ai/v2/docs/console/go/; IDs: https://models.dev/api.json; accessed 2026-10-28"
 
-[[models]]
-model = "opencode/openrouter/~anthropic/claude-fable-latest"
-efforts = []
-evidence_ref = "model-listings/opencode-models.txt"
-trains_on_prompts = false
 
-[[models]]
-model = "opencode/openrouter/~anthropic/claude-haiku-latest"
-efforts = []
-evidence_ref = "model-listings/opencode-models.txt"
-trains_on_prompts = false
 
 [[models]]
 model = "claude/claude-haiku-5-5"
@@ -183,14 +125,14 @@ trains_on_prompts = false
 model = "opencode/opencode/deepseek-v4.1-flash-free"
 free = true
 efforts = []
-evidence_ref = "legacy config/model-routing.json@114e3331"
+evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30"
 trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode/glm-5.3-flash-free"
 free = true
 efforts = []
-evidence_ref = "legacy config/model-routing.json@114e3331"
+evidence_ref = "https://opencode.ai/docs/zen (privacy: zero retention, no training; not an exception); accessed 2026-10-30"
 trains_on_prompts = false
 
 [pacing]
@@ -207,6 +149,9 @@ utility = [
     { model = "codex/gpt-6-luna", weight = 2, effort = "low", efforts = ["low"] },
 ]
 junior = [
+    # Prefer free capacity while it is eligible and available.
+    { model = "opencode/opencode/deepseek-v4.1-flash-free", weight = 50, efforts = [] },
+    { model = "opencode/opencode/glm-5.3-flash-free", weight = 50, efforts = [] },
     # Provisional pending local trial evidence.
     { model = "opencode/opencode-go/deepseek-v4.1-flash", weight = 2, efforts = [] },
     { model = "opencode/opencode-go/glm-5.3-flash", weight = 1, efforts = [] },

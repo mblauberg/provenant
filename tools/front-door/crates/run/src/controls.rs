@@ -12,6 +12,7 @@ use serde::Serialize;
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static HOLDERLESS_BEFORE_EXCLUSION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static REBOOT_TEMPORARY_CLEANUP: std::cell::RefCell<Option<std::result::Result<Option<Reconciled>, String>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -44,16 +45,40 @@ pub struct Resume {
 const DEADLINE_GRACE_SECONDS: u64 = 120;
 
 fn past_runtime_deadline(record: &AttemptRecord, call: &Request<'_>) -> bool {
-    let (AttemptState::Running { .. }, Some(deadline), Ok(now)) = (
-        &record.state,
-        record.runtime_deadline,
-        call.clock.wall_now(),
-    ) else {
+    call.clock
+        .wall_now()
+        .is_ok_and(|now| overdue_at(record, now))
+}
+
+/// Whether a running attempt is past its runtime deadline plus the grace.
+pub fn overdue_at(record: &AttemptRecord, now: WallTime) -> bool {
+    let (AttemptState::Running { .. }, Some(deadline)) = (&record.state, record.runtime_deadline)
+    else {
         return false;
     };
     provenant_core::DurationMicros::from_seconds(DEADLINE_GRACE_SECONDS)
         .and_then(|grace| deadline.checked_add(grace))
         .is_ok_and(|limit| now >= limit)
+}
+
+/// Whether a running attempt's guardian and provider are both gone with no
+/// exit recorded, so nothing is left to settle it. Read-only; unreadable
+/// state counts as not stale. `root` is the execution state root.
+pub fn holder_absent(root: &std::path::Path, record: &AttemptRecord) -> bool {
+    if !matches!(record.state, AttemptState::Running { .. }) {
+        return false;
+    }
+    let path = root.join(format!(
+        "runs/{}/attempts/{}",
+        record.run_id, record.attempt_id
+    ));
+    let Ok(attempt) = provenant_os::fs::Directory::open_anchor(&path) else {
+        return false;
+    };
+    matches!(
+        read_sealed(&attempt, "process-exit.json", RECORD_LIMIT),
+        Ok(None)
+    ) && custody::holder_gone(&attempt, RunStore::scope(record), &SystemProcessObserver)
 }
 
 /// What reconcile found for one attempt.
@@ -76,7 +101,7 @@ pub enum Reconciled {
     /// The attempt is terminal, but temporary data could not be removed.
     TemporaryRetained {
         path: std::path::PathBuf,
-        reason: String,
+        reason: TemporaryReason,
     },
     /// Launch never reached a guardian; ended as rejected.
     Withdrawn,
@@ -86,6 +111,53 @@ pub enum Reconciled {
     /// Custody cannot be proven either way; it stays fenced.
     Uncertain { reason: UncertainReason },
 }
+/// Stable reason for retaining terminal temporary data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemporaryReasonKind {
+    Error,
+    ReservationUnreadable,
+    ReservationRetained,
+    NotPrivate,
+}
+
+/// A typed reason that remains a string in reconcile output.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct TemporaryReason {
+    text: String,
+    #[serde(skip)]
+    pub kind: TemporaryReasonKind,
+}
+impl TemporaryReason {
+    fn new(kind: TemporaryReasonKind, text: impl Into<String>) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+        }
+    }
+}
+impl From<String> for TemporaryReason {
+    fn from(text: String) -> Self {
+        Self::new(TemporaryReasonKind::Error, text)
+    }
+}
+impl From<&str> for TemporaryReason {
+    fn from(text: &str) -> Self {
+        Self::from(text.to_owned())
+    }
+}
+impl std::ops::Deref for TemporaryReason {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+impl std::fmt::Display for TemporaryReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
 /// Why custody could not be proven. The text of an underlying error rides
 /// along as `error`; the kind is what a caller matches on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -93,6 +165,13 @@ pub enum Reconciled {
 pub enum UncertainReason {
     /// Reconciling the attempt failed before it could be settled.
     ReconcileFailed { error: String },
+    /// Reboot evidence could not be established; the wire kind is unchanged.
+    #[serde(rename = "reconcile_failed")]
+    RebootProofUnavailable {
+        error: String,
+        #[serde(skip)]
+        cause: RebootProofCause,
+    },
     /// Custody could not be reattached, acquired or observed.
     CustodyUnavailable { error: String },
     /// A running attempt has no launch summary.
@@ -108,12 +187,50 @@ pub enum UncertainReason {
     /// A writer reservation outlived the attempt's terminal commit.
     WriterReservationRetained { reservation: std::path::PathBuf },
 }
+/// The source of an unavailable reboot proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RebootProofCause {
+    Filesystem,
+    Other,
+}
+
+/// Causes of an attempt lost during custody recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LostReason {
+    Holderless,
+    RemovedWorktree,
+    StaleReservation,
+}
+impl LostReason {
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::Holderless => {
+                "no live holder: the guardian and provider ended before the attempt settled"
+            }
+            Self::RemovedWorktree => {
+                "machine rebooted before settlement and the writer worktree was removed"
+            }
+            Self::StaleReservation => {
+                "writer reservation was gone or stale and the recorded process tree predates this boot"
+            }
+        }
+    }
+}
+impl RebootProofCause {
+    fn from_error(error: &RunError) -> Self {
+        if matches!(error, RunError::Filesystem(_)) {
+            Self::Filesystem
+        } else {
+            Self::Other
+        }
+    }
+}
 impl std::fmt::Display for UncertainReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ReconcileFailed { error } | Self::CustodyUnavailable { error } => {
-                f.write_str(error)
-            }
+            Self::ReconcileFailed { error }
+            | Self::RebootProofUnavailable { error, .. }
+            | Self::CustodyUnavailable { error } => f.write_str(error),
             Self::NoLaunchSummary => f.write_str("running attempt has no launch summary"),
             Self::CustodyNotProvablyAbsent => f.write_str("launch custody is not provably absent"),
             Self::ExitWithoutLaunchSummary => f.write_str("exit exists without a launch summary"),
@@ -138,6 +255,89 @@ const ORPHAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
 mod reboot_tests {
     use super::*;
+
+    #[test]
+    fn reader_refusal_published_before_recovery_exclusion_is_not_lost()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let record = store.record(id, &call)?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let path = context
+            .state_root
+            .as_path()
+            .join(format!("runs/{}/attempts/{id}", run.run_id));
+        drop(custody::acquire_reader(
+            attempt.try_clone()?,
+            scope,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?);
+        let reservation = path.join(id.to_string()).join("reservation.json");
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+        value["launch_state"] = "spawned".into();
+        value["boot"] = "darwin:00000000-0000-0000-0000-000000000000".into();
+        value["guardian"] = serde_json::json!({
+            "boot": "darwin:00000000-0000-0000-0000-000000000000",
+            "pid": 123, "native_start": 1, "group_id": 123, "session_id": 123
+        });
+        let meta = attempt.metadata()?;
+        value["attempt_device"] = meta.device.into();
+        value["attempt_inode"] = meta.inode.into();
+        std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+        crate::artifacts::seal(&attempt, "launch.json", b"{}", RECORD_LIMIT)?;
+        // Simulate the guardian's refusal while it owns writer exclusion, in
+        // the precise gap after the first holder check and before acquisition.
+        let hook_path = path.clone();
+        let hook_reservation = reservation.clone();
+        HOLDERLESS_BEFORE_EXCLUSION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let dir = provenant_os::fs::Directory::open_anchor(&hook_path).unwrap();
+                let _lease = dir
+                    .try_lock(
+                        std::ffi::OsStr::new("writer.lock"),
+                        provenant_os::fs::LockMode::Exclusive,
+                    )
+                    .unwrap();
+                crate::artifacts::seal(&dir, "process-exit.json", b"refusal", RECORD_LIMIT)
+                    .unwrap();
+                let mut current: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&hook_reservation).unwrap()).unwrap();
+                current["launch_state"] = "settling".into();
+                current["unresolved_cleanup"] = false.into();
+                current["census_incomplete"] = false.into();
+                std::fs::write(&hook_reservation, serde_json::to_vec(&current).unwrap()).unwrap();
+            }))
+        });
+        assert_eq!(
+            store.settle_holderless(&record, &call, &SystemProcessObserver)?,
+            None
+        );
+        assert_eq!(store.record(id, &call)?, record);
+        assert!(reservation.exists());
+        let recovery =
+            custody::acquire_recovery(attempt, scope, call.lock_budget(), &cancel, &clock)?;
+        assert_eq!(recovery.observe(), RecoveryState::Absent);
+        Ok(())
+    }
 
     #[test]
     fn reboot_settlement_error_propagates() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -245,6 +445,94 @@ mod reboot_tests {
     }
 
     #[test]
+    fn reap_queues_recovery_for_running_and_cancelled_starting_attempts_only()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let spawned = std::cell::Cell::new(0);
+        let spawn = |_: &[std::ffi::OsString], _: &std::path::Path| {
+            spawned.set(spawned.get() + 1);
+            Ok(())
+        };
+        assert_eq!(
+            store.reap_with(&call, spawn)?,
+            0,
+            "an uncancelled start waits"
+        );
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let scope = RunStore::scope(&store.record(id, &call)?);
+        let request = serde_json::to_vec(&serde_json::json!({"scope": scope}))?;
+        crate::artifacts::seal(&attempt, "cancel.json", &request, RECORD_LIMIT)?;
+        assert_eq!(
+            store.reap_with(&call, spawn)?,
+            1,
+            "a cancelled start is reaped"
+        );
+        assert_eq!(spawned.get(), 1);
+        store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_running_attempt_with_no_guardian_is_stale_and_reaped()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let record = store.record(id, &call)?;
+        assert!(holder_absent(context.state_root.as_path(), &record));
+        let spawned = std::cell::Cell::new(0);
+        let reaped = store.reap_with(&call, |_, _| {
+            spawned.set(spawned.get() + 1);
+            Ok(())
+        })?;
+        assert_eq!((reaped, spawned.get()), (1, 1));
+        Ok(())
+    }
+
+    #[test]
     fn only_a_running_attempt_past_its_deadline_and_grace_is_overdue()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut clock = crate::tests::clock();
@@ -320,18 +608,18 @@ mod reboot_tests {
         let reservation = evidence.join("reservation.json");
         let cause = if corrupt_reservation {
             std::fs::write(&reservation, b"corrupt reservation")?;
-            "record is invalid"
+            RebootProofCause::Other
         } else {
             std::fs::create_dir(path.join("process-exit.json"))?;
-            "process-exit.json"
+            RebootProofCause::Filesystem
         };
         let before = std::fs::read(&reservation).ok();
         assert!(matches!(store.settle_rebooted(
             &store.record(id, &call)?,
             &call,
             &SystemProcessObserver
-        )?, Some(Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { error } })
-            if error.contains("reboot proof unavailable") && error.contains(cause)));
+        )?, Some(Reconciled::Uncertain { reason: UncertainReason::RebootProofUnavailable { cause: found, .. } })
+            if found == cause));
         assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
         let request: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path.join("cancel.json"))?)?;
@@ -343,8 +631,8 @@ mod reboot_tests {
             &store.record(id, &call)?,
             &call,
             &SystemProcessObserver
-        )?, Some(Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { error } })
-            if error.contains("reboot proof unavailable") && error.contains(cause)));
+        )?, Some(Reconciled::Uncertain { reason: UncertainReason::RebootProofUnavailable { cause: found, .. } })
+            if found == cause));
         assert_eq!(std::fs::read(&reservation).ok(), before);
         assert_eq!(
             store.record(id, &call)?.state,
@@ -948,7 +1236,8 @@ impl RunStore {
             Ok(None) => return Ok(None),
             Err(error) => {
                 return Ok(Some(Reconciled::uncertain(
-                    UncertainReason::ReconcileFailed {
+                    UncertainReason::RebootProofUnavailable {
+                        cause: RebootProofCause::from_error(&error),
                         error: format!("reboot proof unavailable: {error}"),
                     },
                 )));
@@ -973,7 +1262,7 @@ impl RunStore {
                 .and_then(|task| task.writer.as_ref())
                 .is_some_and(crate::writer::worktree_removed);
             if missing_worktree {
-                self.commit_lost(proof.scope(), Self::removed_worktree_lost_reason(), call)?;
+                self.commit_lost(proof.scope(), LostReason::RemovedWorktree.message(), call)?;
             } else {
                 self.commit_reboot_lost(&proof, call)?;
             }
@@ -1006,10 +1295,6 @@ impl RunStore {
             ) && record.exit_evidence.is_none())
     }
 
-    fn removed_worktree_lost_reason() -> &'static str {
-        "machine rebooted before settlement and the writer worktree was removed"
-    }
-
     /// Writer exclusion for an attempt, taken without waiting: failure means a
     /// guardian (or an inheritor of its lease) still holds custody.
     fn orphan_recovery(
@@ -1036,6 +1321,81 @@ impl RunStore {
             call.clock,
         )
         .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
+    }
+    /// Settle an attempt whose guardian and provider are both gone in this
+    /// boot and left no durable exit: nothing remains to import or publish, so
+    /// it ends Lost with a reason instead of waiting for a holder that is not
+    /// coming. Writer exclusion is taken without waiting, so a live guardian,
+    /// or an inheritor of its lease, keeps the attempt open.
+    fn settle_holderless(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+    ) -> Result<Option<Reconciled>> {
+        let scope = Self::scope(record);
+        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
+            || !custody::holder_gone(&attempt, scope, observer)
+        {
+            return Ok(None);
+        }
+        // Name the slot from the recorded binding; a lost writer's repository
+        // need not be readable for its custody to be settled.
+        let request = self.request(record.run_id, call)?;
+        let writer = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .and_then(|task| task.writer.as_ref());
+        let directory = match writer {
+            Some(writer) => {
+                let slot = self
+                    .writer_registry
+                    .join("worktrees")
+                    .join(self.context.project_id.to_string())
+                    .join(provenant_confinement::worktrees::state_dir_name(
+                        &writer.worktree,
+                    ));
+                match provenant_os::fs::Directory::open_anchor(&slot) {
+                    Ok(directory) => directory,
+                    Err(error) if error.is_not_found() => return Ok(None),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            None => attempt,
+        };
+        #[cfg(test)]
+        HOLDERLESS_BEFORE_EXCLUSION.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        let Ok(recovery) = custody::acquire_recovery(
+            directory,
+            scope,
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            call.cancel,
+            call.clock,
+        ) else {
+            return Ok(None);
+        };
+        // A reader can publish its exit and release exclusion after the first
+        // check, so both proofs must still hold under exclusion.
+        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        if recovery.scope() != scope
+            || read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
+            || !custody::holder_gone(&attempt, scope, observer)
+            || recovery.observe_with(observer) != RecoveryState::Absent
+        {
+            return Ok(None);
+        }
+        self.commit_lost(scope, LostReason::Holderless.message(), call)?;
+        recovery
+            .release_lost()
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        self.set_temporary_retained(record.attempt_id, false, call)?;
+        Ok(Some(Reconciled::Finished))
     }
     /// Settle an unreserved attempt only with proof its process tree is gone.
     fn settle_unreserved_loss(
@@ -1117,7 +1477,8 @@ impl RunStore {
             Ok(None) => return Ok(None),
             Err(error) if proof_errors_uncertain => {
                 return Ok(Some(Reconciled::uncertain(
-                    UncertainReason::ReconcileFailed {
+                    UncertainReason::RebootProofUnavailable {
+                        cause: RebootProofCause::from_error(&error),
                         error: format!("reboot proof unavailable: {error}"),
                     },
                 )));
@@ -1127,9 +1488,9 @@ impl RunStore {
         self.commit_lost(
             Self::scope(record),
             if missing_worktree {
-                Self::removed_worktree_lost_reason()
+                LostReason::RemovedWorktree.message()
             } else {
-                "writer reservation was gone or stale and the recorded process tree predates this boot"
+                LostReason::StaleReservation.message()
             },
             call,
         )?;
@@ -1230,7 +1591,6 @@ impl RunStore {
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
         self.cancel_with_observer(id, reason, call, &SystemProcessObserver)
     }
-    #[allow(clippy::disallowed_methods)]
     pub(crate) fn cancel_with_observer(
         &self,
         id: AttemptId,
@@ -1581,7 +1941,10 @@ impl RunStore {
                 )?
             };
             if u64::try_from(generation).ok() != Some(input.expected_generation) {
-                return Err(RunError::Conflict);
+                return Err(RunError::GenerationConflict {
+                    current_generation: u64::try_from(generation)
+                        .map_err(|_| RunError::Conflict)?,
+                });
             }
         }
         // Derived final paths are deterministic. Preflight in this call's
@@ -1703,6 +2066,52 @@ impl RunStore {
         Ok(runs)
     }
 
+    /// Queue recovery for each run of this project that holds a running
+    /// attempt, or a starting attempt with a cancel request, so a lane whose
+    /// guardian died is settled by the next read instead of waiting for a
+    /// `reconcile`. Queuing already leaves a live holder alone and takes no
+    /// writer lock. Best effort: a run that cannot be queued is skipped.
+    pub fn reap(&self, call: &Request<'_>) -> Result<usize> {
+        self.reap_with(call, provenant_os::exec::spawn_detached)
+    }
+    pub(crate) fn reap_with(
+        &self,
+        call: &Request<'_>,
+        spawn: impl Fn(
+            &[std::ffi::OsString],
+            &std::path::Path,
+        ) -> std::result::Result<(), provenant_os::exec::ExecError>,
+    ) -> Result<usize> {
+        let runs: Vec<String> = {
+            let mut query = self
+                .db
+                .prepare("SELECT DISTINCT run FROM attempts WHERE project=?1 AND terminal=0")?;
+            let rows =
+                query.query_map(params![self.context.project_id.to_string()], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let mut queued = 0;
+        for run in runs {
+            let Ok(run) = RunId::parse(&run) else {
+                continue;
+            };
+            let Ok(attempts) = self.pending_attempts(run, call) else {
+                continue;
+            };
+            let reapable = attempts.iter().any(|attempt| match attempt.state {
+                AttemptState::Running { .. } => true,
+                AttemptState::Starting { .. } => self
+                    .attempt_dir(run, attempt.attempt_id, false)
+                    .and_then(|dir| read_sealed(&dir, "cancel.json", RECORD_LIMIT))
+                    .is_ok_and(|found| found.is_some()),
+                _ => false,
+            });
+            if reapable && self.queue_reconcile_with(run, call, &spawn).is_ok() {
+                queued += 1;
+            }
+        }
+        Ok(queued)
+    }
     /// Check every attempt of `run` against supervisor custody.
     /// A durable exit is committed and released; a launch that provably never
     /// reached a guardian is withdrawn. Terminal temporary data is retried
@@ -1920,7 +2329,7 @@ impl RunStore {
             Err(error) => {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
-                    reason: error.to_string(),
+                    reason: error.to_string().into(),
                 }));
             }
         };
@@ -1975,7 +2384,7 @@ impl RunStore {
                 Err(error) => {
                     return Ok(Some(Reconciled::TemporaryRetained {
                         path,
-                        reason: error.to_string(),
+                        reason: error.to_string().into(),
                     }));
                 }
             }
@@ -1996,7 +2405,7 @@ impl RunStore {
             Err(error) => {
                 return Ok(Some(Reconciled::TemporaryRetained {
                     path,
-                    reason: error.to_string(),
+                    reason: error.to_string().into(),
                 }));
             }
         };
@@ -2005,10 +2414,13 @@ impl RunStore {
         if let Some(issue) = listing.issues.first() {
             return Ok(Some(Reconciled::TemporaryRetained {
                 path,
-                reason: format!(
-                    "writer reservation unreadable at {}: {}",
-                    issue.reservation.display(),
-                    issue.reason
+                reason: TemporaryReason::new(
+                    TemporaryReasonKind::ReservationUnreadable,
+                    format!(
+                        "writer reservation unreadable at {}: {}",
+                        issue.reservation.display(),
+                        issue.reason
+                    ),
                 ),
             }));
         }
@@ -2025,7 +2437,7 @@ impl RunStore {
                 provenant_os::fs::LockMode::Exclusive,
             )?;
             match custody::reservation_present(&attempt, scope) {
-                Ok(true) => return Err(RunError::Validation("attempt reservation retained")),
+                Ok(true) => return Err(RunError::AttemptReservationRetained),
                 Ok(false) => {}
                 Err(error) => return Err(error.into()),
             }
@@ -2039,7 +2451,18 @@ impl RunStore {
             }
             Err(error) => Reconciled::TemporaryRetained {
                 path,
-                reason: error.to_string(),
+                reason: TemporaryReason::new(
+                    match error {
+                        RunError::AttemptReservationRetained => {
+                            TemporaryReasonKind::ReservationRetained
+                        }
+                        RunError::Filesystem(provenant_os::fs::FsError::NotPrivate { .. }) => {
+                            TemporaryReasonKind::NotPrivate
+                        }
+                        _ => TemporaryReasonKind::Error,
+                    },
+                    error.to_string(),
+                ),
             },
         }))
     }
@@ -2129,11 +2552,16 @@ impl RunStore {
                         })
                     }
                     Ok(Observation::Live | Observation::PublicationPending) => Ok(Reconciled::Held),
-                    Ok(Observation::Unknown) => Ok(self
-                        .settle_unreserved_loss(record, call, observer, false)?
-                        .unwrap_or_else(|| {
+                    Ok(Observation::Unknown) => {
+                        let settled =
+                            match self.settle_unreserved_loss(record, call, observer, false)? {
+                                Some(state) => Some(state),
+                                None => self.settle_holderless(record, call, observer)?,
+                            };
+                        Ok(settled.unwrap_or_else(|| {
                             Reconciled::uncertain(UncertainReason::GuardianNotObservable)
-                        })),
+                        }))
+                    }
                     Err(error) => Ok(Reconciled::custody_unavailable(&error)),
                 }
             }
@@ -2159,6 +2587,19 @@ mod tests {
 
     #[test]
     fn uncertain_reasons_serialise_by_kind_and_keep_their_text() {
+        let retained = Reconciled::TemporaryRetained {
+            path: "/tmp".into(),
+            reason: TemporaryReason::new(TemporaryReasonKind::ReservationUnreadable, "detail"),
+        };
+        assert_eq!(serde_json::to_value(retained).unwrap()["reason"], "detail");
+        assert_eq!(
+            serde_json::to_value(UncertainReason::RebootProofUnavailable {
+                error: "proof failed".into(),
+                cause: RebootProofCause::Filesystem,
+            })
+            .unwrap(),
+            serde_json::json!({ "kind": "reconcile_failed", "error": "proof failed" })
+        );
         let reservation = std::path::PathBuf::from("/state/custody/reservation.json");
         let found = Reconciled::uncertain(UncertainReason::WriterCustodyUnconfirmed {
             reservation: reservation.clone(),
@@ -2173,6 +2614,7 @@ mod tests {
         let Reconciled::Uncertain { reason } = found else {
             unreachable!()
         };
+        // The display text is the operator's recovery guidance.
         assert!(reason.to_string().contains("chair recovery required"));
         let unit = serde_json::to_value(UncertainReason::GuardianNotObservable).unwrap();
         assert_eq!(

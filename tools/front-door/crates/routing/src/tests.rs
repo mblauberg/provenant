@@ -6,20 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[test]
-fn default_pools_do_not_include_free_routes() -> Result<(), Box<dyn std::error::Error>> {
-    let catalogue = Catalogue::bundled()?;
-    let config = RoutingConfig::default();
-    let context = context(&catalogue, &config, now()?);
-    let listed = list(&RouteListQuery::default(), &context)?;
-    assert!(listed.pools.values().flatten().all(|member| !member.free));
-    Ok(())
-}
-
-#[test]
 fn model_policy_config_accepts_layered_rules() -> Result<(), Box<dyn std::error::Error>> {
     let config = serde_json::from_value::<RoutingConfig>(serde_json::json!({
         "model_policy": {"rules": [{"model": "codex/gpt-6.1-terra", "account": "work",
-            "schedule": {"expires": 200}, "policy": {"lane": {"stop_early_ok": false}}}]}
+            "schedule": {"expires":"1970-01-01T00:03:20Z"}, "policy": {"lane": {"stop_early_ok": false}}}]}
     }));
     assert!(
         config.is_ok(),
@@ -232,7 +222,6 @@ fn read_heavy_routing_records_cache_preference_without_forcing_edit_work()
             choice: RouteChoice::NamedRoute(RouteName::parse("cachetest")?),
             effort: None,
             confidential: false,
-            allow_free: false,
             fallback: Fallback::None,
         };
         let route = resolve_with_seed(&request, &context, "cache-test", 0)?;
@@ -279,7 +268,6 @@ fn request(model: &str) -> Result<RouteRequest, RoutingError> {
         choice: RouteChoice::Model(ModelId::parse(model)?),
         effort: None,
         confidential: false,
-        allow_free: false,
         fallback: Fallback::None,
     })
 }
@@ -292,16 +280,23 @@ fn effort_errors_report_recorded_controls_and_nearest_models()
     for (model, expected) in [
         ("codex/gpt-6.1-luna", "codex/gpt-6-luna"),
         ("codex/gpt-6-luna", "supported efforts: low"),
-        ("opencode/opencode-go/glm-5.2", "takes no effort"),
+        ("opencode/opencode-go/glm-5.3-flash", "takes no effort"),
     ] {
         let mut query = request(model)?;
         query.effort = Some("unsupported".into());
-        let message = resolve(&query, &context)
-            .expect_err("effort must be refused")
-            .to_string();
-        assert!(message.contains(model), "{message}");
-        assert!(message.contains("unsupported"), "{message}");
-        assert!(message.contains(expected), "{message}");
+        let error = resolve(&query, &context).expect_err("effort must be refused");
+        assert_eq!(error.code(), "unsupported_effort");
+        let RoutingError::UnsupportedEffort {
+            model: refused_model,
+            effort,
+            support,
+        } = error
+        else {
+            unreachable!();
+        };
+        assert_eq!(refused_model, model);
+        assert_eq!(effort, "unsupported");
+        assert!(support.contains(expected), "{support}");
     }
     assert_eq!(
         catalogue
@@ -347,7 +342,7 @@ fn pacing_override_schedules_validate_at_load_and_need_no_expiry()
             {"provider":"codex", "policy":"spend", "schedule":{"windows":[{"weekdays":[0,1,2,3,4],"start_hour":23,"end_hour":7}]}},
             {"provider":"claude", "policy":"max"},
             {"provider":"agy", "policy":"off", "schedule":{"tz":"Mars/Olympus_Mons"}},
-            {"provider":"cursor", "policy":"pace", "schedule":{"starts":5,"expires":5}}
+            {"provider":"cursor", "policy":"pace", "schedule":{"starts":"1970-01-01T00:00:05Z","expires":"1970-01-01T00:00:05Z"}}
         ]
     }))?;
     let errors: Vec<_> = config
@@ -371,8 +366,8 @@ fn nearest_models_respect_namespace_and_distance() -> Result<(), Box<dyn std::er
         Ok(catalogue.nearest_models(&ModelId::parse(id)?))
     };
     assert_eq!(
-        nearest("opencode/openrouter/~anthropic/claude-haiku-latestt")?,
-        vec!["opencode/openrouter/~anthropic/claude-haiku-latest"]
+        nearest("opencode/opencode-go/glm-5.3-flashh")?,
+        vec!["opencode/opencode-go/glm-5.3-flash"]
     );
     assert!(nearest("opencode/openrouter/~openai/claude-haiku-latest")?.is_empty());
     assert!(
@@ -476,7 +471,7 @@ fn model_selector_keeps_the_entire_provider_path() -> Result<(), RoutingError> {
 }
 #[test]
 fn route_names_validate_at_the_string_boundary() -> Result<(), Box<dyn std::error::Error>> {
-    let wire = r#"{"intent":{"workload":"general","writes":false},"choice":{"kind":"named_route","value":"review.v1-_2"},"effort":null,"confidential":false,"allow_free":false,"fallback":{"kind":"none"}}"#;
+    let wire = r#"{"intent":{"workload":"general","writes":false},"choice":{"kind":"named_route","value":"review.v1-_2"},"effort":null,"confidential":false,"fallback":{"kind":"none"}}"#;
     let query: RouteRequest = serde_json::from_str(wire)?;
     assert_eq!(serde_json::to_string(&query)?, wire);
     assert_eq!(
@@ -486,19 +481,9 @@ fn route_names_validate_at_the_string_boundary() -> Result<(), Box<dyn std::erro
     let longest = "x".repeat(64);
     assert_eq!(RouteName::parse(&longest)?.as_str(), longest);
     for text in ["", "bad name", "bad/name", "bad\n", "é", &"x".repeat(65)] {
-        assert!(matches!(
-            RouteName::parse(text),
-            Err(RoutingError::InvalidValue)
-        ));
+        assert_eq!(RouteName::parse(text).unwrap_err().code(), "invalid_value");
         let wire = serde_json::json!({"kind": "named_route", "value": text});
-        let error = serde_json::from_value::<RouteChoice>(wire)
-            .err()
-            .ok_or("invalid name accepted")?;
-        assert!(
-            error
-                .to_string()
-                .contains(&RoutingError::InvalidValue.to_string())
-        );
+        assert!(serde_json::from_value::<RouteChoice>(wire).is_err());
     }
     for value in [
         serde_json::json!({"name": "review"}),
@@ -540,7 +525,7 @@ fn exact_unknown_is_retained_but_requires_availability() -> Result<(), Box<dyn s
     Ok(())
 }
 #[test]
-fn explicit_unlisted_model_is_ready_without_provider_listing()
+fn explicit_catalogued_model_is_ready_without_provider_listing()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
@@ -557,10 +542,10 @@ fn explicit_unlisted_model_is_ready_without_provider_listing()
     let mut context = context(&catalogue, &config, now()?);
     context.availability = &records;
     context.access = &access;
-    let query = request("opencode/opencode/beam-free")?;
+    let query = request("opencode/opencode/glm-5.3-flash-free")?;
     let route = resolve(&query, &context)?;
-    assert_eq!(route.model, "opencode/beam-free");
-    assert_eq!(route.eligibility, RouteEligibility::UnverifiedModel);
+    assert_eq!(route.model, "opencode/glm-5.3-flash-free");
+    assert_eq!(route.eligibility, RouteEligibility::Eligible);
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     assert!(route.exclusions.is_empty());
     let mut with_effort = query.clone();
@@ -571,10 +556,41 @@ fn explicit_unlisted_model_is_ready_without_provider_listing()
     ));
     let mut confidential = query;
     confidential.confidential = true;
-    assert!(matches!(
-        resolve(&confidential, &context),
-        Err(RoutingError::ConfidentialModel)
-    ));
+    assert!(resolve(&confidential, &context).is_ok());
+    Ok(())
+}
+
+#[test]
+fn explicit_unlisted_opencode_model_names_the_admitted_routes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let context = context(&catalogue, &config, now()?);
+    let admitted = [
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        "opencode/opencode/glm-5.3-flash-free",
+        "opencode/opencode-go/deepseek-v4.1-flash",
+        "opencode/opencode-go/glm-5.3-flash",
+    ];
+    for id in [
+        "opencode/opencode/beam-free",
+        "opencode/opencode-go/glm-5.2",
+    ] {
+        let error = resolve(&request(id)?, &context).expect_err("model must be refused");
+        assert_eq!(error.code(), "unlisted_opencode_model");
+        let message = error.to_string();
+        assert!(message.contains(id), "{message}");
+        for route in admitted {
+            assert!(message.contains(route), "{message}");
+        }
+    }
+    let mut fallback = request("codex/gpt-6-luna")?;
+    fallback.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse(
+        "opencode/opencode/beam-free",
+    )?])?);
+    let error = resolve(&fallback, &context).expect_err("fallback must be refused");
+    assert_eq!(error.code(), "unlisted_opencode_model");
+    assert!(resolve(&request("codex/unlisted-exact-id")?, &context).is_ok());
     Ok(())
 }
 
@@ -671,7 +687,6 @@ fn named_routes_are_exact_with_explicit_effort_override_and_no_default()
         choice: RouteChoice::NamedRoute(RouteName::parse("review")?),
         effort: None,
         confidential: false,
-        allow_free: false,
         fallback: Fallback::None,
     };
     assert_eq!(resolve(&query, &context)?.effort.as_deref(), Some("low"));
@@ -1209,8 +1224,7 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
 }
 
 #[test]
-fn free_pool_members_require_opt_in_and_confidential_models_are_excluded()
--> Result<(), Box<dyn std::error::Error>> {
+fn confidential_pool_excludes_training_models() -> Result<(), Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
     catalogue.pools.insert(
         "free-check".into(),
@@ -1242,29 +1256,150 @@ fn free_pool_members_require_opt_in_and_confidential_models_are_excluded()
     let mut query = request("codex/gpt-6-luna")?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("free-check")?);
     query.confidential = true;
-    match resolve(&query, &ctx).unwrap_err() {
-        RoutingError::NoEligiblePoolMember { exclusions } => {
-            assert!(
-                exclusions
-                    .iter()
-                    .any(|reason| reason == "confidential model")
-            );
-            assert!(
-                exclusions
-                    .iter()
-                    .any(|reason| reason == "free model disabled")
-            );
-        }
-        error => panic!("unexpected pool error: {error}"),
-    }
-    // Opting in passes the free gate; availability is still required.
-    query.allow_free = true;
     let resolved = resolve(&query, &ctx)?;
-    assert_eq!(resolved.adapter, "opencode");
+    let receipt = resolved.pool_selection.as_ref().ok_or("pool receipt")?;
     assert_eq!(
-        reason(&resolved),
-        Some(&RouteExclusionReason::UnknownAvailability)
+        receipt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == "codex/gpt-6-luna")
+            .ok_or("training candidate")?
+            .exclusion
+            .as_deref(),
+        Some("confidential")
     );
+    let free = receipt
+        .candidates
+        .iter()
+        .find(|candidate| candidate.model == "opencode/opencode/deepseek-v4.1-flash-free")
+        .ok_or("free candidate")?;
+    assert_eq!(free.exclusion, None);
+    assert!(matches!(
+        free.readiness,
+        Some(RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::UnknownAvailability,
+            ..
+        })
+    ));
+    Ok(())
+}
+
+/// Zen serves the free OpenCode routes and Go the paid flash routes.
+fn opencode_accounts() -> [AvailabilityRecord; 2] {
+    ["zen", "go"].map(|key| AvailabilityRecord {
+        adapter: "opencode".into(),
+        account_key: Some(key.into()),
+        ..availability()
+    })
+}
+fn opencode_access() -> [AccessContext<'static>; 1] {
+    [AccessContext {
+        adapter: "opencode",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }]
+}
+/// The junior pool resolved under a range of seeds, so every member gets drawn.
+fn junior_draws(
+    query: &RouteRequest,
+    ctx: &RoutingContext<'_>,
+) -> Result<Vec<ResolvedRoute>, Box<dyn std::error::Error>> {
+    let mut routes = Vec::new();
+    for task_index in 0..16 {
+        routes.push(resolve_with_seed(query, ctx, "junior-free", task_index)?);
+    }
+    Ok(routes)
+}
+fn picked_model(route: &ResolvedRoute) -> Result<ModelId, RoutingError> {
+    ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+}
+
+#[test]
+fn junior_free_routes_are_selected_without_opt_in() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = opencode_accounts();
+    let access = opencode_access();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    let mut free_picks = 0;
+    for route in junior_draws(&query, &ctx)? {
+        if catalogue.is_free_model(&picked_model(&route)?) {
+            free_picks += 1;
+            assert_eq!(route.account_key.as_deref(), Some("zen"));
+            assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+        }
+    }
+    assert!(free_picks > 0, "no seed selected a free junior route");
+    Ok(())
+}
+
+#[test]
+fn confidential_junior_requests_accept_free_routes() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = opencode_accounts();
+    let access = opencode_access();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    query.confidential = true;
+    assert!(
+        junior_draws(&query, &ctx)?
+            .iter()
+            .any(|route| catalogue.is_free_model(&picked_model(route).unwrap()))
+    );
+    for model in [
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        "opencode/opencode/glm-5.3-flash-free",
+    ] {
+        query.choice = RouteChoice::Model(ModelId::parse(model)?);
+        assert!(resolve(&query, &ctx).is_ok());
+    }
+    Ok(())
+}
+
+#[test]
+fn cooling_free_route_falls_back_to_another_junior_member() -> Result<(), Box<dyn std::error::Error>>
+{
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = opencode_accounts();
+    let access = opencode_access();
+    let cooldowns = [provenant_quota::CapacityCooldown {
+        extra: Default::default(),
+        account: provenant_quota::AccountScope {
+            adapter: "opencode".into(),
+            account_key: "zen".into(),
+            label: "test".into(),
+        },
+        model: "opencode/deepseek-v4.1-flash-free".into(),
+        observed_unix_seconds: 90,
+        expires_unix_seconds: 110,
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.capacity_cooldowns = &cooldowns;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    let cooling = "opencode/opencode/deepseek-v4.1-flash-free";
+    for route in junior_draws(&query, &ctx)? {
+        assert_ne!(picked_model(&route)?.as_str(), cooling);
+        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+        let receipt = route.pool_selection.ok_or("pool receipt")?;
+        let skipped = receipt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == cooling)
+            .ok_or("cooling candidate")?;
+        assert_eq!(skipped.exclusion.as_deref(), Some("capacity cooldown"));
+    }
     Ok(())
 }
 
@@ -1519,7 +1654,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     let roots = inputs.resolve(&Resolver)?;
     let model_policy_config = provenant_config::load_with_domains(
         &roots,
-        Some("schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.schedule]\nexpires=200\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n".as_bytes()),
+        Some("schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.schedule]\nexpires='1970-01-01T00:03:20Z'\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n".as_bytes()),
         &sections,
     )?;
     assert_eq!(
@@ -1637,7 +1772,11 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             .domains
             .routing
             .model_policy
-            .effective(&model, None, 0)
+            .effective(
+                &model,
+                None,
+                provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
+            )
             .policy;
         assert_eq!(policy.lane.read_only, Some(true), "{text}");
         assert_ne!(policy.lane.max_continuations, Some(9), "{text}");
@@ -1658,7 +1797,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nread_only='yes'\n",
         "schema_version=1\n[domains.routing.model_policy.defaults]\nlane='read_only'\n",
         "schema_version=1\n[[domains.routing.model_policy.rules]]\nadapter='codex'\nmodel='claude/claude-opus-5-5'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\n",
-        "schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts=10, expires=5 }\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=4\n",
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=4\n",
     ] {
         let error = provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
             .err()
@@ -1671,7 +1810,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     // A malformed rule that restricts nothing is dropped whole, with a warning.
     let config = provenant_config::load_with_domains(
         &roots,
-        Some("schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts=10, expires=5 }\n[domains.routing.model_policy.rules.policy.cache]\nprice_multiplier=2.0\n".as_bytes()),
+        Some("schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }\n[domains.routing.model_policy.rules.policy.cache]\nprice_multiplier=2.0\n".as_bytes()),
         &sections,
     )?;
     assert!(config.domains.routing.model_policy.rules.is_empty());
@@ -1908,17 +2047,17 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         ("spend", serde_json::json!([]), false),
         (
             "pace",
-            serde_json::json!([{"account":"codex/opaque-account", "policy":"spend", "schedule":{"expires":101}}]),
+            serde_json::json!([{"account":"codex/opaque-account", "policy":"spend", "schedule":{"expires":"1970-01-01T00:01:41Z"}}]),
             false,
         ),
         (
             "pace",
-            serde_json::json!([{"account":"claude/opaque-account", "policy":"spend", "schedule":{"expires":101}}]),
+            serde_json::json!([{"account":"claude/opaque-account", "policy":"spend", "schedule":{"expires":"1970-01-01T00:01:41Z"}}]),
             true,
         ),
         (
             "pace",
-            serde_json::json!([{"account":"opaque-account", "policy":"spend", "schedule":{"expires":100}}]),
+            serde_json::json!([{"account":"opaque-account", "policy":"spend", "schedule":{"expires":"1970-01-01T00:01:40Z"}}]),
             true,
         ),
     ] {
@@ -1945,10 +2084,10 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     use provenant_quota::{QuotaStatus, QuotaWindow};
     let catalogue = Catalogue::bundled()?;
     let config: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pools": {"trial": [{"model":"opencode/opencode-go/minimax-m3.1-flash", "weight":1, "efforts":[]}]},
+        "pools": {"trial": [{"model":"opencode/opencode-go/glm-5.3-flash", "weight":1, "efforts":[]}]},
         "pacing": {"accounts": {"go": {"policy":"pace", "windows":["rolling", "seven_day", "monthly"], "reserve":{"rolling":0}}}}
     }))?;
-    let model = "opencode/opencode-go/minimax-m3.1-flash";
+    let model = "opencode/opencode-go/glm-5.3-flash";
     let mut record = availability();
     record.adapter = "opencode".into();
     record.account_key = Some("go".into());
@@ -1994,7 +2133,6 @@ fn rolling_window_limits_go_despite_monthly_headroom() -> Result<(), Box<dyn std
     ctx.quota = &observations;
     let mut query = request(model)?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
-    query.allow_free = true;
     let route = resolve_with_seed(&query, &ctx, "rolling", 0)?;
     let receipt = serde_json::to_value(route)?;
     assert_eq!(
@@ -2705,7 +2843,6 @@ fn profile_preview_with_status(
     ctx.quota = &references;
     let mut query = request(model)?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("profile-test")?);
-    query.allow_free = true;
     Ok(resolve(&query, &ctx)?)
 }
 
@@ -3031,7 +3168,7 @@ fn account_profile_and_overrides_govern_free_models() -> Result<(), Box<dyn std:
     assert!(!blocked(serde_json::json!({"pacing":{
         "accounts":{"zen":{"policy":"max"}}, "free":{"opencode":{"policy":"off"}}}}))?);
     // An active override outranks the account profile; an expired one does not.
-    let override_row = |expires| serde_json::json!([{"account":"zen", "policy":"spend", "schedule":{"expires":expires}}]);
+    let override_row = |expires: i64| serde_json::json!([{"account":"zen", "policy":"spend", "schedule":{"expires":provenant_core::WallTime::from_unix_seconds(expires).map(|at| at.to_string()).ok()}}]);
     assert!(!blocked(serde_json::json!({
         "pacing":{"accounts":{"zen":{"policy":"off"}}}, "pacing_overrides": override_row(1_000_000)
     }))?);
@@ -3170,15 +3307,15 @@ fn opencode_zen_and_go_use_separate_account_identities() -> Result<(), Box<dyn s
     ctx.availability = &records;
     ctx.access = &access;
     for (model, key) in [
-        ("opencode/opencode/beam-free", "zen"),
-        ("opencode/opencode-go/glm-5.1", "go"),
+        ("opencode/opencode/glm-5.3-flash-free", "zen"),
+        ("opencode/opencode-go/glm-5.3-flash", "go"),
     ] {
         let query = request(model)?;
         let route = resolve(&query, &ctx)?;
         assert_eq!(route.account_key.as_deref(), Some(key));
         assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     }
-    let free = request("opencode/opencode/beam-free")?;
+    let free = request("opencode/opencode/glm-5.3-flash-free")?;
     let route = resolve_for_account_with_seed(&free, &ctx, Some("go"), "fixture", 0)?;
     assert!(matches!(
         route.readiness,
@@ -3255,7 +3392,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
             five_hour: Some(43),
             seven_day: Some(17),
             thirty_day: Some(59),
-            expires: "1970-01-01T00:01:41Z".into(), // timebomb: allow fixed epoch fixture, not the live clock
+            expires: provenant_core::WallTime::from_unix_seconds(101)?,
         },
     );
     let apply = |observation: &QuotaObservation| {
@@ -3285,7 +3422,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
                 five_hour,
                 seven_day,
                 thirty_day: Some(59),
-                expires: "1970-01-01T00:01:41Z".into(), // timebomb: allow fixed epoch fixture, not the live clock
+                expires: provenant_core::WallTime::from_unix_seconds(101)?,
             },
         );
         let mut record = AccountRecord::empty(raw.snapshot.account.clone());
@@ -3464,7 +3601,6 @@ fn opencode_zen_pool_does_not_inherit_go_pacing_quota() -> Result<(), Box<dyn st
     ctx.quota = &quota;
     let mut query = request(free)?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("zen-trial")?);
-    query.allow_free = true;
     let route = resolve(&query, &ctx)?;
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     assert_eq!(route.account_key.as_deref(), Some("zen"));
@@ -3937,7 +4073,10 @@ fn malformed_scope_types_drop_or_refuse_the_whole_record() -> Result<(), Box<dyn
 #[test]
 fn invalid_override_schedules_drop_their_override_at_load() -> Result<(), Box<dyn std::error::Error>>
 {
-    for schedule in ["{starts=20,expires=10}", "{tz='Mars/Olympus_Mons'}"] {
+    for schedule in [
+        "{starts='1970-01-01T00:00:20Z',expires='1970-01-01T00:00:10Z'}",
+        "{tz='Mars/Olympus_Mons'}",
+    ] {
         let text = format!(
             "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='off'\nschedule={schedule}\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n"
         );

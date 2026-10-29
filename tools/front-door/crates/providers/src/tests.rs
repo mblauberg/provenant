@@ -473,7 +473,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
         let other = root.join("other");
         let linked = root.join("linked");
         let host_git = |cwd: &Path, args: &[&std::ffi::OsStr]| {
-            let output = Command::new("/usr/bin/git")
+            let output = provenant_os::fixture::git_command_at("/usr/bin/git")
                 .current_dir(cwd)
                 .env_clear()
                 .env(
@@ -700,7 +700,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
         let other_head = host_git(&other, &["rev-parse".as_ref(), "HEAD".as_ref()]);
         // Native Git can inspect a second repository by explicitly removing
         // the lane's repository selectors; no command-routing parser is needed.
-        let other_read = Command::new(git)
+        let other_read = provenant_os::fixture::git_command_at(git)
             .current_dir(&other)
             .env_clear()
             .envs(spec.env.iter().cloned())
@@ -1138,6 +1138,7 @@ fn agy_individual_quota_is_quota_limited_until_its_stated_reset() -> Result<(), 
             "Individual quota reached. Resets in 2d 5m 30s",
             Some(173_130),
         ),
+        ("Individual quota reached. Resets in 1w", Some(604_800)),
         ("Individual quota reached. Resets in 8d", None),
         ("Individual quota reached. Resets in 0m", None),
         ("INDIVIDUAL QUOTA REACHED", None),
@@ -2793,10 +2794,18 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     "/fixture/state/config.toml",
                     "/fixture/state/host-id",
                     "/fixture/state/projects",
-                    "/fixture/state/fabric",
                 ]
                 .iter()
                 .any(|path| grant.path == std::path::Path::new(path))
+                || ([
+                    "/fixture/state/fabric/fabric.sqlite3",
+                    "/fixture/state/fabric/fabric.sqlite3-wal",
+                    "/fixture/state/fabric/fabric.sqlite3-shm",
+                    "/fixture/state/fabric/fabric.sqlite3-journal",
+                ]
+                .iter()
+                .any(|path| grant.path == Path::new(path))
+                    && grant.scope == provenant_confinement::permissions::PathScope::Exact)
         }));
         assert!(
             spec.profile

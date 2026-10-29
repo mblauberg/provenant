@@ -10,6 +10,27 @@ use std::{
 };
 
 #[test]
+fn bounded_row_collection_stops_before_over_budget_row() {
+    let rows = [
+        Ok((vec![0; MAX_PAGE_BYTES / 2], ())),
+        Ok((vec![0; MAX_PAGE_BYTES / 2], ())),
+        Ok((vec![0; 1], ())),
+    ];
+    let rows = bounded_rows(rows.into_iter(), |bytes, ()| Ok(bytes)).unwrap();
+    assert_eq!(rows.items.len(), 2);
+    assert!(rows.truncated);
+    assert_eq!(
+        rows.items.iter().map(Vec::len).sum::<usize>(),
+        MAX_PAGE_BYTES
+    );
+
+    let rows = [Ok((vec![0; MAX_PAGE_BYTES + 1], ()))];
+    let rows = bounded_rows(rows.into_iter(), |bytes, ()| Ok(bytes)).unwrap();
+    assert!(rows.items.is_empty());
+    assert!(rows.truncated);
+}
+
+#[test]
 fn sqlite_diagnostic_reports_code_without_private_details() {
     let error = Error::Sqlite(rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY),
@@ -21,6 +42,47 @@ fn sqlite_diagnostic_reports_code_without_private_details() {
 }
 
 struct Resolver;
+
+#[test]
+fn fabric_commits_signal_inbox_and_board() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let before = provenant_os::changes::read(fixture.root.as_path()).unwrap();
+    store
+        .send(&message(&fixture, 5), &fixture.request())
+        .unwrap();
+    let after = provenant_os::changes::read(fixture.root.as_path()).unwrap();
+    assert!(after.inbox > before.inbox);
+    store
+        .create_task(&task(&fixture), &fixture.request())
+        .unwrap();
+    let board = provenant_os::changes::read(fixture.root.as_path()).unwrap();
+    assert!(board.board > after.board);
+}
+
+#[test]
+fn signal_failure_reports_a_committed_fabric_write() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    let signal = fixture
+        .root
+        .as_path()
+        .join(provenant_core::changes::FILE_NAME);
+    std::fs::remove_file(&signal).unwrap();
+    std::fs::create_dir(&signal).unwrap();
+    // The signal is a hint: a forced failure must not fail the committed write.
+    store
+        .send(&message(&fixture, 5), &fixture.request())
+        .unwrap();
+    assert_eq!(
+        store
+            .read_mail(project(), actor(3), Some(0), 10, &fixture.request())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+}
 impl PathResolver for Resolver {
     fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
         if path.exists() {
@@ -111,7 +173,6 @@ fn live_read_only_observations_refresh_wal_and_refuse_mutations() {
     assert!(f.open().live_read_only().is_err());
 }
 #[test]
-#[allow(clippy::disallowed_methods)] // Native read-only WAL open deadline.
 fn persisted_wal_survives_last_writer_in_unwritable_directory() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();

@@ -1216,3 +1216,42 @@ fn text_byte_limit_is_enforced_even_when_codepoint_length_is_smaller() {
     let over_limit = "😀".repeat(16_385);
     assert!(ToolCall::parse("fabric_events", json!({"op":"note","note":over_limit})).is_err());
 }
+
+#[test]
+fn mail_send_without_artifacts_defaults_to_an_empty_list() {
+    let input = json!({"op":"send", "recipients":["00000000000000000000000000000001"], "kind":"note", "body":"body"});
+    assert!(matches!(
+        ToolCall::parse("fabric_mail", input),
+        Ok(ToolCall::Mail(crate::tools::MailInput::Send { artifacts, .. }, _)) if artifacts.is_empty()
+    ));
+    let input = json!({"op":"send", "recipients":["00000000000000000000000000000001"], "kind":"note", "body":"body", "artifacts":null});
+    assert!(matches!(
+        ToolCall::parse("fabric_mail", input),
+        Err(InvalidInput::Arguments { path }) if path == "arguments.artifacts"
+    ));
+}
+
+#[test]
+fn context_without_operation_defaults_to_inspect() {
+    assert!(matches!(
+        ToolCall::parse("fabric_context", json!({})),
+        Ok(ToolCall::Identity(_))
+    ));
+    assert!(matches!(
+        ToolCall::parse("fabric_context", json!({"op":"inspect"})),
+        Ok(ToolCall::Identity(_))
+    ));
+    assert!(matches!(
+        ToolCall::parse("fabric_context", json!({"limit":5})),
+        Err(InvalidInput::Arguments { path }) if path == "arguments.limit"
+    ));
+}
+
+#[test]
+fn inbox_invalid_input_names_its_field() {
+    let error = crate::tools::ServiceError::Inbox(
+        provenant_fabric_runtime::inbox::InboxError::Invalid("body"),
+    );
+    assert_eq!(error.code(), "invalid_input");
+    assert_eq!(error.structured_error()["field"], "body");
+}

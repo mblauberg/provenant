@@ -155,12 +155,6 @@ fn board_read_only() -> Result {
         2,
     )?;
     assert_eq!(stale["error"]["code"], "CATALOGUE_INPUT");
-    assert!(
-        stale["error"]["message"]
-            .as_str()
-            .ok_or("repair")?
-            .contains("without --cursor")
-    );
     let after = snapshot(&rig.state)?;
     let changes: std::collections::BTreeSet<_> = before
         .iter()

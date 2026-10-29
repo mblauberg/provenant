@@ -44,7 +44,10 @@ mod writer;
 pub use admission::{
     AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
-pub use controls::{CancelReceipt, Reconciled, Resume, UncertainReason};
+pub use controls::{
+    CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,
+    holder_absent, overdue_at,
+};
 pub use delivery::HostDeliveryContext;
 pub use git_context::{GitContext, continuation_history, resolve_git_base, review_merge_base};
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
@@ -64,6 +67,7 @@ pub use writer::{
 
 pub use db::{ExecutionContext, Request, RunStore};
 pub use provenant_records::run::*;
+pub use provenant_supervisor::custody::AdmissionError;
 pub use reader::{
     ArtifactPart, AttemptFilter, AttemptReader, Attempts, ByteRange, LanePage, LaneQuery,
     LaneTarget, OutputChunk, fact,
@@ -173,12 +177,52 @@ impl std::fmt::Display for PathCheck {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportRefusal {
+    LaneConfig,
+    LaneProgram,
+    Unreadable,
+}
+
+impl From<&provenant_confinement::transport::TransportError> for TransportRefusal {
+    fn from(error: &provenant_confinement::transport::TransportError) -> Self {
+        use provenant_confinement::transport::TransportError;
+        match error {
+            TransportError::LaneConfig { .. } => Self::LaneConfig,
+            TransportError::LaneProgram { .. } => Self::LaneProgram,
+            TransportError::Unreadable => Self::Unreadable,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("{0}")]
+    InvalidTaskTitle(String),
     #[error("{message}")]
     Input { kind: ErrorKind, message: String },
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
+    #[error(
+        "host writer delivery failed at Prepare (origin refresh): default branch collides with another branch name"
+    )]
+    OriginDefaultCollision,
+    #[error(
+        "host writer delivery failed at Prepare (integration target): default and primary checkout branches require PR delivery"
+    )]
+    ProtectedDeliveryBranch,
+    #[error("host writer delivery failed at Prepare (origin refresh): {0}")]
+    OriginNormalisationCollision(String),
+    #[error("host writer delivery failed at Prepare (transport): {reason}")]
+    DeliveryTransport {
+        kind: TransportRefusal,
+        reason: String,
+    },
+    #[error("run filesystem I/O failed: {reason}")]
+    GitTransport {
+        kind: TransportRefusal,
+        reason: String,
+    },
     #[error("host writer delivery failed at Prepare ({step}): {reason}")]
     DeliveryPrepare { step: &'static str, reason: String },
     #[error("provider evidence could not be committed: {0}")]
@@ -195,8 +239,14 @@ pub enum RunError {
     WriterRefLocked(std::path::PathBuf),
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
+    #[error("invalid run record: attempt reservation retained")]
+    AttemptReservationRetained,
     #[error("invalid run record: {0}")]
     Validation(&'static str),
+    #[error("invalid run record: writer HEAD is not the lane branch")]
+    WriterHeadNotLaneBranch,
+    #[error("invalid run record: review required; use lane deliver --accept-review ATTEMPT")]
+    ReviewAcceptanceRequired,
     #[error("lane object import refused: {0}")]
     ObjectImportLimit(&'static str),
     #[error("invalid Git base {0:?}: expected a resolvable commit reference")]
@@ -220,33 +270,16 @@ pub enum RunError {
     ProviderStateExpired,
     #[error("run record revision conflicts or is immutable")]
     Conflict,
+    #[error("continuation generation conflict; current generation is {current_generation}")]
+    GenerationConflict { current_generation: u64 },
     #[error("read or record exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
     #[error("artifact digest or length does not match its record")]
     ArtifactMismatch,
     #[error("terminal publication is already sealed; recover its original facts and result")]
     TerminalRecoveryRequired,
-    #[error(
-        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
-    )]
-    DiskFloor { free: u64, floor: u64 },
-    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
-    MemoryPressure { level: String },
-    #[error(
-        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
-        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
-    )]
-    LaneCap {
-        active: u64,
-        limit: u64,
-        scope: &'static str,
-    },
-    #[error(
-        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs and cargo_debug"
-    )]
-    BuildSettings,
-    #[error("guardian process identity unavailable; retry when process observation is available")]
-    GuardianIdentityUnavailable,
+    #[error(transparent)]
+    Admission(#[from] AdmissionError),
     #[error("operation refused by the execution context")]
     Refused,
     #[error("nested lane depth {depth} exceeds configured maximum {max_depth}")]
@@ -255,10 +288,6 @@ pub enum RunError {
     DepthOverflow,
     #[error("host queue is full")]
     Capacity,
-    #[error(
-        "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
-    )]
-    HostClock,
     #[error("run store stayed contended past its busy timeout")]
     Contention,
     #[error("run-store call was cancelled")]

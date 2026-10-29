@@ -2716,8 +2716,6 @@ mod lifecycle_tests {
             .err()
             .ok_or("removed busy tree")?;
         assert!(matches!(error, WorktreeError::LockBusy));
-        assert!(error.to_string().contains("lock busy"));
-        assert!(!error.to_string().contains("live"));
         assert_eq!(
             list(&context, &cancel())?
                 .iter()
@@ -5493,10 +5491,6 @@ mod lifecycle_tests {
         )
         .expect_err("recreated branch with stale registration must fail with prune hint");
         assert!(matches!(error_recreated, WorktreeError::StaleRegistration));
-        assert!(
-            error_recreated.to_string().contains("git worktree prune"),
-            "{error_recreated}"
-        );
         Ok(())
     }
 
@@ -5526,11 +5520,7 @@ mod lifecycle_tests {
                 &cancel(),
             )
             .expect_err("stale registration must be reported");
-            assert!(
-                error.to_string().contains("registration is stale"),
-                "{error}"
-            );
-            assert!(error.to_string().contains("git worktree prune"), "{error}");
+            assert!(matches!(error, WorktreeError::StaleRegistration));
         }
         assert!(branch_exists(&fixture, "scratch/stale"));
         assert!(

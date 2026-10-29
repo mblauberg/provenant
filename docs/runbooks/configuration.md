@@ -49,7 +49,16 @@ A knob in `[knobs]` wins over the profile preset, which wins over the registry
 default. There is no project JSON overlay or `PROVENANT_KNOB_*` environment
 layer. `config set|unset|show` read and write this file through one editor
 that validates the whole result before replacing it, and `config show` reports
-each value and its source. Dispatch accepts repeated `--knob NAME=VALUE`, and
+each value and its source. `config show` also returns the file's `revision`.
+`config schema` lists every editable field with its type, bounds, default,
+effective value, source layer and restart need. `config apply --file PATCH.json
+--expect-revision REV [--dry-run]` takes a flat JSON object of field to value
+(null clears a field), validates it through the domain owners and commits all of
+it or none; a stale revision is refused and names the current one. Every edit
+command takes the same lock and appends to a bounded history that `config
+history [--since T] [--limit N]` lists, with secret-looking values redacted;
+`config.history_max_entries`, `config.history_max_age_days` and
+`config.history_max_bytes` set its retention. Dispatch accepts repeated `--knob NAME=VALUE`, and
 `fabric_run` (`op: submit`) accepts `knobs: ["NAME=VALUE"]`; these validated
 overrides win over configuration. Each sealed task and attempt records the
 profile name, effective knob values and exact dispatch overrides, and

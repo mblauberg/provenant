@@ -1,7 +1,7 @@
 //! Host config may lower or raise probe execution ceilings within the recorded
 //! bounds; the defaults stay conservative.
 use crate::Calibration;
-use provenant_config::{DomainConfig, DomainSection, SectionError};
+use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,11 +164,28 @@ impl DomainConfig for Settings {
 }
 /// Probe and history bounds are a boundary: configuration may tune them, but
 /// values outside the recorded ranges refuse the file.
+pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::int("max_parallel", 1, MAX_PARALLEL as i64),
+    FieldMetadata::int("wall_budget_seconds", 1, MAX_WALL_BUDGET_SECONDS as i64),
+    FieldMetadata::int(
+        "history_max_bytes",
+        crate::MIN_HISTORY_MAX_BYTES as i64,
+        crate::MAX_HISTORY_MAX_BYTES as i64,
+    ),
+    FieldMetadata::enumeration("display.headline", &["auto", "5h", "weekly"]),
+    FieldMetadata::int("polling_intervals.{adapter}.timer_seconds", 1, i64::MAX / 4),
+    FieldMetadata::int("polling_intervals.{adapter}.panel_seconds", 1, i64::MAX / 4),
+    FieldMetadata::int("calibration.{account}.five_hour", 0, 100),
+    FieldMetadata::int("calibration.{account}.seven_day", 0, 100),
+    FieldMetadata::int("calibration.{account}.thirty_day", 0, 100),
+    FieldMetadata::new("calibration.{account}.expires", "string"),
+];
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "quota",
-    |_| "max_parallel = 3\nwall_budget_seconds = 55\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
+    |_| "max_parallel = 3\nwall_budget_seconds = 55\nhistory_max_bytes = 4194304\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
 )
-.with_boundary_check(|error| error.code == "ceiling");
+.with_boundary_check(|error| error.code == "ceiling")
+.with_fields(FIELD_METADATA);
 
 #[cfg(test)]
 mod tests {

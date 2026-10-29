@@ -69,6 +69,7 @@ impl Request<'_> {
 
 pub struct Store {
     pub(crate) db: Connection,
+    pub(crate) state_root: std::path::PathBuf,
     pub(crate) locks: Option<Directory>,
     // SQLite supports movable connections, but Fabric requires worker ownership.
     _owner: PhantomData<Rc<()>>,
@@ -78,7 +79,6 @@ impl Store {
     /// are opened read-only too; an unavailable WAL index fails closed.
     /// Filesystem calls are blocking. The deadline is checked between steps;
     /// callers needing a hard bound must run this off-thread with a timeout.
-    #[allow(clippy::disallowed_methods)]
     pub fn open_read_only(root: &StateRoot, deadline: std::time::Instant) -> Result<Option<Self>> {
         Self::open_local_delivery(root, deadline, false)
     }
@@ -103,7 +103,6 @@ impl Store {
         Self::open_local_delivery(root, deadline, true)
     }
 
-    #[allow(clippy::disallowed_methods)]
     pub(crate) fn open_local_delivery(
         root: &StateRoot,
         deadline: std::time::Instant,
@@ -171,6 +170,7 @@ impl Store {
         }
         let store = Self {
             db,
+            state_root: root.as_path().to_owned(),
             locks: None,
             _owner: PhantomData,
         };
@@ -220,6 +220,7 @@ impl Store {
         }
         Ok(Self {
             db,
+            state_root: root.as_path().to_owned(),
             locks: None,
             _owner: PhantomData,
         })
@@ -341,6 +342,7 @@ impl Store {
         }
         let store = Self {
             db,
+            state_root: root.as_path().to_owned(),
             locks,
             _owner: PhantomData,
         };
@@ -360,6 +362,11 @@ impl Store {
         }
         Ok(store)
     }
+    /// Called after commit. The signal is a hint, so a failure never fails the write.
+    pub(crate) fn signal_changes(&self) {
+        use provenant_os::changes::{Scope, hint};
+        hint(&self.state_root, &[Scope::Inbox, Scope::Board]);
+    }
     pub(crate) fn write<T>(
         &self,
         request: &Request<'_>,
@@ -373,6 +380,7 @@ impl Store {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let value = action(&tx)?;
         tx.commit()?;
+        self.signal_changes();
         Ok(value)
     }
 }

@@ -1,5 +1,6 @@
 //! Scheduling uses explicit integer seconds; it never sleeps or executes a probe.
 use crate::*;
+use provenant_core::retry::Backoff;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,12 +93,20 @@ pub fn next_due(
 }
 pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option<u64>) -> u64 {
     let base = match failure {
-        ProbeFailure::Network => 15_u64
-            .saturating_mul(1_u64 << failures.saturating_sub(1).min(5))
-            .min(300),
-        ProbeFailure::RateLimited => 120_u64
-            .saturating_mul(1_u64 << failures.saturating_sub(1).min(5))
-            .min(3600),
+        ProbeFailure::Network | ProbeFailure::RateLimited => {
+            let (first, cap) = if failure == ProbeFailure::Network {
+                (15, 300)
+            } else {
+                (120, 3600)
+            };
+            Backoff::new(
+                std::time::Duration::from_secs(first),
+                2,
+                std::time::Duration::from_secs(cap),
+            )
+            .delay(failures.saturating_sub(1))
+            .as_secs()
+        }
         ProbeFailure::Auth => 900,
         ProbeFailure::MissingCli | ProbeFailure::Disabled => 86400,
         ProbeFailure::Malformed | ProbeFailure::ProbeDirectory => 120,

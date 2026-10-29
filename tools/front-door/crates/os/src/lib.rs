@@ -3,6 +3,7 @@
 
 pub mod build_slots;
 pub mod capture;
+pub mod changes;
 pub mod clock;
 pub mod disk;
 pub mod exec;

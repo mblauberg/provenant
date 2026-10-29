@@ -180,10 +180,7 @@ impl HostDeliveryContext {
             .lines()
             .find_map(|line| line.strip_prefix("branch refs/heads/"));
         if protected_default || primary_branch == Some(target) {
-            return Err(prepare_error(
-                "integration target",
-                "default and primary checkout branches require PR delivery",
-            ));
+            return Err(RunError::ProtectedDeliveryBranch);
         }
         Ok(())
     }
@@ -331,13 +328,8 @@ impl HostDeliveryContext {
         use provenant_core::{CancelToken, Clock, WaitBudget};
         use provenant_os::{clock::SystemClock, fs::LockMode};
         let stage = Stage::Push;
-        let common = self.command(
-            project,
-            "git",
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            stage,
-        )?;
-        let directory = Directory::open_anchor(Path::new(&common))?;
+        let common = self.common_git_dir(project, stage)?;
+        let directory = Directory::open_anchor(&common)?;
         let clock = SystemClock;
         let cancel = CancelToken::new();
         let _lock = directory.lock(
@@ -736,14 +728,13 @@ impl HostDeliveryContext {
         let on_disk: Vec<&str> = existing.iter().map(String::as_str).collect();
         if let Some((name, other)) = provenant_core::find_normalisation_alias(&advertised, &on_disk)
         {
-            return Err(prepare_error(
-                "origin refresh",
+            return Err(RunError::OriginNormalisationCollision(prepare_reason(
                 format!(
                     "branch names {} and {} are equivalent under Unicode NFC normalisation; refusing to refresh {remote} until one spelling is gone",
                     spelled(name),
                     spelled(other),
                 ),
-            ));
+            )));
         }
         let mut refspecs = Vec::new();
         for name in &heads {
@@ -754,10 +745,7 @@ impl HostDeliveryContext {
                     .iter()
                     .any(|held| *name == held || provenant_core::refs_collide(name, held));
             if collides && default.as_deref() == Some(*name) {
-                return Err(prepare_error(
-                    "origin refresh",
-                    "default branch collides with another branch name",
-                ));
+                return Err(RunError::OriginDefaultCollision);
             }
             if collides || GitRefName::branch(name).is_err() {
                 use std::io::Write;
@@ -805,13 +793,8 @@ impl HostDeliveryContext {
         stage: Stage,
     ) -> Result<String> {
         let branch_ref = GitRefName::branch(branch).map_err(|_| RunError::Delivery(stage))?;
-        let common = self.command(
-            &writer.worktree,
-            "git",
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            stage,
-        )?;
-        crate::writer::verify_writer_git_paths(Path::new(&common), &branch_ref)?;
+        let common = self.common_git_dir(&writer.project, stage)?;
+        crate::writer::verify_writer_git_paths(&common, &branch_ref)?;
         self.validate_transport_helpers(writer)?;
         let source = format!("refs/heads/{branch}");
         // Read and fetch the same sealed destination used for the later push.
@@ -1224,7 +1207,10 @@ impl HostDeliveryContext {
         use provenant_confinement::transport;
         let refuse = |error: transport::TransportError| {
             if stage == Stage::Prepare {
-                prepare_error("transport", error)
+                RunError::DeliveryTransport {
+                    kind: (&error).into(),
+                    reason: prepare_reason(error),
+                }
             } else {
                 RunError::Delivery(stage)
             }
@@ -1280,12 +1266,7 @@ impl HostDeliveryContext {
     }
     fn verify_objects(&self, writer: &WriterRequest, head: GitOid, stage: Stage) -> Result<()> {
         let git = &self.tools.as_ref().ok_or(RunError::Delivery(stage))?.git;
-        let common = self
-            .bound
-            .as_ref()
-            .and_then(|bound| bound.common_git_dir.clone())
-            .map(Ok)
-            .unwrap_or_else(|| self.trusted_common_git_dir(writer, stage))?;
+        let common = self.common_git_dir(&writer.project, stage)?;
         crate::objects::require_commit(
             git,
             &common,
@@ -1297,17 +1278,44 @@ impl HostDeliveryContext {
         .map_err(|_| RunError::Delivery(stage))
     }
     fn trusted_common_git_dir(&self, writer: &WriterRequest, stage: Stage) -> Result<PathBuf> {
-        // Old handoffs have no sealed common directory. Resolve through the
-        // protected host checkout, without installing the lane's GIT_DIR.
-        let mut host = self.clone();
-        host.bound = None;
-        let common = host.command(
-            &writer.project,
-            "git",
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            stage,
-        )?;
-        std::fs::canonicalize(common).map_err(|_| RunError::Delivery(stage))
+        self.discover_common_git_dir(&writer.project, stage)
+    }
+
+    pub(super) fn common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
+        match self
+            .bound
+            .as_ref()
+            .and_then(|bound| bound.common_git_dir.clone())
+        {
+            Some(common) => Ok(common),
+            None => self.discover_common_git_dir(project, stage),
+        }
+    }
+
+    fn discover_common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
+        // Use the validated host executable and checkout; never resolve through
+        // lane-writable Git metadata after delivery has been bound.
+        let failure = |reason: String| {
+            if stage == Stage::Prepare {
+                prepare_error("HEAD", reason)
+            } else {
+                RunError::Delivery(stage)
+            }
+        };
+        let git = &self
+            .tools
+            .as_ref()
+            .ok_or_else(|| failure("host tools are unavailable".into()))?
+            .git;
+        let executor = SystemExecutor::new(1).map_err(|error| failure(error.to_string()))?;
+        provenant_os::git::repository_path_with_cancel(
+            &executor,
+            git,
+            project,
+            provenant_os::git::RepositoryPath::CommonDir,
+            self.cancellation.as_ref(),
+        )
+        .map_err(|error| failure(error.to_string()))
     }
     fn clean(&self, writer: &WriterRequest) -> Result<()> {
         let path = writer.worktree.to_str().ok_or_else(|| {
@@ -1786,6 +1794,13 @@ fn spelled(name: &str) -> String {
 }
 
 pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
+    RunError::DeliveryPrepare {
+        step,
+        reason: prepare_reason(detail),
+    }
+}
+
+fn prepare_reason(detail: impl std::fmt::Display) -> String {
     let detail = detail.to_string();
     let redacted = provenant_confinement::redact::delivery_diagnostics(&detail);
     let mut reason = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1793,7 +1808,7 @@ pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) 
         reason.truncate(reason.floor_char_boundary(1024));
         reason.push_str("...");
     }
-    RunError::DeliveryPrepare { step, reason }
+    reason
 }
 
 fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
@@ -2035,9 +2050,7 @@ impl crate::RunStore {
                 outcome: crate::Outcome::ReviewRequired,
                 ..
             } => {
-                return Err(RunError::Validation(
-                    "review required; use lane deliver --accept-review ATTEMPT",
-                ));
+                return Err(RunError::ReviewAcceptanceRequired);
             }
             _ => {
                 return Err(RunError::Validation(

@@ -177,39 +177,37 @@ impl Store {
     ) -> Result<Page<Delivery>> {
         request.check()?;
         let limit = page(after.unwrap_or(0), limit)?;
-        let mut statement=self.db.prepare("SELECT d.seq,substr(m.record,1,?5),m.id FROM deliveries d JOIN messages m ON m.project=d.project AND m.id=d.message WHERE d.project=?1 AND d.recipient=?2 AND d.seq>coalesce(?3,(SELECT seq FROM mail_cursors WHERE project=?1 AND recipient=?2),0) ORDER BY d.seq LIMIT ?4")?;
-        let mut rows = statement.query(params![
-            project.to_string(),
-            recipient.to_string(),
-            after,
-            limit,
-            MAX_RECORD_READ_BYTES
-        ])?;
-        let mut output = Vec::new();
-        let mut total = 0;
-        let mut truncated = false;
-        while let Some(row) = rows.next()? {
-            let bytes: Vec<u8> = row.get(1)?;
-            total += bytes.len();
-            if total > MAX_PAGE_BYTES {
-                truncated = true;
-                break;
-            }
+        let mut statement=self.db.prepare("SELECT substr(m.record,1,?5),d.seq,m.id FROM deliveries d JOIN messages m ON m.project=d.project AND m.id=d.message WHERE d.project=?1 AND d.recipient=?2 AND d.seq>coalesce(?3,(SELECT seq FROM mail_cursors WHERE project=?1 AND recipient=?2),0) ORDER BY d.seq LIMIT ?4")?;
+        let rows = statement.query_map(
+            params![
+                project.to_string(),
+                recipient.to_string(),
+                after,
+                limit,
+                MAX_RECORD_READ_BYTES
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    (row.get::<_, i64>(1)?, row.get::<_, String>(2)?),
+                ))
+            },
+        )?;
+        let rows = bounded_rows(rows, |bytes, (seq, id)| {
             let message: Message = decode(&bytes)?;
-            let id: String = row.get(2)?;
             if message.project != project || message.id.to_string() != id {
                 return Err(Error::Invalid("stored message identity"));
             }
-            output.push(Delivery {
+            Ok(Delivery {
                 extra: Default::default(),
-                seq: row.get(0)?,
+                seq,
                 message,
-            });
-        }
+            })
+        })?;
         Ok(Page {
             extra: Default::default(),
-            items: output,
-            truncated,
+            items: rows.items,
+            truncated: rows.truncated,
         })
     }
     /// The service supplies the authenticated recipient, never a mail sender.

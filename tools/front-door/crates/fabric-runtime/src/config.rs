@@ -1,5 +1,5 @@
 //! Fabric owns domain policy and complete compiled profile assets.
-use provenant_config::{DomainConfig, DomainSection, Profile, SectionError};
+use provenant_config::{DomainConfig, DomainSection, FieldMetadata, Profile, SectionError};
 use provenant_core::HostId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -24,6 +24,9 @@ pub struct FabricConfig {
     pub graph: GraphConfig,
     #[serde(default)]
     pub lanes: Lanes,
+    /// The front door reads and validates pipeline experiments. The runtime only accepts the key.
+    #[serde(default, skip_serializing)]
+    pub pipelines: provenant_config::experiment::PipelineExperiments,
 }
 
 /// Named command policy supplied by host configuration, never by task prompts.
@@ -698,8 +701,26 @@ fn defaults(_profile: Profile) -> &'static str {
 /// Protocol caps, graph limits and budgets, read roots and executables are a
 /// boundary: recovery could raise a cap, lift a budget or swap a binary. Labels,
 /// peers' addresses and lane tuning recover to defaults.
-pub const SECTION: DomainSection =
-    DomainSection::new::<FabricConfig>("fabric", defaults).with_boundary_check(boundary);
+pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::enumeration(
+        "lanes.memory_pressure_threshold",
+        &["warning", "critical", "never"],
+    ),
+    FieldMetadata::int("lanes.max_concurrent_builds", 1, 64),
+    FieldMetadata::int("lanes.cargo_build_jobs", 1, 1024),
+    FieldMetadata::int("lanes.max_writer_lanes", 1, 64),
+    FieldMetadata::int("lanes.max_project_writer_lanes", 1, 32),
+    FieldMetadata::int("lanes.build_wait_minutes", 1, 1440),
+    FieldMetadata::int("lanes.lane_port_base", 1024, 65535),
+    FieldMetadata::int("lanes.lane_port_block", 1, 1024),
+    FieldMetadata::int("lanes.lane_port_blocks", 0, 1024),
+    FieldMetadata::int("peers.{peer}.connect_timeout_seconds", 1, 30),
+    FieldMetadata::new("commands.{name}.argv", "array"),
+    FieldMetadata::new("home_hosts.{host}", "string"),
+];
+pub const SECTION: DomainSection = DomainSection::new::<FabricConfig>("fabric", defaults)
+    .with_boundary_check(boundary)
+    .with_fields(FIELD_METADATA);
 
 fn boundary(error: &SectionError) -> bool {
     let field = error.field.as_str();
@@ -893,6 +914,7 @@ mod tests {
             client_label: "agent".into(),
             commands: BTreeMap::new(),
             host_native: BTreeMap::new(),
+            pipelines: Default::default(),
             home_hosts: BTreeMap::new(),
             peers: BTreeMap::from([(
                 "worker".into(),
@@ -1236,11 +1258,13 @@ mod tests {
             let error =
                 provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
                     .err()
-                    .unwrap()
-                    .to_string();
-            assert!(error.contains(key), "{error}");
-            assert_eq!(error.contains(rejected), should_echo, "{error}");
-            assert!(error.contains(rule), "{error}");
+                    .unwrap();
+            let provenant_config::ConfigError::Domain { source, .. } = &error else {
+                panic!("unexpected refusal: {error:?}");
+            };
+            assert_eq!(source.field, format!("domains.fabric.{key}"), "{error}");
+            assert_eq!(source.code, rule, "{error}");
+            assert_eq!(error.to_string().contains(rejected), should_echo, "{error}");
         }
 
         // Lane tuning is not a boundary: it recovers with a warning that names

@@ -608,8 +608,13 @@ mod tests {
         };
         let coverage = index.validate(&forged, &call)?;
         assert!(
-            matches!(outcome.as_slice(), [Started::Refused {reason, ..}]
-            if reason.contains("fixture sibling handoff")),
+            matches!(
+                outcome.as_slice(),
+                [Started::Refused {
+                    kind: crate::RefusalKind::Handoff,
+                    ..
+                }]
+            ),
             "forged lookup={coverage:?}, sibling={outcome:?}"
         );
         assert_eq!(coverage, WorkCoverage::Unindexed);
@@ -699,9 +704,13 @@ mod tests {
             &|_, _| Err(RunError::Validation("fixture sibling handoff")),
             &call,
         )?;
-        assert!(
-            matches!(outcome.as_slice(), [Started::Refused { reason, .. }] if reason.contains("fixture sibling handoff"))
-        );
+        assert!(matches!(
+            outcome.as_slice(),
+            [Started::Refused {
+                kind: crate::RefusalKind::Handoff,
+                ..
+            }]
+        ));
         Ok(())
     }
 

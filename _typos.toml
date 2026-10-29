@@ -31,6 +31,8 @@ Modeling = "Modeling"
 "uncatalogued" = "uncatalogued"
 "unparseable" = "unparseable"
 "URE" = "URE"
+# Foundation's String.capitalized, used by the Swift console.
+"capitalized" = "capitalized"
 # GitHub Actions event activity types.
 "labeled" = "labeled"
 "synchronize" = "synchronize"

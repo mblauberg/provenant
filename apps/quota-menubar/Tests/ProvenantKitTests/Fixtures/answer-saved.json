@@ -1,0 +1,28 @@
+{
+ "schema_version": 1,
+ "command": "answer",
+ "status": "ok",
+ "data": {
+  "result": "saved",
+  "operation_id": "99999999999999999999999999999999",
+  "request_id": "11111111111111111111111111111111",
+  "revision": 4,
+  "state": "answered",
+  "answer_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "delivery": {
+   "schema_version": 1,
+   "answer_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "target_host": "cccccccccccccccccccccccccccccccc",
+   "target_session": "3f9c2a10d4e84b7f",
+   "target_actor": "dddddddddddddddddddddddddddddddd",
+   "transport": "fabric_mail",
+   "message_id": "ffffffffffffffffffffffffffffffff",
+   "state": "queued",
+   "attempts": 0,
+   "last_attempt_at": null,
+   "acknowledged_at": null,
+   "error": null
+  }
+ },
+ "error": null
+}

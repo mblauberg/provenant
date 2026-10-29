@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
 };
 use thiserror::Error;
 
@@ -24,6 +24,16 @@ pub enum UsageError {
     Filesystem(#[from] FsError),
     #[error("cannot read the usage log: {0}")]
     Io(#[from] io::Error),
+}
+
+impl UsageError {
+    /// Stable machine-readable refusal code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Filesystem(_) => "filesystem",
+            Self::Io(_) => "io",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -256,6 +266,12 @@ pub struct Report {
     pub units: Vec<Unit>,
 }
 
+/// A newline ends a record. So does a zero byte: zero-filled space, such as a
+/// crash can leave, must not swallow the record written after it.
+fn ends_record(byte: u8) -> bool {
+    byte == b'\n' || byte == 0
+}
+
 fn events(roots: &Roots) -> Result<Vec<Event>, UsageError> {
     let mut events = Vec::new();
     let directory = match Directory::open_anchor(roots.state.as_path()) {
@@ -270,12 +286,30 @@ fn events(roots: &Roots) -> Result<Vec<Event>, UsageError> {
                 Err(error) if error.is_not_found() => continue,
                 Err(error) => return Err(error.into()),
             };
+            let size = file.metadata()?.size;
+            let offset = size.saturating_sub(CAP);
+            // A window that starts just after a record end holds only whole records.
+            let mut whole = true;
+            if offset > 0 {
+                let mut before = [0u8];
+                file.seek(SeekFrom::Start(offset - 1))?;
+                file.read_exact(&mut before)?;
+                whole = ends_record(before[0]);
+            }
             let mut bytes = Vec::new();
             // A writer can cross the cap while rotation is busy. Bound the read,
             // rather than failing the report when the file grows.
+            file.seek(SeekFrom::Start(offset))?;
             (&mut file).take(CAP).read_to_end(&mut bytes)?;
+            if !whole {
+                let skip = bytes
+                    .iter()
+                    .position(|byte| ends_record(*byte))
+                    .map_or(bytes.len(), |end| end + 1);
+                bytes.drain(..skip);
+            }
             // Ignore torn or malformed records; only complete bounded lines count.
-            for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            for line in bytes.split_inclusive(|byte| ends_record(*byte)) {
                 if line.len() > LINE_CAP || !line.ends_with(b"\n") {
                     continue;
                 }

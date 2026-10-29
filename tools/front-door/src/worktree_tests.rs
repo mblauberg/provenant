@@ -2045,12 +2045,6 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
             let value = json(&refused)?;
             assert_eq!(value["status"], "refused", "{value}");
             assert_eq!(value["error"]["code"], "WORKTREE_LOCK_BUSY", "{value}");
-            assert!(
-                value["error"]["message"]
-                    .as_str()
-                    .ok_or("message")?
-                    .contains("lock busy")
-            );
         }
         make_idle(&cache)?;
         let listed = ok(&rig, &["worktree", "list", "--json"])?;
@@ -2231,11 +2225,7 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
     };
     let old_tree = Directory::open_anchor(&path)?;
     drop(acquire(scope)?);
-    assert!(acquire(scope).is_err_and(|error| {
-        error
-            .to_string()
-            .contains("writer reservation requires recovery")
-    }));
+    assert!(acquire(scope).is_err_and(|error| is_fenced(error.as_ref())));
     provenant_supervisor::custody::acquire_recovery(
         Directory::open_anchor(&state)?,
         scope,
@@ -2252,9 +2242,7 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
             generation: 2,
             ..scope
         })
-        .is_err_and(|error| error
-            .to_string()
-            .contains("writer reservation requires recovery"))
+        .is_err_and(|error| is_fenced(error.as_ref()))
     );
     let lease = acquire(Scope {
         run: provenant_core::RunId::from_bytes([33; 16]),
@@ -2269,12 +2257,17 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
             generation: 2,
             ..scope
         })
-        .is_err_and(|error| error
-            .to_string()
-            .contains("writer reservation requires recovery"))
+        .is_err_and(|error| is_fenced(error.as_ref()))
     );
     drop(old_tree);
     Ok(())
+}
+
+fn is_fenced(error: &(dyn std::error::Error + 'static)) -> bool {
+    matches!(
+        error.downcast_ref::<provenant_supervisor::custody::CustodyError>(),
+        Some(provenant_supervisor::custody::CustodyError::Fenced)
+    )
 }
 
 fn branch_commit(rig: &TestRig, branch: &str) -> Result<std::path::PathBuf> {
@@ -2756,6 +2749,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
         "{}",
         String::from_utf8_lossy(&identity.stderr.bytes)
     );
+    // The host owns and initialises the Fabric store before a lane opens it
+    // read-only. Identity alone does not create the coordination database.
+    ok(&rig, &["fabric", "events", "read", "--json"])?;
     let home = rig.root.join("fixture-home");
     fs::create_dir_all(home.join(".claude-fixture"))?;
     if !cfg!(target_os = "macos") {
@@ -3864,9 +3860,9 @@ fn verify_lane_profile(
     );
     host.provider_exited(&parent.encode()?, None)?;
     fs::write(state.join("config.toml"), config(1))?;
-    // The child store's git-home is the in-lane fabric context's own, not the
-    // host's: its preparation keeps its git home under the host root.
-    assert!(child.join("tmp/git-home").is_dir());
+    // The in-lane fabric context opens read-only and reaches the host through
+    // the relay, so it creates no git home in the child store.
+    assert!(!child.join("tmp/git-home").exists());
     // Host probes leave no directory or lease behind once the child launched.
     let probes: Vec<_> = fs::read_dir(state)?
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())

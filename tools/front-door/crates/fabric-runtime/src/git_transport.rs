@@ -75,6 +75,29 @@ pub enum GitTransportError {
 }
 
 impl GitTransportError {
+    /// The existing landing refusal code, independent of its displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::PushUnknown { .. } | Self::PushUnresolved { .. } => "launch_unknown",
+            Self::Store(error) => crate::coordination::facade::FacadeError::from(error).code(),
+            Self::PushNotFound { .. } => "not_found",
+            Self::Invalid(_) | Self::InvalidRemote => "invalid_input",
+            Self::DirtyWorktree
+            | Self::IncompleteRepository
+            | Self::OidMismatch
+            | Self::NonFastForward
+            | Self::TransportConflict
+            | Self::RemoteMoved => "conflict",
+            Self::GitUnavailable
+            | Self::SshUnavailable
+            | Self::GitCommand { .. }
+            | Self::IncompleteOutput { .. }
+            | Self::InvalidOutput { .. }
+            | Self::Filesystem(_)
+            | Self::Execution(_) => "io",
+        }
+    }
+
     pub fn is_unknown(&self) -> bool {
         matches!(self, Self::PushUnknown { .. } | Self::PushUnresolved { .. })
     }
@@ -581,20 +604,48 @@ impl<'a> GitTransport<'a> {
     fn ensure_repo_root(&self, repository: &Path, cancel: &CancelToken) -> Result<PathBuf> {
         let root = fs::canonicalize(repository)?;
         let _held = Directory::open_anchor(&root)?;
-        let args = strings(&["rev-parse", "--show-toplevel"]);
-        let output = self.require_success(
-            "repository root",
+        let git_root = provenant_os::git::repository_path_with_cancel(
+            self.executor,
+            &self.git_executable,
             &root,
-            &args,
-            None,
-            MAX_TEXT_BYTES,
-            cancel,
-        )?;
-        let value = one_line(&output.stdout.bytes, "repository root")?;
-        let text = std::str::from_utf8(value).map_err(|_| GitTransportError::InvalidOutput {
-            command: "repository root",
+            provenant_os::git::RepositoryPath::Toplevel,
+            Some(cancel),
+        )
+        .map_err(|error| {
+            use provenant_os::git::DiscoveryError;
+            match error
+                .into_inner()
+                .and_then(|error| error.downcast::<DiscoveryError>().ok())
+                .map(|error| *error)
+            {
+                Some(DiscoveryError::Execution(error)) => GitTransportError::Execution(error),
+                Some(
+                    DiscoveryError::TimedOut
+                    | DiscoveryError::Cancelled
+                    | DiscoveryError::Incomplete,
+                ) => GitTransportError::IncompleteOutput {
+                    command: "repository root",
+                },
+                Some(DiscoveryError::Command(_)) => GitTransportError::GitCommand {
+                    command: "repository root",
+                },
+                Some(DiscoveryError::Canonicalize(source)) => {
+                    GitTransportError::Filesystem(FsError::Io {
+                        operation: "canonicalize",
+                        path: root.clone(),
+                        source,
+                    })
+                }
+                Some(DiscoveryError::Unavailable) | None => GitTransportError::InvalidOutput {
+                    command: "repository root",
+                },
+            }
         })?;
-        let git_root = fs::canonicalize(Path::new(text))?;
+        if git_root.to_str().is_none() {
+            return Err(GitTransportError::InvalidOutput {
+                command: "repository root",
+            });
+        }
         if git_root != root {
             return Err(GitTransportError::Invalid("repository root binding"));
         }
@@ -1109,6 +1160,66 @@ mod tests {
 
     struct CaptureCommandExecutor {
         argv: std::sync::Mutex<Option<Vec<OsString>>>,
+    }
+
+    struct DiscoveryFailureExecutor(u8);
+    impl Executor for DiscoveryFailureExecutor {
+        fn execute(&self, _: ExecOptions<'_>) -> std::result::Result<ExecOutcome, ExecError> {
+            if self.0 == 0 {
+                return Err(ExecError::Io {
+                    operation: "spawn",
+                    source: std::io::ErrorKind::NotFound.into(),
+                });
+            }
+            Ok(ExecOutcome {
+                termination: Termination::Exit(1),
+                stdout: CapturedStream::default(),
+                stderr: CapturedStream::default(),
+                timed_out: self.0 == 1,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: self.0 == 2,
+                elapsed_micros: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn repository_root_preserves_discovery_failure_categories() {
+        let fixture = Fixture::new();
+        for mode in 0..4 {
+            let executor = DiscoveryFailureExecutor(mode);
+            let transport = GitTransport {
+                executor: &executor,
+                git_executable: "/git".into(),
+                ssh_executable: "/ssh".into(),
+                ssh_auth_sock: None,
+            };
+            let error = transport
+                .ensure_repo_root(fixture.root.path(), &fixture.cancel)
+                .unwrap_err();
+            match mode {
+                0 => assert!(matches!(
+                    error,
+                    GitTransportError::Execution(ExecError::Io {
+                        operation: "spawn",
+                        ..
+                    })
+                )),
+                1 | 2 => assert!(matches!(
+                    error,
+                    GitTransportError::IncompleteOutput {
+                        command: "repository root"
+                    }
+                )),
+                _ => assert!(matches!(
+                    error,
+                    GitTransportError::GitCommand {
+                        command: "repository root"
+                    }
+                )),
+            }
+        }
     }
     impl Executor for CaptureCommandExecutor {
         fn execute(&self, options: ExecOptions<'_>) -> std::result::Result<ExecOutcome, ExecError> {

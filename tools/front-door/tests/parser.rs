@@ -191,8 +191,12 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert_eq!(stats["data"]["totals"]["cost"]["missing_attempts"], 25);
     let stats = rig.command(&["telemetry", "stats", "--full"])?;
     assert_eq!(code(&stats), 0);
+    let text = String::from_utf8(stats.stdout.bytes)?;
+    let (scope, totals) = text.split_once('\n').ok_or("scope line")?;
+    assert!(scope.starts_with("scope: project "), "{scope}");
+    assert!(scope.ends_with(", finished attempts only (0 queued or running not counted); other projects are excluded, so run stats from their checkout"), "{scope}");
     assert_eq!(
-        String::from_utf8(stats.stdout.bytes)?,
+        totals,
         "25 attempts, cost unknown (25 attempts missing cost data)\ncache-read share: unknown (incomplete input categories)\n"
     );
     // Named status includes old terminal lanes by run, task or attempt ID.

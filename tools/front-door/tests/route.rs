@@ -69,7 +69,7 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     );
     let none = call(
         &rig,
-        &["route", "resolve", "opencode/opencode-go/glm-5.2"],
+        &["route", "resolve", "opencode/opencode-go/glm-5.3-flash"],
         0,
     )?;
     assert_eq!(none["data"]["supported_efforts"], serde_json::json!([]));
@@ -87,7 +87,7 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
             .ok_or("message")?
             .contains("codex/gpt-6-luna")
     );
-    let output = rig.command(&["route", "resolve", "opencode/opencode-go/glm-5.2"])?;
+    let output = rig.command(&["route", "resolve", "opencode/opencode-go/glm-5.3-flash"])?;
     assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("supported efforts: none"));
     Ok(())
 }
@@ -317,7 +317,11 @@ fn override_set_echoes_replaces_lists_and_clears() -> Result {
     assert_eq!(overrides.len(), 2);
     assert_eq!(overrides[0]["account"], "claude/pro");
     assert_eq!(overrides[0]["policy"], "pace");
-    assert!(overrides[0]["schedule"]["expires"].as_i64().is_some());
+    assert!(
+        overrides[0]["schedule"]["expires"]
+            .as_str()
+            .is_some_and(|at| provenant_core::WallTime::parse(at).is_ok())
+    );
     assert_eq!(overrides[1]["schedule"]["windows"][0]["start_hour"], 23);
     let one = call(
         &rig,
@@ -345,7 +349,7 @@ fn override_set_resolves_labels_and_rejects_ambiguous_keys() -> Result {
     fs::create_dir_all(&rig.state)?;
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[domains.accounts.entries.one]\nadapter='claude'\nlabel='work'\nkey='shared'\ndirectory='/tmp/a'\n[domains.accounts.entries.two]\nadapter='codex'\nlabel='personal'\nkey='shared'\ndirectory='/tmp/b'\n[[domains.routing.pacing_overrides]]\naccount='work'\npolicy='pace'\nschedule={expires=2000000000}\n",
+        "schema_version=1\n[domains.accounts.entries.one]\nadapter='claude'\nlabel='work'\nkey='shared'\ndirectory='/tmp/a'\n[domains.accounts.entries.two]\nadapter='codex'\nlabel='personal'\nkey='shared'\ndirectory='/tmp/b'\n[[domains.routing.pacing_overrides]]\naccount='work'\npolicy='pace'\nschedule={expires='2033-05-18T03:33:20Z'}\n", // timebomb: allow far-future fixture expiry
     )?;
     let rejected = call(
         &rig,
@@ -397,15 +401,16 @@ fn override_set_resolves_labels_and_rejects_ambiguous_keys() -> Result {
 fn override_list_shows_active_future_and_expired_schedules() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
-    let now = jiff::Timestamp::now().as_second();
+    let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+    let at = |seconds: i64| jiff::Timestamp::from_second(seconds).map(|at| at.to_string());
     let config = format!(
-        "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n[[domains.routing.pacing_overrides]]\nprovider='agy'\npolicy='off'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nschedule={{windows=[{{weekdays=[5,6],start_hour=0,end_hour=24}}]}}\n[domains.routing.model_policy.rules.policy.cache]\nttl_seconds=60\n",
-        now - 30,
-        now + 300,
-        now + 300,
-        now + 600,
-        now - 600,
-        now - 300,
+        "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\n[domains.routing.pacing_overrides.schedule]\nstarts='{}'\nexpires='{}'\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n[domains.routing.pacing_overrides.schedule]\nstarts='{}'\nexpires='{}'\n[[domains.routing.pacing_overrides]]\nprovider='agy'\npolicy='off'\n[domains.routing.pacing_overrides.schedule]\nstarts='{}'\nexpires='{}'\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nschedule={{windows=[{{weekdays=[5,6],start_hour=0,end_hour=24}}]}}\n[domains.routing.model_policy.rules.policy.cache]\nttl_seconds=60\n",
+        at(now - 30)?,
+        at(now + 300)?,
+        at(now + 300)?,
+        at(now + 600)?,
+        at(now - 600)?,
+        at(now - 300)?,
     );
     fs::write(rig.state.join("config.toml"), config)?;
     let listed = call(&rig, &["route", "override", "list"], 0)?;
@@ -426,6 +431,30 @@ fn override_list_shows_active_future_and_expired_schedules() -> Result {
         serde_json::json!([5, 6])
     );
     assert!(rows[3]["remaining_seconds"].is_null());
+    Ok(())
+}
+
+#[test]
+fn fallback_and_retired_key_warnings_are_revision_scoped() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    let config = "schema_version=1\n[domains.routing]\npacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n[domains.routing.model_policy.defaults.result]\nfallback='codex/not-catalogued'\n";
+    fs::write(rig.state.join("config.toml"), config)?;
+    let first = rig.command(&["route", "list"])?;
+    let stderr = String::from_utf8(first.stderr.bytes)?;
+    assert!(stderr.contains("schedule.expires"), "{stderr}");
+    assert!(stderr.contains("unknown_fallback"), "{stderr}");
+    assert_eq!(stderr.matches("unknown_fallback").count(), 1);
+    let second = rig.command(&["route", "list"])?;
+    assert!(second.stderr.bytes.is_empty());
+    fs::write(
+        rig.state.join("config.toml"),
+        format!("{config}\n# revision\n"),
+    )?;
+    let third = rig.command(&["route", "list"])?;
+    let stderr = String::from_utf8(third.stderr.bytes)?;
+    assert!(stderr.contains("schedule.expires"), "{stderr}");
+    assert!(stderr.contains("unknown_fallback"), "{stderr}");
     Ok(())
 }
 
@@ -480,7 +509,7 @@ fn retired_schedule_keys_drop_only_their_record_with_a_named_warning() -> Result
 fn cached_account_pacing_is_visible_without_probing() -> Result {
     use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow};
     let rig = rig()?;
-    let at = jiff::Timestamp::now().as_second();
+    let at = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
     let directory = rig.state.join("quota/opaque-one");
     fs::create_dir_all(&directory)?;
     for path in [&rig.state, &rig.state.join("quota"), &directory] {
@@ -650,12 +679,21 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
     call(&rig, &["route", "--help"], 0)?;
     let listed = call(&rig, &["route", "list", "--adapter", "opencode"], 0)?;
     assert_eq!(listed["command"], "route list");
-    assert!(
-        listed["data"]["models"]
-            .as_array()
-            .ok_or("models")?
-            .iter()
-            .any(|m| m["model"] == "opencode/openrouter/~anthropic/claude-haiku-latest")
+    let mut models: Vec<&str> = listed["data"]["models"]
+        .as_array()
+        .ok_or("models")?
+        .iter()
+        .map(|m| m["model"].as_str().ok_or("model"))
+        .collect::<std::result::Result<_, _>>()?;
+    models.sort_unstable();
+    assert_eq!(
+        models,
+        [
+            "opencode/opencode-go/deepseek-v4.1-flash",
+            "opencode/opencode-go/glm-5.3-flash",
+            "opencode/opencode/deepseek-v4.1-flash-free",
+            "opencode/opencode/glm-5.3-flash-free",
+        ]
     );
     let pool = call(
         &rig,
@@ -671,7 +709,7 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
             "--model",
             "codex/gpt-6.1-terra",
             "--fallback",
-            "opencode/openrouter/~anthropic/claude-haiku-latest,agy/explicit",
+            "opencode/opencode-go/glm-5.3-flash,agy/explicit",
         ],
         0,
     )?;
@@ -683,7 +721,7 @@ fn help_list_and_resolve_are_pure_and_resolve_reports_exact_candidates() -> Resu
     );
     assert_eq!(
         resolved["data"]["alternatives"][0]["model"],
-        "openrouter/~anthropic/claude-haiku-latest"
+        "opencode-go/glm-5.3-flash"
     );
     assert_eq!(
         resolved["data"]["exclusions"]
@@ -923,13 +961,10 @@ fn route_config_verbs_edit_inline_domain_tables() -> Result {
 fn named_routes_are_read_only_and_fail_closed() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
-    let config = "schema_version=1\n[domains.routing.routes.review]\nmodel='opencode/openrouter/~anthropic/claude-haiku-latest'\n";
+    let config = "schema_version=1\n[domains.routing.routes.review]\nmodel='opencode/opencode-go/glm-5.3-flash'\n";
     fs::write(rig.state.join("config.toml"), config)?;
     let resolved = call(&rig, &["route", "resolve", "--route", "review"], 0)?;
-    assert_eq!(
-        resolved["data"]["model"],
-        "openrouter/~anthropic/claude-haiku-latest"
-    );
+    assert_eq!(resolved["data"]["model"], "opencode-go/glm-5.3-flash");
     assert_eq!(fs::read_to_string(rig.state.join("config.toml"))?, config);
     // Only the usage counter may appear beside the config.
     let names = fs::read_dir(&rig.state)?

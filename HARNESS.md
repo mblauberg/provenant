@@ -9,9 +9,8 @@ as when tests run or how decisions are recorded for confirmation. That is not a
 weakening so long as every gate still holds before merge or promotion. A project may also set its own review ladder and name its own
 acceptance gate, as described below.
 
-Skills ship in the product checkout and install into `~/.claude/skills/` and
-`~/.codex/skills/`. When a skill is named, read its `SKILL.md`; a named skill
-binds.
+Skills ship in the product checkout and install into each configured harness's
+skills directory. When a skill is named, read its `SKILL.md`; a named skill binds.
 
 ## Accountable topology
 

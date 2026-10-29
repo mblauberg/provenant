@@ -1198,7 +1198,7 @@ impl provenant_supervisor::Holder for RefusingHolder {
         _attempt: &Directory,
     ) -> std::result::Result<(), CustodyError> {
         Err(if self.clock {
-            CustodyError::AdmissionClock
+            CustodyError::Admission(AdmissionError::Clock)
         } else {
             CustodyError::Io(io::Error::other("/private/state/admission.sqlite3"))
         })
@@ -1241,7 +1241,7 @@ fn the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal(root: &P
         (
             "clock",
             "unreadable-clock",
-            "startup spacing cannot be judged: host clock or boot identity unreadable",
+            "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read",
         ),
         ("io", "other-error", "admission refused"),
     ] {
@@ -1640,20 +1640,23 @@ fn stale_complete_census_does_not_signal_a_late_shared_group_owner(root: &Path) 
     Ok(())
 }
 
+/// Waits for the guardian to record `field`, since a fixture can signal
+/// readiness before the guardian republishes its reservation.
 fn reservation_identity(writer_path: &Path, field: &str) -> Result<ProcessIdentity> {
-    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(
-        writer_path
-            .join(scope().attempt.to_string())
-            .join("reservation.json"),
-    )?)?;
-    serde_json::from_value(
-        value
-            .get(field)
-            .filter(|identity| !identity.is_null())
-            .cloned()
-            .ok_or_else(|| io::Error::other(format!("reservation omitted {field} identity")))?,
-    )
-    .map_err(Into::into)
+    let path = writer_path
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        if let Some(identity) = value.get(field).filter(|identity| !identity.is_null()) {
+            return serde_json::from_value(identity.clone()).map_err(Into::into);
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!("reservation omitted {field} identity")).into());
+        }
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
 }
 
 fn assert_peer_open(stream: &mut UnixStream) -> Result<()> {
@@ -2500,6 +2503,35 @@ fn run_case(name: &str) -> Result<()> {
     result
 }
 
+/// The system clock, with wall time jumped forward once the marker appears,
+/// as a sleeping host's would be.
+struct JumpingClock {
+    sleeping: PathBuf,
+    jump: i64,
+}
+impl provenant_core::Clock for JumpingClock {
+    fn wall_now(&self) -> std::result::Result<provenant_core::WallTime, provenant_core::TimeError> {
+        let now = provenant_core::Clock::wall_now(&SystemClock::new())?;
+        let offset = if self.sleeping.exists() { self.jump } else { 0 };
+        provenant_core::WallTime::from_micros(now.as_micros() + offset * 1_000_000)
+    }
+    fn mono_now(&self) -> provenant_core::MonoTime {
+        provenant_core::Clock::mono_now(&SystemClock::new())
+    }
+    fn host_monotonic_micros(&self) -> std::result::Result<u64, provenant_core::TimeError> {
+        provenant_core::Clock::host_monotonic_micros(&SystemClock::new())
+    }
+    fn boot_identity(&self) -> std::result::Result<String, provenant_core::TimeError> {
+        provenant_core::Clock::boot_identity(&SystemClock::new())
+    }
+    fn wait_until(
+        &self,
+        deadline: provenant_core::MonoTime,
+    ) -> std::result::Result<(), provenant_core::TimeError> {
+        provenant_core::Clock::wait_until(&SystemClock::new(), deadline)
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|a| a == "internal")
@@ -2519,14 +2551,9 @@ fn main() -> Result<()> {
         // The jump starts once the test has the provider connected: a stop at
         // once would end it before it could.
         let sleeping = home.join(S2_WALL_JUMP_NOW);
-        let jumping = move || {
-            let now = provenant_core::Clock::wall_now(&SystemClock::new()).ok()?;
-            let offset = if sleeping.exists() {
-                jump.unwrap_or(0)
-            } else {
-                0
-            };
-            provenant_core::WallTime::from_micros(now.as_micros() + offset * 1_000_000).ok()
+        let jumping = JumpingClock {
+            sleeping,
+            jump: jump.unwrap_or(0),
         };
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
@@ -2553,7 +2580,9 @@ fn main() -> Result<()> {
                 children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
                 nested_children: production_shape.then_some(&store as &dyn NestedChildStore),
                 observer: Some(&observer),
-                wall_clock: jump.is_some().then_some(&jumping as &dyn Fn() -> Option<_>),
+                wall_clock: jump
+                    .is_some()
+                    .then_some(&jumping as &dyn provenant_core::Clock),
                 disk: disk
                     .as_ref()
                     .map(|disk| disk as &dyn provenant_supervisor::DiskPressure),

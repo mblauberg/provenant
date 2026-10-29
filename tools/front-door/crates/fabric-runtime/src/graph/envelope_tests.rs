@@ -105,6 +105,7 @@ fn filled_ask(mut ask: NodeAsk) -> NodeAsk {
         actor: Some(worst(HOST_ID_BYTES)),
         at: Some(envelope::latest()),
         rejected: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+        rejection_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
     });
     ask.inbox_error = Some(worst(MAX_ADVANCE_ERROR_BYTES));
     ask
@@ -115,16 +116,30 @@ fn filled_ask(mut ask: NodeAsk) -> NodeAsk {
 fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
     let mut asks = Vec::new();
     for node in &plan.nodes {
-        if let Some(session) = node.loop_body.as_ref().and_then(|spec| spec.decision_session.as_deref()) {
+        if let Some(session) = node
+            .loop_body
+            .as_ref()
+            .and_then(|spec| spec.decision_session.as_deref())
+        {
             let rounds = plan
                 .nodes
                 .iter()
-                .filter_map(|n| n.round.as_ref().filter(|r| r.loop_id == node.id).map(|r| r.round))
+                .filter_map(|n| {
+                    n.round
+                        .as_ref()
+                        .filter(|r| r.loop_id == node.id)
+                        .map(|r| r.round)
+                })
                 .max()
                 .unwrap_or(0);
-            asks.extend(
-                (1..=rounds).map(|round| filled_ask(asks::loop_ask(&plan.graph_id, &node.id, usize::MAX - round, session))),
-            );
+            asks.extend((1..=rounds).map(|round| {
+                filled_ask(asks::loop_ask(
+                    &plan.graph_id,
+                    &node.id,
+                    usize::MAX - round,
+                    session,
+                ))
+            }));
         }
         if let Some(spec) = &node.land {
             asks.push(filled_ask(land::land_ask(
@@ -180,7 +195,12 @@ fn filled_land(tier: provenant_records::workflow::RiskTier) -> LandRecord {
 }
 
 fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphCheckpoint {
-    let longest = plan.nodes.iter().map(|node| node.id.clone()).max_by_key(String::len).unwrap();
+    let longest = plan
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .max_by_key(String::len)
+        .unwrap();
     let nodes = plan
         .nodes
         .iter()
@@ -240,6 +260,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 id: node.id.clone(),
                 state: NodeState::Succeeded,
                 advance_error: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+                advance_error_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
+                loop_pause_code: node.loop_body.as_ref().map(|_| "c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 outputs: Some(if boundary {
                     gate_outputs(false)
                 } else {
@@ -299,8 +321,12 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         integration_pin: Some("1".repeat(64)),
         cancelled: true,
         pause_reason: Some(worst(PAUSE_REASON_BYTES)),
+        pause_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
         unknown_usage: vec![
-            format!("node {longest} route {}: wall_time_seconds usage unknown", u16::MAX);
+            format!(
+                "node {longest} route {}: wall_time_seconds usage unknown",
+                u16::MAX
+            );
             MAX_UNKNOWN_USAGE
         ],
         unknown_usage_omitted: usize::MAX,
@@ -366,15 +392,22 @@ fn assert_fits(document: GraphDocument) {
     let stored = StoredCheckpoint {
         extra: Default::default(),
         schema_version: 1,
-        digest: CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &(&checkpoint, &execution))
-            .unwrap()
-            .to_string(),
+        digest: CanonicalV1::record_digest(
+            "fabric-graph-checkpoint",
+            2,
+            &(&checkpoint, &execution),
+        )
+        .unwrap()
+        .to_string(),
         checkpoint,
         execution,
     };
     let size = canonical_len(&stored);
     let bound = envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
-    assert!(size <= bound, "filled checkpoint is {size} bytes, over its {bound}-byte bound");
+    assert!(
+        size <= bound,
+        "filled checkpoint is {size} bytes, over its {bound}-byte bound"
+    );
     assert!(bound < size * 2, "bound {bound} is loose against {size}");
 }
 
@@ -384,7 +417,8 @@ fn a_graph_at_the_default_node_limit_is_admitted() {
         .map(|index| json!({"id":format!("n{index}"), "access":"read_only", "prompt":"work", "route":{"alias":"senior"}}))
         .collect::<Vec<_>>();
     let document: GraphDocument =
-        serde_json::from_value(json!({"schema_version":1, "graph_id":"wide", "nodes":nodes})).unwrap();
+        serde_json::from_value(json!({"schema_version":1, "graph_id":"wide", "nodes":nodes}))
+            .unwrap();
     document.expanded(&Default::default()).unwrap();
 }
 
@@ -394,15 +428,12 @@ fn an_oversized_graph_is_refused_before_its_first_save_naming_the_size() {
         .map(|index| json!({"id":format!("n{index}"), "access":"read_only", "prompt":"work", "routes":routes(16)}))
         .collect::<Vec<_>>();
     let document: GraphDocument =
-        serde_json::from_value(json!({"schema_version":1, "graph_id":"wide", "nodes":nodes})).unwrap();
+        serde_json::from_value(json!({"schema_version":1, "graph_id":"wide", "nodes":nodes}))
+            .unwrap();
     let preflight = document.expanded(&Default::default()).unwrap_err();
-    assert!(
-        preflight.starts_with("graph checkpoint could reach ")
-            && preflight.contains(" bytes, over its 16777216-byte limit"),
-        "{preflight}"
-    );
     let mut journal = MemoryJournal::default();
     let error = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap_err();
+    assert_eq!(error.code(), "invalid_graph");
     assert!(matches!(error, GraphError::Invalid(reason) if reason == preflight));
     assert!(journal.0.is_none());
 }
@@ -422,12 +453,23 @@ fn a_loop_extension_past_the_envelope_pauses_instead_of_growing() {
     }))
     .unwrap();
     let mut owner = FakeOwner {
-        observations: (0..18).map(|_| terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL")).collect(),
+        observations: (0..18)
+            .map(|_| terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"))
+            .collect(),
         ..Default::default()
     };
-    let limits = crate::config::GraphLimits { expansion_depth: 64, ..Default::default() };
+    let limits = crate::config::GraphLimits {
+        expansion_depth: 64,
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
-    let first = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default());
+    let first = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    );
     assert_eq!(first.unwrap().status, GraphStatus::Paused);
     let run = resume_with_budget(
         &document,
@@ -439,8 +481,10 @@ fn a_loop_extension_past_the_envelope_pauses_instead_of_growing() {
     )
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    let reason = run.checkpoint.pause_reason.unwrap();
-    assert!(reason.contains("decision cannot be applied: graph checkpoint could reach "), "{reason}");
+    assert_eq!(
+        run.checkpoint.pause_code.as_deref(),
+        Some("invalid_loop_decision")
+    );
     assert!(run.checkpoint.extensions.is_empty());
     assert_eq!(owner.calls.len(), 18);
 }
@@ -516,7 +560,10 @@ fn long_and_many_extensions_are_kept_and_count_toward_the_envelope() {
         &mut journal,
         &Default::default(),
         &crate::config::GraphBudget {
-            per_graph: crate::config::BudgetLimit { tokens: Some(1), ..Default::default() },
+            per_graph: crate::config::BudgetLimit {
+                tokens: Some(1),
+                ..Default::default()
+            },
             ..Default::default()
         },
         &extensions,
@@ -548,10 +595,18 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
     let mut document = mixed();
     let plan = planned(&document);
     let checkpoint = filled_checkpoint(&document, &plan);
-    document.extra.insert("bulk".into(), json!(vec![0; 120_000]));
-    let mut journal = FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    document
+        .extra
+        .insert("bulk".into(), json!(vec![0; 120_000]));
+    let mut journal =
+        FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
-        .bind(GraphExecution { extra: Default::default(), integration_base: None, directory: base.clone(), document: document.clone() })
+        .bind(GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            directory: base.clone(),
+            document: document.clone(),
+        })
         .unwrap();
     journal.save(&checkpoint).unwrap();
     assert_eq!(journal.load(&document.graph_id).unwrap(), Some(checkpoint));
@@ -559,25 +614,49 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
 
 #[test]
 fn usage_warnings_keep_the_most_recently_settled_attempts() {
-    let document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    let document = graph(vec![
+        node("one", route("first")),
+        node("two", route("first")),
+    ]);
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::Succeeded), terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [
+            terminal(AttemptOutcome::Succeeded),
+            terminal(AttemptOutcome::Succeeded),
+        ]
+        .into(),
         ..Default::default()
     };
-    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap().checkpoint;
-    let settled: Vec<_> = checkpoint.nodes.iter().map(|n| n.attempts[0].settled).collect();
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    let settled: Vec<_> = checkpoint
+        .nodes
+        .iter()
+        .map(|n| n.attempts[0].settled)
+        .collect();
     assert_eq!((settled, checkpoint.settlements), (vec![1, 2], 2));
 
     // Node one settled last, so its lines are the newest despite node order.
     let copies = MAX_UNKNOWN_USAGE / 3 + 1;
     for (node, first) in [(0, 100), (1, 1)] {
         let attempt = checkpoint.nodes[node].attempts[0].clone();
-        checkpoint.nodes[node].attempts =
-            (0..copies as u64).map(|i| GraphAttempt { settled: first + i, ..attempt.clone() }).collect();
+        checkpoint.nodes[node].attempts = (0..copies as u64)
+            .map(|i| GraphAttempt {
+                settled: first + i,
+                ..attempt.clone()
+            })
+            .collect();
     }
     update_usage_warnings(&mut checkpoint);
     assert_eq!(checkpoint.unknown_usage.len(), MAX_UNKNOWN_USAGE);
-    assert!(checkpoint.unknown_usage.iter().all(|line| line.starts_with("node one ")), "{:?}", checkpoint.unknown_usage);
+    assert!(
+        checkpoint
+            .unknown_usage
+            .iter()
+            .all(|line| line.starts_with("node one ")),
+        "{:?}",
+        checkpoint.unknown_usage
+    );
 }
 
 #[test]
@@ -595,7 +674,10 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     let attempt = provenant_core::AttemptId::from_bytes([2; 16]);
-    let document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    let document = graph(vec![
+        node("one", route("first")),
+        node("two", route("first")),
+    ]);
     let mut failed = terminal(AttemptOutcome::OtherFailure);
     if let AttemptObservation::Terminal { attempt_ref, .. } = &mut failed {
         *attempt_ref = Some(format!("host/{attempt}"));
@@ -607,7 +689,8 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
     };
     let limits = crate::config::GraphLimits::default();
     {
-        let mut journal = FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+        let mut journal =
+            FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
                 extra: Default::default(),
@@ -616,49 +699,117 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
                 document: document.clone(),
             })
             .unwrap();
-        let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
-        let settled: Vec<_> = run.checkpoint.nodes.iter().map(|n| n.attempts[0].settled).collect();
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
+        let settled: Vec<_> = run
+            .checkpoint
+            .nodes
+            .iter()
+            .map(|n| n.attempts[0].settled)
+            .collect();
         assert_eq!(settled, [1, 2]);
     }
     FileJournal::retry_delivered_attempt(&root, project, attempt, budget, &cancel, &clock).unwrap();
-    let reopened = FileJournal::read_checkpoint(&root, project, &document.graph_id).unwrap().unwrap();
+    let reopened = FileJournal::read_checkpoint(&root, project, &document.graph_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(reopened.nodes[0].attempts[0].settled, 0);
 
-    let mut journal = FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
-    let mut owner = FakeOwner { observations: [terminal(AttemptOutcome::Succeeded)].into(), ..Default::default() };
-    let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
+    let mut journal =
+        FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    let mut owner = FakeOwner {
+        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
-    assert_eq!((run.checkpoint.nodes[0].attempts[0].settled, run.checkpoint.settlements), (3, 3));
-    assert!(run.checkpoint.unknown_usage.last().unwrap().starts_with("node one "));
+    assert_eq!(
+        (
+            run.checkpoint.nodes[0].attempts[0].settled,
+            run.checkpoint.settlements
+        ),
+        (3, 3)
+    );
+    assert!(
+        run.checkpoint
+            .unknown_usage
+            .last()
+            .unwrap()
+            .starts_with("node one ")
+    );
 }
 
 #[test]
 fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
     for cap in [0, 150, 16384, 65536] {
-        for count in [0,1,20,100] {
-            let mut document=mixed();
-            let Some(GateCondition::Ci { failed_checks_max_bytes,max_failed_checks,.. })=&mut document.nodes[3].condition else {unreachable!()};
-            *failed_checks_max_bytes=Some(cap);
-            *max_failed_checks=Some(count);
-            let plan=planned(&document);
-            let mut checkpoint=filled_checkpoint(&document,&plan);
+        for count in [0, 1, 20, 100] {
+            let mut document = mixed();
+            let Some(GateCondition::Ci {
+                failed_checks_max_bytes,
+                max_failed_checks,
+                ..
+            }) = &mut document.nodes[3].condition
+            else {
+                unreachable!()
+            };
+            *failed_checks_max_bytes = Some(cap);
+            *max_failed_checks = Some(count);
+            let plan = planned(&document);
+            let mut checkpoint = filled_checkpoint(&document, &plan);
             for node in &mut checkpoint.nodes {
-                if let Some(ci)=&mut node.ci {
-                    let mut observation=CiObservation {
-                        extra:Default::default(),state:CiState::Failed,summary:worst(OUTPUT_FIELD_BYTES),
-                        head_sha:Some("a".repeat(40)),check_names:Vec::new(),truncated:false,
-                        failed_checks:vec![CiFailedCheck {extra:Default::default(),name:"build".into(),url:Some("https://ci/1".into()),excerpt:worst(cap)};count.saturating_add(1)],
+                if let Some(ci) = &mut node.ci {
+                    let mut observation = CiObservation {
+                        extra: Default::default(),
+                        state: CiState::Failed,
+                        summary: worst(OUTPUT_FIELD_BYTES),
+                        head_sha: Some("a".repeat(40)),
+                        check_names: Vec::new(),
+                        truncated: false,
+                        failed_checks: vec![
+                            CiFailedCheck {
+                                extra: Default::default(),
+                                name: "build".into(),
+                                url: Some("https://ci/1".into()),
+                                excerpt: worst(cap)
+                            };
+                            count.saturating_add(1)
+                        ],
                     };
-                    observation.bound_failed_checks(cap,count);
-                    ci.failed_checks=observation.failed_checks;
-                    ci.truncated=observation.truncated;
-                    node.outputs=Some(ci::outputs(false,Some(ci)));
+                    observation.bound_failed_checks(cap, count);
+                    ci.failed_checks = observation.failed_checks;
+                    ci.truncated = observation.truncated;
+                    node.outputs = Some(ci::outputs(false, Some(ci)));
                 }
             }
-            let execution=GraphExecution {extra:Default::default(),integration_base:Some("1".repeat(40).parse().unwrap()),directory:"/fixture".into(),document:document.clone()};
-            let stored=StoredCheckpoint {extra:Default::default(),schema_version:1,digest:"sha256:".to_owned()+&"f".repeat(64),checkpoint,execution};
-            let bound=envelope::checkpoint_bound(&document,&[],&stored.checkpoint.extensions,&plan);
-            assert!(canonical_len(&stored)<=bound,"cap={cap} count={count}");
+            let execution = GraphExecution {
+                extra: Default::default(),
+                integration_base: Some("1".repeat(40).parse().unwrap()),
+                directory: "/fixture".into(),
+                document: document.clone(),
+            };
+            let stored = StoredCheckpoint {
+                extra: Default::default(),
+                schema_version: 1,
+                digest: "sha256:".to_owned() + &"f".repeat(64),
+                checkpoint,
+                execution,
+            };
+            let bound =
+                envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
+            assert!(canonical_len(&stored) <= bound, "cap={cap} count={count}");
         }
     }
 }

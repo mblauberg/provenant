@@ -73,7 +73,7 @@ Set these in `[domains.routing.model_policy]` in the host configuration. Omit a 
 | `defaults.result.sections` | per model | Heading lines a result must contain. (exact section heading lines; empty clears). |
 | `defaults.result.fallback` | per model | Model for the one fallback attempt when the result check fails. (model id). |
 | `defaults.result.fallback_effort` | per model | Effort for the fallback attempt. (effort name). |
-| `rules` | empty | Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Schedule start is inclusive, expiry and window end are exclusive; an overnight window wraps midnight; inactive rules have no effect. (tables with adapter, model, account, schedule {starts, expires, windows [{weekdays?, start_hour, end_hour}] in UTC} and policy (the same fields as defaults, under rules.policy); weekdays use Monday-based indexes, Monday 0 through Sunday 6). |
+| `rules` | empty | Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Schedule start is inclusive, expiry and window end are exclusive; an overnight window wraps midnight; inactive rules have no effect. (tables with adapter, model, account, schedule {starts, expires as RFC 3339 timestamps, windows [{weekdays?, start_hour, end_hour}] in UTC} and policy (the same fields as defaults, under rules.policy); weekdays use Monday-based indexes, Monday 0 through Sunday 6). |
 
 ## Quota history and plan prices
 
@@ -174,6 +174,45 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `reader` | `"tools/front-door/src/chair.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"Lower switches sooner; higher leaves less headroom for the handoff."` |
+| `type` | `"int"` |
+
+## `config.history_max_age_days`
+
+| Field | Value |
+|---|---|
+| `default` | `365` |
+| `effect` | `"Drop configuration history entries older than this many days."` |
+| `max` | `3650` |
+| `min` | `1` |
+| `reader` | `"tools/front-door/crates/config/src/history.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A longer window keeps older changes visible but grows the history file."` |
+| `type` | `"int"` |
+
+## `config.history_max_bytes`
+
+| Field | Value |
+|---|---|
+| `default` | `262144` |
+| `effect` | `"Keep the configuration history file under this many bytes; the oldest entries are dropped first."` |
+| `max` | `16777216` |
+| `min` | `4096` |
+| `reader` | `"tools/front-door/crates/config/src/history.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A larger bound keeps more history but costs more to read on every config edit."` |
+| `type` | `"int"` |
+
+## `config.history_max_entries`
+
+| Field | Value |
+|---|---|
+| `default` | `500` |
+| `effect` | `"Keep at most this many entries in the configuration history; the oldest are dropped first."` |
+| `max` | `100000` |
+| `min` | `10` |
+| `reader` | `"tools/front-door/crates/config/src/history.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A higher count keeps a longer audit trail but a larger history file."` |
 | `type` | `"int"` |
 
 ## `domains.routing.capacity_cooldown_seconds`

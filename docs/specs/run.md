@@ -741,8 +741,11 @@ The original worktree gitfile stays unchanged so the host retains its verified
 repository identity. Seatbelt denies writes throughout both the shared Git
 directory and the linked admin directory, including refs, config, hooks, info
 and the original index. These environment selectors intentionally select the lane
-repository. To inspect a second repository, run the pinned native Git executable
-with GIT_DIR, GIT_COMMON_DIR, GIT_WORK_TREE and GIT_OBJECT_DIRECTORY unset.
+repository. To inspect or create a second repository, run the pinned native Git
+executable with inherited `GIT_*` variables unset. Clearing those variables
+alone is insufficient when `git` resolves to the lane wrapper on `PATH`, since
+the wrapper restores the lane binding. Test fixtures use native Git directly
+and clear those variables before supplying any fixture-specific settings.
 The small Git wrapper has one source and restores
 scrubbed environment or supplies publishing credentials; it does not inspect
 Git commands or route their objects.
@@ -913,27 +916,86 @@ refuses unsafe companion files beside the database, and caps (1 MiB record or pr
 
 ### Output redaction and identity
 
-The guardian applies independent streaming known-shape redactors to stdout
-and stderr before retaining bytes or writing captures to disk. Split credential
-markers remain buffered across chunks. A filter failure discards that stream's
-remaining output. Provider lifecycle frames are decoded before filtering.
-At settlement, the holder filters the decoded result again before sealing
-`result.md`, including credential markers revealed by JSON escapes. A result
-redaction failure refuses publication rather than storing the raw answer.
+Known credential shapes are filtered at three sites. First, the guardian
+applies independent streaming redactors to stdout and stderr before retaining
+bytes or writing captures to disk. Split credential markers remain buffered
+across chunks. A filter failure discards that stream's remaining output.
+Provider lifecycle frames are decoded before filtering.
+
+Second, at settlement the holder filters the decoded result again before
+sealing `result.md`, including credential markers revealed by JSON escapes. It
+also rewrites provider-owned session text in the attempt's private provider
+state in place. The scrubbed stores are Codex `sessions` and
+`archived_sessions` `.jsonl` rollouts, Codex `history.jsonl` and
+`session_index.jsonl`, Claude `claude-config/projects` (`.jsonl` transcripts
+plus the `.txt` and `.json` tool-result files Claude keeps beside them), and
+Claude `claude-config/history.jsonl` and `session_index.jsonl`. The scrub accepts
+at most 64 `candidate-N` directories, descends at most eight levels, and lists
+at most 100,000 entries per directory. A file is rewritten only when a shape
+matches; a clean file is read but never copied, staged or synced. Links, hard
+links, files that change while they are read, a `://` authority longer than the
+64 KiB frame bound, and anything past those bounds are refused. A refused entry does not stop
+the scrub of the others, and the scrub reports failure once every entry has
+been visited. Masking a shape keeps the surrounding transcript usable for resume.
+Earlier run files and provider history archived by an earlier settlement are not
+rewritten.
+
+Provider stores outside that set are not scrubbed, and keep whatever a lane
+printed until provider state expires or is archived as-is:
+
+- Codex SQLite databases (state, thread-history and log stores) and their WAL,
+  SHM and journal companions.
+- agy's `agy-home` copy of its history and conversation summaries, including
+  `conversation_summaries.db`.
+- Every `claude-config` entry outside `projects/` other than `history.jsonl` and
+  `session_index.jsonl`, such as Claude state directories beside `projects/`.
+- Files under the scrubbed trees with any other extension, and `.txt` or `.json`
+  files outside `projects/`. Binary files, credentials, cache trees and links
+  are never touched.
+
+Third, result-only orphan recovery preserves the sealed bytes and their digest
+instead of rewriting an answer it did not filter. It reports `redacted: false`
+when those bytes still contain a known credential shape or cannot be safely
+filtered, so such an orphan keeps its plaintext until retention prunes the
+attempt's evidence and is never presented as redacted.
+
+A redaction failure at settlement does not return a validation error or block
+terminal publication, and it cannot repeat itself. Two failures are distinct.
+A result failure replaces the result with the fixed placeholder
+`[result withheld: redaction failed]`. A session transcript failure keeps the
+filtered result as sealed, since only the transcript scrub failed. Both append
+`redaction failed; result withheld` to the lane's reason. The text is the same
+for both, so a session-only failure's reason still says "result withheld" while
+the result stays unwithheld. Either failure overrides the outcome only for a
+lane that would succeed, needs review or is uncommitted, which settles `failed`.
+A cancelled, timed-out, rejected or lost lane keeps its outcome, and any reason
+it already has (such as a leftover-process note) is kept before the redaction
+text. No delivery starts after a redaction failure. A result-only orphan is the
+exception named above: recovery keeps its sealed bytes with `redacted: false`
+rather than substituting the placeholder.
 
 Result artifact `digest` and `bytes` identify the stored, redacted bytes;
 there is no raw result copy or raw-result digest. Newly sealed holder results set
-`redacted: true` to mean that redaction was applied, even when no credential
-matched. It is not a count of replacements or a guarantee against unknown
-secret formats. This does not rewrite earlier run files or provider-owned
-session state. Result-only orphan recovery preserves sealed bytes and their
-digest; it clears a proposed `redacted: true` if those bytes still contain a
-known credential shape or cannot be safely filtered.
+`redacted: true` to mean that the stored bytes are a filtered rendering or the
+fixed placeholder, even when no credential matched. It is not a count of
+replacements or a guarantee against unknown secret formats.
 - Test: `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
   `crates/run/src/dispatch_tests.rs::holder_seals_redacted_results_and_digests_the_stored_bytes`;
+  `::settlement_scrubs_provider_session_history`;
+  `::unredactable_result_settles_failed_with_a_placeholder`;
+  `::cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails`;
+  `::orphan_result_with_plaintext_settles_once_and_preserves_its_bytes`;
   `crates/run/src/tests.rs::result_orphan_redaction_flag_describes_the_preserved_bytes`;
+  `crates/confinement/src/redact.rs::tests::settlement_scrub_removes_tokens_from_session_text_and_keeps_binaries`;
+  `::session_scrub_skips_links_and_leaves_clean_transcripts_alone`;
+  `::session_scrub_keeps_going_after_an_overlong_authority`;
+  `::session_scrub_keeps_going_past_a_tree_over_the_depth_bound`;
+  `::session_scrub_refuses_more_candidates_than_its_bound`;
+  `::session_scrub_reaches_tool_result_text_under_projects`;
+  `::token_split_across_the_session_chunk_boundary_is_redacted`;
   `tests/dispatch_provider.rs::printed_credentials_leave_no_plaintext_in_run_files`
-- Owner: `src/lib.rs`, `crates/run/src/holder.rs`, `crates/run/src/store.rs`
+- Owner: `src/lib.rs`, `crates/run/src/holder.rs`, `crates/run/src/store.rs`,
+  `crates/confinement/src/redact.rs`
 
 `output` scans the whole artifact for known shapes before paging, including
 older artifacts. Its offsets and digest refer to those filtered bytes. Prompt

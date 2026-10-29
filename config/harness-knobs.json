@@ -63,7 +63,7 @@
       "defaults.result.sections": {"type": "string_list", "allowed": "exact section heading lines; empty clears", "default": "per model", "effect": "Heading lines a result must contain."},
       "defaults.result.fallback": {"type": "string", "allowed": "model id", "default": "per model", "effect": "Model for the one fallback attempt when the result check fails."},
       "defaults.result.fallback_effort": {"type": "string", "allowed": "effort name", "default": "per model", "effect": "Effort for the fallback attempt."},
-      "rules": {"type": "array of tables", "allowed": "tables with adapter, model, account, schedule {starts, expires, windows [{weekdays?, start_hour, end_hour}] in UTC} and policy (the same fields as defaults, under rules.policy); weekdays use Monday-based indexes, Monday 0 through Sunday 6", "default": "empty", "effect": "Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Schedule start is inclusive, expiry and window end are exclusive; an overnight window wraps midnight; inactive rules have no effect."}
+      "rules": {"type": "array of tables", "allowed": "tables with adapter, model, account, schedule {starts, expires as RFC 3339 timestamps, windows [{weekdays?, start_hour, end_hour}] in UTC} and policy (the same fields as defaults, under rules.policy); weekdays use Monday-based indexes, Monday 0 through Sunday 6", "default": "empty", "effect": "Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Schedule start is inclusive, expiry and window end are exclusive; an overnight window wraps midnight; inactive rules have no effect."}
     }
   },
   "quota_history": {
@@ -162,6 +162,36 @@
       "reader": "tools/front-door/src/handoff.rs",
       "effect": "Let a Fabric peer start a Claude session on this host through a session hand-off.",
       "trade_off": "Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."
+    },
+    "config.history_max_entries": {
+      "type": "int",
+      "min": 10,
+      "max": 100000,
+      "default": 500,
+      "status": "wired",
+      "reader": "tools/front-door/crates/config/src/history.rs",
+      "effect": "Keep at most this many entries in the configuration history; the oldest are dropped first.",
+      "trade_off": "A higher count keeps a longer audit trail but a larger history file."
+    },
+    "config.history_max_age_days": {
+      "type": "int",
+      "min": 1,
+      "max": 3650,
+      "default": 365,
+      "status": "wired",
+      "reader": "tools/front-door/crates/config/src/history.rs",
+      "effect": "Drop configuration history entries older than this many days.",
+      "trade_off": "A longer window keeps older changes visible but grows the history file."
+    },
+    "config.history_max_bytes": {
+      "type": "int",
+      "min": 4096,
+      "max": 16777216,
+      "default": 262144,
+      "status": "wired",
+      "reader": "tools/front-door/crates/config/src/history.rs",
+      "effect": "Keep the configuration history file under this many bytes; the oldest entries are dropped first.",
+      "trade_off": "A larger bound keeps more history but costs more to read on every config edit."
     },
     "chair.auto_switch": {
       "strict": true,

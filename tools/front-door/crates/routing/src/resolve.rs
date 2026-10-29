@@ -123,7 +123,7 @@ pub struct AccountPacingView {
     pub policy: PacingPolicy,
     pub source: String,
     pub profile: Option<PacingProfile>,
-    pub expires_unix_seconds: Option<i64>,
+    pub expires: Option<provenant_core::WallTime>,
 }
 #[derive(Debug, Serialize)]
 pub struct RoutePoolMemberView {
@@ -239,7 +239,7 @@ pub fn list(
             .config
             .pacing_overrides
             .iter()
-            .filter(|o| o.schedule.active(context.now_seconds()))
+            .filter(|o| o.schedule.active(context.now))
             .cloned()
             .collect(),
         account_pacing: context
@@ -282,7 +282,7 @@ pub fn list(
                     policy,
                     source: source.into(),
                     profile: profile.cloned(),
-                    expires_unix_seconds: expiry,
+                    expires: expiry,
                 })
             })
             .collect(),
@@ -395,7 +395,7 @@ fn effective_profile<'a>(
     PacingPolicy,
     Option<&'a PacingProfile>,
     &'static str,
-    Option<i64>,
+    Option<provenant_core::WallTime>,
 ) {
     // Direct library callers may supply legacy bare keys. These match any
     // adapter; callers with an account registry should qualify them first.
@@ -416,7 +416,7 @@ fn effective_profile<'a>(
     // provider-level default beneath it.
     let profile = account_profile.or(free_profile);
     let active = context.config.pacing_overrides.iter().rev().find(|o| {
-        o.schedule.active(context.now_seconds())
+        o.schedule.active(context.now)
             && o.account.as_deref().is_none_or(|selector| {
                 account.is_some_and(|key| {
                     selector
@@ -1198,6 +1198,23 @@ fn admissible<'c>(
     }
     Ok(entry)
 }
+/// OpenCode accepts only its catalogued routes. An explicit model outside the
+/// four flash entries is refused with the admitted routes named.
+fn refuse_unlisted_opencode(model: &ModelId, catalogue: &Catalogue) -> Result<(), RoutingError> {
+    if model.adapter() != "opencode" || catalogue.model(model).is_some() {
+        return Ok(());
+    }
+    let admitted = catalogue
+        .models()
+        .iter()
+        .filter(|entry| entry.model.adapter() == "opencode")
+        .map(|entry| entry.model.as_str())
+        .collect::<Vec<_>>();
+    Err(RoutingError::UnlistedOpenCodeModel {
+        model: model.as_str().to_owned(),
+        admitted: admitted.join(", "),
+    })
+}
 fn cooling(model: &ModelId, account: Option<&str>, context: &ValidatedContext<'_>) -> bool {
     let now = context.now_seconds();
     context.capacity_cooldowns.iter().any(|record| {
@@ -1241,7 +1258,7 @@ fn candidate(
                 .effective(
                     model,
                     a.account_key.as_deref().or(context.policy_account_hint),
-                    context.now_seconds(),
+                    context.now,
                 )
                 .policy
                 .permits(intent);
@@ -1315,6 +1332,7 @@ fn candidate(
         },
     })
 }
+/// Confidential work requires the catalogue privacy guarantee.
 fn privacy_allowed(model: &ModelId, confidential: bool, catalogue: &Catalogue) -> bool {
     !confidential
         || catalogue
@@ -1446,6 +1464,7 @@ fn resolve_inner(
 ) -> Result<ResolvedRoute, RoutingError> {
     let (primary, pool_selection) = match &request.choice {
         RouteChoice::Model(model) => {
+            refuse_unlisted_opencode(model, context.catalogue)?;
             if !privacy_allowed(model, request.confidential, context.catalogue) {
                 return Err(RoutingError::ConfidentialModel);
             }
@@ -1505,7 +1524,7 @@ fn resolve_inner(
                     .account_key
                     .as_deref()
                     .or(context.policy_account_hint),
-                context.now_seconds(),
+                context.now,
             )
             .policy,
         request.intent,
@@ -1517,6 +1536,7 @@ fn resolve_inner(
         .iter()
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
         .map(|model| {
+            refuse_unlisted_opencode(model, context.catalogue)?;
             candidate(
                 model,
                 primary.effort.as_deref(),
@@ -1638,8 +1658,6 @@ fn classify_pool(
         let exclusion = if !privacy_allowed(&member.model, request.confidential, context.catalogue)
         {
             Some(("confidential", "confidential model"))
-        } else if context.catalogue.is_free_model(&member.model) && !request.allow_free {
-            Some(("free", "free model disabled"))
         } else if effort
             .as_deref()
             .is_some_and(|value| !member.efforts.iter().any(|allowed| allowed == value))
@@ -1672,7 +1690,7 @@ fn classify_pool(
                                 .account_key
                                 .as_deref()
                                 .or(context.policy_account_hint),
-                            context.now_seconds(),
+                            context.now,
                         )
                         .policy;
                     if !model_policy.permits(request.intent) {

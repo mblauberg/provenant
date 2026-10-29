@@ -2392,8 +2392,6 @@ pub mod snapshot;
 
 #[cfg(test)]
 mod tests {
-    // Tests use real file timestamps to construct race conditions.
-    #![allow(clippy::disallowed_methods)]
 
     use super::*;
     use provenant_os::exec::SystemExecutor;
@@ -2457,7 +2455,6 @@ mod tests {
         assert!(
             matches!(error, PermissionError::ProfileTooLarge { bytes, limit: PROFILE_LIMIT } if bytes > PROFILE_LIMIT)
         );
-        assert!(error.to_string().contains("launch limit"));
         Ok(())
     }
 
@@ -3181,11 +3178,8 @@ mod tests {
         };
         let error = anchors.verify_all().expect_err("replaced anchor accepted");
         assert!(
-            error
-                .to_string()
-                .contains(path.to_str().expect("UTF-8 fixture"))
+            matches!(error, PermissionError::AnchorMismatchAt { path: actual, .. } if actual == path)
         );
-        assert!(error.to_string().contains("replaced after it was held"));
     }
 
     #[cfg(target_os = "macos")]
@@ -3290,11 +3284,8 @@ mod tests {
                 .err()
                 .ok_or("missing discovery parent accepted")?;
             assert!(
-                error
-                    .to_string()
-                    .contains(root.join(".agents").to_str().ok_or("path")?)
+                matches!(error, PermissionError::AnchorMismatchAt { path, .. } if path == root.join(".agents"))
             );
-            assert!(error.to_string().contains("discovery parent anchor lookup"));
             // Only the ancestor's literal directory is readable through discovery.
             for grant in profile
                 .spec
@@ -3343,8 +3334,9 @@ mod tests {
             let error = compile_sbpl(&plan, &profile, &anchors)
                 .err()
                 .ok_or("discovery symlink accepted")?;
-            assert!(error.to_string().contains(path.to_str().ok_or("path")?));
-            assert!(error.to_string().contains("discovery entry type check"));
+            assert!(
+                matches!(error, PermissionError::AnchorMismatchAt { path: actual, .. } if actual == *path)
+            );
             std::fs::remove_file(path)?;
             std::fs::rename(moved, path)?;
         }

@@ -25,6 +25,9 @@ use std::{io, io::Read, path::Path};
 const REQUEST_LIMIT: u64 = 256 * 1024;
 const FACT_LIFETIME_SECONDS: u64 = 300;
 const WAIT_SECONDS: u64 = 30;
+/// A checkpoint larger than this draws a warning; smaller ones stay quiet even
+/// under a tight project budget.
+const CHECKPOINT_WARN_BYTES: u64 = 8 * 1024;
 
 #[derive(Debug, Subcommand)]
 pub enum Workflow {
@@ -517,12 +520,6 @@ fn execute(
                 .with_revisions(keep)
                 .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
             let mut warnings = saved.warnings;
-            let soft_bytes =
-                provenant_config::read_with_domains(&edge.roots, &crate::domains::SECTIONS)
-                    .ok()
-                    .and_then(|config| config.retention.projects.get(&project.to_string()).cloned())
-                    .unwrap_or_default()
-                    .checkpoint_soft_bytes;
             let references = checkpoint_references(std::str::from_utf8(&text).unwrap_or_default());
             let closed = std::thread::scope(|scope| {
                 let tasks: Vec<_> = references
@@ -535,9 +532,11 @@ fn execute(
                     .filter_map(|(number, closed)| closed.then_some(number))
                     .collect::<Vec<_>>()
             });
-            warnings.extend(checkpoint_warnings(&text, soft_bytes, |number| {
-                closed.contains(&number)
-            }));
+            warnings.extend(checkpoint_warnings(
+                &text,
+                checkpoint_soft_bytes(&edge.roots, &project),
+                |number| closed.contains(&number),
+            ));
             Ok(serde_json::json!({
                 "project": project,
                 "saved_bytes": text.len(),
@@ -557,6 +556,25 @@ fn execute(
     }
 }
 
+/// The project checkpoint budget in `[retention.projects.<project>]`: the
+/// advisory soft budget, and the warning names it. A project without an entry,
+/// or with a config that cannot be read, falls back to the shared default: the
+/// warning must never fail or soften a save.
+pub fn checkpoint_soft_bytes(roots: &Roots, project: &ProjectId) -> u64 {
+    provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .ok()
+        .and_then(|config| {
+            config
+                .retention
+                .projects
+                .get(&project.to_string())
+                .map(|entry| entry.checkpoint_soft_bytes)
+        })
+        .unwrap_or_else(|| {
+            provenant_config::ProjectRetentionSettings::default().checkpoint_soft_bytes
+        })
+}
+
 /// Advisory only: failed or unavailable GitHub lookups leave the save intact.
 fn checkpoint_warnings(
     text: &[u8],
@@ -564,8 +582,8 @@ fn checkpoint_warnings(
     mut closed: impl FnMut(u64) -> bool,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
-    if text.len() as u64 > soft_bytes {
-        warnings.push(format!("checkpoint is {} bytes (soft budget {soft_bytes}); rewrite current state rather than appending history", text.len()));
+    if text.len() as u64 > soft_bytes.max(CHECKPOINT_WARN_BYTES) {
+        warnings.push(format!("checkpoint is {} bytes (the soft budget is {soft_bytes}); rewrite current state rather than appending history", text.len()));
     }
     let refs = checkpoint_references(std::str::from_utf8(text).unwrap_or_default());
     let stale: Vec<_> = refs.into_iter().filter(|number| closed(*number)).collect();
@@ -988,8 +1006,10 @@ pub fn run(
 mod tests {
     #[test]
     fn checkpoint_advisories_are_soft_and_ignore_unavailable_references() {
-        let large = vec![b'x'; 2049];
-        assert!(super::checkpoint_warnings(&large, 2048, |_| false)[0].contains("soft budget"));
+        let large = vec![b'x'; 8 * 1024 + 1];
+        assert!(
+            super::checkpoint_warnings(&large, 2048, |_| false)[0].contains("soft budget is 2048")
+        );
         assert!(
             super::checkpoint_warnings(b"Current PR #12 and issue #13", 2048, |n| n == 13)[0]
                 .contains("#13")
@@ -997,7 +1017,17 @@ mod tests {
         assert!(
             super::checkpoint_warnings(b"Current PR #12 and issue #13", 2048, |_| false).is_empty()
         );
-        assert!(super::checkpoint_warnings(&large, 4096, |_| false).is_empty());
+        // Between the project budget and the 8 KiB warning size, nothing is said.
+        assert!(super::checkpoint_warnings(&vec![b'x'; 4096], 2048, |_| false).is_empty());
+        assert!(super::checkpoint_warnings(&vec![b'x'; 8 * 1024], 2048, |_| false).is_empty());
+        // A raised project budget keeps its saves quiet until it is exceeded,
+        // and the warning then names the configured budget, not the default.
+        assert!(super::checkpoint_warnings(&large, 32 * 1024, |_| false).is_empty());
+        let over = vec![b'x'; 32 * 1024 + 1];
+        assert!(
+            super::checkpoint_warnings(&over, 32 * 1024, |_| false)[0]
+                .contains("soft budget is 32768")
+        );
         assert_eq!(
             super::checkpoint_references("é PR #12, issue #13, pull/14, issues/15; PR #12"),
             vec![12, 13, 14, 15]

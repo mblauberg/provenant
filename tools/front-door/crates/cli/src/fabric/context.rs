@@ -427,7 +427,9 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         }
         FacadeError::InvalidInput => (Outcome::Invalid, ErrorKind::Invalid),
         FacadeError::NotFound => (Outcome::Invalid, ErrorKind::NotFound),
-        FacadeError::Conflict => (Outcome::Refused, ErrorKind::Conflict),
+        FacadeError::Conflict | FacadeError::GenerationConflict { .. } => {
+            (Outcome::Refused, ErrorKind::Conflict)
+        }
         FacadeError::NotTerminal => (Outcome::Refused, ErrorKind::Nonterminal),
         FacadeError::OperationConflict => (Outcome::Refused, ErrorKind::OperationConflict),
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),

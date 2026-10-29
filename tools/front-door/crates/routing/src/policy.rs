@@ -1,8 +1,8 @@
 //! Layered model guidance and enforced lane/result admission, evaluated in UTC.
 use crate::{ModelId, RoutingError};
 use provenant_config::SectionError;
+use provenant_core::WallTime;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -220,10 +220,12 @@ impl ModelPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Schedule {
-    /// First active instant, in Unix seconds. Missing means already started.
-    pub starts: Option<i64>,
-    /// First inactive instant, in Unix seconds. Missing means no expiry.
-    pub expires: Option<i64>,
+    /// First active instant, an RFC 3339 timestamp. Missing means already started.
+    #[serde(with = "provenant_core::rfc3339::option")]
+    pub starts: Option<WallTime>,
+    /// First inactive instant, an RFC 3339 timestamp. Missing means no expiry.
+    #[serde(with = "provenant_core::rfc3339::option")]
+    pub expires: Option<WallTime>,
     /// IANA time zone for hour windows. Missing means UTC.
     pub tz: Option<String>,
     /// Hour windows; empty means all hours.
@@ -232,18 +234,19 @@ pub struct Schedule {
 /// Most hour windows one schedule may carry.
 pub const MAX_SCHEDULE_WINDOWS: usize = 16;
 impl Schedule {
-    pub fn active(&self, now: i64) -> bool {
+    pub fn active(&self, now: WallTime) -> bool {
         self.starts.is_none_or(|start| now >= start)
             && self.expires.is_none_or(|end| now < end)
             && (self.windows.is_empty()
                 || self
                     .windows
                     .iter()
-                    .any(|window| window.active(now, self.tz.as_deref())))
+                    .any(|window| window.active(now.unix_seconds(), self.tz.as_deref())))
     }
-    /// Seconds until expiry, zero once expired, `None` without an expiry.
-    pub fn remaining(&self, now: i64) -> Option<i64> {
-        self.expires.map(|end| end.saturating_sub(now).max(0))
+    /// Whole seconds until expiry, zero once expired, `None` without an expiry.
+    pub fn remaining(&self, now: WallTime) -> Option<i64> {
+        self.expires
+            .map(|end| end.unix_seconds().saturating_sub(now.unix_seconds()).max(0))
     }
     /// Whether the bounds, windows, weekdays and time zone are well formed.
     pub fn valid(&self) -> bool {
@@ -261,8 +264,8 @@ impl Schedule {
     /// never active, so validation reports the whole record.
     pub(crate) fn malformed() -> Self {
         Self {
-            starts: Some(1),
-            expires: Some(0),
+            starts: WallTime::from_micros(1).ok(),
+            expires: WallTime::from_micros(0).ok(),
             ..Self::default()
         }
     }
@@ -473,16 +476,6 @@ impl<'de> Deserialize<'de> for ModelPolicies {
         let input = Input::deserialize(deserializer)?;
         let defaults = input.defaults;
         let rules = input.rules;
-        if let Ok(catalogue) = crate::Catalogue::bundled() {
-            warn_invalid_fallback(&defaults, "model_policy.defaults", &catalogue);
-            for (index, rule) in rules.iter().enumerate() {
-                warn_invalid_fallback(
-                    &rule.policy,
-                    &format!("model_policy.rules.{index}"),
-                    &catalogue,
-                );
-            }
-        }
         Ok(Self {
             bundled: input.bundled,
             defaults,
@@ -490,30 +483,61 @@ impl<'de> Deserialize<'de> for ModelPolicies {
         })
     }
 }
-fn warn_invalid_fallback(policy: &ModelPolicy, field: &str, catalogue: &crate::Catalogue) {
-    let Some(model) = policy.result.fallback.as_ref() else {
-        return;
+/// Why a result fallback cannot run on the catalogue, or `None` when it can.
+fn fallback_problem(result: &ResultPolicy, catalogue: &crate::Catalogue) -> Option<&'static str> {
+    let model = result.fallback.as_ref()?;
+    let Some(entry) = catalogue.model(model) else {
+        return Some("unknown model");
     };
-    let entry = catalogue.model(model);
-    let reason = if entry.is_none() {
-        Some("unknown model")
-    } else if policy
-        .result
+    result
         .fallback_effort
         .as_ref()
-        .is_some_and(|effort| !entry.is_some_and(|entry| entry.efforts.contains(effort)))
-    {
-        Some("unsupported effort")
-    } else {
-        None
+        .is_some_and(|effort| !entry.efforts.contains(effort))
+        .then_some("unsupported effort")
+}
+pub(crate) fn fallback_advisories(table: &toml_edit::Table) -> Vec<SectionError> {
+    let Ok(config) = toml_edit::de::from_document::<crate::RoutingConfig>(
+        toml_edit::DocumentMut::from(table.clone()),
+    ) else {
+        return Vec::new();
     };
-    if let Some(reason) = reason {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: domains.routing.{field}.result.fallback: {} ({reason}); effective fallback checked after overlays",
-            model.as_str()
-        );
+    let Ok(catalogue) = crate::Catalogue::bundled() else {
+        return Vec::new();
+    };
+    let mut findings = Vec::new();
+    let policies = &config.model_policy;
+    let policies = std::iter::once(("model_policy.defaults".to_owned(), &policies.defaults)).chain(
+        policies
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(i, rule)| (format!("model_policy.rules.{i}.policy"), &rule.policy)),
+    );
+    for (field, policy) in policies {
+        let Some(model) = policy.result.fallback.as_ref() else {
+            continue;
+        };
+        let entry = catalogue.model(model);
+        let code = if entry.is_none() {
+            Some("unknown_fallback")
+        } else if policy
+            .result
+            .fallback_effort
+            .as_ref()
+            .is_some_and(|effort| !entry.is_some_and(|entry| entry.efforts.contains(effort)))
+        {
+            Some("unsupported_fallback_effort")
+        } else {
+            None
+        };
+        if let Some(code) = code {
+            findings.push(SectionError {
+                field: format!("{field}.result.fallback"),
+                code,
+            });
+        }
     }
+    findings
 }
 fn default_bundled() -> bool {
     true
@@ -533,13 +557,16 @@ pub struct EffectiveModelPolicy {
     #[serde(flatten)]
     pub policy: ModelPolicy,
     pub sources: Vec<String>,
+    /// The result fallback that the effective policy rejected, and why.
+    #[serde(skip)]
+    pub dropped_fallback: Option<(ModelId, &'static str)>,
 }
 impl ModelPolicies {
     pub fn effective(
         &self,
         model: &ModelId,
         account: Option<&str>,
-        now: i64,
+        now: WallTime,
     ) -> EffectiveModelPolicy {
         let account = account.and_then(|account| match account.split_once('/') {
             Some((adapter, key)) if adapter == model.adapter() => Some(key),
@@ -561,25 +588,23 @@ impl ModelPolicies {
             .into(),
         ];
         self.apply_rules(&mut policy, &mut sources, model, account, now);
-        if let Some(fallback) = policy.result.fallback.as_ref() {
-            let valid = crate::Catalogue::bundled()
-                .ok()
-                .and_then(|catalogue| {
-                    catalogue.model(fallback).map(|entry| {
-                        policy
-                            .result
-                            .fallback_effort
-                            .as_ref()
-                            .is_none_or(|effort| entry.efforts.contains(effort))
-                    })
-                })
-                .unwrap_or(false);
-            if !valid {
+        let mut dropped_fallback = None;
+        if let Some(model) = policy.result.fallback.clone() {
+            let problem = crate::Catalogue::bundled()
+                .map_or(Some("catalogue unavailable"), |catalogue| {
+                    fallback_problem(&policy.result, &catalogue)
+                });
+            if let Some(reason) = problem {
                 policy.result.fallback = None;
                 policy.result.fallback_effort = None;
+                dropped_fallback = Some((model, reason));
             }
         }
-        EffectiveModelPolicy { policy, sources }
+        EffectiveModelPolicy {
+            policy,
+            sources,
+            dropped_fallback,
+        }
     }
 
     fn apply_rules(
@@ -588,7 +613,7 @@ impl ModelPolicies {
         sources: &mut Vec<String>,
         model: &ModelId,
         account: Option<&str>,
-        now: i64,
+        now: WallTime,
     ) {
         // Scope outranks array position. Later rules win within one scope.
         let mut matching: Vec<_> = self
@@ -819,7 +844,7 @@ impl ModelPolicy {
 
 // Invalid embedded data is a build defect, never a recoverable user configuration.
 #[allow(clippy::expect_used)]
-fn bundled_policy(model: &ModelId, now: i64) -> ModelPolicy {
+fn bundled_policy(model: &ModelId, now: WallTime) -> ModelPolicy {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Bundled {
@@ -867,6 +892,10 @@ pub fn validate_intent(policy: &ModelPolicy, intent: RouteIntent) -> Result<(), 
 mod tests {
     use super::*;
 
+    fn at(seconds: i64) -> WallTime {
+        WallTime::from_unix_seconds(seconds).expect("instant")
+    }
+
     #[test]
     fn malformed_suffix_selectors_do_not_broaden_rules() -> Result<(), Box<dyn std::error::Error>> {
         for suffix in [
@@ -884,7 +913,7 @@ mod tests {
             assert!(errors.iter().any(|e| e.field == "model_policy.rules.0"));
             assert_eq!(
                 policies
-                    .effective(&ModelId::parse("opencode/unknown-free")?, None, 0)
+                    .effective(&ModelId::parse("opencode/unknown-free")?, None, at(0))
                     .policy
                     .cache
                     .read_ratio,
@@ -908,7 +937,7 @@ mod tests {
             assert_eq!(
                 serde_json::to_value(
                     ModelPolicies::default()
-                        .effective(&case.model, None, case.at)
+                        .effective(&case.model, None, at(case.at))
                         .policy
                 )?,
                 serde_json::to_value(case.policy)?,
@@ -955,7 +984,11 @@ mod tests {
         "#,
         )?;
         let claude = policies
-            .effective(&ModelId::parse("claude/claude-opus-5-5")?, Some("work"), 0)
+            .effective(
+                &ModelId::parse("claude/claude-opus-5-5")?,
+                Some("work"),
+                at(0),
+            )
             .policy;
         assert_eq!(claude.compaction.window, Some(400000));
         assert_eq!(claude.cache.read_share_target, Some(0.8));
@@ -967,7 +1000,7 @@ mod tests {
             ("other", 2, 2.0),
         ] {
             let policy = policies
-                .effective(&deepseek, Some(account), 4 * 86400 + hour * 3600)
+                .effective(&deepseek, Some(account), at(4 * 86400 + hour * 3600))
                 .policy;
             assert_eq!(policy.cache.price_multiplier, Some(expected));
             assert_eq!(
@@ -983,13 +1016,17 @@ mod tests {
             .effective(
                 &ModelId::parse("codex/gpt-6.1-terra")?,
                 Some("codex/work"),
-                0,
+                at(0),
             )
             .policy;
         assert_eq!(terra.lane.stop_early_ok, Some(true));
         assert_eq!(terra.lane.max_continuations, Some(0));
         let free = policies
-            .effective(&ModelId::parse("opencode/unknown-free")?, Some("work"), 0)
+            .effective(
+                &ModelId::parse("opencode/unknown-free")?,
+                Some("work"),
+                at(0),
+            )
             .policy;
         assert_eq!(free.lane.read_only, Some(false));
         Ok(())
@@ -1013,7 +1050,7 @@ mod tests {
                     || (hours[2]..hours[3]).contains(&hour_of_day));
             let expected = if peak { multiplier } else { 1.0 };
             assert_eq!(
-                bundled_policy(&model, at).cache.price_multiplier,
+                bundled_policy(&model, self::at(at)).cache.price_multiplier,
                 Some(expected),
                 "hour {hour}"
             );
@@ -1039,8 +1076,8 @@ mod tests {
             model = "codex/gpt-6.1-terra"
             account = "codex/work"
             [rules.schedule]
-            starts = 3600
-            expires = 10800
+            starts = "1970-01-01T01:00:00Z" # timebomb: allow fixed epoch fixture, not the live clock
+            expires = "1970-01-01T03:00:00Z" # timebomb: allow fixed epoch fixture, not the live clock
             windows = [{ start_hour = 1, end_hour = 2 }]
             [rules.policy.compaction]
             window = 300000
@@ -1055,7 +1092,7 @@ mod tests {
             (Some("other"), 3600, 200_000),
             (None, 3600, 200_000),
         ] {
-            let effective = policies.effective(&model, account, time);
+            let effective = policies.effective(&model, account, at(time));
             assert_eq!(effective.policy.compaction.window, Some(expected));
             assert_eq!(effective.policy.cache.ttl_seconds, Some(300));
             assert_eq!(effective.policy.lane.stop_early_ok, Some(false));
@@ -1085,21 +1122,21 @@ mod tests {
         assert!(!weekdays.active(86_400 + 3600, None));
         assert!(
             !Schedule {
-                starts: Some(10),
-                expires: Some(20),
+                starts: Some(at(10)),
+                expires: Some(at(20)),
                 tz: None,
                 windows: vec![]
             }
-            .active(9)
+            .active(at(9))
         );
         assert!(
             Schedule {
-                starts: Some(10),
-                expires: Some(20),
+                starts: Some(at(10)),
+                expires: Some(at(20)),
                 tz: None,
                 windows: vec![]
             }
-            .active(10)
+            .active(at(10))
         );
         Ok(())
     }
@@ -1114,11 +1151,8 @@ mod tests {
             policies.defaults.result.fallback_effort.as_deref(),
             Some("max")
         );
-        let effective = policies.effective(
-            &ModelId::parse("codex/gpt-6-luna")?,
-            Some("work"),
-            jiff::Timestamp::now().as_second(),
-        );
+        let effective =
+            policies.effective(&ModelId::parse("codex/gpt-6-luna")?, Some("work"), at(0));
         assert_eq!(
             effective
                 .policy
@@ -1132,6 +1166,13 @@ mod tests {
             effective.policy.result.fallback_effort.as_deref(),
             Some("high")
         );
+        assert!(effective.dropped_fallback.is_none());
+        let other = policies.effective(&ModelId::parse("codex/gpt-6-luna")?, Some("other"), at(0));
+        assert!(other.policy.result.fallback.is_none());
+        assert_eq!(
+            other.dropped_fallback,
+            Some((ModelId::parse("codex/gpt-6-luna")?, "unsupported effort"))
+        );
         Ok(())
     }
 
@@ -1143,11 +1184,12 @@ mod tests {
             .parse::<jiff::Timestamp>()?
             .as_second();
         let canonical: ModelPolicies = toml_edit::de::from_str(&format!(
-            "[[rules]]\nmodel='codex/gpt-6.1-terra'\n[rules.schedule]\nstarts={starts}\nwindows=[{{weekdays=[3],start_hour=23,end_hour=2}}]\n[rules.policy.lane]\nmax_turns=17\n"
+            "[[rules]]\nmodel='codex/gpt-6.1-terra'\n[rules.schedule]\nstarts='{}'\nwindows=[{{weekdays=[3],start_hour=23,end_hour=2}}]\n[rules.policy.lane]\nmax_turns=17\n",
+            at(starts)
         ))?;
         assert_eq!(
             canonical
-                .effective(&model, None, starts)
+                .effective(&model, None, at(starts))
                 .policy
                 .lane
                 .max_turns,
@@ -1161,8 +1203,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(sunday_monday.active(3 * 86_400 + 23 * 3600));
-        assert!(sunday_monday.active(4 * 86_400 + 3600));
+        assert!(sunday_monday.active(at(3 * 86_400 + 23 * 3600)));
+        assert!(sunday_monday.active(at(4 * 86_400 + 3600)));
         let policies = ModelPolicies {
             bundled: false,
             rules: vec![ModelPolicyRule {
@@ -1180,27 +1222,23 @@ mod tests {
         };
         for time in [3 * 86_400 + 23 * 3600, 4 * 86_400 + 3600] {
             assert_eq!(
-                policies.effective(&model, None, time).policy.lane.max_turns,
+                policies
+                    .effective(&model, None, at(time))
+                    .policy
+                    .lane
+                    .max_turns,
                 Some(17)
             );
         }
         let dst: Schedule = toml_edit::de::from_str(
             "tz='America/New_York'\nwindows=[{weekdays=[6],start_hour=1,end_hour=4}]",
         )?;
-        assert!(
-            dst.active(
-                "2026-03-08T06:30:00Z" // timebomb: allow evaluated at an injected instant
-                    .parse::<jiff::Timestamp>()?
-                    .as_second()
-            )
-        );
-        assert!(
-            dst.active(
-                "2026-03-08T07:30:00Z" // timebomb: allow evaluated at an injected instant
-                    .parse::<jiff::Timestamp>()?
-                    .as_second()
-            )
-        );
+        assert!(dst.active(WallTime::parse_rfc3339(
+            "2026-03-08T06:30:00Z" // timebomb: allow evaluated at an injected instant
+        )?));
+        assert!(dst.active(WallTime::parse_rfc3339(
+            "2026-03-08T07:30:00Z" // timebomb: allow evaluated at an injected instant
+        )?));
         assert!(dst.valid());
         Ok(())
     }
@@ -1214,19 +1252,19 @@ mod tests {
             end_hour,
         };
         let valid = Schedule {
-            starts: Some(1),
-            expires: Some(2),
+            starts: Some(at(1)),
+            expires: Some(at(2)),
             tz: Some("Australia/Sydney".into()),
             windows: vec![window(vec![0, 4], 9, 17), window(vec![], 23, 2)],
         };
         assert!(valid.valid());
-        assert_eq!(valid.remaining(0), Some(2));
-        assert_eq!(valid.remaining(5), Some(0));
-        assert_eq!(Schedule::default().remaining(5), None);
+        assert_eq!(valid.remaining(at(0)), Some(2));
+        assert_eq!(valid.remaining(at(5)), Some(0));
+        assert_eq!(Schedule::default().remaining(at(5)), None);
         for invalid in [
             Schedule {
-                starts: Some(2),
-                expires: Some(2),
+                starts: Some(at(2)),
+                expires: Some(at(2)),
                 ..Default::default()
             },
             Schedule {
@@ -1313,21 +1351,55 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelId::parse("codex/gpt-6.1-terra")?;
         let policies: ModelPolicies = toml_edit::de::from_str(
-            "[[rules]]\nmodel='codex/gpt-6.1-terra'\nschedule={expires=100}\n[rules.policy.lane]\nmax_turns=17\n",
+            "[[rules]]\nmodel='codex/gpt-6.1-terra'\nschedule={expires='1970-01-01T00:01:40Z'}\n[rules.policy.lane]\nmax_turns=17\n", // timebomb: allow fixed epoch fixture, not the live clock
         )?;
 
         assert_eq!(
-            policies.effective(&model, None, 99).policy.lane.max_turns,
+            policies
+                .effective(&model, None, at(99))
+                .policy
+                .lane
+                .max_turns,
             Some(17)
         );
         assert_eq!(
-            policies.effective(&model, None, 100).policy.lane.max_turns,
+            policies
+                .effective(&model, None, at(100))
+                .policy
+                .lane
+                .max_turns,
             None
         );
         assert_eq!(
-            policies.effective(&model, None, 101).policy.lane.max_turns,
+            policies
+                .effective(&model, None, at(101))
+                .policy
+                .lane
+                .max_turns,
             None
         );
+        use provenant_core::{Clock, DurationMicros, MonoTime, TestClock};
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            "[[rules]]\nmodel='codex/gpt-6.1-terra'\nschedule={starts='1970-01-01T00:00:00.250000Z',expires='1970-01-01T00:00:00.500000Z'}\n[rules.policy.lane]\nmax_turns=17\n", // timebomb: allow fixed injected clock fixture
+        )?;
+        let mut clock = TestClock::new(WallTime::from_micros(249_999)?, MonoTime::from_micros(0));
+        for (advance, expected) in [
+            (0, None),
+            (1, Some(17)),
+            (249_999, Some(17)),
+            (1, None),
+            (250_000, None),
+        ] {
+            clock.advance(DurationMicros::from_micros(advance))?;
+            assert_eq!(
+                policies
+                    .effective(&model, None, clock.wall_now()?)
+                    .policy
+                    .lane
+                    .max_turns,
+                expected
+            );
+        }
         Ok(())
     }
 
@@ -1335,7 +1407,9 @@ mod tests {
     fn compaction_economics_and_cache_share_preserve_unknowns()
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelId::parse("claude/claude-opus-5-5")?;
-        let policy = ModelPolicies::default().effective(&model, None, 0).policy;
+        let policy = ModelPolicies::default()
+            .effective(&model, None, at(0))
+            .policy;
         // (0.05*275000 + (5+1.25)*15000)/(0.05*(275000-15000)).
         assert_eq!(
             policy.break_even_turns(275_000, 15_000, 0),
@@ -1346,7 +1420,7 @@ mod tests {
             .effective(
                 &ModelId::parse("opencode/opencode-go/deepseek-v4.1-flash")?,
                 None,
-                0,
+                at(0),
             )
             .policy;
         let intent = RouteIntent {
@@ -1362,7 +1436,7 @@ mod tests {
         ] {
             assert_eq!(
                 ModelPolicies::default()
-                    .effective(&deepseek_model, None, time)
+                    .effective(&deepseek_model, None, at(time))
                     .policy
                     .cache_factor_basis_points(intent),
                 expected
@@ -1386,7 +1460,7 @@ mod tests {
     fn launch_controls_result_sections_and_overrides() -> Result<(), Box<dyn std::error::Error>> {
         let policies = ModelPolicies::default();
         let claude = policies
-            .effective(&ModelId::parse("claude/claude-sonnet-5-5")?, None, 0)
+            .effective(&ModelId::parse("claude/claude-sonnet-5-5")?, None, at(0))
             .policy;
         assert_eq!(
             claude.launch_env("claude"),
@@ -1394,7 +1468,7 @@ mod tests {
         );
         assert!(claude.launch_env("codex").is_empty());
         let gemini = policies
-            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, 0)
+            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, at(0))
             .policy;
         assert!(!gemini.result_valid(" \n"));
         assert!(!gemini.result_valid("the words ## Findings and ## Evidence"));
@@ -1409,7 +1483,7 @@ mod tests {
         };
         disabled.rules.push(ModelPolicyRule {
             schedule: Schedule {
-                expires: Some(100),
+                expires: Some(at(100)),
                 ..Default::default()
             },
             policy: gemini,
@@ -1417,7 +1491,7 @@ mod tests {
         });
         assert_eq!(
             disabled
-                .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, 100)
+                .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, at(100))
                 .policy
                 .result
                 .check,
@@ -1433,7 +1507,7 @@ mod tests {
             "[defaults.cache]\nread_share_target=1.1",
             "[defaults.lane]\nmax_continuations=9",
             "[[rules]]\n[rules.schedule]\nwindows=[{start_hour=24,end_hour=1}]",
-            "[[rules]]\nschedule={ starts=10, expires=5 }",
+            "[[rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }", // timebomb: allow fixed epoch fixture, not the live clock
             "[defaults.result]\nsections=['']",
         ] {
             let policy: ModelPolicies = toml_edit::de::from_str(text)?;
@@ -1456,7 +1530,7 @@ mod tests {
         );
         assert!(
             drifted
-                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, 0)
+                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, at(0))
                 .policy
                 .result
                 .fallback

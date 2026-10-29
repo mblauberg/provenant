@@ -220,12 +220,11 @@ mod git_tests {
     use super::*;
 
     #[test]
-    #[allow(clippy::disallowed_methods)]
     fn reads_effective_identity_and_omits_missing_values() {
         let dir = tempfile::tempdir().unwrap();
         let git = Path::new("/usr/bin/git");
         assert!(
-            std::process::Command::new(git)
+            provenant_os::fixture::git_command_at(git)
                 .args(["init", "-q"])
                 .current_dir(dir.path())
                 .status()
@@ -237,7 +236,7 @@ mod git_tests {
             ("user.email", "lane@example.org"),
         ] {
             assert!(
-                std::process::Command::new(git)
+                provenant_os::fixture::git_command_at(git)
                     .args(["config", "--local", key, value])
                     .current_dir(dir.path())
                     .status()

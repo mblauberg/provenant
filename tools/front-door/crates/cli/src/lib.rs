@@ -20,6 +20,7 @@ mod grammar;
 pub mod inbox;
 pub mod install;
 pub mod limits;
+pub mod mileage;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
@@ -162,7 +163,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             text: if command.is_empty() && !all {
                 CORE_HELP.into()
             } else {
-                selected.render_long_help().to_string()
+                if command.is_empty() && *all {
+                    format!(
+                        "{}\nFor advanced options, run provenant help COMMAND.\n",
+                        selected.render_long_help()
+                    )
+                } else {
+                    selected.render_long_help().to_string()
+                }
             },
             catalog: scoped(
                 catalog(if command.is_empty() && !all {
@@ -779,6 +787,7 @@ fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
 fn scoped(mut catalogue: HelpCatalogue, scope: &str) -> HelpCatalogue {
     if scope != "provenant" {
         catalogue.error_codes.clear();
+        catalogue.provider_controls.clear();
     }
     catalogue.commands.retain(|command| {
         command
@@ -799,6 +808,7 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
             .map(|arg| {
                 let name = arg.get_id().to_string();
                 HelpArgument {
+                    description: arg.get_help().map(ToString::to_string),
                     bounds: arg
                         .get_num_args()
                         .filter(|range| range.max_values() > 1 && range.max_values() < usize::MAX)
@@ -858,6 +868,7 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
             .collect();
         commands.push(HelpCommand {
             command: path.clone(),
+            description: command.get_about().map(ToString::to_string),
             arguments,
             groups,
             constraints: constraints(&path),
@@ -878,6 +889,7 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
     HelpCatalogue {
         commands,
         error_codes,
+        provider_controls: provenant_records::control::control_capabilities(),
     }
 }
 /// Canonical installed verb paths. Never derived from raw caller arguments.
@@ -996,6 +1008,17 @@ fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
 fn requirements(path: &str, name: &str) -> Vec<String> {
     let names: &[&str] = match (path, name) {
         (_, "condition") => &["wait"],
+        ("provenant run" | "provenant dispatch", "preset") => &["prompt_file"],
+        ("provenant run" | "provenant dispatch", "preset_set" | "preset_params_file") => {
+            &["preset"]
+        }
+        ("provenant run" | "provenant dispatch", "deliver_remote") => {
+            &["deliver_branch", "writer_target"]
+        }
+        ("provenant run" | "provenant dispatch", "deliver_branch" | "open_pr") => {
+            &["deliver_remote"]
+        }
+        ("provenant dispatch", "branch") => &["host", "base"],
         ("provenant dispatch", "concurrency") => &["manifest"],
         ("provenant chair log append", "operation_id") => &["issued_at"],
         ("provenant chair log append", "issued_at") => &["operation_id"],
@@ -1095,6 +1118,61 @@ mod tests {
         ));
         invalid(&["pr", "merge", "1947", "--head", &"a".repeat(40)]);
         invalid(&["pr", "land", "1947", "--head", &"a".repeat(40)]);
+    }
+    #[test]
+    fn expanded_help_catalogue_describes_commands_and_requirements() {
+        let ParseOutcome::Help { text, catalog, .. } = parsed(&["help", "--all"]) else {
+            panic!("help");
+        };
+        assert!(text.contains("provenant help COMMAND"));
+        for path in ["provenant run", "provenant dispatch"] {
+            let command = catalog.commands.iter().find(|c| c.command == path).unwrap();
+            assert!(
+                command
+                    .description
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty())
+            );
+            for (name, expected) in [
+                ("preset_set", vec!["preset"]),
+                ("preset_params_file", vec!["preset"]),
+                ("preset", vec!["prompt_file"]),
+                ("deliver_remote", vec!["deliver_branch", "writer_target"]),
+                ("deliver_branch", vec!["deliver_remote"]),
+                ("open_pr", vec!["deliver_remote"]),
+            ] {
+                let arg = command.arguments.iter().find(|a| a.name == name).unwrap();
+                assert_eq!(arg.requires, expected);
+                assert!(arg.description.as_deref().is_some_and(|s| !s.is_empty()));
+            }
+        }
+        let dispatch = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant dispatch")
+            .unwrap();
+        assert_eq!(
+            dispatch
+                .arguments
+                .iter()
+                .find(|a| a.name == "branch")
+                .unwrap()
+                .requires,
+            ["host", "base"]
+        );
+        let run = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant run")
+            .unwrap();
+        assert!(
+            run.arguments
+                .iter()
+                .find(|a| a.name == "branch")
+                .unwrap()
+                .requires
+                .is_empty()
+        );
     }
     #[test]
     fn chair_log_help_explains_generated_retry_keys() {
@@ -1521,7 +1599,6 @@ mod tests {
             vec!["--title", "title"],
             vec!["--build-heavy"],
             vec!["--confidential"],
-            vec!["--allow-free"],
             vec!["--provider-timeout", "1"],
             vec!["--operation-id", "id"],
         ] {
@@ -1629,7 +1706,7 @@ mod tests {
             let result = run::check_flag_capabilities(&request, None);
             assert_eq!(result.is_err(), refused, "{model}");
             if let Err(fail) = result {
-                assert!(fail.message.contains("does not support effort"), "{model}");
+                assert_eq!(fail.kind.code(), "UNSUPPORTED", "{model}");
             }
         }
     }
@@ -1652,7 +1729,7 @@ mod tests {
             panic!("run")
         };
         let fail = run::check_flag_capabilities(&request, None).unwrap_err();
-        assert!(fail.message.contains("cursor does not support effort"));
+        assert_eq!(fail.kind.code(), "UNSUPPORTED");
     }
     #[test]
     fn pool_effort_is_refused_only_when_no_member_takes_it() {
@@ -1900,6 +1977,40 @@ mod tests {
             panic!("lane deliver");
         };
         assert!(accept_review);
+        let Command::Output(output) = valid(&[
+            "output",
+            "11111111111111111111111111111111",
+            "--part",
+            "transcript",
+            "--to",
+            "saved.txt",
+        ])
+        .command
+        else {
+            panic!("output --to");
+        };
+        assert_eq!(output.to, Some(std::path::PathBuf::from("saved.txt")));
+        valid(&[
+            "output",
+            "11111111111111111111111111111111",
+            "--path",
+            "--part",
+            "stderr",
+        ]);
+        invalid(&[
+            "output",
+            "11111111111111111111111111111111",
+            "--path",
+            "--to",
+            "saved.txt",
+        ]);
+        invalid(&[
+            "output",
+            "11111111111111111111111111111111",
+            "--path",
+            "--tail",
+            "5",
+        ]);
         let Command::Resume(resume) = valid(&[
             "resume",
             "11111111111111111111111111111111",
@@ -1913,6 +2024,58 @@ mod tests {
             panic!("resume");
         };
         assert!(resume.no_fallback);
+    }
+    #[test]
+    fn control_commands_require_piped_text_and_a_channel() {
+        let attempt = "11111111111111111111111111111111";
+        valid(&["steer", attempt, "--text-stdin", "--operation-id", "s-1"]);
+        invalid(&["steer", attempt]);
+        valid(&[
+            "chair",
+            "message",
+            "chair-a",
+            "--text-stdin",
+            "--channel",
+            "console",
+        ]);
+        invalid(&["chair", "message", "chair-a", "--text-stdin"]);
+        invalid(&["chair", "message", "chair-a", "--channel", "console"]);
+        invalid(&["steer", attempt, "--text-stdin", "--approve"]);
+    }
+    #[test]
+    fn mail_cursors_can_be_scoped_to_one_chair_session() {
+        valid(&["fabric", "mail", "read", "--session", "chair-a"]);
+        valid(&[
+            "fabric",
+            "mail",
+            "mark-read",
+            "3",
+            "--session",
+            "chair-a",
+            "--operation-id",
+            "mark-1",
+        ]);
+        invalid(&["fabric", "mail", "read", "--session"]);
+    }
+    #[test]
+    fn full_help_publishes_provider_controls_and_scoped_help_does_not() {
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all", "--json"]) else {
+            panic!("catalog")
+        };
+        assert_eq!(
+            catalog.provider_controls,
+            provenant_records::control::control_capabilities()
+        );
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "steer", "--json"]) else {
+            panic!("catalog")
+        };
+        assert!(catalog.provider_controls.is_empty());
+        assert!(
+            catalog
+                .commands
+                .iter()
+                .any(|c| c.command == "provenant steer")
+        );
     }
     #[test]
     fn native_claude_import_requires_unfiltered_stats() {
@@ -1937,6 +2100,24 @@ mod tests {
             };
             assert!(stats.by.is_some(), "{dimension}");
         }
+    }
+    #[test]
+    fn experiment_show_parses_the_experiment_id_and_comparison_options() {
+        let invocation = valid(&[
+            "telemetry",
+            "experiments",
+            "show",
+            "retry-shape",
+            "--min-samples",
+            "5",
+        ]);
+        let Command::Telemetry(Telemetry::Experiments(Experiments::Show(show))) =
+            invocation.command
+        else {
+            panic!("telemetry experiments show");
+        };
+        assert_eq!(show.id, "retry-shape");
+        assert_eq!(show.pipeline.min_samples, 5);
     }
     #[test]
     fn paging_recovery_and_removal_require_explicit_scopes() {

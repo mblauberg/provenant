@@ -79,13 +79,13 @@ enum QuotaMenu {
     static func entries(for model: QuotaModel, now: Date) -> [MenuEntry] {
         entries(report: model.report, error: model.error, updatedAt: model.updatedAt,
                 refreshing: model.isRefreshing || model.report?.isRefreshing(now: now) == true,
-                lanes: [], stateRoot: model.stateRoot, now: now, overview: model.overview,
+                stateRoot: model.stateRoot, now: now, overview: model.overview,
                 overviewError: model.overviewError, overviewUpdatedAt: model.overviewUpdatedAt,
                 observationError: model.overviewObservationError)
     }
 
     static func entries(report: QuotaReport?, error: String?, updatedAt: Date?, refreshing: Bool,
-                        lanes: [AttentionLane], stateRoot: URL, now: Date, overview: ConsoleOverview? = nil,
+                        stateRoot: URL, now: Date, overview: ConsoleOverview? = nil,
                         overviewError: String? = nil, overviewUpdatedAt: Date? = nil,
                         observationError: String? = nil) -> [MenuEntry] {
         let freshness = refreshing ? "Refreshing…" : updatedAt.map { "Updated \(Fmt.ago($0, now: now))" }
@@ -362,22 +362,6 @@ enum QuotaMenu {
         let lead = resets.expiresAt.count > 1 ? "soonest expires" : "expires"
         return ["\(resets.available)", resets.expiresAt.first.map { "\(lead) \(Fmt.day($0))" }].compactMap { $0 }
             .joined(separator: " · ")
-    }
-
-    private static func mark(_ kind: Attention) -> String {
-        switch kind {
-        case .inputRequired: "questionmark"
-        case .failed: "xmark"
-        case .stalled: "pause.fill"
-        }
-    }
-
-    private static func tint(_ kind: Attention) -> MenuTint {
-        switch kind {
-        case .inputRequired: .blue
-        case .failed: .red
-        case .stalled: .orange
-        }
     }
 
     /// A menu grows to its widest item, so free text is kept to one short line.

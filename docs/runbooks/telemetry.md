@@ -36,7 +36,7 @@ summary. Both results are local reads, and PR rows include only merged PRs.
 To inspect native Claude Code sub-agents for a session, run
 `provenant telemetry stats --claude-subagents PATH`, where `PATH` is that
 session's `subagents` directory under `~/.claude*/projects/<project>/<session>`.
-The directory must contain only regular, non-symlink `agent-*.jsonl` files. This is an
+The importer reads regular, non-symlink `agent-*.jsonl` files and skips unrelated files. This is an
 explicit import and produces a separate usage and API-equivalent cost report
 grouped by model; it does not add those calls to supervised attempt totals.
 The import uses usage metadata, not message bodies. It cannot be combined with
@@ -46,6 +46,62 @@ counts, usage, price-table billing and cost by model, with `cost_basis` set to
 `api_equivalent_estimate`. A model's `cost_usd` is
 null when its usage or price is incomplete. Model prices are matched exactly;
 dated aliases are not inferred.
+
+## Native session ingest
+
+`provenant telemetry ingest [--provider claude] [--since T]` records native
+Claude usage from every registered account directory and from every other
+`~/.claude*` directory under home. Registered accounts use their label; any
+other directory, including the default `~/.claude`, is `unattributed`. Each
+assistant message becomes one row keyed by session and message ID, so running
+the command again adds nothing. `--since` takes seconds ago, a date or an
+RFC3339 timestamp and skips older files and messages. The chair's SessionStart
+hook runs the last day of ingest automatically, within a three-second budget
+that stops the read and keeps the rows already read, so an interactive session
+is captured without a manual command.
+
+The store is `ingest.jsonl` under the state root. It holds counts, model,
+effort, account, timestamp, session and message IDs and a `source` of `chair`,
+`subagent` or `lane`; it never holds prompt, reply, tool or path text. A row
+whose message streamed repeatedly keeps the largest count of each bucket. A
+row first seen as a `lane` becomes a `chair` once the hook records its session.
+A line this build cannot read, such as another schema version or a torn write,
+is kept as it was when the store is rewritten. Reads never follow links, and a
+message without a timestamp is counted as skipped rather than guessed.
+
+## Mileage
+
+`provenant telemetry mileage [--account LABEL] [--window POOL] [--model MODEL]
+[--since T] [--json]` reports what a quota percentage point costs. It joins the
+quota history with ingested usage, priced by `config/telemetry-prices.toml`, so
+run ingest first and let the quota refresh build history.
+
+Mileage is the API-equivalent cost of one point between two distinct readings
+in a reset period; capacity is the cost of a full window. A reset, a reset time
+that advances by a minute or more, a used-percentage drop or a plan change
+starts a new run; a smaller advance is jitter in the same window. A run that
+started from a drop with no reset time is flagged `reset: inferred`. The
+headline is the median over the last seven days with `n` and the priced share.
+
+`--model` counts only that model's tokens, but quota deltas cover every model,
+so mileage under a model filter is understated. Leave it off for mileage.
+
+`step_change` compares the last seven days with the prior 28 at the same plan
+and tier. It is `flagged` for a fall of at least 20% with at least ten priced
+segments on each side, and `inconclusive` otherwise; change the judgement with
+`--min-runs`, `--fall-percent` and `--recent-days`. A plan change also reports
+the capacity change around the upgrade.
+
+`effective` reports, per bucket, the potential rate at full use (the API rate
+times the plan's `price / capacity` discount) and the realised rate (the plan
+price over tokens actually used), with the window's latest used percentage, `n`
+and priced token coverage. The monthly plan price is prorated to the report
+window, and one window's capacity is expanded to the full windows in it. Every
+effective report says token use is a lower bound and the realised rate is an
+upper bound, because ingest coverage of the account is not checked. Fitted
+bucket weights appear only with their sample size and R-squared, and only when
+they explain at least half the variance. A missing price table leaves rates
+unknown rather than guessing.
 
 ## Cache-read share
 
@@ -77,6 +133,49 @@ whose transcript cannot be read are counted as unread. Chair rows need no
 extra setting; `usage.project_attribution` only adds the project.
 
 ## Offline timeline
+
+For offline pipeline comparisons, export the chair's main-branch CI history
+and pass the file to the local report:
+
+```sh
+gh run list --branch main --limit 1000 --json headSha,conclusion,createdAt,workflowName > main-ci.json
+provenant telemetry stats --suggest --ci-file main-ci.json --main-ref main --json
+```
+
+Check `pipeline.outcomes.ci_coverage_from` against the merge dates being
+compared. Mature merges older than the earliest `createdAt` in the export have
+null CI counts. The export must cover the merges and following observation
+windows being compared. Runs with a head SHA unavailable locally are counted
+as unattributed and skipped. Increase the limit or export additional pages for a busy repository.
+The telemetry command itself uses no network. Omit `--ci-file` to inspect local
+reverts and line-overlapping follow-up fixes with CI marked `not_measured`.
+Use `--outcomes` instead of `--suggest` to request the same outcome and ranking
+evidence. `--since` and `--until` select attempt facts, while `--outcome-days`
+sets the post-merge observation window (default 14 days).
+
+`pipeline.outcomes.rows` retains originating graph, pattern, lens and model
+alongside counts; unmatched evidence stays `unattributed`.
+`pipeline.ranking.arms` shows sample counts, cost coverage, verifier counts,
+rates and 95% intervals by risk tier and task kind. Missing strata are
+`unknown`; comparisons with an unknown risk tier or task kind are insufficient
+and include a reason. Escapes are attributed per PR, so every node arm in that
+PR is charged with the PR outcome. Ranking waits for the full observation window and at least 20
+graphs and mature merges per arm. Set `--min-samples`, `--outcome-days` and
+`--expiry-days` to change these defaults; expiry is 14 days.
+
+Review `pipeline.ranking.suggestions` with its referenced arm evidence before
+making a routing decision. Each suggestion has counts, intervals and expiry.
+`accept: null` means the choice is advisory: there is currently no scheduled
+pattern, lens or arbitrary model-choice command. The report writes no override
+and posts no graph ask. `route override set` is a pacing override and must not
+be used as a model-choice command. See the
+[telemetry spec](../specs/telemetry.md#offline-post-merge-outcomes-and-suggestions)
+for the conservative line matcher and coverage limits.
+
+Whole-patch read counts remain unavailable because provider telemetry supplies
+no read-event source; token counts cannot stand in for that measurement.
+
+## Attempt timeline
 
 `provenant telemetry trace [--out FILE] [--since 604800] [--run ID] [--peers]`
 writes retained attempts as Chrome Trace Event JSON (default
@@ -192,10 +291,11 @@ effective_from = "2026-01-01"
 
 Prices are USD unless `currency` says otherwise, and nothing converts currencies. A free plan has
 `price = 0` and may carry `notional_usd`, the list price it replaces; history
-shows both. An account may also list extra `directories` signed into it; they
-are schema only until native ingest lands. The keys are listed in
-[config keys](../reference/config-keys.md). No value or mileage report reads
-this yet.
+shows both. An account may also list extra `directories` signed into it; native
+ingest attributes them to the same label, so one account signed in to two config
+directories counts once. The keys are listed in
+[config keys](../reference/config-keys.md). Mileage reads these prices; the
+value multiple is not built yet.
 
 ## Routing
 

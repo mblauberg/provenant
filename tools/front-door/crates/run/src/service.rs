@@ -89,7 +89,7 @@ impl<'a> Service<'a> {
             Self::scan(&task.prompt)?;
             if let Some(title) = &task.title {
                 provenant_core::validate_task_title(title)
-                    .map_err(|message| input_error(ErrorKind::Invalid, message))?;
+                    .map_err(|message| RunError::InvalidTaskTitle(message.into()))?;
             }
             // A lane's child launches outside the lane's sandbox, so it may not
             // name access its parent never had.
@@ -600,27 +600,30 @@ impl From<&RunError> for ErrorKind {
     fn from(error: &RunError) -> Self {
         match error {
             RunError::Input { kind, .. } => *kind,
+            RunError::InvalidTaskTitle(_) | RunError::AttemptReservationRetained => Self::Invalid,
             RunError::WorktreeMissing(_) => Self::WorktreeMissing,
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,
             RunError::Writer(_) => Self::WriterScope,
             RunError::Confinement(_) => Self::Confinement,
             RunError::Refused => Self::Refused,
-            RunError::DiskFloor { .. } => Self::DiskFloor,
-            RunError::MemoryPressure { .. } => Self::MemoryPressure,
-            RunError::LaneCap { .. } => Self::LaneCap,
-            RunError::BuildSettings => Self::BuildSettings,
-            RunError::GuardianIdentityUnavailable => Self::GuardianIdentity,
-            RunError::HostClock => Self::HostClock,
+            RunError::Admission(AdmissionError::Disk { .. }) => Self::DiskFloor,
+            RunError::Admission(AdmissionError::MemoryPressure { .. }) => Self::MemoryPressure,
+            RunError::Admission(AdmissionError::LaneCap { .. }) => Self::LaneCap,
+            RunError::Admission(AdmissionError::BuildSettings) => Self::BuildSettings,
+            RunError::Admission(AdmissionError::GuardianIdentity) => Self::GuardianIdentity,
+            RunError::Admission(AdmissionError::Clock) => Self::HostClock,
             RunError::WriterRefLocked(_) => Self::WriterRefLocked,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
-            RunError::Validation(_) | RunError::InvalidBase(_) | RunError::TooLarge { .. } => {
-                Self::Invalid
-            }
+            RunError::Validation(_)
+            | RunError::WriterHeadNotLaneBranch
+            | RunError::ReviewAcceptanceRequired
+            | RunError::InvalidBase(_)
+            | RunError::TooLarge { .. } => Self::Invalid,
             RunError::OperationConflict => Self::OperationConflict,
             RunError::NotFound => Self::NotFound,
             RunError::Nonterminal => Self::Nonterminal,
             RunError::ProviderStateExpired => Self::ProviderStateExpired,
-            RunError::Conflict => Self::Conflict,
+            RunError::Conflict | RunError::GenerationConflict { .. } => Self::Conflict,
             RunError::Cancelled => Self::Cancelled,
             RunError::DepthExceeded { .. } | RunError::DepthOverflow => Self::LaneDepth,
             RunError::Capacity => Self::QueueFull,

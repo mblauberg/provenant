@@ -1,5 +1,7 @@
 # OpenCode Go model admission, 28 October 2026
 
+Current policy limits the OpenCode catalogue to the free Zen and paid Go variants of DeepSeek V4.1 Flash and GLM-5.3 Flash. Other models discussed below are historical research and are no longer catalogued.
+
 The [routing catalogue](../../tools/front-door/crates/routing/assets/catalogue.toml)
 owns current pool membership. This note records the evidence for the Batch O
 admission decision; provider benchmark claims are priors, not local trial results.
@@ -17,7 +19,7 @@ uses prompts and completions to improve the model. Zen models use a separate
 account and are not subject to this floor.
 The IDs for the other documented models at or above $60 were checked against
 the [models.dev provider catalogue](https://models.dev/api.json), accessed on
-28 October 2026. They are explicit-only pending local trial evidence.
+28 October 2026. They are no longer catalogued.
 
 ## Excluded models
 
@@ -25,7 +27,7 @@ MiMo V2.6 Pro and GLM-5.3 are not catalogued. Each draws the Go allowance at
 roughly four times the rate of the Flash models (a $15 monthly limit on the $10
 plan, against $60 to $80), and the Flash models are strong enough for both pools.
 
-MiMo V2.6 Flash stays catalogued for exact selection only. Xiaomi reports
+MiMo V2.6 Flash is no longer catalogued. Xiaomi reports
 Terminal-Bench 2.1 87.6 for it in its
 [model card](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL), but no
 independent score places it ahead of DeepSeek V4.1 Flash or GLM-5.3 Flash, and it
@@ -34,8 +36,9 @@ costs the same allowance as GLM-5.3 Flash.
 ## Flash fallbacks
 
 The free Zen variants of DeepSeek V4.1 Flash and GLM-5.3 Flash already sit in
-the junior pool, but free allowances run out. Their paid Go endpoints are the
-cheapest fallbacks: the [Go documentation](https://opencode.ai/v2/docs/console/go/)
+the junior pool at weight 50 each, but free allowances run out. Weighted
+selection favours them without guaranteeing they are exhausted first. Their paid
+Go endpoints are the cheapest fallbacks: the [Go documentation](https://opencode.ai/v2/docs/console/go/)
 gives DeepSeek V4.1 Flash an $80 monthly limit on the $10 plan (8x) and GLM-5.3
 Flash $60 (6x), the same as MiMo V2.6 Flash. Artificial Analysis rates
 [DeepSeek V4.1 Flash](https://artificialanalysis.ai/models/releases/deepseek-v4-1-flash)
@@ -50,12 +53,10 @@ evidence.
 ## Catalogue refresh, 29 October 2026
 
 The [Go pricing table](https://opencode.ai/v2/docs/console/go/), accessed on
-29 October 2026, lists newer releases in two families. The catalogue now carries
+29 October 2026, lists newer releases in two families. The catalogue previously carried
 MiniMax M3.1 Flash ($20 monthly limit on the $10 plan) in place of MiniMax M3,
 and Qwen3.8 Flash ($30) in place of Qwen3.7 Plus. Qwen3.8 Flash is preferred to
-Qwen3.8 Max ($15) because it draws the allowance at half the rate. Both
-replacements sit below the default $60 floor, so they are refused until the
-operator lowers `domains.routing.opencode_go.min_monthly_allowance_usd`.
+Qwen3.8 Max ($15) because it draws the allowance at half the rate. Both replacements have since been removed from the catalogue.
 
 Kimi K2.7 Code, MiMo V2.5 and Muse Spark 1.2 Contributor were removed as
 superseded. Claude Haiku 5.5 was removed because the Claude adapter already

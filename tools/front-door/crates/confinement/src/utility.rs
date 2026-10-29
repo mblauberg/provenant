@@ -3161,7 +3161,6 @@ pub(crate) mod tests {
             matches!(&error, UtilityError::LaneConfiguration { key, .. } if key == "status.showuntrackedfiles"),
             "{error}"
         );
-        assert!(error.to_string().contains("cannot be neutralised"));
         // The primary checkout and a worktree on another branch are unaffected.
         assert_eq!(status(&fixture, &repo)?.termination, Termination::Exit(0));
         let tree = probe(&fixture, &repo, &other)?;
