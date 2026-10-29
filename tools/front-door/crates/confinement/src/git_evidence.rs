@@ -271,7 +271,7 @@ impl<'a> Git<'a> {
             return Ok(Vec::new());
         }
         let exempt = &exempt.with_symlinks(
-            self.symlink_paths()
+            self.symlink_paths(None)
                 .map_err(|_| GitEvidenceError::UntrackedOrUnsupportedPath)?,
         );
         // Lists each untracked file, not its directory, whatever

@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 pub const RULES: [(&str, &str); 3] = [
     (
         "force-push",
-        "Force push to the default branch is refused. Accepted: `git push origin my-topic` then open a PR; `git push --force-with-lease origin my-topic` is fine on a topic branch.",
+        "Force push to the default branch is refused. Accepted: `git push origin my-topic` then open a PR; the pre-push hook refuses non-fast-forward updates on every branch, so integrate with `git fetch origin && git merge origin/my-topic` rather than forcing.",
     ),
     (
         "rm-root",
@@ -362,6 +362,16 @@ mod tests {
     }
     fn denies(command: &str, root: &Path) -> bool {
         denies_in(command, root, "home/project", &GuardConfig::default())
+    }
+
+    #[test]
+    fn no_remedy_recommends_a_force_push() {
+        for (id, remedy) in RULES {
+            assert!(
+                !remedy.contains("--force") && !remedy.contains("push -f"),
+                "{id}: {remedy}"
+            );
+        }
     }
 
     #[test]

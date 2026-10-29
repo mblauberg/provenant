@@ -181,6 +181,11 @@ pub enum GitRead {
         base: GitOid,
         head: GitOid,
     },
+    /// Changed paths with their old and new modes (`diff --raw`).
+    ChangedModes {
+        base: GitOid,
+        head: GitOid,
+    },
     DiffIndex {
         paths: Vec<RepoPath>,
     },
@@ -926,6 +931,18 @@ fn git_args(
             "--no-textconv".into(),
             "--no-renames".into(),
             "--name-only".into(),
+            "-z".into(),
+            base.to_string().into(),
+            head.to_string().into(),
+            "--".into(),
+        ],
+        GitRead::ChangedModes { base, head } => vec![
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--no-renames".into(),
+            "--raw".into(),
+            "--no-abbrev".into(),
             "-z".into(),
             base.to_string().into(),
             head.to_string().into(),

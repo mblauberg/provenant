@@ -65,8 +65,13 @@ impl ProtectedPath {
 }
 
 impl Git<'_> {
-    /// Tracked symlinks, which no review-exempt listing may cover.
-    pub(crate) fn symlink_paths(&self) -> Result<BTreeSet<Vec<u8>>, QuarantineError> {
+    /// Symlinks no review-exempt listing may cover: index entries, plus any
+    /// path that was a symlink in `base` or in HEAD among the paths changed
+    /// between them, so unstaging a committed link does not hide it.
+    pub(crate) fn symlink_paths(
+        &self,
+        base: Option<GitOid>,
+    ) -> Result<BTreeSet<Vec<u8>>, QuarantineError> {
         let raw = self
             .read(GitRead::IndexEntries { paths: Vec::new() })?
             .stdout
@@ -78,6 +83,14 @@ impl Git<'_> {
                 paths.insert(entry.path.to_vec());
             }
         }
+        if let Some(base) = base {
+            let head = self.head()?;
+            let raw = self
+                .read(GitRead::ChangedModes { base, head })?
+                .stdout
+                .bytes;
+            paths.extend(raw_symlink_paths(&raw)?);
+        }
         Ok(paths)
     }
 
@@ -88,7 +101,7 @@ impl Git<'_> {
         &self,
         exempt: &ReviewExempt,
     ) -> Result<Vec<ProtectedPath>, QuarantineError> {
-        let exempt = &exempt.with_symlinks(self.symlink_paths()?);
+        let exempt = &exempt.with_symlinks(self.symlink_paths(None)?);
         let raw = self
             .read(GitRead::IndexEntries { paths: Vec::new() })?
             .stdout
@@ -578,7 +591,7 @@ fn quarantine_instruction_changes(
     exempt: &ReviewExempt,
 ) -> Result<QuarantineOutcome, QuarantineError> {
     let repo = git.repo;
-    let exempt = &exempt.with_symlinks(git.symlink_paths()?);
+    let exempt = &exempt.with_symlinks(git.symlink_paths(Some(snapshot.head))?);
     let archive_identity = quarantine_dir.metadata()?;
     validate_archive(repo.root_identity().device, &archive_identity)?;
     if !snapshot.archive_identity.same_identity(&archive_identity) {
@@ -1341,6 +1354,25 @@ fn restore_file(
     Ok(())
 }
 
+/// Paths a `diff --raw -z` lists with a symlink mode on either side.
+fn raw_symlink_paths(raw: &[u8]) -> Result<Vec<Vec<u8>>, QuarantineError> {
+    if !raw.is_empty() && !raw.ends_with(&[0]) {
+        return Err(QuarantineError::Incomplete);
+    }
+    let mut fields = raw.split(|byte| *byte == 0);
+    let mut paths = Vec::new();
+    while let Some(meta) = fields.next().filter(|meta| !meta.is_empty()) {
+        let path = fields.next().ok_or(QuarantineError::Incomplete)?;
+        let meta = meta.strip_prefix(b":").ok_or(QuarantineError::Incomplete)?;
+        let mut parts = meta.split(|byte| *byte == b' ');
+        let (old, new) = (parts.next(), parts.next());
+        if old == Some(b"120000") || new == Some(b"120000") {
+            paths.push(path.to_vec());
+        }
+    }
+    Ok(paths)
+}
+
 fn parse_tree_entries(raw: &[u8]) -> Result<Vec<TreeRecord>, QuarantineError> {
     if !raw.is_empty() && !raw.ends_with(&[0]) {
         return Err(QuarantineError::Incomplete);
@@ -1425,7 +1457,7 @@ fn under_agents(path: &Path) -> bool {
         .is_ok_and(|relative| !relative.as_os_str().is_empty())
 }
 fn under_agents_bytes(path: &[u8]) -> bool {
-    path.starts_with(b".agents/")
+    path.len() > 8 && path[..8].eq_ignore_ascii_case(b".agents/")
 }
 fn is_protected_evidence_path(path: &[u8], exempt: &ReviewExempt) -> bool {
     if exempt.refuses_symlink(path) {
@@ -1991,6 +2023,47 @@ mod custody_integration_tests {
             "{outcome:?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn an_unstaged_committed_symlink_in_an_exempt_directory_still_needs_review()
+    -> Result<(), Box<dyn Error>> {
+        let listed = ReviewExempt::new(&["docs/specs/"]);
+        for unstage in [
+            &["rm", "--cached", "docs/specs/link"][..],
+            &["update-index", "--force-remove", "docs/specs/link"][..],
+        ] {
+            let outcome = settle_writer_commit(
+                |fixture| {
+                    let target = fixture.root.join("docs/specs/link");
+                    std::os::unix::fs::symlink("../../AGENTS.md", &target)?;
+                    fixture.run(&["add", "-f", "docs/specs/link"])?;
+                    fixture.run(&["commit", "-m", "alias"])?;
+                    fixture.run(unstage)?;
+                    Ok(())
+                },
+                &listed,
+            )?;
+            assert!(
+                matches!(outcome, QuarantineOutcome::ReviewRequired { .. }),
+                "{unstage:?}: {outcome:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_agents_prefix_matches_without_ascii_case() {
+        for path in [".agents/a", ".Agents/a", ".AGENTS/x/y"] {
+            assert!(super::under_agents_bytes(path.as_bytes()), "{path}");
+        }
+        for path in [".agents", ".agentsx/a", "x/.agents/a"] {
+            assert!(!super::under_agents_bytes(path.as_bytes()), "{path}");
+        }
+        assert!(super::is_protected_evidence_path(
+            b".AGENTS/x/Cargo.lock",
+            &ReviewExempt::new(&["Cargo.lock", ".agents/"])
+        ));
     }
 
     #[test]
