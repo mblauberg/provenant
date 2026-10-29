@@ -496,6 +496,7 @@ fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>
         slot.lens.as_deref().unwrap_or("general")
     );
     Submitted {
+        context: None,
         build_heavy: false,
         title: Some(format!(
             "Review {}",

@@ -827,7 +827,7 @@ pub fn expand_with(
     .to_string();
     let id = format!("preset-{}", &digest[7..39]);
     check_expansion(&nodes, "", 0)?;
-    let mut document = json!({"schema_version":1,"graph_id":id,"nodes":nodes});
+    let mut document = json!({"schema_version":1,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
     let parameters = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),

@@ -2267,6 +2267,7 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(fail_error)?;
             submitted.push(Submitted {
+                context: task.context,
                 build_heavy: task.build_heavy,
                 base: task.base,
                 head: task.head,
@@ -4379,13 +4380,33 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .map_err(|_| FacadeError::StateCorrupt)?,
             );
             let operation_id = graph_operation("graph-attempt-operation", key)?;
-            let accepted = owner
-                .store(self.budget, self.cancel)?
-                .operation(&operation_id, &owner.call(self.budget, self.cancel))
-                .map_err(run_error)?
-                .is_some_and(|operation| {
-                    operation.state != provenant_run::OperationState::Prepared
-                });
+            let store = owner.store(self.budget, self.cancel)?;
+            let call = owner.call(self.budget, self.cancel);
+            let operation = store.operation(&operation_id, &call).map_err(run_error)?;
+            let accepted = operation.as_ref().is_some_and(|operation| {
+                operation.state != provenant_run::OperationState::Prepared
+            });
+            // A crash can leave an accepted operation without a checkpoint
+            // reference. Preserve its immutable labels, including legacy None.
+            let mut prepared_without_request = false;
+            let context = match &operation {
+                Some(operation) => match store.request(operation.run_id, &call) {
+                    Ok(request) => request
+                        .tasks
+                        .first()
+                        .ok_or(FacadeError::StateCorrupt)?
+                        .context
+                        .clone(),
+                    Err(provenant_run::RunError::NotFound)
+                        if operation.state == provenant_run::OperationState::Prepared =>
+                    {
+                        prepared_without_request = true;
+                        Some(node.context)
+                    }
+                    Err(error) => return Err(run_error(error)),
+                },
+                None => Some(node.context),
+            };
             if !accepted && let (Some(path), Some(commit)) = (worktree, node.source_commit) {
                 let head = commit.parse().map_err(|_| FacadeError::InvalidInput)?;
                 provenant_confinement::worktrees::with_context(
@@ -4438,6 +4459,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 extra: Default::default(),
                 operation_id,
                 tasks: vec![SubmittedTask {
+                    context,
                     extra: Default::default(),
                     build_heavy: false,
                     base: node.source_commit.map(|head| {
@@ -4517,7 +4539,28 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 self.factory.context.roots.state.as_path(),
             )
             .map_err(fail_error)?;
-            let receipt = owner.submit_with_access(input, self.budget, self.cancel, grants)?;
+            let legacy_input = prepared_without_request.then(|| {
+                let mut legacy = input.clone();
+                let SubmitInput::Submit { tasks, .. } = &mut legacy;
+                for task in tasks {
+                    task.context = None;
+                }
+                legacy
+            });
+            let receipt =
+                match owner.submit_with_access(input, self.budget, self.cancel, grants.clone()) {
+                    Err(FacadeError::OperationConflict) if legacy_input.is_some() => {
+                        // Store admission still requires the reserved digest to match
+                        // exactly. Only legacy metadata is retried, once.
+                        owner.submit_with_access(
+                            legacy_input.ok_or(FacadeError::StateCorrupt)?,
+                            self.budget,
+                            self.cancel,
+                            grants,
+                        )?
+                    }
+                    result => result?,
+                };
             owner.actor = None;
             let target = receipt
                 .targets
@@ -6758,6 +6801,126 @@ mod peer_tests {
                 worktree: info.path,
             })
         }
+    }
+
+    #[test]
+    fn graph_replay_preserves_legacy_context_without_a_checkpoint_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_replay_preserves_legacy_context_without_a_checkpoint_reference",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadWait,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"legacy-context", "node_id":"inspect", "route_index":0
+        }))?;
+        let mut run_owner = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let input: SubmitInput = serde_json::from_value(serde_json::json!({
+            "op":"submit", "operation_id":graph_operation("graph-attempt-operation", &key)?,
+            "tasks":[{
+                "title":"inspect", "prompt":"Review the slice",
+                "route":{"kind":"model", "provider":"fixture", "model":"fixture/model"},
+                "timeout_seconds":factory.context.config.limits.graph_timeout_seconds
+            }], "concurrency":1
+        }))?;
+        let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default())?;
+        let target = receipt.targets.first().ok_or("target")?;
+        let mut graph_owner = BoundGraphOwner {
+            factory: &factory,
+            integration_base: None,
+            integration_branch: None,
+            budget,
+            cancel: &cancel,
+            prices: None,
+        };
+        let actor = graph_owner.actor();
+        let route = serde_json::from_value(
+            serde_json::json!({"adapter":"fixture", "model":"fixture/model"}),
+        )?;
+        let store = run_owner.store(budget, &cancel)?;
+        for prepared in [false, true] {
+            if prepared {
+                // Reserve the legacy digest without the canonical request file,
+                // as a crash between row reservation and publication would leave it.
+                let call = run_owner.call(budget, &cancel);
+                let mut operation = store
+                    .operation(&receipt.operation_id, &call)?
+                    .ok_or("operation")?;
+                operation.state = provenant_run::OperationState::Prepared;
+                let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+                db.execute(
+                    "UPDATE operations SET record=?1",
+                    [serde_json::to_vec(&operation)?],
+                )?;
+                std::fs::remove_file(
+                    rig.state
+                        .join("runs")
+                        .join(operation.run_id.to_string())
+                        .join("request.json"),
+                )?;
+            }
+            let observation = graph_owner.observe_or_start(
+                &key,
+                graph::NodeInput {
+                    context: provenant_records::run::WorkContext {
+                        graph_id: Some(key.graph_id.clone()),
+                        node_id: Some(key.node_id.clone()),
+                        pattern: Some("council".into()),
+                        ..Default::default()
+                    },
+                    read_roots: &[],
+                    distinct_from_attempts: &[],
+                    source_commit: None,
+                    title: "inspect",
+                    prompt: "Review the slice",
+                    required_verdict: None,
+                },
+                &route,
+                graph::AccessMode::ReadOnly,
+                None,
+                graph::Replay {
+                    delivery: None,
+                    stored_ref: None,
+                    launch_actor: &actor,
+                },
+            )?;
+            let graph::AttemptObservation::Terminal { attempt_ref, .. } = observation else {
+                return Err("expected settled fixture attempt".into());
+            };
+            assert_eq!(
+                attempt_ref,
+                Some(format!(
+                    "{}/{}",
+                    factory.context.identity.host, target.attempt
+                ))
+            );
+            let record = store.record(target.attempt, &run_owner.call(budget, &cancel))?;
+            assert!(record.context.is_none());
+        }
+        Ok(())
     }
 
     #[test]
