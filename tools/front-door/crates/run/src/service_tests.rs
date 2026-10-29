@@ -151,6 +151,7 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
         chair: None,
         operation_id: OperationId::parse("service-dispatch").unwrap(),
         tasks: vec![DispatchTask {
+            context: None,
             build_heavy: false,
             title: None,
             task_id: TaskId::from_bytes([3; 16]),

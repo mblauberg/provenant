@@ -153,6 +153,7 @@ mod tests {
     fn attempt() -> AttemptFact {
         let path = PathWire::from_relative(&RelativePath::parse("out.md").unwrap()).unwrap();
         AttemptFact {
+            context: None,
             attempt_id: AttemptId::from_bytes([1; 16]),
             task_id: TaskId::from_bytes([2; 16]),
             attempt_number: 1,
