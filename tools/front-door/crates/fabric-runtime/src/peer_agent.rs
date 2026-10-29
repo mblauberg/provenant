@@ -457,6 +457,7 @@ pub fn systemctl(args: &[&OsStr], home: &Path) -> Result<(bool, String), AgentEr
         ("HOME", Some(home.as_os_str().to_owned())),
         ("PATH", Some("/usr/bin:/bin:/usr/sbin:/sbin".into())),
         ("XDG_RUNTIME_DIR", std::env::var_os("XDG_RUNTIME_DIR")),
+        ("XDG_CONFIG_HOME", std::env::var_os("XDG_CONFIG_HOME")),
         (
             "DBUS_SESSION_BUS_ADDRESS",
             std::env::var_os("DBUS_SESSION_BUS_ADDRESS"),

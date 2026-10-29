@@ -674,23 +674,21 @@ fn desired(
         let home =
             provenant_os::fs::canonicalize(&targets.home).unwrap_or_else(|_| targets.home.clone());
         let state = targets.roots.state.as_path();
-        let mut units = vec![("tick-agent", bytes, tick_agent_plist(state), MACOS_TICK)];
+        let mut units = vec![("tick-agent", bytes, tick_agent_plist(state))];
         if let Some(service) = &targets.tick_service {
             units = vec![
-                ("tick-agent", bytes, tick_timer_path(state), LINUX_TIMER),
-                (
-                    "tick-service",
-                    service,
-                    tick_service_path(state),
-                    LINUX_SERVICE,
-                ),
+                ("tick-agent", bytes, tick_timer_path(state)),
+                ("tick-service", service, tick_service_path(state)),
             ];
         }
-        for (selector, bytes, path, relative) in units {
+        for (selector, bytes, path) in units {
             let path = path.ok_or(InstallError::InvalidConfig(
                 "tick agent requires the default state root",
             ))?;
-            if path != home.join(relative) {
+            if selector == "tick-agent"
+                && targets.tick_service.is_none()
+                && path != home.join(MACOS_TICK)
+            {
                 return Err(InstallError::Conflict(path));
             }
             insert(
@@ -774,8 +772,21 @@ pub fn peer_agent_plist(state: &Path) -> Option<PathBuf> {
 }
 
 const MACOS_TICK: &str = "Library/LaunchAgents/dev.provenant.tick.plist";
-const LINUX_TIMER: &str = ".config/systemd/user/provenant-tick.timer";
-const LINUX_SERVICE: &str = ".config/systemd/user/provenant-tick.service";
+const LINUX_TIMER: &str = "provenant-tick.timer";
+const LINUX_SERVICE: &str = "provenant-tick.service";
+
+/// The systemd user unit directory: `$XDG_CONFIG_HOME/systemd/user` when that
+/// is an absolute path, else `~/.config/systemd/user`.
+pub fn systemd_user_dir(home: &Path) -> PathBuf {
+    user_dir_in(home, std::env::var_os("XDG_CONFIG_HOME"))
+}
+
+fn user_dir_in(home: &Path, config_home: Option<std::ffi::OsString>) -> PathBuf {
+    match config_home.map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => dir.join("systemd/user"),
+        _ => home.join(".config/systemd/user"),
+    }
+}
 
 fn default_state_home(state: &Path) -> Option<&Path> {
     let home = state.ancestors().nth(4)?;
@@ -789,12 +800,12 @@ pub fn tick_agent_plist(state: &Path) -> Option<PathBuf> {
 
 /// The Linux systemd user timer, in the same ownership scope.
 pub fn tick_timer_path(state: &Path) -> Option<PathBuf> {
-    default_state_home(state).map(|home| home.join(LINUX_TIMER))
+    default_state_home(state).map(|home| systemd_user_dir(home).join(LINUX_TIMER))
 }
 
 /// The service the Linux timer activates.
 pub fn tick_service_path(state: &Path) -> Option<PathBuf> {
-    default_state_home(state).map(|home| home.join(LINUX_SERVICE))
+    default_state_home(state).map(|home| systemd_user_dir(home).join(LINUX_SERVICE))
 }
 
 /// Receipt entries the scheduler owns, whichever platform wrote them.
@@ -2658,3 +2669,18 @@ pub fn uninstall(
 #[cfg(test)]
 #[path = "managed_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod unit_dir_tests {
+    use super::*;
+
+    #[test]
+    fn systemd_unit_dir_honours_an_absolute_xdg_config_home_only() {
+        let home = Path::new("/h");
+        let dir = |xdg: Option<&str>| user_dir_in(home, xdg.map(Into::into));
+        assert_eq!(dir(None), Path::new("/h/.config/systemd/user"));
+        assert_eq!(dir(Some("/c")), Path::new("/c/systemd/user"));
+        assert_eq!(dir(Some("rel")), Path::new("/h/.config/systemd/user"));
+        assert_eq!(dir(Some("")), Path::new("/h/.config/systemd/user"));
+    }
+}

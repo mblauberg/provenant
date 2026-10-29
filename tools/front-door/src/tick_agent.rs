@@ -25,7 +25,7 @@ pub fn plist(home: &Path) -> PathBuf {
 }
 
 pub fn timer(home: &Path) -> PathBuf {
-    home.join(".config/systemd/user").join(TIMER)
+    provenant_config::systemd_user_dir(home).join(TIMER)
 }
 
 pub fn service(home: &Path) -> PathBuf {
@@ -69,17 +69,34 @@ pub fn render(program: &Path, state: &Path, search: &OsStr) -> Result<Vec<u8>, A
 "#).into_bytes())
 }
 
-/// A systemd quoted word: `\`, `"`, `%` and `$` are special inside quotes.
-fn systemd_quote(text: &str) -> Result<String, AgentError> {
+/// A systemd double-quoted word. `%` always expands; `$` expands only where
+/// `dollars` is set (command lines), so `Environment=` values stay exact.
+fn systemd_quote(text: &str, dollars: bool) -> Result<String, AgentError> {
     if text.chars().any(char::is_control) {
         return Err(AgentError::Path(text.into()));
     }
+    let text = text
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
     Ok(format!(
         "\"{}\"",
-        text.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('%', "%%")
-            .replace('$', "$$")
+        if dollars {
+            text.replace('$', "$$")
+        } else {
+            text
+        }
+    ))
+}
+
+/// An unquoted `append:` log target, which systemd takes verbatim after specifier expansion.
+fn systemd_append(path: &str) -> Result<String, AgentError> {
+    if path.chars().any(char::is_control) {
+        return Err(AgentError::Path(path.into()));
+    }
+    Ok(format!(
+        "append:{}",
+        path.replace('%', "%%").replace(' ', "\\x20")
     ))
 }
 
@@ -93,13 +110,13 @@ pub fn render_timer() -> Vec<u8> {
 
 /// The Linux one-shot service the timer activates.
 pub fn render_service(program: &Path, state: &Path, search: &OsStr) -> Result<Vec<u8>, AgentError> {
-    let exec = systemd_quote(utf8(program)?)?;
-    let path = systemd_quote(&format!("PATH={}", utf8(Path::new(search))?))?;
-    let state_env = systemd_quote(&format!("PROVENANT_STATE_DIR={}", utf8(state)?))?;
-    let stdout = systemd_quote(&format!("append:{}", utf8(&state.join("tick/stdout.log"))?))?;
-    let stderr = systemd_quote(&format!("append:{}", utf8(&state.join("tick/stderr.log"))?))?;
+    let exec = systemd_quote(utf8(program)?, true)?;
+    let path = systemd_quote(&format!("PATH={}", utf8(Path::new(search))?), false)?;
+    let state_env = systemd_quote(&format!("PROVENANT_STATE_DIR={}", utf8(state)?), false)?;
+    let stdout = systemd_append(utf8(&state.join("tick/stdout.log"))?)?;
+    let stderr = systemd_append(utf8(&state.join("tick/stderr.log"))?)?;
     Ok(format!(
-        "[Unit]\nDescription=Provenant host tick\n\n[Service]\nType=oneshot\nExecStart={exec} tick\nEnvironment={path}\nEnvironment={state_env}\nStandardOutput={stdout}\nStandardError={stderr}\n"
+        "[Unit]\nDescription=Provenant host tick\n\n[Service]\nType=oneshot\nKillMode=process\nExecStart={exec} tick\nEnvironment={path}\nEnvironment={state_env}\nStandardOutput={stdout}\nStandardError={stderr}\n"
     )
     .into_bytes())
 }
@@ -323,14 +340,20 @@ mod tests {
         assert!(text.contains("ExecStart=\"/bin/a b\\\"%%$$\" tick\n"));
         assert!(text.contains("Environment=\"PATH=/usr/bin:/opt/a\"\n"));
         assert!(text.contains("Environment=\"PROVENANT_STATE_DIR=/state/x\"\n"));
-        for name in ["stdout", "stderr"] {
-            let key = if name == "stdout" {
-                "StandardOutput"
-            } else {
-                "StandardError"
-            };
-            assert!(text.contains(&format!("{key}=\"append:/state/x/tick/{name}.log\"\n")));
-        }
+        assert!(text.contains("KillMode=process\n"));
+        assert!(text.contains("StandardOutput=append:/state/x/tick/stdout.log\n"));
+        assert!(text.contains("StandardError=append:/state/x/tick/stderr.log\n"));
+        let odd = String::from_utf8(
+            render_service(
+                Path::new("/b"),
+                Path::new("/s p/100%"),
+                OsStr::new("/a$b:/c"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(odd.contains("StandardOutput=append:/s\\x20p/100%%/tick/stdout.log\n"));
+        assert!(odd.contains("Environment=\"PATH=/a$b:/c\"\n"));
         assert!(!text.contains("Restart="));
         assert!(render_service(Path::new("/bin/a\nb"), Path::new("/s"), OsStr::new("/p")).is_err());
         assert_eq!(
