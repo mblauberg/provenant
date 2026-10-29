@@ -14,8 +14,11 @@ session checkpoint is only a bounded resume aid.
 - Before compaction or handoff, save concise Markdown for the explicit host
   session ID with `provenant workflow session save <session-id> --file
   <checkpoint.md>`. Include the goal, authority/evidence references, verified
-  progress, next actions, blockers, and resume trigger. The checkpoint limit is
-  32 KiB; hooks emit at most 8 KiB.
+  progress, next actions, blockers, and resume trigger. Keep it near 2 KiB; the
+  hard limit is 256 KiB, and hooks emit at most 8 KiB.
+- Keep harness scratch in the harness scratch directory (for Claude Code,
+  under `CLAUDE_CODE_TMPDIR`). Scratch is disposable: move anything needed later
+  to its owner first.
 - Do not copy raw transcripts or unreviewed worker claims into the checkpoint.
   Verify progress against live owners after resuming.
 - Keep private memory to cross-project preferences. Put project decisions and
