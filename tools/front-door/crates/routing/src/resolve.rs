@@ -298,15 +298,21 @@ fn effective_pool_names(context: &RoutingContext<'_>) -> BTreeSet<String> {
         .cloned()
         .collect()
 }
-fn effective_pool<'a>(
-    context: &'a RoutingContext<'_>,
-    name: &str,
-) -> Option<&'a Vec<RoutePoolMember>> {
+fn raw_pool<'a>(context: &'a RoutingContext<'_>, name: &str) -> Option<&'a Vec<RoutePoolMember>> {
     context
         .config
         .pools
         .get(name)
         .or_else(|| context.catalogue.pools.get(name))
+}
+fn effective_pool(context: &RoutingContext<'_>, name: &str) -> Option<Vec<RoutePoolMember>> {
+    let members = raw_pool(context, name)?;
+    Some(
+        members
+            .iter()
+            .map(|member| member.reconciled(context.catalogue.model(&member.model)).0)
+            .collect(),
+    )
 }
 /// Providers named by the primary route or pool and its explicit fallbacks.
 /// Discovery must not run commands for unrelated installed providers.
@@ -1340,7 +1346,7 @@ pub fn resolve_for_account_with_seed_excluding(
             RouteChoice::Model(model) => [model.adapter()].into_iter().collect(),
             RouteChoice::NamedRoute(name) => {
                 let name = name.as_str();
-                if let Some(pool) = effective_pool(context, name) {
+                if let Some(pool) = raw_pool(context, name) {
                     pool.iter().map(|member| member.model.adapter()).collect()
                 } else {
                     [context
@@ -1422,7 +1428,7 @@ fn resolve_inner(
         RouteChoice::NamedRoute(name) => {
             let name = name.as_str();
             if let Some(pool) = effective_pool(context, name) {
-                let selected = select_pool(name, pool, request, context, seed, excluded_members)?;
+                let selected = select_pool(name, &pool, request, context, seed, excluded_members)?;
                 (selected.route, Some(selected.receipt))
             } else {
                 let named = context

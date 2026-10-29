@@ -850,6 +850,9 @@ fn prepare_candidates(
             ));
             continue;
         }
+        for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
+            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+        }
         if writer.is_some()
             && let Some(advisory) = config
                 .domains

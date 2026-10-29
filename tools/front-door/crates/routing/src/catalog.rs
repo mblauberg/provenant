@@ -242,6 +242,24 @@ impl Default for PacingReserve {
     }
 }
 impl RoutingConfig {
+    /// One warning per configured pool member whose efforts the catalogue no
+    /// longer lists. The efforts are dropped at resolution; this only reports.
+    pub fn pool_effort_warnings(&self, catalogue: &Catalogue) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for (name, members) in &self.pools {
+            for (index, member) in members.iter().enumerate() {
+                let (_, dropped) = member.reconciled(catalogue.model(&member.model));
+                if !dropped.is_empty() {
+                    warnings.push(format!(
+                        "warning: domains.routing.pools.{name}[{index}].efforts: {} does not list {}; dropped",
+                        member.model.as_str(),
+                        dropped.join(", ")
+                    ));
+                }
+            }
+        }
+        warnings
+    }
     /// Suggest a cheaper route in the applied tier. Exact models and custom
     /// pools use the model's highest bundled implementation tier.
     pub fn opus_writer_advisory(
@@ -399,24 +417,21 @@ impl DomainConfig for RoutingConfig {
                         code: "unknown_provider",
                     });
                 }
+                // An effort the catalogue does not list is not an error here: it
+                // is dropped at resolution (see `RoutePoolMember::reconciled`).
                 let mut seen_efforts = BTreeSet::new();
                 if member.efforts.len() > 16
-                    || member.efforts.iter().any(|effort| {
-                        !effort_valid(effort)
-                            || !seen_efforts.insert(effort)
-                            || model.is_some_and(|entry| {
-                                !entry.efforts.iter().any(|supported| supported == effort)
-                            })
-                    })
+                    || member
+                        .efforts
+                        .iter()
+                        .any(|effort| !effort_valid(effort) || !seen_efforts.insert(effort))
                 {
                     errors.push(SectionError {
                         field: format!("{prefix}.efforts"),
                         code: "unsupported_effort",
                     });
                 }
-                if member.effort.as_deref().is_some_and(|effort| {
-                    !effort_valid(effort) || !member.efforts.iter().any(|allowed| allowed == effort)
-                }) {
+                if member.effort.as_deref().is_some_and(|e| !effort_valid(e)) {
                     errors.push(SectionError {
                         field: format!("{prefix}.effort"),
                         code: "unsupported_effort",
@@ -735,6 +750,32 @@ pub struct RoutePoolMember {
     pub efforts: Vec<String>,
     #[serde(default)]
     pub free: bool,
+}
+impl RoutePoolMember {
+    /// The single place a pool member is reconciled with the catalogue: efforts
+    /// the model does not list are dropped, and a default effort that is no
+    /// longer allowed falls back to none. Returns the member and the dropped
+    /// efforts (the default is reported once, as `effort`).
+    pub(crate) fn reconciled(&self, entry: Option<&ModelEntry>) -> (Self, Vec<String>) {
+        let mut member = self.clone();
+        let Some(entry) = entry else {
+            return (member, Vec::new());
+        };
+        let (kept, mut dropped): (Vec<_>, Vec<_>) = self
+            .efforts
+            .iter()
+            .cloned()
+            .partition(|effort| entry.efforts.contains(effort));
+        member.efforts = kept;
+        if let Some(effort) = member.effort.take() {
+            if member.efforts.contains(&effort) {
+                member.effort = Some(effort);
+            } else if !dropped.contains(&effort) {
+                dropped.push(effort);
+            }
+        }
+        (member, dropped)
+    }
 }
 fn default_weight() -> u8 {
     1
