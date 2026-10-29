@@ -862,7 +862,9 @@ fn apply<R: Error + 'static, J: GraphJournal>(
                     && ask.rounds == Some(rounds)
                     && let Some(answer) = ask.answer.as_mut()
                 {
-                    answer.rejection_code = Some("invalid_loop_decision".into());
+                    answer
+                        .rejection_code
+                        .get_or_insert_with(|| "invalid_loop_decision".into());
                     answer
                         .rejected
                         .get_or_insert_with(|| bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
@@ -949,7 +951,15 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
         checkpoint.pause_code = if reasons.is_empty() {
             None
         } else {
-            Some(checkpoint.nodes.iter().filter_map(|node| node.loop_pause_code.as_deref()).find(|code| *code != "loop_paused").unwrap_or("loop_paused").into())
+            Some(
+                checkpoint
+                    .nodes
+                    .iter()
+                    .filter_map(|node| node.loop_pause_code.as_deref())
+                    .find(|code| *code != "loop_paused")
+                    .unwrap_or("loop_paused")
+                    .into(),
+            )
         };
         checkpoint.pause_reason = (!reasons.is_empty()).then(|| {
             bounded(
