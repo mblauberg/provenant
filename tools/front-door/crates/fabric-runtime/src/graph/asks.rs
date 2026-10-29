@@ -61,6 +61,9 @@ pub struct AskAnswer {
     /// Why the answer could not be applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected: Option<String>,
+    /// Stable reason code when an answer could not be applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection_code: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,6 +434,7 @@ pub(super) fn answered(reply: AskReply) -> AskAnswer {
         text: reply.text.filter(|_| rejected.is_none()),
         actor: Some(bounded(&reply.actor, HOST_ID_BYTES)),
         at: reply.at,
+        rejection_code: rejected.as_ref().map(|_| "answer_too_large".into()),
         rejected,
     }
 }
@@ -528,6 +532,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
             actor: None,
             at: now,
             rejected: None,
+            rejection_code: None,
         }),
         _ => None,
     };
@@ -544,6 +549,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
         .filter(|id| ask.options.iter().any(|option| &option.id == id));
     let ask_id = ask.ask_id.clone();
     if answer.rejected.is_none() && chosen.is_none() {
+        answer.rejection_code = Some("invalid_decide_option".into());
         let ids: Vec<_> = ask
             .options
             .iter()
@@ -715,9 +721,13 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
                 }
             }
             checkpoint.pause_reason = None;
+            checkpoint.pause_code = None;
             true
         }
         Err(reason) => {
+            answer
+                .rejection_code
+                .get_or_insert_with(|| "invalid_pause_answer".into());
             answer.rejected = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
             false
         }

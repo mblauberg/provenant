@@ -30,7 +30,12 @@ fn routed(timeout: Option<u64>) -> GraphDocument {
 }
 
 fn state(run: &GraphRun, id: &str) -> NodeState {
-    run.checkpoint.nodes.iter().find(|n| n.id == id).unwrap().state
+    run.checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == id)
+        .unwrap()
+        .state
 }
 
 /// Seconds in a Julian year.
@@ -59,16 +64,36 @@ fn decide_answer_becomes_the_verdict_and_routes_the_chosen_edge() {
     assert!(ask.body.contains("Ship the change?"));
     assert!(ask.wake_at.is_none() && waiting.checkpoint.wake_at.is_none());
     assert!(owner.calls.is_empty());
-    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().checkpoint, waiting.checkpoint);
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        waiting.checkpoint
+    );
 
-    owner.answers.insert("choose.ask-1".into(), reply(Some("ship"), None));
+    owner
+        .answers
+        .insert("choose.ask-1".into(), reply(Some("ship"), None));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!(state(&run, "ship-work"), NodeState::Succeeded);
     assert_eq!(state(&run, "hold-work"), NodeState::Skipped);
-    let choose = run.checkpoint.nodes.iter().find(|n| n.id == "choose").unwrap();
-    assert_eq!(choose.outputs.as_ref().unwrap().verdict.as_deref(), Some("ship"));
-    assert!(choose.deterministic_summary().unwrap().contains("answered by chair"));
+    let choose = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "choose")
+        .unwrap();
+    assert_eq!(
+        choose.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some("ship")
+    );
+    assert!(
+        choose
+            .deterministic_summary()
+            .unwrap()
+            .contains("answered by chair")
+    );
     let answer = run.checkpoint.asks[0].answer.as_ref().unwrap();
     assert_eq!(answer.source, AnswerSource::Answered);
     assert_eq!(answer.actor.as_deref(), Some("chair"));
@@ -86,10 +111,20 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
         observations: [terminal(AttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
-    owner.answers.insert("choose.ask-1".into(), reply(None, Some(" hold\n")));
+    owner
+        .answers
+        .insert("choose.ask-1".into(), reply(None, Some(" hold\n")));
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    let choose = run.checkpoint.nodes.iter().find(|n| n.id == "choose").unwrap();
-    assert_eq!(choose.outputs.as_ref().unwrap().verdict.as_deref(), Some("hold"));
+    let choose = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "choose")
+        .unwrap();
+    assert_eq!(
+        choose.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some("hold")
+    );
     assert_eq!(state(&run, "hold-work"), NodeState::Succeeded);
 
     // A rejected answer keeps the node open and the next advance asks again.
@@ -97,14 +132,18 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
         observations: [terminal(AttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
-    owner.answers.insert("choose.ask-1".into(), reply(None, Some("maybe later")));
+    owner
+        .answers
+        .insert("choose.ask-1".into(), reply(None, Some("maybe later")));
     let mut journal = MemoryJournal::default();
     let rejected = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(rejected.status, GraphStatus::Pending);
     assert_eq!(state(&rejected, "choose"), NodeState::Running);
     let first = &rejected.checkpoint.asks[0];
-    let reason = first.answer.as_ref().unwrap().rejected.as_deref().unwrap();
-    assert!(reason.contains("answer must choose one of ship, hold"), "{reason}");
+    assert_eq!(
+        first.answer.as_ref().unwrap().rejection_code.as_deref(),
+        Some("invalid_decide_option")
+    );
     assert!(first.resolved && first.closed);
     assert!(owner.calls.is_empty());
 
@@ -112,10 +151,14 @@ fn decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again() {
     let second = &again.checkpoint.asks[0];
     assert_eq!(second.ask_id, "choose.ask-2");
     assert!(!second.resolved);
-    assert!(second.body.ends_with(
-        "The previous answer was not applied: answer must choose one of ship, hold"
-    ));
-    owner.answers.insert("choose.ask-2".into(), reply(Some("ship"), None));
+    assert!(
+        second
+            .body
+            .ends_with("The previous answer was not applied: answer must choose one of ship, hold")
+    );
+    owner
+        .answers
+        .insert("choose.ask-2".into(), reply(Some("ship"), None));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!(state(&run, "ship-work"), NodeState::Succeeded);
@@ -134,7 +177,11 @@ fn decide_ids_stay_unique_across_repeated_cancel_and_resume() {
         resume(&document, &mut owner, &mut journal).unwrap();
     }
     let checkpoint = journal.0.as_ref().unwrap();
-    let ids: Vec<_> = checkpoint.asks.iter().map(|ask| ask.ask_id.as_str()).collect();
+    let ids: Vec<_> = checkpoint
+        .asks
+        .iter()
+        .map(|ask| ask.ask_id.as_str())
+        .collect();
     assert_eq!(ids, ["choose.ask-3"]);
     assert_eq!(owner.closed_asks, ["choose.ask-1", "choose.ask-2"]);
 }
@@ -152,9 +199,18 @@ fn waiting_decide_nodes_do_not_use_up_concurrency() {
         observations: [terminal(AttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
-    let limits = crate::config::GraphLimits { concurrency: Some(1), ..Default::default() };
-    let run = advance_with_budget(&document, &mut owner, &mut MemoryJournal::default(), &limits, &Default::default())
-        .unwrap();
+    let limits = crate::config::GraphLimits {
+        concurrency: Some(1),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(state(&run, "choose"), NodeState::Running);
     assert_eq!(state(&run, "work"), NodeState::Succeeded);
     assert_eq!(owner.calls.len(), 1);
@@ -166,8 +222,13 @@ fn decide_deadlines_wait_for_a_clock_instead_of_dropping_the_timeout() {
     let mut owner = FakeOwner::default();
     let mut journal = MemoryJournal::default();
     let error = advance(&document, &mut owner, &mut journal).unwrap_err();
-    assert!(matches!(&error, GraphError::Refused(reason) if reason.contains("no wall clock")), "{error}");
-    assert!(journal.0.as_ref().is_none_or(|checkpoint| checkpoint.asks.is_empty()));
+    assert_eq!(error.code(), "graph_refused");
+    assert!(
+        journal
+            .0
+            .as_ref()
+            .is_none_or(|checkpoint| checkpoint.asks.is_empty())
+    );
     assert!(owner.asked.is_empty());
 
     owner.now = Some(at(0));
@@ -177,42 +238,84 @@ fn decide_deadlines_wait_for_a_clock_instead_of_dropping_the_timeout() {
 
 #[test]
 fn decide_timeouts_past_a_century_are_kept_until_the_deadline_overflows() {
-    let owner = || FakeOwner { now: Some(at(0)), ..Default::default() };
+    let owner = || FakeOwner {
+        now: Some(at(0)),
+        ..Default::default()
+    };
     let long = routed(Some(YEAR * 200));
     let waiting = advance(&long, &mut owner(), &mut MemoryJournal::default()).unwrap();
-    assert_eq!(waiting.checkpoint.asks[0].wake_at, Some(at(YEAR as i64 * 200)));
+    assert_eq!(
+        waiting.checkpoint.asks[0].wake_at,
+        Some(at(YEAR as i64 * 200))
+    );
 
     // Valid against the wall-time range, but past it from the present time.
     let late = routed(Some(YEAR * 8_000));
     validate_plan(&late).unwrap();
     let mut journal = MemoryJournal::default();
     let error = advance(&late, &mut owner(), &mut journal).unwrap_err();
-    assert!(matches!(&error, GraphError::Refused(reason) if reason.contains("last representable wall time")), "{error}");
-    assert!(journal.0.as_ref().is_none_or(|checkpoint| checkpoint.asks.is_empty()));
+    assert_eq!(error.code(), "graph_refused");
+    assert!(
+        journal
+            .0
+            .as_ref()
+            .is_none_or(|checkpoint| checkpoint.asks.is_empty())
+    );
 }
 
 #[test]
 fn completion_closes_a_pause_ask_left_by_lowered_limits() {
-    let mut document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    let mut document = graph(vec![
+        node("one", route("first")),
+        node("two", route("first")),
+    ]);
     document.decision_session = Some("chair-session".into());
-    let pending = || AttemptObservation::Pending { attempt_ref: Some("host/attempt".into()) };
+    let pending = || AttemptObservation::Pending {
+        attempt_ref: Some("host/attempt".into()),
+    };
     let mut owner = FakeOwner {
         observations: [pending(), pending(), pending(), pending()].into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
     advance(&document, &mut owner, &mut journal).unwrap();
-    let lowered = crate::config::GraphLimits { nodes: 1, ..Default::default() };
-    let paused = advance_with_budget(&document, &mut owner, &mut journal, &lowered, &Default::default()).unwrap();
+    let lowered = crate::config::GraphLimits {
+        nodes: 1,
+        ..Default::default()
+    };
+    let paused = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &lowered,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
     assert_eq!(owner.asked, ["pause-1"]);
     assert!(!paused.checkpoint.asks[0].resolved);
 
-    owner.observations = [terminal(AttemptOutcome::Succeeded), terminal(AttemptOutcome::Succeeded)].into();
-    let run = advance_with_budget(&document, &mut owner, &mut journal, &lowered, &Default::default()).unwrap();
+    owner.observations = [
+        terminal(AttemptOutcome::Succeeded),
+        terminal(AttemptOutcome::Succeeded),
+    ]
+    .into();
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &lowered,
+        &Default::default(),
+    )
+    .unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.pause_reason.is_none());
-    assert!(run.checkpoint.asks.iter().all(|ask| ask.resolved && ask.closed));
+    assert!(
+        run.checkpoint
+            .asks
+            .iter()
+            .all(|ask| ask.resolved && ask.closed)
+    );
     assert_eq!(owner.closed_asks, ["pause-1"]);
 }
 
@@ -231,7 +334,12 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
     assert_eq!(waiting.checkpoint.asks[0].default.as_deref(), Some("hold"));
     assert_eq!(journal.0.as_ref().unwrap().wake_at, Some(at(60)));
     owner.now = Some(at(59));
-    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().checkpoint, waiting.checkpoint);
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        waiting.checkpoint
+    );
 
     owner.now = Some(at(61));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
@@ -240,11 +348,24 @@ fn decide_timeout_persists_wake_at_and_takes_the_default() {
     assert_eq!(state(&run, "ship-work"), NodeState::Skipped);
     let answer = run.checkpoint.asks[0].answer.as_ref().unwrap();
     assert_eq!(answer.source, AnswerSource::Default);
-    assert_eq!((answer.option.as_deref(), answer.actor.as_deref()), (Some("hold"), None));
+    assert_eq!(
+        (answer.option.as_deref(), answer.actor.as_deref()),
+        (Some("hold"), None)
+    );
     assert_eq!(answer.at, Some(at(61)));
     assert!(run.checkpoint.wake_at.is_none());
-    let choose = run.checkpoint.nodes.iter().find(|n| n.id == "choose").unwrap();
-    assert!(choose.deterministic_summary().unwrap().contains("the default at the deadline"));
+    let choose = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "choose")
+        .unwrap();
+    assert!(
+        choose
+            .deterministic_summary()
+            .unwrap()
+            .contains("the default at the deadline")
+    );
 }
 
 #[test]
@@ -254,14 +375,24 @@ fn several_decide_asks_are_open_at_once_and_resolve_independently() {
         "nodes":[decide("first", Some(120)), decide("second", Some(30))]
     }))
     .unwrap();
-    let mut owner = FakeOwner { now: Some(at(0)), ..Default::default() };
+    let mut owner = FakeOwner {
+        now: Some(at(0)),
+        ..Default::default()
+    };
     let mut journal = MemoryJournal::default();
     let waiting = advance(&document, &mut owner, &mut journal).unwrap();
-    let ids: Vec<_> = waiting.checkpoint.asks.iter().map(|ask| ask.ask_id.as_str()).collect();
+    let ids: Vec<_> = waiting
+        .checkpoint
+        .asks
+        .iter()
+        .map(|ask| ask.ask_id.as_str())
+        .collect();
     assert_eq!(ids, ["first.ask-1", "second.ask-1"]);
     assert_eq!(waiting.checkpoint.wake_at, Some(at(30)));
 
-    owner.answers.insert("second.ask-1".into(), reply(Some("ship"), None));
+    owner
+        .answers
+        .insert("second.ask-1".into(), reply(Some("ship"), None));
     let partial = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(partial.status, GraphStatus::Pending);
     assert_eq!(state(&partial, "second"), NodeState::Succeeded);
@@ -269,7 +400,9 @@ fn several_decide_asks_are_open_at_once_and_resolve_independently() {
     assert_eq!(partial.checkpoint.wake_at, Some(at(120)));
     assert_eq!(owner.closed_asks, ["second.ask-1"]);
 
-    owner.answers.insert("first.ask-1".into(), reply(Some("hold"), None));
+    owner
+        .answers
+        .insert("first.ask-1".into(), reply(Some("hold"), None));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.wake_at.is_none());
@@ -289,13 +422,25 @@ fn decide_nodes_run_inside_loop_bodies_once_per_round() {
     }))
     .unwrap();
     let mut owner = FakeOwner::default();
-    owner.answers.insert("revise--r1--choose.ask-1".into(), reply(Some("hold"), None));
-    owner.answers.insert("revise--r2--choose.ask-1".into(), reply(Some("ship"), None));
+    owner
+        .answers
+        .insert("revise--r1--choose.ask-1".into(), reply(Some("hold"), None));
+    owner
+        .answers
+        .insert("revise--r2--choose.ask-1".into(), reply(Some("ship"), None));
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.successful());
-    let ids: Vec<_> = run.checkpoint.asks.iter().map(|ask| ask.ask_id.as_str()).collect();
-    assert_eq!(ids, ["revise--r1--choose.ask-1", "revise--r2--choose.ask-1"]);
+    let ids: Vec<_> = run
+        .checkpoint
+        .asks
+        .iter()
+        .map(|ask| ask.ask_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["revise--r1--choose.ask-1", "revise--r2--choose.ask-1"]
+    );
 }
 
 #[test]
@@ -304,18 +449,36 @@ fn decide_configuration_is_checked_against_the_inbox_contract() {
     validate_plan(&base).unwrap();
     type Change = fn(&mut GraphNode);
     let cases: [(&str, Change); 12] = [
-        ("one option", |n| n.decide.as_mut().unwrap().options.truncate(1)),
-        ("duplicate IDs", |n| n.decide.as_mut().unwrap().options[1].id = "ship".into()),
-        ("bad option ID", |n| n.decide.as_mut().unwrap().options[1].id = "has space".into()),
-        ("unknown default", |n| n.decide.as_mut().unwrap().default = Some("later".into())),
-        ("timeout without default", |n| n.decide.as_mut().unwrap().default = None),
-        ("zero timeout", |n| n.decide.as_mut().unwrap().timeout_seconds = Some(0)),
-        ("empty question", |n| n.decide.as_mut().unwrap().question = " ".into()),
+        ("one option", |n| {
+            n.decide.as_mut().unwrap().options.truncate(1)
+        }),
+        ("duplicate IDs", |n| {
+            n.decide.as_mut().unwrap().options[1].id = "ship".into()
+        }),
+        ("bad option ID", |n| {
+            n.decide.as_mut().unwrap().options[1].id = "has space".into()
+        }),
+        ("unknown default", |n| {
+            n.decide.as_mut().unwrap().default = Some("later".into())
+        }),
+        ("timeout without default", |n| {
+            n.decide.as_mut().unwrap().default = None
+        }),
+        ("zero timeout", |n| {
+            n.decide.as_mut().unwrap().timeout_seconds = Some(0)
+        }),
+        ("empty question", |n| {
+            n.decide.as_mut().unwrap().question = " ".into()
+        }),
         ("timeout past the wall-time range", |n| {
             n.decide.as_mut().unwrap().timeout_seconds = Some(YEAR * 9_000)
         }),
-        ("unrepresentable timeout", |n| n.decide.as_mut().unwrap().timeout_seconds = Some(u64::MAX)),
-        ("body past the inbox limit", |n| n.decide.as_mut().unwrap().question = "q".repeat(8_000)),
+        ("unrepresentable timeout", |n| {
+            n.decide.as_mut().unwrap().timeout_seconds = Some(u64::MAX)
+        }),
+        ("body past the inbox limit", |n| {
+            n.decide.as_mut().unwrap().question = "q".repeat(8_000)
+        }),
         ("prompt", |n| n.prompt = "run an agent".into()),
         ("route", |n| n.route = Some(route("fixture"))),
     ];
@@ -337,7 +500,10 @@ fn decide_configuration_is_checked_against_the_inbox_contract() {
 }
 
 fn budget_pause() -> (GraphDocument, FakeOwner, crate::config::GraphBudget) {
-    let mut document = graph(vec![node("one", route("first")), node("two", route("first"))]);
+    let mut document = graph(vec![
+        node("one", route("first")),
+        node("two", route("first")),
+    ]);
     document.decision_session = Some("chair-session".into());
     let observation = || AttemptObservation::Terminal {
         attempt_ref: Some("host/attempt".into()),
@@ -351,11 +517,17 @@ fn budget_pause() -> (GraphDocument, FakeOwner, crate::config::GraphBudget) {
     };
     let owner = FakeOwner {
         observations: [observation(), observation()].into(),
-        usage: AttemptUsage { tokens: Some(10), ..Default::default() },
+        usage: AttemptUsage {
+            tokens: Some(10),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let budget = crate::config::GraphBudget {
-        per_graph: crate::config::BudgetLimit { tokens: Some(10), ..Default::default() },
+        per_graph: crate::config::BudgetLimit {
+            tokens: Some(10),
+            ..Default::default()
+        },
         ..Default::default()
     };
     (document, owner, budget)
@@ -366,22 +538,42 @@ fn a_budget_pause_raises_one_ask_and_an_extend_answer_resumes() {
     let (document, mut owner, budget) = budget_pause();
     let mut journal = MemoryJournal::default();
     let limits = Default::default();
-    let paused = advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
+    let paused =
+        advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
     let ask = &paused.checkpoint.asks[0];
     assert_eq!((ask.ask_id.as_str(), ask.kind), ("pause-1", AskKind::Pause));
-    assert!(ask.body.contains(paused.checkpoint.pause_reason.as_deref().unwrap()));
-    assert_eq!(advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap().checkpoint, paused.checkpoint);
+    assert!(
+        ask.body
+            .contains(paused.checkpoint.pause_reason.as_deref().unwrap())
+    );
+    assert_eq!(
+        advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget)
+            .unwrap()
+            .checkpoint,
+        paused.checkpoint
+    );
 
     owner.answers.insert(
         "pause-1".into(),
-        reply(None, Some(r#"{"decision":"extend","extensions":["budget.per_graph.tokens=30"]}"#)),
+        reply(
+            None,
+            Some(r#"{"decision":"extend","extensions":["budget.per_graph.tokens=30"]}"#),
+        ),
     );
     let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!(run.checkpoint.extensions, ["budget.per_graph.tokens=30"]);
     assert_eq!(owner.calls.len(), 2);
-    assert_eq!(run.checkpoint.asks[0].answer.as_ref().unwrap().actor.as_deref(), Some("chair"));
+    assert_eq!(
+        run.checkpoint.asks[0]
+            .answer
+            .as_ref()
+            .unwrap()
+            .actor
+            .as_deref(),
+        Some("chair")
+    );
     assert_eq!(owner.closed_asks, ["pause-1"]);
 }
 
@@ -393,18 +585,33 @@ fn a_pause_answer_can_cancel_and_a_rejected_answer_asks_again() {
     advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
     owner.answers.insert(
         "pause-1".into(),
-        reply(None, Some(r#"{"decision":"extend","extensions":["limits.nodes=99"]}"#)),
+        reply(
+            None,
+            Some(r#"{"decision":"extend","extensions":["limits.nodes=99"]}"#),
+        ),
     );
-    let rejected = advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
+    let rejected =
+        advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
     assert_eq!(rejected.status, GraphStatus::Paused);
     let first = &rejected.checkpoint.asks[0];
-    assert!(first.answer.as_ref().unwrap().rejected.as_deref().unwrap().contains("extends budgets only"));
+    assert_eq!(
+        first.answer.as_ref().unwrap().rejection_code.as_deref(),
+        Some("invalid_pause_answer")
+    );
     let again = advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
-    let second = again.checkpoint.asks.iter().find(|ask| ask.ask_id == "pause-2").unwrap();
+    let second = again
+        .checkpoint
+        .asks
+        .iter()
+        .find(|ask| ask.ask_id == "pause-2")
+        .unwrap();
     assert!(second.body.contains("The previous answer was not applied"));
 
-    owner.answers.insert("pause-2".into(), reply(Some("cancel"), None));
-    let cancelled = advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
+    owner
+        .answers
+        .insert("pause-2".into(), reply(Some("cancel"), None));
+    let cancelled =
+        advance_with_budget(&document, &mut owner, &mut journal, &limits, &budget).unwrap();
     assert_eq!(cancelled.status, GraphStatus::Cancelled);
     assert_eq!(owner.calls.len(), 1);
     assert!(cancelled.checkpoint.asks.iter().all(|ask| ask.closed));
@@ -420,7 +627,10 @@ fn a_planner_fragment_can_add_a_decide_node_when_its_kinds_allow_it() {
         ]
     }))
     .unwrap();
-    let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1, "nodes":[decide("choose", None)]}));
+    let fragment = format!(
+        "```fragment\n{}\n```",
+        json!({"schema_version":1, "nodes":[decide("choose", None)]})
+    );
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, &fragment),
@@ -429,9 +639,16 @@ fn a_planner_fragment_can_add_a_decide_node_when_its_kinds_allow_it() {
         .into(),
         ..Default::default()
     };
-    owner.answers.insert("plan--choose.ask-1".into(), reply(Some("ship"), None));
+    owner
+        .answers
+        .insert("plan--choose.ask-1".into(), reply(Some("ship"), None));
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(
+        run.status,
+        GraphStatus::Complete,
+        "{:?}",
+        run.checkpoint.pause_reason
+    );
     assert_eq!(state(&run, "plan--choose"), NodeState::Succeeded);
     assert_eq!(owner.calls.len(), 2);
 
@@ -443,8 +660,10 @@ fn a_planner_fragment_can_add_a_decide_node_when_its_kinds_allow_it() {
     };
     let paused = advance(&narrow, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
-    let reason = paused.checkpoint.pause_reason.as_deref().unwrap();
-    assert!(reason.contains("not declared"), "{reason}");
+    assert_eq!(
+        paused.checkpoint.pause_code.as_deref(),
+        Some("invalid_plan_expansion")
+    );
     // The graph's decision session turns the expansion pause into a pause ask.
     assert_eq!(owner.asked, ["pause-1"]);
 }
