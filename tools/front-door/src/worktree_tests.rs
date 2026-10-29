@@ -2890,6 +2890,13 @@ fn lane_prepare_isolates_nested_state() -> Result {
         if !writer {
             task.writer = None;
         }
+        // Publishing is opt-in (`lanes.publish`, default off), so the
+        // publishing rows request it the way dispatch resolves the knob.
+        if publishing {
+            task.profile
+                .knobs
+                .insert("lanes.publish".into(), serde_json::json!(true));
+        }
         // Catalogue models only: production refuses unverified exact IDs.
         task.route = provenant_run::RequestedRoute::Model {
             extra: Default::default(),

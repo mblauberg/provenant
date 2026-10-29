@@ -1776,10 +1776,19 @@ mod tests {
             panic!("dispatch")
         };
         assert_eq!(request.provider_timeout, 1);
+        // `--network` is the default a manifest task's `network` overrides.
+        valid(&[
+            "dispatch",
+            "--manifest",
+            "tasks.json",
+            "--operation-id",
+            "op",
+            "--network",
+            "off",
+        ]);
         for args in [
             vec!["--model", "codex/id"],
             vec!["--mode", "read-only"],
-            vec!["--network", "off"],
             vec!["--effort", "high"],
         ] {
             let mut words = vec![
