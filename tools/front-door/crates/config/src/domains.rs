@@ -77,6 +77,8 @@ pub struct DomainSection {
     pub name: &'static str,
     pub defaults: fn(Profile) -> &'static str,
     pub validate: fn(&Table) -> Vec<SectionError>,
+    /// Advisory findings that do not trigger recovery.
+    pub advisories: fn(&Table) -> Vec<SectionError>,
     /// The owner identifies invalid input that controls a real boundary.
     pub boundary: fn(&SectionError) -> bool,
     /// Owner-published types, bounds and variants for the settings editor.
@@ -92,6 +94,7 @@ impl DomainSection {
             name,
             defaults,
             validate: validate::<T>,
+            advisories: |_| Vec::new(),
             boundary: |_| false,
             fields: &[],
         }

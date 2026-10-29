@@ -3,7 +3,6 @@ use crate::{ModelId, RoutingError};
 use provenant_config::SectionError;
 use provenant_core::WallTime;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -477,16 +476,6 @@ impl<'de> Deserialize<'de> for ModelPolicies {
         let input = Input::deserialize(deserializer)?;
         let defaults = input.defaults;
         let rules = input.rules;
-        if let Ok(catalogue) = crate::Catalogue::bundled() {
-            warn_invalid_fallback(&defaults, "model_policy.defaults", &catalogue);
-            for (index, rule) in rules.iter().enumerate() {
-                warn_invalid_fallback(
-                    &rule.policy,
-                    &format!("model_policy.rules.{index}"),
-                    &catalogue,
-                );
-            }
-        }
         Ok(Self {
             bundled: input.bundled,
             defaults,
@@ -506,17 +495,49 @@ fn fallback_problem(result: &ResultPolicy, catalogue: &crate::Catalogue) -> Opti
         .is_some_and(|effort| !entry.efforts.contains(effort))
         .then_some("unsupported effort")
 }
-fn warn_invalid_fallback(policy: &ModelPolicy, field: &str, catalogue: &crate::Catalogue) {
-    let Some(model) = policy.result.fallback.as_ref() else {
-        return;
+pub(crate) fn fallback_advisories(table: &toml_edit::Table) -> Vec<SectionError> {
+    let Ok(config) = toml_edit::de::from_document::<crate::RoutingConfig>(
+        toml_edit::DocumentMut::from(table.clone()),
+    ) else {
+        return Vec::new();
     };
-    if let Some(reason) = fallback_problem(&policy.result, catalogue) {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: domains.routing.{field}.result.fallback: {} ({reason}); effective fallback checked after overlays",
-            model.as_str()
-        );
+    let Ok(catalogue) = crate::Catalogue::bundled() else {
+        return Vec::new();
+    };
+    let mut findings = Vec::new();
+    let policies = &config.model_policy;
+    let policies = std::iter::once(("model_policy.defaults".to_owned(), &policies.defaults)).chain(
+        policies
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(i, rule)| (format!("model_policy.rules.{i}.policy"), &rule.policy)),
+    );
+    for (field, policy) in policies {
+        let Some(model) = policy.result.fallback.as_ref() else {
+            continue;
+        };
+        let entry = catalogue.model(model);
+        let code = if entry.is_none() {
+            Some("unknown_fallback")
+        } else if policy
+            .result
+            .fallback_effort
+            .as_ref()
+            .is_some_and(|effort| !entry.is_some_and(|entry| entry.efforts.contains(effort)))
+        {
+            Some("unsupported_fallback_effort")
+        } else {
+            None
+        };
+        if let Some(code) = code {
+            findings.push(SectionError {
+                field: format!("{field}.result.fallback"),
+                code,
+            });
+        }
     }
+    findings
 }
 fn default_bundled() -> bool {
     true

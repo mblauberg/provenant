@@ -435,6 +435,30 @@ fn override_list_shows_active_future_and_expired_schedules() -> Result {
 }
 
 #[test]
+fn fallback_and_retired_key_warnings_are_revision_scoped() -> Result {
+    let rig = rig()?;
+    fs::create_dir_all(&rig.state)?;
+    let config = "schema_version=1\n[domains.routing]\npacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n[domains.routing.model_policy.defaults.result]\nfallback='codex/not-catalogued'\n";
+    fs::write(rig.state.join("config.toml"), config)?;
+    let first = rig.command(&["route", "list"])?;
+    let stderr = String::from_utf8(first.stderr.bytes)?;
+    assert!(stderr.contains("schedule.expires"), "{stderr}");
+    assert!(stderr.contains("unknown_fallback"), "{stderr}");
+    assert_eq!(stderr.matches("unknown_fallback").count(), 1);
+    let second = rig.command(&["route", "list"])?;
+    assert!(second.stderr.bytes.is_empty());
+    fs::write(
+        rig.state.join("config.toml"),
+        format!("{config}\n# revision\n"),
+    )?;
+    let third = rig.command(&["route", "list"])?;
+    let stderr = String::from_utf8(third.stderr.bytes)?;
+    assert!(stderr.contains("schedule.expires"), "{stderr}");
+    assert!(stderr.contains("unknown_fallback"), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn retired_schedule_keys_drop_only_their_record_with_a_named_warning() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
