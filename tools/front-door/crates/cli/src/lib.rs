@@ -25,7 +25,7 @@ pub mod provider_updates;
 mod render;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
-use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpGroup};
+use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
 pub use render::*;
 use std::ffi::OsString;
 use thiserror::Error;
@@ -775,8 +775,12 @@ fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
     }
     Some(scope)
 }
-/// Keep the named command and its descendants; `help` alone keeps all.
+/// Keep the named command and its descendants; `help` alone keeps all,
+/// including the error codes.
 fn scoped(mut catalogue: HelpCatalogue, scope: &str) -> HelpCatalogue {
+    if scope != "provenant" {
+        catalogue.error_codes.clear();
+    }
     catalogue.commands.retain(|command| {
         command
             .command
@@ -865,7 +869,17 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
     }
     let mut commands = Vec::new();
     walk(model, "provenant".into(), &mut commands);
-    HelpCatalogue { commands }
+    let error_codes = provenant_run::ErrorKind::ALL
+        .iter()
+        .map(|kind| HelpErrorCode {
+            code: kind.code().into(),
+            summary: kind.summary().into(),
+        })
+        .collect();
+    HelpCatalogue {
+        commands,
+        error_codes,
+    }
 }
 /// Canonical installed verb paths. Never derived from raw caller arguments.
 pub fn usage_verbs() -> Vec<String> {
@@ -2053,6 +2067,24 @@ mod tests {
         assert!(!verbs.contains(&"fabric".to_owned()));
     }
     #[test]
+    fn help_all_lists_each_error_code_once_with_its_meaning() {
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all", "--json"]) else {
+            panic!("catalog")
+        };
+        let codes: Vec<_> = catalog
+            .error_codes
+            .iter()
+            .map(|c| c.code.as_str())
+            .collect();
+        assert_eq!(codes.len(), provenant_run::ErrorKind::ALL.len());
+        let unique: std::collections::BTreeSet<_> = codes.iter().collect();
+        assert_eq!(unique.len(), codes.len(), "duplicate code in {codes:?}");
+        for code in ["REFUSED", "DISK_FLOOR", "LANE_CAP", "HOST_CLOCK"] {
+            assert!(codes.contains(&code), "{code} missing from {codes:?}");
+        }
+        assert!(catalog.error_codes.iter().all(|c| !c.summary.is_empty()));
+    }
+    #[test]
     fn globals_help_and_json_transport_are_pure_and_exact() {
         for words in [
             &["lanes", "--json", "--limit", "0"][..],
@@ -2110,6 +2142,7 @@ mod tests {
             panic!("reconcile help")
         };
         assert_eq!(catalog.commands.len(), 1);
+        assert!(catalog.error_codes.is_empty(), "scoped help omits codes");
         let names = |words: &[&str]| match parsed(words) {
             ParseOutcome::Help { catalog, .. } => catalog
                 .commands

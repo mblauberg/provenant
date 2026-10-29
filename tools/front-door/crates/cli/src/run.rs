@@ -111,6 +111,13 @@ impl From<run::RunError> for Fail {
             | ErrorKind::WorktreeMissing => Status::Invalid,
             ErrorKind::WorktreeUnregistered
             | ErrorKind::Refused
+            | ErrorKind::WriterScope
+            | ErrorKind::Confinement
+            | ErrorKind::DiskFloor
+            | ErrorKind::MemoryPressure
+            | ErrorKind::LaneCap
+            | ErrorKind::BuildSettings
+            | ErrorKind::GuardianIdentity
             | ErrorKind::Nonterminal
             | ErrorKind::ProviderStateExpired
             | ErrorKind::Conflict
@@ -1624,7 +1631,7 @@ pub fn submit_with_host(
                     edge.home,
                 )
                 .map_err(|message| {
-                    let mut fail = Fail::new(Status::Refused, ErrorKind::Refused, message.clone());
+                    let mut fail = Fail::new(Status::Refused, ErrorKind::DiskFloor, message.clone());
                     // Keep the volume, available bytes and floor for MCP callers.
                     fail.detail = Some(
                         provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {

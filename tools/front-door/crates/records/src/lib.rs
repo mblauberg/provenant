@@ -45,7 +45,8 @@ pub use install::{
 
 mod command_result;
 pub use command_result::{
-    CommandError, CommandResult, HelpArgument, HelpCatalogue, HelpCommand, HelpGroup, Outcome,
+    CommandError, CommandResult, HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode,
+    HelpGroup, Outcome,
 };
 
 mod resolved_route;

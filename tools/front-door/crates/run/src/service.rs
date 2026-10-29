@@ -519,101 +519,89 @@ impl<'a> Service<'a> {
     }
 }
 
-/// Refusal categories stay typed until an edge renders its stable code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorKind {
-    Invalid,
-    Refused,
-    WorktreeMissing,
-    WorktreeUnregistered,
-    OperationConflict,
-    NotFound,
-    Nonterminal,
-    ProviderStateExpired,
-    Conflict,
-    Cancelled,
-    LaneDepth,
-    QueueFull,
-    Contention,
-    Io,
-    Unsupported,
-    ContinuationUnsupported,
-    Time,
-    Entropy,
-    LaneContext,
-    Identity,
-    Config,
-    Git,
-    SecretInput,
-    WorktreeRequired,
-    WorktreeNotApplicable,
-    ParentAttempt,
-    Internal,
-    Limit,
-    Prices,
-    Fabric,
-    StateCorrupt,
-    LaunchUnknown,
-    UnknownHost,
-    PeerUnavailable,
-    PeerVersion,
-    OwnerUnavailable,
-    BaseUnreachable,
-    BranchExists,
-    LaneCoordinationRefused,
-    UpgradeRefused,
-    UpgradeRequired,
-    Timeout,
-    Peer,
-}
-impl ErrorKind {
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::Invalid => "INVALID",
-            Self::Refused => "REFUSED",
-            Self::WorktreeMissing => "WORKTREE_MISSING",
-            Self::WorktreeUnregistered => "WORKTREE_UNREGISTERED",
-            Self::OperationConflict => "OPERATION_CONFLICT",
-            Self::NotFound => "NOT_FOUND",
-            Self::Nonterminal => "NONTERMINAL",
-            Self::ProviderStateExpired => "PROVIDER_STATE_EXPIRED",
-            Self::Conflict => "CONFLICT",
-            Self::Cancelled => "CANCELLED",
-            Self::LaneDepth => "LANE_DEPTH",
-            Self::QueueFull => "QUEUE_FULL",
-            Self::Contention => "CONTENTION",
-            Self::Io => "IO",
-            Self::Unsupported => "UNSUPPORTED",
-            Self::ContinuationUnsupported => "CONTINUATION_UNSUPPORTED",
-            Self::Time => "TIME",
-            Self::Entropy => "ENTROPY",
-            Self::LaneContext => "LANE_CONTEXT",
-            Self::Identity => "IDENTITY",
-            Self::Config => "CONFIG",
-            Self::Git => "GIT",
-            Self::SecretInput => "SECRET_INPUT",
-            Self::WorktreeRequired => "WORKTREE_REQUIRED",
-            Self::WorktreeNotApplicable => "WORKTREE_NOT_APPLICABLE",
-            Self::ParentAttempt => "PARENT_ATTEMPT",
-            Self::Internal => "INTERNAL",
-            Self::Limit => "LIMIT",
-            Self::Prices => "PRICES",
-            Self::Fabric => "FABRIC",
-            Self::StateCorrupt => "STATE_CORRUPT",
-            Self::LaunchUnknown => "LAUNCH_UNKNOWN",
-            Self::UnknownHost => "UNKNOWN_HOST",
-            Self::PeerUnavailable => "PEER_UNAVAILABLE",
-            Self::PeerVersion => "PEER_VERSION",
-            Self::OwnerUnavailable => "OWNER_UNAVAILABLE",
-            Self::BaseUnreachable => "BASE_UNREACHABLE",
-            Self::BranchExists => "BRANCH_EXISTS",
-            Self::LaneCoordinationRefused => "lane_coordination_refused",
-            Self::UpgradeRefused => "UPGRADE_REFUSED",
-            Self::UpgradeRequired => "upgrade_required",
-            Self::Timeout => "TIMEOUT",
-            Self::Peer => "PEER",
+/// One declaration per kind keeps the enum, its stable code and its catalogue
+/// summary together; the CLI help catalogue and generated reference read them.
+macro_rules! error_kinds {
+    ($($kind:ident => $code:literal, $summary:literal;)*) => {
+        /// Refusal categories stay typed until an edge renders its stable code.
+        /// Each refusal has its own code, so callers and tests match the code,
+        /// never the message.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum ErrorKind {
+            $(#[doc = $summary] $kind,)*
         }
-    }
+        impl ErrorKind {
+            /// Every kind, in catalogue order.
+            pub const ALL: &[Self] = &[$(Self::$kind,)*];
+            /// The stable `error.code` the CLI envelope carries.
+            pub const fn code(self) -> &'static str {
+                match self {
+                    $(Self::$kind => $code,)*
+                }
+            }
+            /// What the code means, for the help catalogue and reference.
+            pub const fn summary(self) -> &'static str {
+                match self {
+                    $(Self::$kind => $summary,)*
+                }
+            }
+        }
+    };
+}
+error_kinds! {
+    Invalid => "INVALID", "The request or a stored run record is invalid.";
+    Refused => "REFUSED", "The execution context or a policy refused the operation.";
+    WorktreeMissing => "WORKTREE_MISSING", "The named local worktree does not exist.";
+    WorktreeUnregistered => "WORKTREE_UNREGISTERED", "The worktree is not registered with Provenant.";
+    OperationConflict => "OPERATION_CONFLICT", "The operation ID was already used for a different request.";
+    NotFound => "NOT_FOUND", "No run record matches in this scope.";
+    Nonterminal => "NONTERMINAL", "The attempt has not finished.";
+    ProviderStateExpired => "PROVIDER_STATE_EXPIRED", "Retention removed the provider state this attempt needs to resume.";
+    Conflict => "CONFLICT", "The run record changed concurrently or is immutable.";
+    Cancelled => "CANCELLED", "The call was cancelled.";
+    LaneDepth => "LANE_DEPTH", "Nested lane depth exceeds the configured maximum.";
+    QueueFull => "QUEUE_FULL", "The host queue is full.";
+    Contention => "CONTENTION", "The run store is contended or the call budget expired.";
+    Io => "IO", "Filesystem, database or other I/O failed.";
+    Unsupported => "UNSUPPORTED", "The route or adapter does not support the requested launch.";
+    ContinuationUnsupported => "CONTINUATION_UNSUPPORTED", "The attempt's provider session cannot be continued.";
+    Time => "TIME", "The host clock could not be read.";
+    Entropy => "ENTROPY", "The host could not supply random identifiers.";
+    LaneContext => "LANE_CONTEXT", "The lane environment is missing or inconsistent.";
+    Identity => "IDENTITY", "The project or actor identity could not be resolved.";
+    Config => "CONFIG", "Configuration could not be loaded or is invalid.";
+    Git => "GIT", "Git is unavailable or a Git query failed.";
+    SecretInput => "SECRET_INPUT", "The prompt or input appears to contain a secret.";
+    WorktreeRequired => "WORKTREE_REQUIRED", "The requested mode needs a worktree.";
+    WorktreeNotApplicable => "WORKTREE_NOT_APPLICABLE", "A worktree was given for a mode that does not use one.";
+    ParentAttempt => "PARENT_ATTEMPT", "The parent attempt is missing or cannot start children.";
+    Internal => "INTERNAL", "An internal invariant failed.";
+    Limit => "LIMIT", "A requested size or count exceeds its bound.";
+    Prices => "PRICES", "Plan prices could not be read or are invalid.";
+    Fabric => "FABRIC", "A Fabric operation failed.";
+    StateCorrupt => "STATE_CORRUPT", "A stored record or artifact is corrupt.";
+    LaunchUnknown => "LAUNCH_UNKNOWN", "The launch handoff was not confirmed; reconcile the run.";
+    UnknownHost => "UNKNOWN_HOST", "No configured peer has this host label.";
+    PeerUnavailable => "PEER_UNAVAILABLE", "The peer host could not be reached.";
+    PeerVersion => "PEER_VERSION", "The peer host runs an incompatible version.";
+    OwnerUnavailable => "OWNER_UNAVAILABLE", "The run owner is unavailable in this build or host.";
+    BaseUnreachable => "BASE_UNREACHABLE", "The Git base cannot be resolved or fetched.";
+    BranchExists => "BRANCH_EXISTS", "The branch already exists.";
+    LaneCoordinationRefused => "lane_coordination_refused", "Lane coordination policy refused the operation.";
+    UpgradeRefused => "UPGRADE_REFUSED", "The upgrade was refused.";
+    UpgradeRequired => "upgrade_required", "A record needs a newer Provenant to read it.";
+    Timeout => "TIMEOUT", "The wait budget expired.";
+    Peer => "PEER", "The peer host returned an error.";
+    WriterScope => "WRITER_SCOPE", "The writer worktree scope was refused.";
+    Confinement => "CONFINEMENT", "Confinement refused the requested access.";
+    DiskFloor => "DISK_FLOOR", "Free disk space is below gc.free_floor; run `provenant gc --apply`.";
+    MemoryPressure => "MEMORY_PRESSURE", "Host memory pressure is too high to admit a lane.";
+    LaneCap => "LANE_CAP", "The host or project writer lane cap is reached.";
+    BuildSettings => "BUILD_SETTINGS", "The host lane build settings are invalid.";
+    GuardianIdentity => "GUARDIAN_IDENTITY", "The guardian process identity could not be observed.";
+    HostClock => "HOST_CLOCK", "Startup spacing cannot be judged: the monotonic clock or boot identity is unreadable.";
+    WriterRefLocked => "WRITER_REF_LOCKED", "A writer Git ref lock already exists.";
+    ObjectImportLimit => "OBJECT_IMPORT_LIMIT", "A lane's Git object import exceeded its limits.";
 }
 impl From<&RunError> for ErrorKind {
     fn from(error: &RunError) -> Self {
@@ -621,14 +609,17 @@ impl From<&RunError> for ErrorKind {
             RunError::Input { kind, .. } => *kind,
             RunError::WorktreeMissing(_) => Self::WorktreeMissing,
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,
-            RunError::Writer(_)
-            | RunError::Confinement(_)
-            | RunError::Refused
-            | RunError::DiskFloor { .. }
-            | RunError::MemoryPressure { .. }
-            | RunError::LaneCap { .. }
-            | RunError::BuildSettings
-            | RunError::GuardianIdentityUnavailable => Self::Refused,
+            RunError::Writer(_) => Self::WriterScope,
+            RunError::Confinement(_) => Self::Confinement,
+            RunError::Refused => Self::Refused,
+            RunError::DiskFloor { .. } => Self::DiskFloor,
+            RunError::MemoryPressure { .. } => Self::MemoryPressure,
+            RunError::LaneCap { .. } => Self::LaneCap,
+            RunError::BuildSettings => Self::BuildSettings,
+            RunError::GuardianIdentityUnavailable => Self::GuardianIdentity,
+            RunError::HostClock => Self::HostClock,
+            RunError::WriterRefLocked(_) => Self::WriterRefLocked,
+            RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
             RunError::Validation(_) | RunError::InvalidBase(_) | RunError::TooLarge { .. } => {
                 Self::Invalid
             }

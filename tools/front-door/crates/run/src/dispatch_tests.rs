@@ -2721,11 +2721,22 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
             }
         }
         match last.ok_or("a fourth writer")? {
-            Err(error @ RunError::LaneCap { limit: 3, .. }) => {
-                let text = error.to_string();
-                assert!(text.contains("writer lane cap reached"), "{text}");
-                assert!(text.contains(scope), "{text}");
-                assert!(text.contains("max_"), "{text}");
+            Err(
+                error @ RunError::LaneCap {
+                    limit: 3,
+                    scope: refused,
+                    ..
+                },
+            ) => {
+                assert_eq!(error.code(), "LANE_CAP");
+                assert_eq!(refused, scope);
+                // The message names the configuration key to raise.
+                let key = if scope == "project" {
+                    "max_project_writer_lanes"
+                } else {
+                    "max_writer_lanes"
+                };
+                assert!(error.to_string().contains(key), "{error}");
             }
             other => return Err(format!("the fourth writer is refused: {other:?}").into()),
         }
@@ -3521,11 +3532,8 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
             "an unreadable {name} refuses, with no wall-clock fallback"
         );
         let admitted = store.admit(lane_id, &attempt, &Host { available: 100 }, &host, &cancel);
-        let reason = admitted.err().ok_or("admit must refuse")?.to_string();
-        assert!(
-            reason.contains("startup spacing cannot be judged"),
-            "{name}: {reason}"
-        );
+        let refused = admitted.err().ok_or("admit must refuse")?;
+        assert_eq!(refused.code(), "HOST_CLOCK", "{name}: {refused}");
         assert_eq!(
             store.record(lane_id, &call)?.state,
             AttemptState::Starting {
@@ -7277,9 +7285,10 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
                     floor: 100
                 }
             ));
+            assert_eq!(error.code(), "DISK_FLOOR");
+            // The message names the floor's key and the repair command.
             let message = error.to_string();
-            assert!(message.contains("99 bytes available"), "{message}");
-            assert!(message.contains("gc.free_floor 100 bytes"), "{message}");
+            assert!(message.contains("gc.free_floor"), "{message}");
             assert!(message.contains("provenant gc --apply"), "{message}");
         }
     }

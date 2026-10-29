@@ -1,0 +1,4 @@
+## Breaking changes
+### CLI and install
+
+- **Run refusals carry their own `error.code` instead of `REFUSED` or `IO`.** A writer scope refusal is now `WRITER_SCOPE`, confinement `CONFINEMENT`, low disk `DISK_FLOOR` (at dispatch and at admission), memory pressure `MEMORY_PRESSURE`, the writer lane cap `LANE_CAP`, invalid build settings `BUILD_SETTINGS`, an unobservable guardian `GUARDIAN_IDENTITY`, an unreadable host clock `HOST_CLOCK`, a stale writer ref lock `WRITER_REF_LOCKED` and an oversized object import `OBJECT_IMPORT_LIMIT`. `status` and exit codes are unchanged. Scripts that matched `REFUSED` or `IO` for these should match the new code. `help --all --json` lists every run code with its meaning under `error_codes`, and the [CLI reference](../../reference/cli.md#error-codes) renders it (#2273).

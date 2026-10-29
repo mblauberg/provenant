@@ -409,6 +409,23 @@ belong to the [cross-cutting decisions](README.md#cross-cutting-decisions).
   `crates/cli/src/render.rs::terse_quotes_and_escapes_anything_that_could_mislead_a_terminal`
 - Owner: `crates/cli/src/render.rs`
 
+### Each refusal has a stable code
+
+`error.code` names the refusal, not only its category: a writer lane cap is
+`LANE_CAP`, a disk below `gc.free_floor` is `DISK_FLOOR`, and so on. `status`
+and the exit code carry the category. The run owner declares each code once,
+with its meaning, in `ErrorKind`; `help --all --json` lists them under
+`error_codes` and the generated [CLI reference](../reference/cli.md#error-codes)
+renders that list. Tests assert the code and stable identifiers such as a
+configuration key or repair command, never message prose. Other owners and
+per-attempt launch refusals still use coarser codes.
+- Why: agents and tests act on the code, and a reworded message must break
+  neither.
+- Test: `crates/run/src/service_tests.rs::each_refusal_has_its_own_stable_code`;
+  `crates/cli/src/lib.rs::help_all_lists_each_error_code_once_with_its_meaning`;
+  `tests/fabric_transport.rs::writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch`
+- Owner: `crates/run/src/service.rs`
+
 ### Waits are readers
 
 Every wait has an explicit budget. A lane needing input can satisfy a wait.
