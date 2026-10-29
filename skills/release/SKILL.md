@@ -9,6 +9,9 @@ Promotion is a one-way door and is never automatic. Passing CI, delivery
 acceptance and broad session authority do not authorise it. The owner's grant
 must bind this artefact, this action, this target and an expiry.
 
+Release mechanics (version bump, branch, notes, publishing) come from the repo's
+own `AGENTS.md`, `CONTRIBUTING` and runbooks. Look there first.
+
 ## Before asking
 
 Confirm and state in the request:

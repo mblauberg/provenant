@@ -15,6 +15,9 @@ verified, non-goals, risk tier and write authority (the tracker issue or the
 scope digest). Missing inputs go back to `scope`. Do not invent owner decisions;
 record an engineering call as `Decided (<source>): <reason>` and proceed.
 
+Repository specifics (verify commands, commit and PR rules, review ladder) come
+from the repo's own `AGENTS.md`, `CONTRIBUTING` and runbooks. Look there first.
+
 ## How it runs
 
 ```sh

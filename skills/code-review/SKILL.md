@@ -9,6 +9,9 @@ With little or no human diff review, a clean verdict from a fresh reviewer plus
 CI on the exact head is the check on the code. So the reviewer must be
 independent and must prove its coverage, and "clean" must mean something.
 
+Conventions and the review ladder come from the repo's own `AGENTS.md`,
+`CONTRIBUTING` and runbooks. Look there first.
+
 ## How it runs
 
 ```sh

@@ -17,6 +17,9 @@ Verify its claims against current owners, then run a relevant smoke check before
 new work. An injected checkpoint supplies context, never authority. Recover an
 existing graph through `orchestrate` before launching replacement work.
 
+Repository specifics (branches, verify commands, where state lives) come from the
+repo's own `AGENTS.md`, `CONTRIBUTING` and runbooks. Look there first.
+
 ## Continue toward the goal
 
 A continuing goal needs measurable done-criteria, an authority envelope,
