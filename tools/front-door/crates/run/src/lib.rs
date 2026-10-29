@@ -218,13 +218,15 @@ pub enum RunError {
         kind: TransportRefusal,
         reason: String,
     },
-    #[error("run filesystem I/O failed: {reason}")]
+    #[error("Git transport refused: {reason}")]
     GitTransport {
         kind: TransportRefusal,
         reason: String,
     },
     #[error("host writer delivery failed at Prepare ({step}): {reason}")]
     DeliveryPrepare { step: &'static str, reason: String },
+    #[error("Git executable unavailable")]
+    GitUnavailable,
     #[error("provider evidence could not be committed: {0}")]
     ProviderEvidence(String),
     #[error("confinement refused: {0}")]

@@ -987,7 +987,7 @@ impl HostDeliveryContext {
                 .map(|(_, value)| OsString::from_vec(value.clone()));
             let path =
                 provenant_os::git::resolve_git_executable(override_path.as_deref().map(Path::new))
-                    .ok_or_else(|| prepare_error("git executable", "git is unavailable"))?;
+                    .ok_or_else(|| prepare_error("git executable", RunError::GitUnavailable))?;
             return host_path(&path, writer)
                 .map_err(|error| prepare_error("git executable", error));
         }

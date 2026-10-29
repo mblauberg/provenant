@@ -168,8 +168,8 @@ impl<'a> Service<'a> {
                             format!("{label} must be a full Git SHA"),
                         )
                     })?;
-                    let git = provenant_os::git::git_executable()
-                        .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
+                    let git =
+                        provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
                     let resolved = resolve_git_base(&git, git_cwd, sha).map_err(|_| {
                         input_error(
                             ErrorKind::Invalid,
@@ -196,8 +196,7 @@ impl<'a> Service<'a> {
             } else if let Some(pinned) = task.pinned_base {
                 Some(pinned.to_string())
             } else if let Some(head) = task.head.as_deref().filter(|_| task.base.is_none()) {
-                let git = provenant_os::git::git_executable()
-                    .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
+                let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
                 Some(review_merge_base(&git, git_cwd, head)?)
             } else if input.parent_attempt.is_some() {
                 task.base
@@ -205,8 +204,8 @@ impl<'a> Service<'a> {
                 task.base
                     .as_deref()
                     .map(|base| {
-                        let git = provenant_os::git::git_executable()
-                            .ok_or_else(|| input_error(ErrorKind::Git, "Git unavailable"))?;
+                        let git =
+                            provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
                         resolve_git_base(&git, git_cwd, base)
                     })
                     .transpose()?
@@ -613,6 +612,7 @@ impl From<&RunError> for ErrorKind {
             RunError::Admission(AdmissionError::GuardianIdentity) => Self::GuardianIdentity,
             RunError::Admission(AdmissionError::Clock) => Self::HostClock,
             RunError::WriterRefLocked(_) => Self::WriterRefLocked,
+            RunError::GitUnavailable => Self::Git,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
             RunError::Validation(_)
             | RunError::WriterHeadNotLaneBranch
