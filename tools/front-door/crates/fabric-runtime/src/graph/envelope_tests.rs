@@ -191,6 +191,11 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     clock_reanchor_reason: Some("previous checkpoint lacked a host stamp".into()),
                     state: CiState::Unavailable,
                     summary: worst(OUTPUT_FIELD_BYTES),
+                    head_sha: Some("a".repeat(64)),
+                    failed_checks: Vec::new(),
+                    check_names: vec![worst(OUTPUT_FIELD_BYTES - 3)],
+                    truncated: true,
+                    elapsed_seconds: u64::MAX,
                 }),
                 title: Some(node.title.clone().unwrap_or_else(|| node.id.clone())),
                 worktree: node.worktree.clone(),
@@ -560,4 +565,35 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!((run.checkpoint.nodes[0].attempts[0].settled, run.checkpoint.settlements), (3, 3));
     assert!(run.checkpoint.unknown_usage.last().unwrap().starts_with("node one "));
+}
+
+#[test]
+fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
+    for cap in [0, 150, 16384, 65536] {
+        for count in [0,1,20,100] {
+            let mut document=mixed();
+            let Some(GateCondition::Ci { failed_checks_max_bytes,max_failed_checks,.. })=&mut document.nodes[3].condition else {unreachable!()};
+            *failed_checks_max_bytes=Some(cap);
+            *max_failed_checks=Some(count);
+            let plan=planned(&document);
+            let mut checkpoint=filled_checkpoint(&document,&plan);
+            for node in &mut checkpoint.nodes {
+                if let Some(ci)=&mut node.ci {
+                    let mut observation=CiObservation {
+                        extra:Default::default(),state:CiState::Failed,summary:worst(OUTPUT_FIELD_BYTES),
+                        head_sha:Some("a".repeat(40)),check_names:Vec::new(),truncated:false,
+                        failed_checks:vec![CiFailedCheck {extra:Default::default(),name:"build".into(),url:Some("https://ci/1".into()),excerpt:worst(cap)};count.saturating_add(1)],
+                    };
+                    observation.bound_failed_checks(cap,count);
+                    ci.failed_checks=observation.failed_checks;
+                    ci.truncated=observation.truncated;
+                    node.outputs=Some(ci::outputs(false,Some(ci)));
+                }
+            }
+            let execution=GraphExecution {extra:Default::default(),integration_base:Some("1".repeat(40).parse().unwrap()),directory:"/fixture".into(),document:document.clone()};
+            let stored=StoredCheckpoint {extra:Default::default(),schema_version:1,digest:"sha256:".to_owned()+&"f".repeat(64),checkpoint,execution};
+            let bound=envelope::checkpoint_bound(&document,&[],&stored.checkpoint.extensions,&plan);
+            assert!(canonical_len(&stored)<=bound,"cap={cap} count={count}");
+        }
+    }
 }

@@ -501,15 +501,27 @@ count requires at least the configured positive count. Budget gates must check
 settled attempt usage at evaluation time against the effective host budgets, including saved
 extensions, and fail on unknown or partial usage for a configured metric.
 CI gates check the configured pull request or branch through the host's check
-status interface. Explicitly named checks must pass. Without named checks, the
+status interface. A string `condition.target` names that pull request or branch.
+`condition.target = { node = "write" }` instead resolves the upstream node's
+delivered branch and pins its current head SHA. The target must be an upstream
+dependency exposing a delivered branch. The host queries checks for that exact
+SHA and checks the branch again before accepting a result. A newer push supersedes the
+pin, discards stale check evidence and restarts the timeout for the new head;
+a result for the previous head must not pass the gate. Explicitly named checks
+must pass. Without named checks, the
 host uses required checks from branch protection or rulesets if resolvable;
 otherwise every reported check must pass or be skipped, with at least one pass.
-The evidence records the applied policy. Failed checks fail; missing or unavailable
-checks fail with reason `unavailable`. Pending checks leave the gate waiting,
+The evidence records the applied policy. Failed checks fail. Checks still
+registering, including explicitly named checks that have not appeared, leave
+the gate waiting; an unavailable host or API, or an invalid check policy, fails
+with reason `unavailable`. Pending checks leave the gate waiting,
 and fail with reason `timeout` after the configured timeout (two hours by
-default). The checkpoint retains the first observation time, last state and
-check summary. Timeout uses the host's monotonic clock, so wall clock changes do
-not affect it. If the host boot changes or the monotonic clock moves backwards,
+default). The checkpoint retains the first observation time, last state,
+`head_sha`, check names, elapsed seconds and check summary. The compact and full
+graph status show a running CI gate's check names, head SHA and elapsed time.
+Status refreshes elapsed time from the same host boot's monotonic clock without
+querying CI or saving a new checkpoint. Timeout uses the host's monotonic clock,
+so wall clock changes do not affect it. If the host boot changes or the monotonic clock moves backwards,
 the gate re-anchors its timeout to the new host stamp. The checkpoint retains
 the re-anchor count; after three re-anchors, another such change settles the
 gate as `timeout` with a reason naming the re-anchor limit. Replay restores
@@ -518,6 +530,17 @@ settlement re-evaluate the gate. Graph status reads
 the saved snapshot, and there is no automatic background re-check.
 Gates must save their decision before dependants run and retain it on replay,
 even if budgets change. Gates expose `PASS` or `FAIL` as their typed verdict.
+The CI observation also carries `failed_checks`, each with a `name`, optional
+`url` and `excerpt`. `condition.failed_checks_max_bytes` defaults to 16384 bytes
+and `condition.max_failed_checks` defaults to 20; values in the project graph
+override those built-in defaults. Checkpoint `ci.failed_checks_policy` records
+the effective byte and count values and whether each came from the condition
+or the default layer. The byte cap includes the encoded failed
+check records, and `truncated` records omitted or shortened evidence. Both caps
+are evidence retention policy and may be adjusted per gate. Failed CI gates
+map those checks into typed `findings` outputs, allowing a repair node to
+select them with `inputs = [{ node = "ci", outputs = ["findings"] }]`. A passing
+gate has no failure findings. Gates never launch a model or create an attempt.
 
 A failure target named by `on_fail` must depend on its gate, so ordinary cycle
 and edge limits cover the failure path. Only that target may follow a failed
@@ -899,7 +922,8 @@ can hold:
 | Stored text | Canonical cap |
 | --- | --- |
 | Result excerpt (composite) | 4096 (65536) bytes |
-| Findings list | 9216 bytes, otherwise the block is invalid |
+| Task findings list | 9216 bytes, otherwise the block is invalid |
+| CI failed checks | `failed_checks_max_bytes` per gate, 16384 bytes by default; at most `max_failed_checks`, 20 by default |
 | Warning | 512 bytes each, at most 4 |
 | Verdict, path, branch, commit, gate reason, CI summary, PR URL | 1024 bytes each |
 | Advance error, expansion pause, loop reason | 2048 bytes each |
@@ -1118,7 +1142,11 @@ the exact graph head. A matching sealed marker also permits recreating an absent
 publication ref at that same head. A different marker, a different ref head or
 a symbolic ref refuses. Alternatively,
 the graph uses its existing remote integration branch, and opens one PR. Its body
-contains bounded commit messages, run and attempt IDs, gate decisions and skipped nodes. The checkpoint
+contains bounded commit messages, run and attempt IDs, gate decisions and skipped nodes.
+Graph review-council attempts render as the same `Independent review` rows used
+by `pr open`, with each review role, model family and recorded verdict. The rows
+include lens, verification and synthesis attempts, including retries, while
+subject-framing tasks remain ordinary node evidence. The checkpoint
 records the PR URL and successful final delivery;
 replay observes it. A failed final delivery keeps its advance error and remains
 eligible for advancement or manual resume. Neither conflicts nor unknown

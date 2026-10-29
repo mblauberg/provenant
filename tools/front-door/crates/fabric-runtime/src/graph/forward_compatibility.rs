@@ -39,6 +39,8 @@ record_cases! {
     condition_budget_digest_round_trip: GateCondition => json!({"type":"budget"});
     condition_ci_digest_round_trip: GateCondition => json!({"type":"ci","target":"main"});
     ci_observation_digest_round_trip: CiObservation => json!({"state":"passed","summary":"green"});
+    ci_target_digest_round_trip: CiTarget => json!({"node":"write"});
+    ci_failed_check_digest_round_trip: CiFailedCheck => json!({"name":"build","url":"https://ci/1","excerpt":"failed"});
     ci_stamp_digest_round_trip: CiHostStamp => json!({"boot_identity":"boot","host_monotonic_micros":1});
     ci_evidence_digest_round_trip: CiEvidence => json!({"state":"passed","summary":"green"});
     gate_result_digest_round_trip: GateResult => json!({"passed":true,"reason":null,"on_fail":null});
