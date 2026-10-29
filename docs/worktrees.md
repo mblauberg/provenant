@@ -30,6 +30,35 @@ such submissions with `worktree_unregistered` and the worktree path. Create
 a writer at the branch's tip with
 `provenant worktree create <new-branch> --base <branch>`.
 
+New branch names must not differ from an existing local or remote-tracking
+branch name only by case (including non-ASCII case) or by a branch-path
+prefix, and spellings that differ only in Unicode normalisation (NFC against
+NFD) count as the same name. Branch names follow Git's own ref
+format, so `feat/a+b` is accepted.
+
+A remote base such as `origin/main` is pinned to the commit the remote
+advertises, rather than the tracking ref, and revision operators apply to that
+commit (`origin/main~1`). This holds for every spelling of the tracking root
+(`remotes/origin/HEAD~1`, `refs/remotes/origin/main^`, `origin`, `@{u}`).
+Remote bases require a reachable remote; an offline or missing remote base
+fails instead of trusting a stale tracking ref, and so does a base that Git
+resolves to a remote-tracking ref the remote did not advertise (such as
+`Origin/main` on a case-insensitive filesystem).
+
+Host origin refresh leaves out advertised branches whose names collide with
+another advertised name, with a warning; their tracking refs may remain
+stale. `HEAD` counts as an existing name, so a branch called `head` collides
+with `origin/HEAD`, and a branch that would be written into an existing
+tracking symref is left out too. It fails only if the remote's default branch
+is among them. Refresh fetches pass `core.precomposeunicode=true`, so names
+that differ only in Unicode normalisation (an NFD default with an NFC sibling)
+would share one tracking ref. Refresh compares every advertised name, and every
+tracking ref already on disk, under NFC normalisation and case folding before
+it fetches, and refuses outright, naming both spellings, when two distinct
+spellings are equivalent. The
+pre-push policy reads the remote's advertised default branch instead of the
+local tracking HEAD, and refuses the push if none is advertised.
+
 `remove NAME` deletes the clean worktree and then its branch when every commit
 on the branch is contained in the fetched upstream default branch. Without
 `origin`, or if fetching fails, the primary checkout's integration branch

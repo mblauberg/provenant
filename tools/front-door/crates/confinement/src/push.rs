@@ -2,7 +2,7 @@
 use crate::{
     GitRead, UtilityBudget, UtilityRuntime,
     repo::{GitRefName, ReadOnlyRepo},
-    utility::run_release_read_utility,
+    utility::{advertised_remote_head, run_release_read_utility},
 };
 use provenant_core::{CancelToken, GitOid};
 use provenant_os::exec::{Executor, Termination};
@@ -55,38 +55,28 @@ impl PushContext<'_> {
         .map_err(|_| PushRefusal::Evidence)
     }
     pub fn check(&self, remote: &str, updates: &[PushUpdate]) -> Result<(), PushRefusal> {
-        let head = self.read(GitRead::RemoteHead {
-            remote: remote.to_owned(),
-        })?;
-        let default = match head.termination {
-            Termination::Exit(0) => {
-                let prefix = format!("refs/remotes/{remote}/");
-                let branch = std::str::from_utf8(&head.stdout.bytes)
-                    .ok()
-                    .and_then(|s| s.strip_suffix('\n'))
-                    .and_then(|s| s.strip_prefix(&prefix))
-                    .ok_or(PushRefusal::Evidence)?;
-                GitRefName::branch(branch).map_err(|_| PushRefusal::Evidence)?
-            }
-            Termination::Exit(1) => {
-                let mut found = None;
-                for branch in ["main", "master"] {
-                    let name = GitRefName::branch(branch).map_err(|_| PushRefusal::Evidence)?;
-                    let tip = self.read(GitRead::ResolveRef { name: name.clone() })?;
-                    if tip.termination == Termination::Exit(0) {
-                        found = Some(name);
-                        break;
-                    }
-                    if tip.termination != Termination::Exit(128)
-                        && tip.termination != Termination::Exit(1)
-                    {
-                        return Err(PushRefusal::Evidence);
-                    }
-                }
-                found.ok_or(PushRefusal::Evidence)?
-            }
-            _ => return Err(PushRefusal::Evidence),
-        };
+        let head = advertised_remote_head(
+            self.executor,
+            self.repo,
+            self.runtime,
+            remote,
+            self.budget,
+            self.cancel,
+        )
+        .map_err(|_| PushRefusal::Evidence)?;
+        if head.termination != Termination::Exit(0) {
+            return Err(PushRefusal::Evidence);
+        }
+        let text = std::str::from_utf8(&head.stdout.bytes).map_err(|_| PushRefusal::Evidence)?;
+        let mut targets = text.lines().filter_map(|line| {
+            line.strip_prefix("ref: refs/heads/")?
+                .strip_suffix("\tHEAD")
+        });
+        let branch = targets.next().ok_or(PushRefusal::Evidence)?;
+        if targets.next().is_some() {
+            return Err(PushRefusal::Evidence);
+        }
+        let default = GitRefName::branch(branch).map_err(|_| PushRefusal::Evidence)?;
         for update in updates {
             if update.remote_ref == default.as_str() {
                 if is_zero(update.local) {
@@ -129,6 +119,52 @@ impl PushContext<'_> {
                 return Err(PushRefusal::ConflictMarkers);
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::Fixture;
+    use std::error::Error;
+
+    #[test]
+    fn advertised_default_overrides_stale_tracking_head() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let head = fixture.head()?;
+        let root = fixture.root.to_str().ok_or("non-UTF8 root")?;
+        fixture.run(&["remote", "add", "origin", root])?;
+        let symbolic = fixture.run(&["symbolic-ref", "HEAD"])?;
+        let default = std::str::from_utf8(&symbolic.stdout.bytes)?.trim();
+        fixture.run(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/stale",
+        ])?;
+        let repo = fixture.runtime.open_read_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        let cancel = CancelToken::new();
+        let context = PushContext {
+            repo: &repo,
+            runtime: &fixture.runtime,
+            executor: &fixture.executor,
+            budget: fixture.budget()?,
+            cancel: &cancel,
+        };
+        let update = PushUpdate {
+            local: GitOid::parse(&"0".repeat(40))?,
+            remote_ref: default.to_owned(),
+            remote: head,
+        };
+        assert!(matches!(
+            context.check("origin", &[update]),
+            Err(PushRefusal::DefaultDeletion)
+        ));
         Ok(())
     }
 }

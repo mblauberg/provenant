@@ -1,24 +1,45 @@
 //! Bounded host-side history for lanes whose tools cannot execute Git.
 use crate::{Result, RunError, artifacts::seal};
+use provenant_confinement::transport;
 use provenant_os::{
     exec::{CapturedStream, ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination},
     fs::Directory,
 };
-use std::{ffi::OsString, path::Path, time::Duration};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const CONTEXT_LIMIT: usize = 1024 * 1024;
 
 pub fn continuation_history(cwd: &Path, base: &str) -> Result<String> {
     let git = provenant_os::git::git_executable().ok_or(RunError::Validation("Git unavailable"))?;
     let executor = SystemExecutor::new(1).map_err(execution_error)?;
-    let env = repository_environment(&executor, &git, cwd)?;
-    let base = resolve(&executor, &git, cwd, base, &env)?;
+    continuation_history_with(&executor, &git, cwd, base)
+}
+
+fn continuation_history_with(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    base: &str,
+) -> Result<String> {
+    let env = repository_environment(executor, git, cwd)?;
+    let base = resolve(executor, git, cwd, base, &env)?;
     let range = format!("{base}..HEAD");
     let (out, timed_out) = read_git_with_env(
-        &executor,
-        &git,
+        executor,
+        git,
         cwd,
-        &["log", "--max-count=50", "--format=%h %s", &range, "--"],
+        &[
+            "log",
+            "--no-show-signature",
+            "--max-count=50",
+            "--format=%h %s",
+            &range,
+            "--",
+        ],
         16_384,
         &env,
     )?;
@@ -38,6 +59,7 @@ const GIT_CONFIG_OVERRIDES: &[(&str, &str)] = &[
     ("core.hooksPath", "/dev/null"),
     ("core.attributesFile", "/dev/null"),
     ("core.fsmonitor", "false"),
+    ("log.showSignature", "false"),
 ];
 
 fn environment() -> Vec<(OsString, OsString)> {
@@ -156,6 +178,150 @@ fn read_git_with_env(
     Ok((out.stdout, out.timed_out))
 }
 
+/// The `-c` arguments every advertisement shares with delivery and the
+/// confinement utility: no hooks, no fsmonitor, only the usual transports.
+fn transport_args() -> Vec<String> {
+    transport::CONFIG
+        .iter()
+        .flat_map(|(key, value)| ["-c".to_owned(), format!("{key}={value}")])
+        .collect()
+}
+
+/// The host environment for talking to a remote, bound to this repository.
+fn transport_environment(env: &[(OsString, OsString)]) -> Vec<(OsString, OsString)> {
+    let bound = env.iter().filter(|(key, _)| {
+        matches!(
+            key.to_str(),
+            Some("GIT_DIR" | "GIT_WORK_TREE" | "GIT_COMMON_DIR")
+        )
+    });
+    transport::environment(std::env::vars_os(), bound.cloned())
+}
+
+/// Where a lane can write: its linked worktree, the project's worktree and
+/// scratch areas, and the run state directory when one is set.
+fn lane_roots(cwd: &Path, env: &[(OsString, OsString)]) -> transport::LaneRoots {
+    let get = |name: &str| {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| PathBuf::from(value))
+    };
+    let run_state = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).map(PathBuf::from);
+    let extra = transport::LaneRoots::new(run_state);
+    match (get("GIT_DIR"), get("GIT_COMMON_DIR")) {
+        (Some(private), Some(common)) => {
+            transport::LaneRoots::for_repository(cwd, &private, &common, &extra)
+        }
+        _ => transport::LaneRoots::project(cwd),
+    }
+}
+
+/// Refuse an advertisement whose effective configuration is read from a
+/// lane-writable file, or names a transport program in a lane-writable
+/// location. `Ok` says nothing about whether the remote is reachable.
+fn check_transport(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    env: &[(OsString, OsString)],
+    transport_env: &[(OsString, OsString)],
+) -> Result<()> {
+    let hardening = transport_args();
+    let args: Vec<&str> = hardening
+        .iter()
+        .map(String::as_str)
+        .chain(transport::LISTING_ARGS)
+        .collect();
+    let (listing, timed_out) =
+        read_git_with_env(executor, git, cwd, &args, CONTEXT_LIMIT, transport_env)?;
+    if timed_out || listing.truncated {
+        return Err(execution_error("Git configuration listing was incomplete"));
+    }
+    let entries = transport::parse_listing(&listing.bytes).map_err(execution_error)?;
+    let roots = lane_roots(cwd, env);
+    transport::check_environment(transport_env, cwd, &roots).map_err(execution_error)?;
+    transport::check_listing(&entries, cwd, &roots).map_err(execution_error)
+}
+
+/// Look up the exact object ID the remote advertises for a tracking ref named
+/// by `root`. A bare remote name or its `HEAD` stands for the advertised default.
+fn advertised_oid(
+    executor: &dyn Executor,
+    git: &Path,
+    cwd: &Path,
+    root: &str,
+    remote_name: &str,
+    env: &[(OsString, OsString)],
+    transport_env: &[(OsString, OsString)],
+) -> Option<String> {
+    let (resolved_remote, branch) = remote_name.split_once('/')?;
+    // Symbolic resolution dereferences HEAD. Identify an explicitly requested
+    // remote HEAD from the configured remote names, rather than trusting the
+    // local symref's target to name that remote.
+    let (remotes, timed_out) =
+        read_git_with_env(executor, git, cwd, &["remote"], 16384, env).ok()?;
+    if timed_out || remotes.truncated {
+        return None;
+    }
+    let remotes = std::str::from_utf8(&remotes.bytes).ok()?;
+    let requested_default = remotes.lines().find(|remote| {
+        root == *remote
+            || root == format!("{remote}/HEAD")
+            || root == format!("remotes/{remote}/HEAD")
+            || root == format!("refs/remotes/{remote}/HEAD")
+    });
+    let remote = requested_default.unwrap_or(resolved_remote);
+    let default = requested_default.is_some() || branch == "HEAD";
+    let reference = format!("refs/heads/{branch}");
+    let hardening = transport_args();
+    let hardening: Vec<&str> = hardening.iter().map(String::as_str).collect();
+    let tail = if default {
+        vec![
+            "ls-remote",
+            "--symref",
+            "--exit-code",
+            "--",
+            remote,
+            "HEAD",
+            "refs/heads/*",
+        ]
+    } else {
+        vec![
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "--",
+            remote,
+            reference.as_str(),
+        ]
+    };
+    let args: Vec<&str> = hardening.into_iter().chain(tail).collect();
+    let (advertised, timed_out) =
+        read_git_with_env(executor, git, cwd, &args, CONTEXT_LIMIT, transport_env).ok()?;
+    if timed_out || advertised.truncated {
+        return None;
+    }
+    let advertised = std::str::from_utf8(&advertised.bytes).ok()?;
+    let mut default_branch = None;
+    let mut heads = Vec::new();
+    for line in advertised.lines() {
+        let (value, name) = line.split_once('\t')?;
+        if name == "HEAD" && value.starts_with("ref: ") {
+            let name = value.strip_prefix("ref: refs/heads/")?;
+            if default_branch.replace(name).is_some() {
+                return None;
+            }
+        } else if let Some(name) = name.strip_prefix("refs/heads/") {
+            provenant_core::GitOid::parse(value).ok()?;
+            heads.push((name, value));
+        }
+    }
+    let branch = if default { default_branch? } else { branch };
+    let mut matches = heads.iter().filter(|(name, _)| *name == branch);
+    let (_, oid) = matches.next()?;
+    matches.next().is_none().then(|| (*oid).to_owned())
+}
+
 fn resolve(
     executor: &dyn Executor,
     git: &Path,
@@ -167,6 +333,44 @@ fn resolve(
     if base.is_empty() || base.len() > 1024 || base.contains('\0') {
         return Err(invalid());
     }
+    // A tracking ref can alias a differently spelled ref on the host's
+    // filesystem. Replace its root with the exact advertised object ID and
+    // apply any revision operators to that.
+    let (root, suffix) = provenant_core::split_revision_root(base);
+    let (symbolic, timed_out) = read_git_with_env(
+        executor,
+        git,
+        cwd,
+        &[
+            "rev-parse",
+            "--symbolic-full-name",
+            "--verify",
+            "--end-of-options",
+            root,
+        ],
+        4096,
+        env,
+    )
+    .map_err(|_| invalid())?;
+    if timed_out || symbolic.truncated {
+        return Err(invalid());
+    }
+    let symbolic = std::str::from_utf8(&symbolic.bytes)
+        .map_err(|_| invalid())?
+        .trim();
+    let verified;
+    let base = if let Some(remote_name) = symbolic.strip_prefix("refs/remotes/") {
+        // The remote answers with host credentials and programs, so first
+        // refuse any that a lane could have supplied.
+        let transport_env = transport_environment(env);
+        check_transport(executor, git, cwd, env, &transport_env)?;
+        let oid = advertised_oid(executor, git, cwd, root, remote_name, env, &transport_env)
+            .ok_or_else(invalid)?;
+        verified = format!("{oid}{suffix}");
+        verified.as_str()
+    } else {
+        base
+    };
     let (out, timed_out) = read_git_with_env(
         executor,
         git,
@@ -550,7 +754,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
         assert_eq!(metadata["log_truncated"], false);
         assert_eq!(metadata["diff_truncated"], false);
-        assert_eq!(executor.0.lock().map_err(|_| "calls poisoned")?.len(), 6);
+        assert_eq!(executor.0.lock().map_err(|_| "calls poisoned")?.len(), 8);
         Ok(())
     }
 
@@ -739,6 +943,174 @@ mod tests {
             executor,
             base,
         })
+    }
+
+    #[test]
+    fn remote_base_requires_exact_advertised_oid() -> TestResult {
+        struct TestHome<'a> {
+            executor: &'a SystemExecutor,
+            home: &'a Path,
+        }
+        impl Executor for TestHome<'_> {
+            fn execute(
+                &self,
+                options: ExecOptions<'_>,
+            ) -> std::result::Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError>
+            {
+                let mut env = options.env.unwrap_or_default().to_vec();
+                env.retain(|(key, _)| key != "HOME");
+                env.push(("HOME".into(), self.home.as_os_str().to_owned()));
+                let mut isolated = ExecOptions::new(options.argv, options.cwd, options.timeout);
+                isolated.env = Some(&env);
+                isolated.stdout = options.stdout;
+                isolated.stderr = options.stderr;
+                isolated.stop_on_output_limit = options.stop_on_output_limit;
+                self.executor.execute(isolated)
+            }
+        }
+        let fixture = small_history()?;
+        let executor = TestHome {
+            executor: &fixture.executor,
+            home: &fixture.root,
+        };
+        let env = repository_environment(&executor, &fixture.binary, &fixture.root)?;
+        let resolve_base =
+            |base: &str| resolve(&executor, &fixture.binary, &fixture.root, base, &env);
+        let run = |args: &[&str]| git(&fixture.executor, &fixture.binary, &fixture.root, args);
+        run(&["branch", "-M", "main"])?;
+        run(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.root.to_str().ok_or("non-UTF8 root")?,
+        ])?;
+        run(&["update-ref", "refs/remotes/origin/main", &fixture.base])?;
+        run(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ])?;
+        run(&["config", "branch.main.remote", "origin"])?;
+        run(&["config", "branch.main.merge", "refs/heads/main"])?;
+        run(&["config", "push.default", "upstream"])?;
+        let aliases = [
+            "origin/main",
+            "remotes/origin/main",
+            "origin",
+            "@{u}",
+            "main@{upstream}",
+            "@{push}",
+            "refs/remotes/origin/HEAD",
+        ];
+        let head = resolve_git_base(&fixture.binary, &fixture.root, "HEAD")?;
+        for base in aliases {
+            assert_eq!(resolve_base(base)?, head, "{base}");
+        }
+        run(&["update-ref", "refs/remotes/origin/main", &head])?;
+        for base in aliases {
+            assert_eq!(resolve_base(base)?, head, "{base}");
+        }
+        // Operators apply to the verified root, not to the stale tracking ref
+        // (whose own parent does not exist). Every spelling of a tracking root
+        // takes the same suffixes: `HEAD` forms are followed to the advertised
+        // default, and a compound suffix is applied to that.
+        run(&["update-ref", "refs/remotes/origin/main", &fixture.base])?;
+        for root in [
+            "origin/main",
+            "remotes/origin/main",
+            "refs/remotes/origin/main",
+            "origin/HEAD",
+            "remotes/origin/HEAD",
+            "refs/remotes/origin/HEAD",
+            "origin",
+            "@{u}",
+            "main@{upstream}",
+            "@{push}",
+        ] {
+            for (suffix, expected) in [
+                ("^", fixture.base.as_str()),
+                ("~1", fixture.base.as_str()),
+                ("^{commit}", head.as_str()),
+                ("~1^{commit}", fixture.base.as_str()),
+                ("^0", head.as_str()),
+            ] {
+                assert_eq!(
+                    resolve_base(&format!("{root}{suffix}"))?,
+                    expected,
+                    "{root}{suffix}"
+                );
+            }
+        }
+
+        // A tracking ref its remote cannot vouch for fails closed instead of
+        // falling back to the local OID: no such remote is configured, and (on
+        // a case-insensitive filesystem) a remote spelled in another case.
+        run(&["update-ref", "refs/remotes/gone/main", &head])?;
+        let mut unverifiable = vec![
+            "gone/main",
+            "gone/main~1",
+            "refs/remotes/gone/main^{commit}",
+        ];
+        let probe = fixture.root.join("CaseProbe");
+        std::fs::write(&probe, b"")?;
+        if fixture.root.join("caseprobe").exists() {
+            unverifiable.extend(["Origin/main", "Origin/main~1"]);
+        }
+        for base in unverifiable {
+            assert!(
+                matches!(resolve_base(base), Err(RunError::InvalidBase(named)) if named == base),
+                "{base} must not fall back to the local tracking OID"
+            );
+        }
+
+        // Configuration or programs a lane could have supplied are refused
+        // before any advertisement; the user's own helpers elsewhere are not.
+        let lane = fixture.root.join(".worktrees/lane-1/upload-pack");
+        std::fs::create_dir_all(lane.parent().ok_or("no parent")?)?;
+        std::fs::write(&lane, "#!/bin/sh\nexit 1\n")?;
+        let lane = lane.to_str().ok_or("non-UTF8 path")?;
+        run(&["config", "remote.origin.uploadpack", lane])?;
+        let refused = resolve_base("origin/main")
+            .err()
+            .ok_or("lane helper must fail")?;
+        assert!(
+            refused.to_string().contains("where lanes can write"),
+            "{refused}"
+        );
+        run(&["config", "remote.origin.uploadpack", "git-upload-pack"])?;
+        assert_eq!(resolve_base("origin/main")?, head);
+        Ok(())
+    }
+
+    #[test]
+    fn continuation_history_never_asks_git_to_verify_signatures() -> TestResult {
+        struct Records<'a>(&'a SystemExecutor, Mutex<Vec<Vec<OsString>>>);
+        impl Executor for Records<'_> {
+            fn execute(
+                &self,
+                options: ExecOptions<'_>,
+            ) -> std::result::Result<ExecOutcome, ExecError> {
+                self.1
+                    .lock()
+                    .map_err(|_| ExecError::Busy)?
+                    .push(options.argv.to_vec());
+                self.0.execute(options)
+            }
+        }
+        let fixture = small_history()?;
+        let executor = Records(&fixture.executor, Mutex::new(Vec::new()));
+        let history =
+            continuation_history_with(&executor, &fixture.binary, &fixture.root, &fixture.base)?;
+        assert!(history.contains("fixture"));
+        let calls = executor.1.lock().map_err(|_| "calls poisoned")?;
+        let log = calls
+            .iter()
+            .find(|argv| argv.contains(&"log".into()))
+            .ok_or("no log call")?;
+        assert!(log.contains(&"--no-show-signature".into()), "{log:?}");
+        // The environment override covers every other host read as well.
+        assert!(GIT_CONFIG_OVERRIDES.contains(&("log.showSignature", "false")));
+        Ok(())
     }
 
     #[test]
