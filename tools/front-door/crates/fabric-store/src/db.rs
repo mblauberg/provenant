@@ -190,9 +190,7 @@ impl Store {
             _owner: PhantomData,
         };
         if schema_version(&store.db)? != MIGRATIONS.len() {
-            return Err(Error::Invalid(
-                "local delivery index unavailable; upgrade through a normal inbox command",
-            ));
+            return Err(Error::Invalid("local delivery index unavailable"));
         }
         crate::local_delivery::before(deadline)?;
         Ok(Some(store))

@@ -34,9 +34,8 @@ fn lane_available_bytes_with(
 }
 
 use crate::cache::{
-    CARGO_CACHE_OWNER, CacheGcPolicy, CacheGcReason, LEGACY_CARGO_CACHE_OWNER_PREFIX,
-    cache_gc_reason_with_newest, cache_owner_fingerprint, cache_tombstone, is_cache_digest,
-    read_cache_owner,
+    CARGO_CACHE_OWNER, CacheGcPolicy, CacheGcReason, cache_gc_reason_with_newest,
+    cache_owner_fingerprint, cache_tombstone, is_cache_digest, read_cache_owner,
 };
 use crate::permissions::PermissionError;
 use crate::repo::VerifiedRepo;
@@ -52,7 +51,6 @@ use provenant_os::{
     fs::{Directory, FileKind, effective_uid, entry_names},
 };
 use std::ffi::OsStr;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Inspect caches without invoking GC or opening a write lock.
@@ -176,21 +174,7 @@ fn classify_lane_cache(
         {
             return Ok(("refused", None));
         }
-        let mut bytes = Vec::new();
-        let Ok(file) = cache.open_read(marker) else {
-            return Ok(("refused", None));
-        };
-        if file.take(8193).read_to_end(&mut bytes).is_err() {
-            return Ok(("refused", None));
-        }
-        return Ok((
-            if bytes.starts_with(LEGACY_CARGO_CACHE_OWNER_PREFIX) {
-                "legacy"
-            } else {
-                "refused"
-            },
-            None,
-        ));
+        return Ok(("refused", None));
     };
     let state = match cache_gc_reason_with_newest(relative, &owner, policy, || Ok(newest_write_ns))?
     {
@@ -201,7 +185,6 @@ fn classify_lane_cache(
         Some(CacheGcReason::Foreign) => "foreign",
         Some(CacheGcReason::Live) => "live",
         Some(CacheGcReason::Unobservable) => "unobservable",
-        None if owner.identity.is_none() => "legacy",
         None => "live",
     };
     Ok((state, Some(owner.path)))
@@ -471,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn lane_classification_retains_legacy_unmarked_and_refused()
+    fn lane_classification_refuses_unmarked_and_obsolete_markers()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = tempfile::tempdir()?;
         let cache = fixture.path().join("a".repeat(64));
@@ -485,29 +468,29 @@ mod tests {
         );
         std::fs::write(
             cache.join(CARGO_CACHE_OWNER),
-            LEGACY_CARGO_CACHE_OWNER_PREFIX,
+            b"provenant-lane-cargo-owner-v1\n",
         )?;
         assert_eq!(
             classify_lane_cache(&directory, relative, &policy, 0)?.0,
-            "legacy"
+            "refused"
         );
         let owner = fixture.path().join("owner");
         std::fs::write(
             cache.join(CARGO_CACHE_OWNER),
             [
-                LEGACY_CARGO_CACHE_OWNER_PREFIX,
+                b"provenant-lane-cargo-owner-v1\n",
                 owner.as_os_str().as_encoded_bytes(),
             ]
             .concat(),
         )?;
         assert_eq!(
             classify_lane_cache(&directory, relative, &policy, 0)?,
-            ("orphaned", Some(owner.clone()))
+            ("refused", None)
         );
         std::fs::create_dir(&owner)?;
         assert_eq!(
             classify_lane_cache(&directory, relative, &policy, 0)?,
-            ("foreign", Some(owner.clone()))
+            ("refused", None)
         );
         let policy = CacheGcPolicy {
             project_owners: [owner.clone()].into(),
@@ -516,7 +499,7 @@ mod tests {
         };
         assert_eq!(
             classify_lane_cache(&directory, relative, &policy, 0)?,
-            ("legacy", Some(owner))
+            ("refused", None)
         );
         std::fs::write(cache.join(CARGO_CACHE_OWNER), b"invalid marker")?;
         assert_eq!(
