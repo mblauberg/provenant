@@ -33,7 +33,6 @@ const REVISION_PREFIX: &str = "rev-";
 /// each names the revision it replaced, so the chain shows what came before and
 /// the content hash shows it was not altered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Revision {
     pub revision: u64,
     pub parent: Option<u64>,
@@ -42,7 +41,6 @@ pub struct Revision {
     pub saved_at: UtcMicros,
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Manifest {
     schema_version: u64,
     /// Oldest first; the last is the checkpoint in `checkpoint.md`.
@@ -51,7 +49,6 @@ struct Manifest {
 /// Every decision of one checkpoint publication, journaled before any file
 /// changes so that recovery replays exactly what was intended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct PublishPlan {
     pub(super) now: UtcMicros,
     /// The replaced revision number and text, stored before the checkpoint.

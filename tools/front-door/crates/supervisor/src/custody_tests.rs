@@ -5,6 +5,33 @@ use std::os::unix::fs::PermissionsExt;
 
 type TestResult = std::result::Result<(), Box<dyn Error>>;
 #[test]
+fn persisted_custody_accepts_future_fields_without_changing_scope_checks() -> TestResult {
+    let record = serde_json::json!({
+        "schema_version": 1,
+        "scope": {
+            "run": scope().run,
+            "attempt": scope().attempt,
+            "generation": 1,
+            "future_scope": {"value": true}
+        },
+        "binding": {"kind": "read_only", "future_binding": 42},
+        "future_journal": [1, 2]
+    });
+    let journal: OwnershipJournal =
+        decode_v1(serde_json::to_vec(&record)?.as_slice(), Limits::CONFIG)?;
+    assert_eq!(journal.schema_version, 1);
+    assert_eq!(journal.scope, scope());
+    journal.binding.validate()?;
+    let mut invalid = record;
+    invalid["scope"]["generation"] = serde_json::json!("invalid");
+    assert!(
+        decode_v1::<OwnershipJournal, _>(serde_json::to_vec(&invalid)?.as_slice(), Limits::CONFIG)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn capture_plan_without_silence_uses_registry_default() -> TestResult {
     let mut stored = serde_json::to_value(CapturePlan::default())?;
     stored

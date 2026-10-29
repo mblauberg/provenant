@@ -14,7 +14,7 @@ pub enum Workload {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct RouteIntent {
     pub workload: Workload,
     pub writes: bool,

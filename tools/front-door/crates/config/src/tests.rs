@@ -91,7 +91,9 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
         ("unknown", "update=false", "provider_id"),
     ] {
         let text = format!("schema_version=1\n[providers.{section}]\n{setting}");
-        assert_refusal(&load(&roots(), Some(text.as_bytes())).unwrap_err(), rule);
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_warning(&config, rule);
+        assert_eq!(config.providers["codex"], ProviderSettings::default());
     }
 }
 
@@ -116,8 +118,9 @@ fn provider_state_retention_defaults_overrides_and_validation() {
         ("'seven'", "type"),
     ] {
         let text = format!("schema_version=1\n[retention]\nprovider_state_days={value}");
-        let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
-        assert_refusal(&error, rule);
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_warning(&config, rule);
+        assert_eq!(config.retention.provider_state_days, 7);
     }
 }
 
@@ -141,8 +144,9 @@ fn session_revision_retention_defaults_overrides_and_validation() {
         ("'many'", "type"),
     ] {
         let text = format!("schema_version=1\n[retention]\nsession_revisions={value}");
-        let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
-        assert_refusal(&error, rule);
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_warning(&config, rule);
+        assert_eq!(config.retention.session_revisions, 8);
     }
 }
 
@@ -183,13 +187,14 @@ fn chair_log_retention_defaults_overrides_and_validation() {
         ("chair_log_bytes", "1073741825"),
     ] {
         let text = format!("schema_version=1\n[retention]\n{key}={value}");
-        let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
-        assert_refusal(&error, &format!("{key}_range"));
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_warning(&config, &format!("{key}_range"));
+        assert_eq!(config.retention, RetentionSettings::default());
     }
 }
 
 #[test]
-fn gc_settings_parse_defaults_overrides_and_refuse_invalid_values() {
+fn gc_settings_parse_defaults_overrides_and_warn_on_invalid_values() {
     let defaults = serde_json::to_value(load::<&[u8]>(&roots(), None).unwrap()).unwrap();
     assert_eq!(defaults["gc"]["schedule"], true);
     assert_eq!(defaults["gc"]["idle_days"], 7);
@@ -228,8 +233,9 @@ fn gc_settings_parse_defaults_overrides_and_refuse_invalid_values() {
         ("projects.p.keep=['/absolute']", "gc_keep_relative_path"),
     ] {
         let text = format!("schema_version=1\n[gc]\n{field}");
-        let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
-        assert_refusal(&error, rule);
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_warning(&config, rule);
+        assert_eq!(config.gc.idle_days, 7);
     }
 }
 
@@ -316,7 +322,7 @@ fn each_profile_selects_the_domain_owned_asset() {
 }
 
 #[test]
-fn closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_without_echoing_input() {
+fn config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoing_input() {
     for (text, refusal) in [
         ("", "missing"),
         ("# no version", "missing"),
@@ -351,9 +357,21 @@ fn closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_witho
             "syntax",
         ),
     ] {
-        let error = load(&roots(), Some(text.as_bytes())).unwrap_err();
-        assert_refusal(&error, refusal);
-        assert!(!format!("{error:?} {error}").contains("private-sentinel"));
+        let loaded = load(&roots(), Some(text.as_bytes()));
+        if matches!(refusal, "missing" | "version" | "syntax")
+            || (text.starts_with("schema_version=")
+                && !text.starts_with("schema_version=1\n")
+                && refusal == "type")
+        {
+            let error = loaded.unwrap_err();
+            assert_refusal(&error, refusal);
+            assert!(!format!("{error:?} {error}").contains("private-sentinel"));
+        } else {
+            let config = loaded.unwrap();
+            assert_warning(&config, refusal);
+            assert!(!format!("{:?}", config.warnings).contains("private-sentinel"));
+            assert_eq!(config.profile, Profile::Balanced);
+        }
     }
     assert!(matches!(
         load(&roots(), Some(&b"schema_version=9"[..])),
@@ -370,7 +388,7 @@ fn closed_toml_boundary_refuses_unknowns_duplicates_bad_types_and_versions_witho
 }
 
 #[test]
-fn domain_registration_checks_closed_types_and_semantics_after_applying_defaults() {
+fn domain_registration_warns_and_uses_defaults_for_invalid_user_values() {
     for (text, refusal) in [
         ("schema_version=1\n[domains.sample]\nlimit=0", "domain"),
         ("schema_version=1\n[domains.sample]\nlimit=9", "domain"),
@@ -386,23 +404,34 @@ fn domain_registration_checks_closed_types_and_semantics_after_applying_defaults
         ),
         ("schema_version=1\n[domains.other]", "unknown_key"),
     ] {
-        let error = load_with_domains(&roots(), Some(text.as_bytes()), &DOMAINS).unwrap_err();
-        assert_refusal(&error, refusal);
-        assert!(!format!("{error:?} {error}").contains("private-sentinel"));
+        let loaded = load_with_domains(&roots(), Some(text.as_bytes()), &DOMAINS);
+        if refusal == "syntax" {
+            assert_refusal(&loaded.unwrap_err(), refusal);
+        } else {
+            let config = loaded.unwrap();
+            assert_warning(&config, refusal);
+            assert!(!format!("{:?}", config.warnings).contains("private-sentinel"));
+            assert_eq!(
+                config.domains.sample,
+                Sample {
+                    limit: 8,
+                    enabled: true
+                }
+            );
+        }
     }
-    let error = load_with_domains(
+    let config = load_with_domains(
         &roots(),
         Some(&b"schema_version=1\n[domains.sample]\nlimit=0"[..]),
         &DOMAINS,
     )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        ConfigError::Domain {
-            source,
-            ..
-        } if source.field == "domains.sample.limit"
-    ));
+    .unwrap();
+    assert!(
+        config
+            .warnings
+            .iter()
+            .any(|warning| warning.message.starts_with("domains.sample.limit:"))
+    );
     let config = load_with_domains(
         &roots(),
         Some(&b"schema_version=1\n[domains.sample]\nlimit=3"[..]),
@@ -527,7 +556,7 @@ fn github_policy_is_scoped_to_project_and_defaults_only_when_absent() {
 }
 
 #[test]
-fn show_and_check_are_read_only_and_only_absence_uses_defaults() {
+fn show_and_check_are_read_only_and_preserve_hard_schema_errors() {
     let fixture = Files::new();
 
     assert_eq!(
@@ -570,13 +599,12 @@ fn show_and_check_are_read_only_and_only_absence_uses_defaults() {
         1
     );
     std::fs::write(fixture.config(), b"schema_version = 'private-sentinel'").unwrap();
-    assert_eq!(
-        inspect_config(&fixture.roots, &domains::NO_DOMAINS)
-            .unwrap()
-            .check
-            .count,
-        1
-    );
+    let inspection = inspect_config(&fixture.roots, &domains::NO_DOMAINS).unwrap();
+    assert!(inspection.check.findings.is_empty());
+    assert!(matches!(
+        inspection.error,
+        Some(ConfigError::Schema { rule: "type", .. })
+    ));
     assert!(matches!(
         config_show(&fixture.roots, &domains::NO_DOMAINS),
         Err(ConfigError::Schema { rule: "type", .. })
@@ -700,32 +728,28 @@ fn inspect_collects_ordered_unknown_type_range_and_domain_failures() {
 }
 
 #[test]
-fn exact_source_locations_survive_default_merging_and_inline_tables() {
-    for (text, key, line, column) in [
+fn warning_source_locations_survive_default_merging_and_inline_tables() {
+    for (text, key, line) in [
         (
             "schema_version=1\n[domains.sample]\n  surprise=5",
             "domains.sample.surprise",
-            3,
             3,
         ),
         (
             "schema_version=1\n[domains]\nsample = { enabled = 9 }",
             "domains.sample.enabled",
             3,
-            22,
         ),
     ] {
-        let error = load_with_domains(&roots(), Some(text.as_bytes()), &DOMAINS).unwrap_err();
-        match error {
-            ConfigError::Schema { location, .. } => {
-                assert!(matches!(location.origin, Origin::User { .. }));
-                assert_eq!(
-                    (location.key_path.as_str(), location.line, location.column),
-                    (key, line, column)
-                );
-            }
-            other => panic!("wrong refusal: {other:?}"),
-        }
+        let config = load_with_domains(&roots(), Some(text.as_bytes()), &DOMAINS).unwrap();
+        assert_eq!(config.warnings.len(), 1);
+        let warning = &config.warnings[0];
+        assert_eq!(
+            warning.path.to_relative_path().unwrap().as_path(),
+            Path::new("config.toml")
+        );
+        assert_eq!(warning.line, line);
+        assert!(warning.message.starts_with(&format!("{key}:")));
     }
 }
 
@@ -817,6 +841,22 @@ fn assert_refusal(error: &ConfigError, expected: &str) {
     assert_eq!(code, expected, "wrong refusal: {error:?}");
 }
 
+fn assert_warning<T>(config: &ResolvedConfig<T>, rule: &str) {
+    assert!(
+        config.warnings.iter().any(|warning| warning.rule == rule),
+        "missing {rule} warning: {:?}",
+        config.warnings
+    );
+    for warning in &config.warnings {
+        assert_eq!(
+            warning.path.to_relative_path().unwrap().as_path(),
+            Path::new("config.toml")
+        );
+        assert!(warning.line > 0);
+        assert!(warning.message.contains(":"));
+    }
+}
+
 #[test]
 fn array_members_are_checked_independently_at_their_exact_paths() {
     #[derive(Debug, Serialize, Deserialize)]
@@ -871,7 +911,7 @@ fn array_members_are_checked_independently_at_their_exact_paths() {
 }
 
 #[test]
-fn replacement_array_tables_cannot_hide_missing_fields_behind_defaults() {
+fn replacement_array_tables_warn_and_omit_rows_with_missing_fields() {
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct List {
@@ -888,22 +928,14 @@ fn replacement_array_tables_cannot_hide_missing_fields_behind_defaults() {
     }
     const ENTRIES: DomainSections<Aggregate> =
         DomainSections::new(&[DomainSection::new::<List>("list", defaults)]);
-    let error = load_with_domains(
+    let config = load_with_domains(
         &roots(),
         Some(&b"schema_version=1\n[domains.list]\nvalues=[{limit=2}, {enabled=false}]"[..]),
         &ENTRIES,
     )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        ConfigError::Schema {
-            location: Location {
-                origin: Origin::User { .. },
-                ..
-            },
-            rule: "type"
-        }
-    ));
+    .unwrap();
+    assert_warning(&config, "type");
+    assert!(config.domains.list.values.is_empty());
 }
 
 #[test]
@@ -928,7 +960,9 @@ fn empty_default_array_accepts_valid_typed_table_rows() {
     let config = load_with_domains(&roots(), Some(&input[..]), &ENTRIES).unwrap();
     assert_eq!(config.domains.list.rows.len(), 1);
     let invalid = b"schema_version=1\n[domains.list]\nrows=[{limit=2}]";
-    assert!(load_with_domains(&roots(), Some(&invalid[..]), &ENTRIES).is_err());
+    let invalid = load_with_domains(&roots(), Some(&invalid[..]), &ENTRIES).unwrap();
+    assert_warning(&invalid, "type");
+    assert!(invalid.domains.list.rows.is_empty());
 }
 
 #[test]
@@ -1068,7 +1102,7 @@ fn semantic_locations_keep_original_indices_after_invalid_empty_default_array_me
 }
 
 #[test]
-fn structured_arrays_without_a_complete_default_key_set_report_findings() {
+fn structured_arrays_with_empty_defaults_isolate_invalid_rows() {
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct List {
@@ -1093,8 +1127,17 @@ fn structured_arrays_without_a_complete_default_key_set_report_findings() {
     )
     .unwrap();
     let check = inspect_config(&fixture.roots, &ENTRIES).unwrap().check;
-    assert_eq!(check.count, 2);
+    assert_eq!(check.count, 1);
     assert!(check.findings.iter().all(|finding| finding.rule == "type"));
+    let config = read_with_domains(&fixture.roots, &ENTRIES).unwrap();
+    assert_eq!(config.domains.list.values.len(), 1);
+    assert_eq!(
+        config.domains.list.values[0],
+        Sample {
+            limit: 0,
+            enabled: true
+        }
+    );
 }
 
 #[test]
@@ -1177,7 +1220,7 @@ fn empty_compiled_typed_map_accepts_new_keys() {
 }
 
 #[test]
-fn empty_compiled_closed_section_rejects_unknown_keys() {
+fn empty_compiled_closed_section_warns_on_unknown_keys() {
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Closed {}
@@ -1193,14 +1236,13 @@ fn empty_compiled_closed_section_rejects_unknown_keys() {
     const ENTRIES: DomainSections<Aggregate> =
         DomainSections::new(&[DomainSection::new::<Closed>("closed", defaults)]);
     assert!(load_with_domains(&roots(), None::<&[u8]>, &ENTRIES).is_ok());
-    assert!(
-        load_with_domains(
-            &roots(),
-            Some(&b"schema_version=1\n[domains.closed]\nunknown=7"[..]),
-            &ENTRIES
-        )
-        .is_err()
-    );
+    let config = load_with_domains(
+        &roots(),
+        Some(&b"schema_version=1\n[domains.closed]\nunknown=7"[..]),
+        &ENTRIES,
+    )
+    .unwrap();
+    assert_warning(&config, "unknown_key");
 }
 
 fn state_roots(dir: &Path) -> Roots {
@@ -1219,7 +1261,7 @@ fn host_lane_build_settings_read_and_validate() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("config.toml"),
-        "[domains.fabric.lanes]\nmax_concurrent_builds=2\ncargo_build_jobs=5\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds=2\ncargo_build_jobs=5\n",
     )
     .unwrap();
     let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
@@ -1227,19 +1269,24 @@ fn host_lane_build_settings_read_and_validate() {
     assert_eq!(settings.cargo_build_jobs, Some(5));
     std::fs::write(
         temp.path().join("config.toml"),
-        "[domains.fabric.lanes]\nmax_concurrent_builds=0\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds=0\n",
     )
     .unwrap();
-    // Range errors are reported when configuration loads, not at admission.
+    // Invalid optional settings warn and use the same compiled defaults as startup.
     let settings = crate::LaneBuildSettings::read(temp.path()).unwrap();
-    assert_eq!(settings.invalid_keys(), ["max_concurrent_builds"]);
-    assert_eq!(settings.build_limit(0), 1);
+    assert!(settings.invalid_keys().is_empty());
+    assert_eq!(settings.max_concurrent_builds, None);
     std::fs::write(
         temp.path().join("config.toml"),
-        "[domains.fabric.lanes]\ncargo_build_jobs=-2\n",
+        "schema_version=1\n[domains.fabric.lanes]\ncargo_build_jobs=-2\n",
     )
     .unwrap();
-    assert!(crate::LaneBuildSettings::read(temp.path()).is_err());
+    assert_eq!(
+        crate::LaneBuildSettings::read(temp.path())
+            .unwrap()
+            .cargo_build_jobs,
+        None
+    );
 }
 #[test]
 fn set_knob_is_written_atomically_and_shown_with_its_source() {
@@ -1401,20 +1448,18 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
     assert!(!dir.path().join("config.toml").exists());
 }
 #[test]
-fn knob_edit_refuses_to_rewrite_an_invalid_config() {
+fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
     let path = dir.path().join("config.toml");
     let invalid = "schema_version = 1\nunknown = 1\n";
     std::fs::write(&path, invalid).unwrap();
-    assert!(matches!(
-        knob_edit(&roots, KnobEdit::Profile("rigorous")),
-        Err(ConfigError::Schema {
-            rule: "unknown_key",
-            ..
-        })
-    ));
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+    let config = knob_edit(&roots, KnobEdit::Profile("rigorous")).unwrap();
+    assert_eq!(config.profile, Profile::Rigorous);
+    assert_warning(&config, "unknown_key");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("unknown = 1"));
+    assert_eq!(read(&roots).unwrap().profile, Profile::Rigorous);
 }
 #[test]
 fn set_creates_a_missing_private_state_directory() {
@@ -1466,14 +1511,14 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
             3,
         ),
     ] {
-        match load(&roots(), Some(text.as_bytes())) {
-            Err(ConfigError::Schema { rule, location }) => {
-                assert_eq!(rule, "unknown_key", "{text}");
-                assert_eq!(location.key_path, key_path, "{text}");
-                assert_eq!(location.line, line, "{text}");
-            }
-            other => panic!("{text}: expected unknown_key, got {other:?}"),
-        }
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_warning(&config, "unknown_key");
+        assert!(
+            config.warnings.iter().any(|warning| warning.line == line
+                && warning.message.starts_with(&format!("{key_path}:"))),
+            "{text}: {:?}",
+            config.warnings
+        );
     }
 }
 
@@ -1484,27 +1529,19 @@ fn wrong_value_type_in_a_serde_decoded_section_still_reports_type() {
         "schema_version=1\n[gc]\nidle_days='7'",
         "schema_version=1\n[retention]\nprovider_state_days='7'",
     ] {
-        assert!(
-            matches!(
-                load(&roots(), Some(text.as_bytes())),
-                Err(ConfigError::Schema { rule: "type", .. })
-            ),
-            "{text}"
-        );
+        let config = load(&roots(), Some(text.as_bytes())).unwrap();
+        assert_warning(&config, "type");
     }
 }
 
 #[test]
-fn retired_disk_guard_configuration_is_rejected() {
+fn retired_disk_guard_configuration_warns_and_uses_defaults() {
     let roots = roots();
-    assert!(matches!(
-        load(
-            &roots,
-            Some(b"schema_version=1\n[disk_guard]\nenabled=false".as_slice())
-        ),
-        Err(ConfigError::Schema {
-            rule: "unknown_key",
-            ..
-        })
-    ));
+    let config = load(
+        &roots,
+        Some(b"schema_version=1\n[disk_guard]\nenabled=false".as_slice()),
+    )
+    .unwrap();
+    assert_warning(&config, "unknown_key");
+    assert_eq!(config.gc, GcSettings::default());
 }

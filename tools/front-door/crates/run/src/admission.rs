@@ -198,6 +198,9 @@ impl RunStore {
         call: &Request<'_>,
         resources: &dyn Resources,
     ) -> Vec<LaneWait> {
+        let pressure_threshold = provenant_config::LaneBuildSettings::read(&self.writer_registry)
+            .map(|settings| settings.memory_pressure_threshold)
+            .unwrap_or_default();
         lanes
             .iter()
             .filter(|lane| {
@@ -241,10 +244,8 @@ impl RunStore {
                             tenths(left),
                             tenths(spacing)
                         )
-                    } else if let Ok(Some(
-                        pressure @ (resources::MemoryPressure::Warning
-                        | resources::MemoryPressure::Critical),
-                    )) = resources.pressure()
+                    } else if let Ok(Some(pressure)) = resources.pressure()
+                        && pressure_threshold.defers(pressure)
                     {
                         format!("host capacity: memory pressure {pressure:?}")
                     } else {
@@ -476,7 +477,9 @@ impl RunStore {
                 disk_floor_bytes,
                 settings,
             ) {
-                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(_)) => {
+                (Ok(memory), pressure, Ok(disk), Ok(floor), Ok(settings)) => {
+                    let pressure =
+                        pressure.filter(|level| settings.memory_pressure_threshold.defers(*level));
                     let mut disk = disk;
                     if disk < floor {
                         if below_floor.is_multiple_of(RECLAIM_EVERY)
@@ -488,24 +491,13 @@ impl RunStore {
                     }
                     refusal = if disk < floor {
                         Some(RunError::DiskFloor { free: disk, floor })
-                    } else if let Some(
-                        level @ (resources::MemoryPressure::Warning
-                        | resources::MemoryPressure::Critical),
-                    ) = pressure
-                    {
-                        Some(RunError::MemoryPressure {
+                    } else {
+                        pressure.map(|level| RunError::MemoryPressure {
                             level: format!("{level:?}"),
                         })
-                    } else {
-                        None
                     };
-                    !matches!(
-                        pressure,
-                        Some(
-                            resources::MemoryPressure::Warning
-                                | resources::MemoryPressure::Critical
-                        )
-                    ) && memory.total_bytes > 0
+                    pressure.is_none()
+                        && memory.total_bytes > 0
                         && u128::from(memory.available_bytes) * 10_000
                             >= u128::from(memory.total_bytes)
                                 * u128::from(ticket.memory_floor_basis_points)

@@ -113,7 +113,6 @@ impl QuotaSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RefreshClaim {
     pub token: String,
     pub deadline_unix_seconds: i64,
@@ -136,7 +135,6 @@ pub struct CredentialStat {
     pub modified_ns: i128,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AccountRecord {
     pub schema_version: u64,
     pub account: AccountScope,
@@ -297,7 +295,6 @@ impl UpdateIntent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AccountRow {
     pub account: AccountScope,
     pub snapshot: Option<QuotaSnapshot>,
@@ -314,7 +311,6 @@ pub struct AccountRow {
     pub display: Option<RowDisplay>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CapacityCooldownRow {
     pub model: String,
     pub observed_unix_seconds: i64,
@@ -322,7 +318,6 @@ pub struct CapacityCooldownRow {
     pub remaining_seconds: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RowDisplay {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -334,7 +329,6 @@ pub struct RowDisplay {
     pub headline: Option<crate::Headline>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SourceRow {
     pub adapter: String,
     pub status: QuotaStatus,
@@ -342,13 +336,11 @@ pub struct SourceRow {
     pub next_due_unix_seconds: Option<i64>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Coverage {
     pub total: u64,
     pub known: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct QuotaReport {
     pub schema_version: u64,
     pub generated_unix_seconds: i64,
@@ -367,6 +359,28 @@ pub struct QuotaReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn persisted_account_accepts_future_fields_and_keeps_version_validation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let record = AccountRecord::empty(AccountScope {
+            adapter: "claude".into(),
+            account_key: "opaque".into(),
+            label: "work".into(),
+        });
+        let mut value = serde_json::to_value(&record)?;
+        value["future_record"] = serde_json::json!({"value": [1, 2]});
+        let decoded: AccountRecord = serde_json::from_value(value.clone())?;
+        assert_eq!(decoded, record);
+        decoded.validate()?;
+        value["schema_version"] = serde_json::json!(2);
+        assert!(
+            serde_json::from_value::<AccountRecord>(value)?
+                .validate()
+                .is_err()
+        );
+        Ok(())
+    }
+
     #[test]
     fn persisted_claim_cannot_exceed_the_tick_budget_or_exist_without_an_attempt() {
         let mut record = AccountRecord::empty(AccountScope {

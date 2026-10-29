@@ -446,8 +446,8 @@ writes within 24 hours. Deletion detaches and re-verifies identity first.
 
 The attempt layout is the `AttemptFile` table, pinned by
 `crates/records/src/attempt_file.rs::directories_and_classes_match_the_layout`.
-Writers refuse unknown versions and fields; read-only observers tolerate
-added fields within v1. Owner references and launch summaries carry no
+Persisted state tolerates added fields within its supported schema version.
+Version, scope, identity and custody validation still apply. Owner references and launch summaries carry no
 PID-derived or replayable authority, and a stale observation cannot
 establish death.
 - Why: authority comes from held custody, never a file a lane can write.

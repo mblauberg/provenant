@@ -25,7 +25,6 @@ pub(crate) enum Phase {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Journal {
     schema_version: u64,
     scope: Scope,
@@ -328,6 +327,43 @@ mod tests {
             attempt: AttemptId::from_bytes([2; 16]),
             generation: 1,
         }
+    }
+
+    #[test]
+    fn persisted_settlement_accepts_future_fields_and_still_checks_scope_and_version() -> TestResult
+    {
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let mut record = serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "phase": "import",
+            "attempts": 0,
+            "head": null,
+            "base": null,
+            "owner": null,
+            "future_progress": {"value": true}
+        });
+        let persist = |value: &serde_json::Value| -> TestResult {
+            attempt
+                .atomic_write(
+                    OsStr::new(FILE),
+                    ".settlement-test-",
+                    &serde_json::to_vec(value)?,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            Ok(())
+        };
+        persist(&record)?;
+        assert_eq!(read(&attempt, scope())?.phase, Phase::Import);
+        let mut other = scope();
+        other.generation += 1;
+        assert!(read(&attempt, other).is_err());
+        record["schema_version"] = serde_json::json!(2);
+        persist(&record)?;
+        assert!(read(&attempt, scope()).is_err());
+        Ok(())
     }
 
     #[test]
@@ -650,7 +686,6 @@ impl crate::RunStore {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct QueuedWorker {
     schema_version: u64,
     run: provenant_core::RunId,

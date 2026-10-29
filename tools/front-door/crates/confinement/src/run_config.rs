@@ -181,7 +181,8 @@ fn project_key(key: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
-pub const SECTION: DomainSection = DomainSection::new::<RunConfig>("run", |_| DEFAULTS);
+pub const SECTION: DomainSection =
+    DomainSection::new::<RunConfig>("run", |_| DEFAULTS).with_boundary_checks();
 
 #[cfg(test)]
 mod tests {
@@ -297,6 +298,11 @@ review_exempt = []
         let write = |text: &str| std::fs::write(state.path().join("config.toml"), text);
         write("schema_version = 1\n[domains.run]\nreview_exempt = ['a/']\n")?;
         assert_eq!(RunConfig::read(state.path())?.review_exempt, ["a/"]);
+        write("schema_version = 1\n[domains.run]\nfuture=true\nreview_exempt = ['a/']\n")?;
+        assert_eq!(RunConfig::read(state.path())?.review_exempt, ["a/"]);
+        write("schema_version = 1\n[domains.run.projects.p]\nreview_exempt = false\n")?;
+        assert!(RunConfig::read(state.path()).is_err());
+        write("schema_version = 1\n[domains.run]\nreview_exempt = ['a/']\n")?;
         assert!(RunConfig::review_exempt_at(state.path(), "p").covers(b"a/b"));
         // Other domains are not this reader's business.
         write("schema_version = 1\n[domains.guard]\ndeny = []\n")?;

@@ -54,7 +54,8 @@ impl DomainConfig for GuardConfig {
         }
     }
 }
-pub const SECTION: DomainSection = DomainSection::new::<GuardConfig>("guard", |_| DEFAULT_DENY);
+pub const SECTION: DomainSection =
+    DomainSection::new::<GuardConfig>("guard", |_| DEFAULT_DENY).with_boundary_checks();
 
 /// Where a command runs and the directories it must not remove. A rule whose
 /// directory is unknown allows.

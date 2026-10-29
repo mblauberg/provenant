@@ -24,7 +24,6 @@ pub enum MarkerKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HistoryMarker {
     pub kind: MarkerKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,7 +35,6 @@ pub struct HistoryMarker {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HistoryRecord {
     pub schema_version: u64,
     pub observed_unix_seconds: i64,
@@ -196,13 +194,23 @@ impl PlanPrice {
 
 /// Every entry valid, bounded, and at most one price per effective date.
 pub fn valid_plans(plans: &[PlanPrice]) -> bool {
-    plans.len() <= MAX_PLAN_PRICES
-        && plans.iter().all(PlanPrice::valid)
-        && plans.iter().enumerate().all(|(i, p)| {
-            plans[..i]
-                .iter()
-                .all(|q| q.effective_from != p.effective_from)
+    invalid_plan_rows(plans).is_empty()
+}
+
+/// Invalid rows in source order. An invalid row does not reserve its date;
+/// later valid rows can still supply that date's price.
+pub fn invalid_plan_rows(plans: &[PlanPrice]) -> Vec<usize> {
+    let mut dates = std::collections::BTreeSet::new();
+    plans
+        .iter()
+        .enumerate()
+        .filter_map(|(index, plan)| {
+            (index >= MAX_PLAN_PRICES
+                || !plan.valid()
+                || !dates.insert(plan.effective_from.as_str()))
+            .then_some(index)
         })
+        .collect()
 }
 
 /// The price in force at `observed_unix_seconds`, if any entry has started.
@@ -223,6 +231,23 @@ pub fn price_in_force(plans: &[PlanPrice], observed_unix_seconds: i64) -> Option
 mod tests {
     use super::*;
     use crate::QuotaDetails;
+
+    #[test]
+    fn history_keeps_newer_fields_readable_and_skips_unsupported_versions() {
+        let reading =
+            HistoryRecord::from_snapshot(&snapshot(1, None, vec![window("5h", 1, None)])).unwrap();
+        let mut value = serde_json::to_value(&reading).unwrap();
+        value["future_reading"] = serde_json::json!({"value": true});
+        value["markers"] = serde_json::json!([
+            {"kind": "reset", "pool": "5h", "future_marker": 1}
+        ]);
+        let decoded = decode_lines(&serde_json::to_vec(&value).unwrap());
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].account_key, reading.account_key);
+        assert_eq!(decoded[0].markers.len(), 1);
+        value["schema_version"] = serde_json::json!(2);
+        assert!(decode_lines(&serde_json::to_vec(&value).unwrap()).is_empty());
+    }
 
     fn window(pool: &str, used: u64, reset: Option<i64>) -> QuotaWindow {
         QuotaWindow {
@@ -427,5 +452,21 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.currency, "USD");
         assert_eq!(parsed.notional_usd, Some(20.0));
+    }
+
+    #[test]
+    fn invalid_plan_rows_identify_invalid_duplicate_and_excess_rows() {
+        let rows = [
+            plan("bad", -1.0, "2026-01-01"),
+            plan("first", 1.0, "2026-01-01"),
+            plan("duplicate", 2.0, "2026-01-01"),
+            plan("second", 3.0, "2026-02-01"),
+        ];
+        assert_eq!(invalid_plan_rows(&rows), [0, 2]);
+        let rows: Vec<_> = (0..=MAX_PLAN_PRICES)
+            .map(|index| plan("plan", 1.0, &format!("{}-01-01", 2026 + index)))
+            .collect();
+        assert_eq!(invalid_plan_rows(&rows), [MAX_PLAN_PRICES]);
+        assert!(valid_plans(&rows[..MAX_PLAN_PRICES]));
     }
 }

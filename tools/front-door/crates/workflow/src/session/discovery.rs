@@ -3,7 +3,6 @@ use super::*;
 use provenant_core::{ActorId, HostId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct ChairIdentity {
     pub host: HostId,
     pub actor: ActorId,
@@ -16,7 +15,6 @@ const REBIND_LIMIT: usize = 8;
 /// One per-session index entry, stored in `discovery.json`. Unknown provider,
 /// summary, lifecycle and lane facts are not inferred from a checkpoint save.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionDiscovery {
     pub schema_version: u64,
     pub host: HostId,
@@ -59,7 +57,6 @@ fn rebind_history<'de, D: serde::Deserializer<'de>>(
 
 /// The previous binding and when an operator explicitly replaced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChairRebind {
     pub host: HostId,
     pub actor: ActorId,

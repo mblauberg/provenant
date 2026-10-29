@@ -1258,12 +1258,11 @@ fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
     assert!(
         serde_json::from_str::<BoundedModels<2>>(r#"["codex/a","codex/b","codex/c"]"#).is_err()
     );
-    assert!(
-        serde_json::from_str::<RouteRequest>(
-            r#"{"choice":{"kind":"model","value":"codex/a"},"effort":null,"pool":"principal"}"#
-        )
-        .is_err()
-    );
+    let (_, warnings) = RouteRequest::from_json(
+        "request.json",
+        br#"{"choice":{"kind":"model","value":"codex/a"},"effort":null,"pool":"principal"}"#,
+    )?;
+    assert_eq!(warnings[0].key, "pool");
     Ok(())
 }
 #[test]
