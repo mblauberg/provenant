@@ -61,7 +61,7 @@ impl Fixture {
     }
 }
 fn config() -> crate::config::FabricConfig {
-    serde_json::from_value(serde_json::json!({"agent_label":"chair","client_label":"test","home_hosts":{},"peers":{},"limits":{"body_bytes":65536,"input_frame_bytes":1048576,"json_depth":64,"page_rows":100,"output_lines":500,"output_bytes":65536,"result_bytes":1048576,"lease_seconds":3600,"peer_seconds":30,"graph_timeout_seconds":14400,"bundle_bytes":67108864}})).unwrap()
+    serde_json::from_value(serde_json::json!({"agent_label":"chair","client_label":"test","home_hosts":{},"peers":{},"limits":{"body_bytes":65536,"input_frame_bytes":1048576,"json_depth":64,"page_rows":100,"output_lines":500,"output_bytes":65536,"result_bytes":1048576,"lease_seconds":3600,"peer_seconds":30,"graph_timeout_seconds":14400}})).unwrap()
 }
 fn op(text: &str) -> Option<OperationId> {
     Some(OperationId::parse(text).unwrap())

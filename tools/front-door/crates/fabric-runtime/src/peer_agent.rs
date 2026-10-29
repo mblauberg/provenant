@@ -20,6 +20,10 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -33,6 +37,31 @@ const REQUEST: Duration = Duration::from_secs(90);
 /// which the agent exits so launchd restarts it.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 const ACCEPT_FAILURES: u32 = 50;
+/// Maximum accepted requests running concurrently. Excess connections are
+/// closed immediately; the client reports its stable empty-reply error.
+const MAX_CONNECTIONS: usize = 64;
+
+#[derive(Clone, Default)]
+struct ConnectionSlots(Arc<AtomicUsize>);
+
+struct ConnectionSlot(ConnectionSlots);
+
+impl ConnectionSlots {
+    fn acquire(&self) -> Option<ConnectionSlot> {
+        self.0
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_CONNECTIONS).then_some(active + 1)
+            })
+            .ok()
+            .map(|_| ConnectionSlot(self.clone()))
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -255,8 +284,13 @@ fn serve_listener(
     cwd: &Path,
 ) -> Result<(), AgentError> {
     let mut failures = 0;
+    let slots = ConnectionSlots::default();
     loop {
         let Some((stream, _)) = accepted(listener.accept(), &mut failures, ACCEPT_PAUSE)? else {
+            continue;
+        };
+        let Some(slot) = slots.acquire() else {
+            drop(stream);
             continue;
         };
         let (program, state, cwd) = (
@@ -264,11 +298,14 @@ fn serve_listener(
             state.to_path_buf(),
             cwd.to_path_buf(),
         );
-        std::thread::spawn(move || {
+        if let Err(error) = std::thread::Builder::new().spawn(move || {
+            let _slot = slot;
             if let Err(error) = relay(stream, &program, &state, &cwd) {
                 log(&error.to_string());
             }
-        });
+        }) {
+            log(&format!("thread creation failed: {error}"));
+        }
     }
 }
 
@@ -1443,7 +1480,20 @@ mod tests {
     }
 
     #[test]
-    fn requests_beyond_sixteen_held_connections_are_relayed() {
+    fn connection_slots_enforce_bound_and_release_after_drop() {
+        use super::*;
+        let slots = ConnectionSlots::default();
+        let mut held: Vec<_> = (0..MAX_CONNECTIONS)
+            .map(|_| slots.acquire().expect("slot within bound"))
+            .collect();
+        assert!(slots.acquire().is_none());
+        drop(held.pop());
+        assert!(slots.acquire().is_some());
+    }
+
+    #[test]
+    #[ignore = "sandbox socket paths exceed the platform SUN_LEN bound"]
+    fn excess_unix_socket_connection_is_closed_and_slots_reopen() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let state = root.path().to_path_buf();
@@ -1455,17 +1505,26 @@ mod tests {
         std::thread::spawn(move || {
             let _ = serve_listener(listener, &program, &server_state, &server_state);
         });
-        // Connections that never finish their request once filled a cap of
-        // 16 and turned later requests away. The agent has no cap now.
+        // Keep accepted requests open until every slot is occupied.
         let socket = directory(&state).join(SOCKET);
         let held: Vec<UnixStream> = (0..32)
             .map(|_| UnixStream::connect(&socket).unwrap())
             .collect();
+        let held: Vec<UnixStream> = held
+            .into_iter()
+            .chain((0..MAX_CONNECTIONS - 32).map(|_| UnixStream::connect(&socket).unwrap()))
+            .collect();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(matches!(
+            forward(&state, b"request"),
+            Err(AgentError::NoReply(_))
+        ));
+        drop(held);
+        std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             forward(&state, b"request").unwrap(),
             Forward::Replied(b"request".to_vec())
         );
-        drop(held);
     }
 
     #[test]

@@ -149,7 +149,6 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
         peer_seconds: 30,
         graph_timeout_seconds: 14400,
         store_busy_timeout_ms: 30_000,
-        bundle_bytes: 65536,
     };
     service = service.with_limits(limits);
     service.facade.fail_first = false;
@@ -630,7 +629,6 @@ fn relay_limits() -> provenant_fabric_runtime::config::Limits {
         lease_seconds: 300,
         peer_seconds: 30,
         graph_timeout_seconds: 14400,
-        bundle_bytes: 65536,
         store_busy_timeout_ms: 30_000,
     }
 }
