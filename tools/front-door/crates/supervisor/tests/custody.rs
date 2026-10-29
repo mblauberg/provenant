@@ -1241,7 +1241,7 @@ fn the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal(root: &P
         (
             "clock",
             "unreadable-clock",
-            "startup spacing cannot be judged: host clock or boot identity unreadable",
+            "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read",
         ),
         ("io", "other-error", "admission refused"),
     ] {
@@ -2514,6 +2514,12 @@ impl provenant_core::Clock for JumpingClock {
     }
     fn mono_now(&self) -> provenant_core::MonoTime {
         provenant_core::Clock::mono_now(&SystemClock::new())
+    }
+    fn host_monotonic_micros(&self) -> std::result::Result<u64, provenant_core::TimeError> {
+        provenant_core::Clock::host_monotonic_micros(&SystemClock::new())
+    }
+    fn boot_identity(&self) -> std::result::Result<String, provenant_core::TimeError> {
+        provenant_core::Clock::boot_identity(&SystemClock::new())
     }
     fn wait_until(
         &self,
