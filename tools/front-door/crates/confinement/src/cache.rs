@@ -15,7 +15,6 @@ use thiserror::Error;
 
 pub(crate) const CARGO_CACHE_OWNER: &str = ".provenant-worktree-owner";
 pub(crate) const CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v2\n";
-pub(crate) const LEGACY_CARGO_CACHE_OWNER_PREFIX: &[u8] = b"provenant-lane-cargo-owner-v1\n";
 const MAX_CACHE_SWEEP_DEPTH: usize = 32;
 const MAX_CACHE_DIRECTORY_ENTRIES: usize = 100_000;
 
@@ -667,18 +666,14 @@ pub(crate) fn cache_tombstone(name: &str) -> Option<(u64, u64, &str)> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CacheOwner {
     pub(crate) path: PathBuf,
-    pub(crate) identity: Option<(u64, u64)>,
+    pub(crate) identity: (u64, u64),
 }
 
 pub(crate) fn cache_owner_fingerprint(owner: &CacheOwner) -> String {
     let mut digest = Sha256::new();
-    if let Some((device, inode)) = owner.identity {
-        digest.update(CARGO_CACHE_OWNER_PREFIX);
-        digest.update(device.to_le_bytes());
-        digest.update(inode.to_le_bytes());
-    } else {
-        digest.update(LEGACY_CARGO_CACHE_OWNER_PREFIX);
-    }
+    digest.update(CARGO_CACHE_OWNER_PREFIX);
+    digest.update(owner.identity.0.to_le_bytes());
+    digest.update(owner.identity.1.to_le_bytes());
     digest.update(owner.path.as_os_str().as_encoded_bytes());
     provenant_core::hex(&digest.finalize()[..16])
 }
@@ -720,29 +715,24 @@ pub(crate) fn read_cache_owner(
     if marker.len() > 8192 {
         return Ok(None);
     }
-    let (identity, path_bytes) =
-        if let Some(path) = marker.strip_prefix(LEGACY_CARGO_CACHE_OWNER_PREFIX) {
-            (None, path)
-        } else if let Some(owner_bytes) = marker.strip_prefix(CARGO_CACHE_OWNER_PREFIX) {
-            // Short v2 payloads are ambiguous and cannot authorise collection.
-            if owner_bytes.len() <= 16 {
-                return Ok(None);
-            }
-            let (identity, path) = owner_bytes.split_at(16);
-            let device = u64::from_le_bytes(
-                identity[..8]
-                    .try_into()
-                    .map_err(|_| PermissionError::InvalidFixture)?,
-            );
-            let inode = u64::from_le_bytes(
-                identity[8..]
-                    .try_into()
-                    .map_err(|_| PermissionError::InvalidFixture)?,
-            );
-            (Some((device, inode)), path)
-        } else {
-            return Ok(None);
-        };
+    let Some(owner_bytes) = marker.strip_prefix(CARGO_CACHE_OWNER_PREFIX) else {
+        return Ok(None);
+    };
+    // Short payloads cannot authorise collection.
+    if owner_bytes.len() <= 16 {
+        return Ok(None);
+    }
+    let (identity, path_bytes) = owner_bytes.split_at(16);
+    let device = u64::from_le_bytes(
+        identity[..8]
+            .try_into()
+            .map_err(|_| PermissionError::InvalidFixture)?,
+    );
+    let inode = u64::from_le_bytes(
+        identity[8..]
+            .try_into()
+            .map_err(|_| PermissionError::InvalidFixture)?,
+    );
     if path_bytes.is_empty() {
         return Ok(None);
     }
@@ -756,7 +746,7 @@ pub(crate) fn read_cache_owner(
     }
     Ok(Some(CacheOwner {
         path: owner,
-        identity,
+        identity: (device, inode),
     }))
 }
 
@@ -784,7 +774,7 @@ pub(crate) fn cache_gc_reason_with_newest(
     let reason = match std::fs::symlink_metadata(&owner.path) {
         Ok(_) if !policy.project_owners.contains(&owner.path) => CacheGcReason::Foreign,
         Ok(_) if policy.protected_owners.contains_key(&owner.path) => return Ok(None),
-        Ok(metadata) if owner.identity == Some((metadata.dev(), metadata.ino())) => {
+        Ok(metadata) if owner.identity == (metadata.dev(), metadata.ino()) => {
             let Some(threshold) = policy.idle_before_ns else {
                 return Ok(None);
             };
@@ -794,8 +784,6 @@ pub(crate) fn cache_gc_reason_with_newest(
             }
             CacheGcReason::Idle
         }
-        // Legacy owners have no identity for idle collection. A replacement
-        // owner may be launching with a fresh incarnation.
         Ok(_) => return Ok(None),
         Err(error) if error.kind() == io::ErrorKind::NotFound => CacheGcReason::Orphaned,
         Err(error) => {
@@ -957,8 +945,7 @@ mod tests {
         let orphan = cache_root.join("a".repeat(64));
         let live = cache_root.join("b".repeat(64));
         let unknown = cache_root.join("c".repeat(64));
-        let legacy = cache_root.join("d".repeat(64));
-        for cache in [&orphan, &live, &unknown, &legacy] {
+        for cache in [&orphan, &live, &unknown] {
             std::fs::create_dir(cache)?;
             std::fs::set_permissions(cache, std::fs::Permissions::from_mode(0o700))?;
         }
@@ -982,15 +969,6 @@ mod tests {
             marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
             std::fs::write(cache.join(CARGO_CACHE_OWNER), marker)?;
         }
-        let legacy_owner = home.join("legacy-worktree");
-        std::fs::write(
-            legacy.join(CARGO_CACHE_OWNER),
-            [
-                LEGACY_CARGO_CACHE_OWNER_PREFIX,
-                legacy_owner.as_os_str().as_encoded_bytes(),
-            ]
-            .concat(),
-        )?;
         std::fs::create_dir(orphan.join("release"))?;
         std::fs::write(orphan.join("release/provenant"), b"lane artifact")?;
 
@@ -998,7 +976,6 @@ mod tests {
         assert!(!orphan.exists());
         assert!(live.is_dir());
         assert!(unknown.is_dir());
-        assert!(!legacy.exists());
         Ok(())
     }
 
@@ -1313,149 +1290,17 @@ mod tests {
             Ok(())
         }
 
-        fn legacy_marker(cache: &Path, owner: &Path) -> io::Result<()> {
-            std::fs::write(
-                cache.join(CARGO_CACHE_OWNER),
-                [
-                    LEGACY_CARGO_CACHE_OWNER_PREFIX,
-                    owner.as_os_str().as_encoded_bytes(),
-                ]
-                .concat(),
-            )
-        }
-
         #[test]
-        fn gc_retains_invalid_legacy_paths_and_short_v2_markers()
+        fn gc_tombstone_retry_completes_after_interrupted_sweep()
         -> Result<(), Box<dyn std::error::Error>> {
             let temporary = tempfile::tempdir()?;
             let home = temporary.path();
             let path = cache(home, &"a".repeat(64), &home.join("missing"))?;
-            for owner in [
-                Path::new(""),
-                Path::new("relative"),
-                Path::new("/gone/../owner"),
-            ] {
-                legacy_marker(&path, owner)?;
-                assert!(
-                    gc_worktree_cargo_caches(home, &CacheGcPolicy::default())?
-                        .removed
-                        .is_empty()
-                );
-                assert!(path.join("artifact").is_file());
-            }
-            for length in 0..=16 {
-                let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
-                marker.extend(vec![0; length]);
-                std::fs::write(path.join(CARGO_CACHE_OWNER), marker)?;
-                assert!(
-                    gc_worktree_cargo_caches(home, &CacheGcPolicy::default())?
-                        .removed
-                        .is_empty()
-                );
-                assert!(path.join("artifact").is_file());
-            }
-            Ok(())
-        }
-
-        #[test]
-        fn gc_keeps_existing_legacy_owners_and_never_collects_them_as_idle()
-        -> Result<(), Box<dyn std::error::Error>> {
-            for kind in ["directory", "symlink", "recreated", "foreign"] {
-                let temporary = tempfile::tempdir()?;
-                let home = temporary.path();
-                let owner = home.join("owner");
-                std::fs::create_dir(&owner)?;
-                let path = cache(home, &"a".repeat(64), &owner)?;
-                legacy_marker(&path, &owner)?;
-                if kind == "symlink" || kind == "recreated" {
-                    let previous = home.join("previous");
-                    std::fs::rename(&owner, &previous)?;
-                    if kind == "symlink" {
-                        std::os::unix::fs::symlink(&previous, &owner)?;
-                    } else {
-                        std::fs::create_dir(&owner)?;
-                    }
-                }
-                let mut policy = CacheGcPolicy {
-                    idle_before_ns: Some(i128::MAX),
-                    ..CacheGcPolicy::default()
-                };
-                if kind != "foreign" {
-                    policy.project_owners.insert(owner);
-                }
-                let report = gc_worktree_cargo_caches(home, &policy)?;
-                assert!(report.removed.is_empty(), "{kind}");
-                assert!(path.join("artifact").is_file(), "{kind}");
-                if kind == "foreign" {
-                    assert_eq!(report.kept.len(), 1);
-                    assert_eq!(report.kept[0].reason, CacheGcReason::Foreign);
-                } else {
-                    assert!(report.kept.is_empty());
-                }
-            }
-            Ok(())
-        }
-
-        #[test]
-        fn gc_legacy_owner_stat_error_is_reported_and_cache_kept()
-        -> Result<(), Box<dyn std::error::Error>> {
-            let temporary = tempfile::tempdir()?;
-            let home = temporary.path();
-            let file = home.join("file");
-            std::fs::write(&file, b"not a directory")?;
-            let owner = file.join("owner");
-            let path = cache(home, &"a".repeat(64), &owner)?;
-            legacy_marker(&path, &owner)?;
-            let error = gc_worktree_cargo_caches(home, &CacheGcPolicy::default())
-                .expect_err("owner stat error must be reported");
-            assert!(error.to_string().contains("stat owner"));
-            assert!(error.report.removed.is_empty());
-            assert!(path.join("artifact").is_file());
-            Ok(())
-        }
-
-        #[test]
-        fn gc_legacy_marker_upgrade_before_detaching_keeps_cache()
-        -> Result<(), Box<dyn std::error::Error>> {
-            use std::sync::atomic::{AtomicUsize, Ordering};
-
-            let temporary = tempfile::tempdir()?;
-            let home = temporary.path();
-            let owner = home.join("missing");
-            let path = cache(home, &"a".repeat(64), &owner)?;
-            legacy_marker(&path, &owner)?;
-            let reads = AtomicUsize::new(0);
-            let report = sweep(
-                home,
-                &CacheGcPolicy::default(),
-                Arc::new(move |event, marker| {
-                    if event == "read" && reads.fetch_add(1, Ordering::SeqCst) == 1 {
-                        std::fs::create_dir(&owner)?;
-                        let identity = std::fs::metadata(&owner)?;
-                        let mut bytes = CARGO_CACHE_OWNER_PREFIX.to_vec();
-                        bytes.extend_from_slice(&identity.dev().to_le_bytes());
-                        bytes.extend_from_slice(&identity.ino().to_le_bytes());
-                        bytes.extend_from_slice(owner.as_os_str().as_encoded_bytes());
-                        std::fs::write(marker, bytes)?;
-                    }
-                    Ok(())
-                }),
-            )?;
-            assert!(report.removed.is_empty());
-            assert!(
-                std::fs::read(path.join(CARGO_CACHE_OWNER))?.starts_with(CARGO_CACHE_OWNER_PREFIX)
-            );
-            assert!(path.join("artifact").is_file());
-            Ok(())
-        }
-
-        #[test]
-        fn gc_legacy_tombstone_retry_completes_after_interrupted_sweep()
-        -> Result<(), Box<dyn std::error::Error>> {
-            let temporary = tempfile::tempdir()?;
-            let home = temporary.path();
-            let path = cache(home, &"a".repeat(64), &home.join("missing"))?;
-            legacy_marker(&path, &home.join("missing"))?;
+            let mut marker = CARGO_CACHE_OWNER_PREFIX.to_vec();
+            marker.extend_from_slice(&1_u64.to_le_bytes());
+            marker.extend_from_slice(&2_u64.to_le_bytes());
+            marker.extend_from_slice(home.join("missing").as_os_str().as_encoded_bytes());
+            std::fs::write(path.join(CARGO_CACHE_OWNER), marker)?;
             let marker = std::fs::read(path.join(CARGO_CACHE_OWNER))?;
             let error = sweep(
                 home,
@@ -1467,7 +1312,7 @@ mod tests {
                     Ok(())
                 }),
             )
-            .expect_err("injected unlink failure leaves a legacy tombstone");
+            .expect_err("injected unlink failure leaves a tombstone");
             assert!(error.report.removed.is_empty());
             let root = path.parent().ok_or("cache parent")?;
             let tombstone = std::fs::read_dir(root)?.next().ok_or("tombstone")??.path();
