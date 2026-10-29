@@ -1,12 +1,10 @@
 //! Read-only edge resolution. No provider, database, or legacy-content reads.
 use provenant_core::{RootInputs, Roots};
-use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+use provenant_os::git::{RepositoryPath, repository_path};
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     fs, io,
-    os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
-    time::Duration,
 };
 use thiserror::Error;
 #[derive(Debug, Error)]
@@ -79,68 +77,7 @@ pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf,
     Ok(path)
 }
 fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
-    git_project_path(path, "--show-toplevel")
-}
-
-fn git_project_path(path: &Path, field: &str) -> Result<PathBuf, RootError> {
-    let git = provenant_os::git::git_executable().ok_or(RootError::Checkout)?;
-    let argv: Vec<OsString> = [
-        git.as_os_str(),
-        OsStr::new("--no-pager"),
-        OsStr::new("--no-optional-locks"),
-        OsStr::new("-c"),
-        OsStr::new("core.fsmonitor=false"),
-        OsStr::new("-c"),
-        OsStr::new("core.hooksPath=/dev/null"),
-        OsStr::new("rev-parse"),
-        OsStr::new("--path-format=absolute"),
-        OsStr::new(field),
-    ]
-    .into_iter()
-    .map(OsStr::to_owned)
-    .collect();
-    let env: Vec<(OsString, OsString)> = [
-        ("HOME", "/nonexistent"),
-        ("XDG_CONFIG_HOME", "/nonexistent"),
-        ("GIT_CONFIG_NOSYSTEM", "1"),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_SYSTEM", "/dev/null"),
-        ("GIT_NO_REPLACE_OBJECTS", "1"),
-        ("GIT_NO_LAZY_FETCH", "1"),
-        ("GIT_TERMINAL_PROMPT", "0"),
-        ("LC_ALL", "C"),
-    ]
-    .map(|(k, v)| (k.into(), v.into()))
-    .into();
-    let mut options = ExecOptions::new(&argv, path, Duration::from_secs(2));
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
-    options.stderr = StreamPolicy::Discard;
-    options.stop_on_output_limit = true;
-    let result = SystemExecutor::new(1)
-        .and_then(|executor| executor.execute(options))
-        .map_err(|_| RootError::Checkout)?;
-    if result.termination != Termination::Exit(0)
-        || result.timed_out
-        || result.drain_truncated
-        || result.stdout.truncated
-        || result.stdout.read_failed
-    {
-        return Err(RootError::Checkout);
-    }
-    let bytes = result
-        .stdout
-        .bytes
-        .strip_suffix(b"\n")
-        .ok_or(RootError::Checkout)?;
-    if bytes.is_empty() || bytes.contains(&0) || bytes.contains(&b'\n') {
-        return Err(RootError::Checkout);
-    }
-    let root = PathBuf::from(OsString::from_vec(bytes.to_vec()));
-    if !root.is_absolute() {
-        return Err(RootError::Checkout);
-    }
-    Ok(fs::canonicalize(root)?)
+    repository_path(path, RepositoryPath::Toplevel).map_err(|_| RootError::Checkout)
 }
 
 fn session_project(selected: Option<&Path>) -> Result<PathBuf, RootError> {
@@ -151,8 +88,9 @@ fn session_project(selected: Option<&Path>) -> Result<PathBuf, RootError> {
     let selected =
         selected_project(Some(selected), true).map_err(|_| RootError::SessionProjectMissing)?;
     if let Some(cwd) = cwd
-        && git_project_path(&cwd, "--git-common-dir")?
-            != git_project_path(&selected, "--git-common-dir")?
+        && repository_path(&cwd, RepositoryPath::CommonDir).map_err(|_| RootError::Checkout)?
+            != repository_path(&selected, RepositoryPath::CommonDir)
+                .map_err(|_| RootError::Checkout)?
     {
         return Err(RootError::SessionProjectMismatch { cwd, selected });
     }

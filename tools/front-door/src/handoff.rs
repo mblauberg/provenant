@@ -152,12 +152,8 @@ fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refu
         workers,
         |context, cancel| Ok(worktrees::list(context, cancel)?),
     )?;
-    let (_, common) = git(
-        project,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        GIT_TIMEOUT,
-    )?;
-    let common = PathBuf::from(common.trim());
+    let common =
+        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)?;
     let primary = common
         .file_name()
         .is_some_and(|name| name == ".git")

@@ -137,13 +137,8 @@ fn discover_checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
                 .branch = Some(branch.to_owned());
         }
     }
-    let common = git
-        .full(
-            project,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?
-        .ok_or("cannot find the common Git directory")?;
-    let common = fs::canonicalize(common.trim_end_matches('\n'))?;
+    let common =
+        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)?;
     let primary = &checkouts.first().ok_or("no primary checkout")?.path;
     let valid = |candidate: &Path| -> Result<bool> {
         if roots::selected_project(Some(candidate), true)
@@ -233,11 +228,9 @@ enum Use {
 /// missing, unmounted or unreadable still holds its branch there. A missing
 /// state file means not held; any other read error or an unparseable entry is
 /// an error, which refuses the deletion.
-fn holder_of(git: &Git, project: &Path, branch: &str) -> Result<Option<(String, Use)>> {
-    let Some(common) = git.full(project, &["rev-parse", "--git-common-dir"])? else {
-        return Err("cannot find the common Git directory".into());
-    };
-    let common = project.join(common.trim_end_matches('\n'));
+fn holder_of(_git: &Git, project: &Path, branch: &str) -> Result<Option<(String, Use)>> {
+    let common =
+        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)?;
     for dir in administrative_dirs(&common)? {
         if let Some(how) = use_in(&dir, branch)? {
             return Ok(Some((checkout_path(&dir, &common), how)));
