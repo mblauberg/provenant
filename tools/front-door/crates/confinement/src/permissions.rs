@@ -4275,13 +4275,18 @@ mod tests {
         assert!(!sbpl.contains("file-write-unlink"));
         std::fs::remove_file(alias)?;
         // A second name for a Git control file is the one link that refuses.
-        let config_alias = linked.path().join("config-alias");
-        std::fs::hard_link(common.join("config"), &config_alias)?;
+        // (Repository revalidation already refuses a second name for `config`.)
+        std::fs::create_dir_all(common.join("hooks"))?;
+        let hook = common.join("hooks/pre-commit");
+        std::fs::write(&hook, b"#!/bin/sh\n")?;
+        let hook_alias = linked.path().join("hook-alias");
+        std::fs::hard_link(&hook, &hook_alias)?;
         assert!(matches!(
             backend.compile(&plan, &profile, &anchors),
-            Err(PermissionError::GitControlHardLinked(path)) if path == common.join("config")
+            Err(PermissionError::GitControlHardLinked(path)) if path == hook
         ));
-        std::fs::remove_file(config_alias)?;
+        std::fs::remove_file(hook_alias)?;
+        std::fs::remove_file(hook)?;
         assert!(sbpl.contains("(deny file-link)"));
         assert!(sbpl.contains("(allow sysctl-read)"));
         // A writer may run what it builds into a write root.
