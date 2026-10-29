@@ -46,5 +46,25 @@ pub enum RoutingError {
     ReviewDemand,
 }
 
+impl RoutingError {
+    /// Stable identifier for the refusal, independent of its display text.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ReadOnlyPolicy => "read_only_policy",
+            Self::InvalidModel => "invalid_model",
+            Self::InvalidValue => "invalid_value",
+            Self::Alternatives => "alternatives",
+            Self::UnknownAdapter => "unknown_adapter",
+            Self::UnknownRoute => "unknown_route",
+            Self::ConfidentialModel => "confidential_model",
+            Self::NoEligiblePoolMember { .. } => "no_eligible_pool_member",
+            Self::UnsupportedEffort { .. } => "unsupported_effort",
+            Self::Catalogue => "catalogue",
+            Self::Availability => "availability",
+            Self::ReviewDemand => "review_demand",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

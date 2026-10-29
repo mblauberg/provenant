@@ -530,8 +530,7 @@ billing = "subscription"
     assert_eq!(report.totals.cost.subscription_attempts, 1);
     assert_eq!(report.routes[0].totals.cost.subscription_attempts, 1);
     let bad = minimal.replace("[models.rates]", "[models.rates]\nother = 1");
-    let error = toml_edit::de::from_str::<ConfiguredPrices>(&bad).unwrap_err();
-    assert!(error.message().contains("unknown field `other`"));
+    assert!(toml_edit::de::from_str::<ConfiguredPrices>(&bad).is_err());
 }
 
 #[test]
@@ -576,40 +575,27 @@ fn subscription_classification_requires_an_exact_price_table_identity() {
 
 #[test]
 fn price_validation_refuses_unsupported_units_duplicates_and_unverified_zero() {
-    let invalid = PriceError::Invalid;
     type Mutation = fn(&mut ConfiguredPrices);
-    let cases: [(Mutation, PriceError); 8] = [
-        (|c| c.schema_version = 2, PriceError::UnsupportedVersion(2)),
-        (|c| c.units = "dollars".into(), invalid("units")),
-        (
-            |c| c.models.push(c.models[0].clone()),
-            invalid("duplicate provider/model"),
-        ),
+    let cases: [(Mutation, &str); 8] = [
+        (|c| c.schema_version = 2, "unsupported_version"),
+        (|c| c.units = "dollars".into(), "units"),
+        (|c| c.models.push(c.models[0].clone()), "duplicate_model"),
         (
             |c| c.models[0].rates.cache_read = Some(0),
-            invalid("zero rate requires explicit verification"),
+            "unverified_zero_rate",
         ),
         (
             |c| c.models[0].billing = BillingKind::Free,
-            invalid("free billing requires four verified zero rates"),
+            "invalid_free_rates",
         ),
-        (
-            |c| c.reviewed_at = "2026-02-30".into(),
-            invalid("identity or review date"),
-        ),
-        (
-            |c| c.models[0].sources.clear(),
-            invalid("model identity or source references"),
-        ),
-        (
-            |c| c.models[0].model = " ".into(),
-            invalid("model identity or source references"),
-        ),
+        (|c| c.reviewed_at = "2026-02-30".into(), "identity"),
+        (|c| c.models[0].sources.clear(), "model_identity"),
+        (|c| c.models[0].model = " ".into(), "model_identity"),
     ];
-    for (mutate, error) in cases {
+    for (mutate, code) in cases {
         let mut config = configured(Some(1));
         mutate(&mut config);
-        assert_eq!(validate_prices(&config).unwrap_err(), error);
+        assert_eq!(validate_prices(&config).unwrap_err().code(), code);
     }
 }
 

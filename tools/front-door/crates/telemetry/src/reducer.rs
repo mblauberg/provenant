@@ -22,6 +22,18 @@ pub enum TelemetryError {
     #[error("telemetry arithmetic overflow")]
     Overflow,
 }
+impl TelemetryError {
+    /// Stable machine-readable refusal code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TooLarge(_) => "too_large",
+            Self::InvalidFact(_) => "invalid_fact",
+            Self::InvalidWindow => "invalid_window",
+            Self::InvalidPrice(error) => error.code(),
+            Self::Overflow => "overflow",
+        }
+    }
+}
 pub type Stats = Result<StatsReport, TelemetryError>;
 
 /// Explicit selection supplied by CLI. Bounds are already parsed UTC instants.

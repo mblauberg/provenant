@@ -26,6 +26,16 @@ pub enum UsageError {
     Io(#[from] io::Error),
 }
 
+impl UsageError {
+    /// Stable machine-readable refusal code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Filesystem(_) => "filesystem",
+            Self::Io(_) => "io",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Event {
     kind: String,
