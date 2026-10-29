@@ -177,7 +177,8 @@ impl Store {
         id: &OperationId,
         request: &Request<'_>,
     ) -> Result<Option<PeerOperation>> {
-        request.retry(|| load_peer(&self.db, project, actor, id))
+        request.check()?;
+        load_peer(&self.db, project, actor, id)
     }
 
     /// Return a sent request to Prepared after a known transient owner refusal.
@@ -264,17 +265,16 @@ impl Store {
         host: HostId,
         request: &Request<'_>,
     ) -> Result<u64> {
-        request.retry(|| {
-            let sequence: Option<i64> = self
-                .db
-                .query_row(
-                    "SELECT sequence FROM run_event_cursors WHERE project=?1 AND host=?2",
-                    params![project.to_string(), host.to_string()],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            u64::try_from(sequence.unwrap_or(0)).map_err(|_| Error::Invalid("stored run cursor"))
-        })
+        request.check()?;
+        let sequence: Option<i64> = self
+            .db
+            .query_row(
+                "SELECT sequence FROM run_event_cursors WHERE project=?1 AND host=?2",
+                params![project.to_string(), host.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        u64::try_from(sequence.unwrap_or(0)).map_err(|_| Error::Invalid("stored run cursor"))
     }
 
     /// Atomically add host-qualified run events to the project event stream and
@@ -365,8 +365,7 @@ impl Store {
 mod tests {
     use super::*;
     use provenant_core::{
-        CancelToken, Clock, MonoTime, PathResolver, RootInputs, StateRoot, TestClock, WaitBudget,
-        WallTime,
+        CancelToken, MonoTime, PathResolver, RootInputs, StateRoot, TestClock, WallTime,
     };
     use provenant_records::run::AttemptState;
     use std::path::{Path, PathBuf};
@@ -408,9 +407,7 @@ mod tests {
         fn request(&self) -> Request<'_> {
             Request {
                 clock: &self.clock,
-                budget: WaitBudget::cli(self.clock.mono_now(), 5).expect("budget"),
                 cancel: &self.cancel,
-                backoff: &ThreadWait,
             }
         }
         fn open(&self) -> Store {

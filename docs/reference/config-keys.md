@@ -37,6 +37,14 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | `allowed_read_roots` | empty (read roots stay inside the project and its registered worktrees) | Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees. (absolute directory paths). |
 | `limits.expansion_depth` | 64 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 33. Graph documents cannot raise it. (1 or more). |
 
+## Host store settings
+
+Set these in `[domains.fabric.limits]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `store_busy_timeout_ms` | 30000 (30 seconds) | Milliseconds a command waits for a contended local store, both the SQLite busy timeout and the stores' own advisory locks, before it reports contention. Read once when a command starts; zero fails fast (0 to 600000). |
+
 ## Host model policy settings
 
 Set these in `[domains.routing.model_policy]` in the host configuration. Omit a key for its bundled or empty default. `rules.policy` takes the same fields as `defaults`.

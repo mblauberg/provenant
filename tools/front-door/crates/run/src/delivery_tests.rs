@@ -1819,7 +1819,6 @@ fn review_delivery_requires_acceptance_and_exact_head()
     )?;
     let call = Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
         cancel: &cancel,
     };
     let store = RunStore::open(&execution, &call)?;
@@ -1849,7 +1848,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let lock = attempt.lock(
         std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
         provenant_os::fs::LockMode::Exclusive,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;
@@ -1972,7 +1971,6 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
     )?;
     let call = Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
         cancel: &cancel,
     };
     let store = RunStore::open(&execution, &call)?;
@@ -1998,7 +1996,7 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
     let lock = attempt.lock(
         std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
         provenant_os::fs::LockMode::Exclusive,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;
@@ -3238,7 +3236,7 @@ fn landed_writer_fence_fixture(
         directory,
         scope,
         binding,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?);
@@ -3273,7 +3271,7 @@ fn landed_writer_fence_fixture(
     let before = std::fs::read(&reservation)?;
     let recovery = custody::acquire_recovery(
         Directory::open_anchor(reservation.parent().ok_or("custody directory")?)?,
-        call.budget,
+        call.lock_budget(),
         &cancel,
         &clock,
     )?;

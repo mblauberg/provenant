@@ -713,7 +713,7 @@ struct QueuedWorker {
 /// The internal same-binary supervisor entry. It acquires journal ownership
 /// before each attempt; competing resumes return without waiting for Git.
 pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
-    use provenant_core::{Clock, RootInputs, WaitBudget};
+    use provenant_core::RootInputs;
     let request: ResumeRequest =
         serde_json::from_str(raw).map_err(|_| RunError::Validation("settlement resume request"))?;
     let mut roots = RootInputs::new(request.roots.home, request.roots.checkout);
@@ -731,8 +731,6 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
     let cancel = CancelToken::new();
     let call = crate::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 30)
-            .map_err(|_| RunError::Validation("settlement budget"))?,
         cancel: &cancel,
     };
     let store = crate::RunStore::open(&context, &call)?.with_writer_registry(&request.registry);
@@ -742,7 +740,7 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
     let _worker = match directory.lock(
         OsStr::new("settlement-worker.lock"),
         LockMode::Exclusive,
-        call.budget,
+        call.lock_budget(),
         call.cancel,
         call.clock,
     ) {
@@ -760,18 +758,8 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
             let (_wake, sleep) = mpsc::channel::<()>();
             let _ = sleep.recv_timeout(Duration::from_millis(delay_ms));
         }
-        let phase_call = crate::Request {
-            clock: &clock,
-            cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30)
-                .map_err(|_| RunError::Validation("settlement phase budget"))?,
-        };
-        let found = store.reconcile_with_observer(
-            request.run,
-            providers,
-            &phase_call,
-            &SystemProcessObserver,
-        )?;
+        let found =
+            store.reconcile_with_observer(request.run, providers, &call, &SystemProcessObserver)?;
         if !found
             .iter()
             .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { .. }))

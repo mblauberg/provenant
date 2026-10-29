@@ -1,7 +1,7 @@
 //! Host-only dispatch associations. Never open this index in a lane's child root.
 use provenant_core::{Digest, OperationId, ProjectId, RunId, StateRoot};
 use provenant_fabric_store::HostStore;
-pub use provenant_fabric_store::{Error, Request, RunChair, ThreadWait};
+pub use provenant_fabric_store::{Error, Request, RunChair};
 use provenant_records::run::CanonicalRequest;
 
 pub struct ChairIndex(HostStore);
@@ -161,8 +161,7 @@ impl ChairIndex {
 mod tests {
     use super::*;
     use provenant_core::{
-        ActorId, AttemptId, CancelToken, Clock, HostId, MonoTime, RootInputs, TestClock,
-        WaitBudget, WallTime,
+        ActorId, AttemptId, CancelToken, HostId, MonoTime, RootInputs, TestClock, WallTime,
     };
     use provenant_records::run::ChairBinding;
 
@@ -192,9 +191,7 @@ mod tests {
         let cancel = CancelToken::new();
         let call = Request {
             clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 30)?,
             cancel: &cancel,
-            backoff: &ThreadWait,
         };
         let project = ProjectId::from_bytes([1; 16]);
         let run = |n| RunId::from_bytes([n; 16]);

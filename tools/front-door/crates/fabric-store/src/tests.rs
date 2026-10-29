@@ -1,7 +1,7 @@
 use super::*;
 use provenant_core::{
     CancelToken, Clock, DurationMicros, MessageId, MonoTime, PathResolver, RootInputs, StateRoot,
-    TaskId, TestClock, TimeError, WaitBudget,
+    TaskId, TestClock, TimeError,
 };
 use provenant_records::{ArtifactRef, PathWire, RecordHeader};
 use std::{
@@ -57,9 +57,7 @@ impl Fixture {
     fn request(&self) -> Request<'_> {
         Request {
             clock: &self.clock,
-            budget: WaitBudget::cli(self.clock.mono_now(), 1).unwrap(),
             cancel: &self.cancel,
-            backoff: &ThreadWait,
         }
     }
     fn open(&self) -> Store {
@@ -549,56 +547,27 @@ fn event_replay_deduplication_and_durable_cursor() {
             .is_empty()
     );
 }
-struct BusyHandshake {
-    entered: Arc<Barrier>,
-    released: Arc<Barrier>,
-    first: std::sync::atomic::AtomicBool,
-}
-impl RetryWait for BusyHandshake {
-    fn wait(&self, _: DurationMicros, _: &CancelToken) {
-        if !self.first.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            self.entered.wait();
-            self.released.wait();
-        }
-    }
-}
+// The holder keeps its write lock across a real-time sleep so the sender waits.
+#[allow(clippy::disallowed_methods)]
 #[test]
-fn busy_retries_after_reserved_lock_release_without_sleep_or_open_transaction() {
+fn a_busy_store_waits_for_the_writer_instead_of_failing() {
     let f = Fixture::new();
-    let holder = f.open();
-    let ready = Arc::new(Barrier::new(2));
-    let start = Arc::new(Barrier::new(2));
-    let entered = Arc::new(Barrier::new(2));
-    let released = Arc::new(Barrier::new(2));
+    let store = f.open();
+    let held = Barrier::new(2);
     std::thread::scope(|s| {
-        let f = &f;
-        let ready2 = ready.clone();
-        let start2 = start.clone();
-        let entered2 = entered.clone();
-        let released2 = released.clone();
-        let worker = s.spawn(move || {
-            let store = f.open();
-            ready2.wait();
-            start2.wait();
-            let wait = BusyHandshake {
-                entered: entered2,
-                released: released2,
-                first: std::sync::atomic::AtomicBool::new(false),
-            };
-            let mut request = f.request();
-            request.backoff = &wait;
-            store.send(&message(f, 5), &request)
+        let releaser = s.spawn(|| {
+            let holder = f.open();
+            holder.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+            held.wait();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            holder.db.execute_batch("ROLLBACK").unwrap();
         });
-        ready.wait();
-        holder.db.execute_batch("BEGIN IMMEDIATE").unwrap();
-        start.wait();
-        entered.wait();
-        holder.db.execute_batch("ROLLBACK").unwrap();
-        released.wait();
-        worker.join().unwrap().unwrap();
+        held.wait();
+        store.send(&message(&f, 5), &f.request()).unwrap();
+        releaser.join().unwrap();
     });
     assert_eq!(
-        holder
+        store
             .read_mail(project(), actor(3), Some(0), 100, &f.request())
             .unwrap()
             .items
@@ -606,38 +575,18 @@ fn busy_retries_after_reserved_lock_release_without_sleep_or_open_transaction() 
         1
     );
 }
-struct AdvancingClock(std::cell::RefCell<TestClock>);
-impl Clock for AdvancingClock {
-    fn wall_now(&self) -> std::result::Result<WallTime, TimeError> {
-        self.0.borrow().wall_now()
-    }
-    fn mono_now(&self) -> MonoTime {
-        self.0.borrow().mono_now()
-    }
-    fn wait_until(&self, deadline: MonoTime) -> std::result::Result<(), TimeError> {
-        self.0.borrow().wait_until(deadline)
-    }
-}
-impl RetryWait for AdvancingClock {
-    fn wait(&self, _: DurationMicros, _: &CancelToken) {
-        self.0
-            .borrow_mut()
-            .advance(DurationMicros::from_seconds(1).unwrap())
-            .unwrap();
-    }
-}
 #[test]
 fn busy_and_cancellation_are_bounded_and_leave_no_mutation() {
     let f = Fixture::new();
     let store = f.open();
     let holder = f.open();
     holder.db.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let clock = AdvancingClock(std::cell::RefCell::new(f.clock.clone()));
-    let mut request = f.request();
-    request.clock = &clock;
-    request.backoff = &clock;
+    store
+        .db
+        .busy_timeout(std::time::Duration::from_millis(10))
+        .unwrap();
     assert!(matches!(
-        store.send(&message(&f, 5), &request),
+        store.send(&message(&f, 5), &f.request()),
         Err(Error::Busy)
     ));
     holder.db.execute_batch("ROLLBACK").unwrap();
@@ -664,13 +613,7 @@ fn cold_open_race_serialises_schema_setup() {
             let f = &f;
             scope.spawn(move || {
                 barrier.wait();
-                // The other opener can hold the write lock for seconds under
-                // CI load. This test checks serialisation, not latency.
-                let request = Request {
-                    budget: WaitBudget::cli(f.clock.mono_now(), 30).unwrap(),
-                    ..f.request()
-                };
-                let store = Store::open(&f.root, &request).unwrap();
+                let store = Store::open(&f.root, &f.request()).unwrap();
                 assert_eq!(
                     store
                         .db
@@ -685,6 +628,28 @@ fn cold_open_race_serialises_schema_setup() {
         first.join().unwrap();
         second.join().unwrap();
     });
+}
+#[test]
+fn concurrent_cold_opens_wait_for_one_initialiser() {
+    // SQLite never calls the busy handler on the switch to WAL, so without
+    // the initialisation lock a second cold open reports busy at once.
+    for _ in 0..10 {
+        let f = Fixture::new();
+        let barrier = Barrier::new(8);
+        std::thread::scope(|scope| {
+            let opens: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        Store::open(&f.root, &f.request()).map(drop)
+                    })
+                })
+                .collect();
+            for open in opens {
+                assert!(matches!(open.join().unwrap(), Ok(())));
+            }
+        });
+    }
 }
 #[cfg(unix)]
 #[test]

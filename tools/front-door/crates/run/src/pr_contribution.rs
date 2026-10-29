@@ -54,29 +54,27 @@ impl crate::RunStore {
         run: provenant_core::RunId,
         call: &Request<'_>,
     ) -> Result<Vec<crate::AttemptRecord>> {
-        call.retry(|| {
-            let mut query = self.db.prepare(
-                "SELECT id FROM attempts WHERE run=?1 AND project=?2 ORDER BY sequence LIMIT 10001",
-            )?;
-            let ids = query
-                .query_map(
-                    params![run.to_string(), self.context.project_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            if ids.len() > 10000 {
-                return Err(RunError::Validation("too many contribution attempts"));
-            }
-            ids.into_iter()
-                .map(|id| {
-                    self.record(
-                        id.parse()
-                            .map_err(|_| RunError::Validation("invalid contribution attempt"))?,
-                        call,
-                    )
-                })
-                .collect()
-        })
+        let mut query = self.db.prepare(
+            "SELECT id FROM attempts WHERE run=?1 AND project=?2 ORDER BY sequence LIMIT 10001",
+        )?;
+        let ids = query
+            .query_map(
+                params![run.to_string(), self.context.project_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if ids.len() > 10000 {
+            return Err(RunError::Validation("too many contribution attempts"));
+        }
+        ids.into_iter()
+            .map(|id| {
+                self.record(
+                    id.parse()
+                        .map_err(|_| RunError::Validation("invalid contribution attempt"))?,
+                    call,
+                )
+            })
+            .collect()
     }
     pub(crate) fn inherit_contribution(
         &self,
@@ -207,6 +205,7 @@ pub struct Contributions(Connection, usize);
 impl Contributions {
     /// Read without creating or migrating a store, including committed WAL data.
     pub fn open_read_only(host: &Path, call: &Request<'_>) -> Result<Option<Self>> {
+        call.check()?;
         let root = match provenant_os::fs::Directory::open_anchor(host) {
             Ok(root) => root,
             Err(error) if error.is_not_found() => return Ok(None),
@@ -218,7 +217,7 @@ impl Contributions {
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
         }
-        crate::db::companions(&root, FILE, call)?;
+        crate::db::companions(&root, FILE)?;
         let db = provenant_sqlite::open_connection(&host.join(FILE), true)?;
         match provenant_sqlite::read_version(&db, 4) {
             Ok(version @ 1..=4) => Ok(Some(Self(db, version))),
@@ -232,12 +231,12 @@ impl Contributions {
     }
     pub fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
         let (_, db, _lock) = open_database(host, FILE, call)?;
-        let version = call.retry(|| match provenant_sqlite::read_version(&db, 4) {
+        let version = match provenant_sqlite::read_version(&db, 4) {
             Ok(v) => Ok(v),
             Err(provenant_sqlite::VersionError::Unsupported(v)) => Err(RunError::Version(v)),
             Err(provenant_sqlite::VersionError::Unversioned) => Err(RunError::Version(0)),
             Err(provenant_sqlite::VersionError::Sqlite(e)) => Err(e.into()),
-        })?;
+        }?;
         if version == 0 {
             immediate(&db, call, |tx| {
                 tx.execute_batch(
@@ -500,10 +499,11 @@ impl Contributions {
         branch: &str,
         call: &Request<'_>,
     ) -> Result<Vec<PullRequest>> {
+        call.check()?;
         if self.1 < 3 {
             return Ok(Vec::new());
         }
-        call.retry(|| {
+        {
             let mut query = self.0.prepare(
                 "SELECT DISTINCT repository,number FROM branch_prs
                  WHERE project=?1 AND branch=?2 AND closed=0 ORDER BY repository,number",
@@ -518,7 +518,7 @@ impl Contributions {
                 Ok(PullRequest { repository, number })
             })
             .collect()
-        })
+        }
     }
 
     fn resolve(tx: &Connection, project: ProjectId, branch: &str) -> Result<()> {
@@ -679,34 +679,34 @@ impl Contributions {
 
     /// A binding can have no attempts; retained legacy links also establish coverage.
     pub fn is_bound(&self, pr: &PullRequest, call: &Request<'_>) -> Result<bool> {
+        call.check()?;
         pr.validate()?;
         let bindings = if self.1 == 1 {
             ""
         } else {
             " OR EXISTS(SELECT 1 FROM branch_prs WHERE repository=?1 AND number=?2)"
         };
-        call.retry(|| {
-            Ok(self.0.query_row(
-                &format!(
-                    "SELECT EXISTS(SELECT 1 FROM links WHERE repository=?1 AND number=?2){bindings}"
-                ),
-                params![
-                    pr.repository,
-                    i64::try_from(pr.number)
-                        .map_err(|_| RunError::Validation("PR number too large"))?
-                ],
-                |row| row.get(0),
-            )?)
-        })
+        Ok(self.0.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM links WHERE repository=?1 AND number=?2){bindings}"
+            ),
+            params![
+                pr.repository,
+                i64::try_from(pr.number)
+                    .map_err(|_| RunError::Validation("PR number too large"))?
+            ],
+            |row| row.get(0),
+        )?)
     }
 
     /// Truncation includes attempts whose link to this PR could not be added.
     pub fn truncated_for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<bool> {
+        call.check()?;
         pr.validate()?;
         if self.1 < 3 {
             return Ok(false);
         }
-        call.retry(|| {
+        {
             Ok(self.0.query_row(
                 "SELECT EXISTS(SELECT 1 FROM truncations t WHERE
                     EXISTS(SELECT 1 FROM links l WHERE l.attempt=t.attempt AND l.repository=?1 AND l.number=?2)
@@ -719,16 +719,17 @@ impl Contributions {
                 ],
                 |row| row.get(0),
             )?)
-        })
+        }
     }
 
     /// Attempts moved off this PR to the next generation after a late close.
     pub fn reassigned_from_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<u64> {
+        call.check()?;
         pr.validate()?;
         if self.1 < 4 {
             return Ok(0);
         }
-        call.retry(|| {
+        {
             let count: i64 = self.0.query_row(
                 "SELECT count(*) FROM reassignments WHERE repository=?1 AND number=?2",
                 params![
@@ -739,16 +740,17 @@ impl Contributions {
                 |row| row.get(0),
             )?;
             u64::try_from(count).map_err(|_| RunError::Validation("invalid contribution count"))
-        })
+        }
     }
 
     /// Linked attempts with no queue time, which a late close cannot place.
     pub fn unplaced_for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<u64> {
+        call.check()?;
         pr.validate()?;
         if self.1 < 3 {
             return Ok(0);
         }
-        call.retry(|| {
+        {
             let count: i64 = self.0.query_row(
                 "SELECT count(*) FROM links l JOIN branch_attempts a USING(attempt)
                  WHERE l.repository=?1 AND l.number=?2 AND a.queued_at IS NULL",
@@ -760,16 +762,17 @@ impl Contributions {
                 |row| row.get(0),
             )?;
             u64::try_from(count).map_err(|_| RunError::Validation("invalid contribution count"))
-        })
+        }
     }
 
     /// Sealed allocations omitted by automatic resolution, including absent rows.
     pub fn skipped_sealed_for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<u64> {
+        call.check()?;
         pr.validate()?;
         if self.1 < 3 {
             return Ok(0);
         }
-        call.retry(|| {
+        {
             let count: i64 = self.0.query_row(
                 "SELECT count(DISTINCT a.attempt) FROM branch_attempts a
                  JOIN branch_prs p USING(project,branch,generation)
@@ -785,76 +788,110 @@ impl Contributions {
                 |row| row.get(0),
             )?;
             u64::try_from(count).map_err(|_| RunError::Validation("invalid contribution count"))
-        })
+        }
     }
 
     /// Read linked attempts once, preserving unknown weights.
     pub fn for_pr(&self, pr: &PullRequest, call: &Request<'_>) -> Result<Vec<Contribution>> {
+        call.check()?;
         pr.validate()?;
         let number =
             i64::try_from(pr.number).map_err(|_| RunError::Validation("PR number too large"))?;
-        call.retry(|| {
-            let metadata = if self.1 == 1 {
-                "NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL"
-            } else if self.1 == 2 {
-                "a.branch,p.head,CASE a.role WHEN 'review' THEN 'read_only' ELSE a.role END,a.model,a.account,NULL,NULL,NULL,NULL"
-            } else {
-                "a.branch,p.head,a.role,a.model,a.account,a.run,a.outcome,a.queued_at,a.finished_at"
-            };
-            let joins = if self.1 == 1 { "" } else {
-                "LEFT JOIN branch_attempts a USING(attempt) LEFT JOIN branch_prs p ON p.project=a.project AND p.branch=a.branch AND p.repository=l.repository AND p.number=l.number"
-            };
-            let generation_join = if self.1 < 3 { "" } else { " AND p.generation=a.generation" };
-            let truncated = if self.1 < 3 { "0" } else { "EXISTS(SELECT 1 FROM truncations t WHERE t.attempt=l.attempt)" };
-            let sql = format!("SELECT l.attempt,l.weight,{metadata},
-                (SELECT count(*) FROM links c WHERE c.attempt=l.attempt),
-                NOT EXISTS(SELECT 1 FROM allocations s WHERE s.attempt=l.attempt),{truncated}
-                FROM links l {joins}{generation_join} WHERE l.repository=?1 AND l.number=?2 ORDER BY 10,l.attempt LIMIT 10001");
-            let mut query = self.0.prepare(&sql)?;
-            let mut rows = query.query(params![pr.repository, number])?;
-            let mut result = Vec::new();
-            while let Some(row) = rows.next()? {
-                if result.len() == 10000 {
-                    return Err(RunError::Validation("too many PR contributions"));
-                }
-                let raw: String = row.get(0)?;
-                let attempt = raw
-                    .parse()
-                    .map_err(|_| RunError::Validation("invalid contribution attempt"))?;
-                let weight: Option<i64> = row.get(1)?;
-                let weight_millionths = weight
-                    .map(|w| {
-                        u32::try_from(w)
-                            .map_err(|_| RunError::Validation("invalid contribution weight"))
-                    })
-                    .transpose()?;
-                let head: Option<String> = row.get(3)?;
-                let head = head
-                    .map(|head| {
-                        GitOid::parse(&head)
-                            .map_err(|_| RunError::Validation("invalid contribution head"))
-                    })
-                    .transpose()?;
-                result.push(Contribution {
-                    attempt,
-                    pull_request: pr.clone(),
-                    weight_millionths,
-                    branch: row.get(2)?,
-                    head,
-                    role: row.get(4)?,
-                    model: row.get(5)?,
-                    account: row.get(6)?,
-                    run: row.get::<_, Option<String>>(7)?.map(|id| id.parse().map_err(|_| RunError::Validation("invalid contribution run"))).transpose()?,
-                    outcome: row.get::<_, Option<String>>(8)?.map(|raw| serde_json::from_str(&raw).map_err(|_| RunError::Validation("invalid contribution outcome"))).transpose()?,
-                    queued_at: row.get::<_, Option<i64>>(9)?.map(|time| WallTime::from_micros(time).map_err(|_| RunError::Validation("invalid contribution time"))).transpose()?,
-                    finished_at: row.get::<_, Option<i64>>(10)?.map(|time| WallTime::from_micros(time).map_err(|_| RunError::Validation("invalid contribution time"))).transpose()?,
-                    pr_count: u64::try_from(row.get::<_, i64>(11)?).map_err(|_| RunError::Validation("invalid contribution count"))?,
-                    ambiguous: row.get::<_, i64>(11)? > 1 && row.get::<_, bool>(12)?,
-                    truncated: row.get(13)?,
-                });
+        let metadata = if self.1 == 1 {
+            "NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL"
+        } else if self.1 == 2 {
+            "a.branch,p.head,CASE a.role WHEN 'review' THEN 'read_only' ELSE a.role END,a.model,a.account,NULL,NULL,NULL,NULL"
+        } else {
+            "a.branch,p.head,a.role,a.model,a.account,a.run,a.outcome,a.queued_at,a.finished_at"
+        };
+        let joins = if self.1 == 1 {
+            ""
+        } else {
+            "LEFT JOIN branch_attempts a USING(attempt) LEFT JOIN branch_prs p ON p.project=a.project AND p.branch=a.branch AND p.repository=l.repository AND p.number=l.number"
+        };
+        let generation_join = if self.1 < 3 {
+            ""
+        } else {
+            " AND p.generation=a.generation"
+        };
+        let truncated = if self.1 < 3 {
+            "0"
+        } else {
+            "EXISTS(SELECT 1 FROM truncations t WHERE t.attempt=l.attempt)"
+        };
+        let sql = format!("SELECT l.attempt,l.weight,{metadata},
+            (SELECT count(*) FROM links c WHERE c.attempt=l.attempt),
+            NOT EXISTS(SELECT 1 FROM allocations s WHERE s.attempt=l.attempt),{truncated}
+            FROM links l {joins}{generation_join} WHERE l.repository=?1 AND l.number=?2 ORDER BY 10,l.attempt LIMIT 10001");
+        let mut query = self.0.prepare(&sql)?;
+        let mut rows = query.query(params![pr.repository, number])?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next()? {
+            if result.len() == 10000 {
+                return Err(RunError::Validation("too many PR contributions"));
             }
-            Ok(result)
-        })
+            let raw: String = row.get(0)?;
+            let attempt = raw
+                .parse()
+                .map_err(|_| RunError::Validation("invalid contribution attempt"))?;
+            let weight: Option<i64> = row.get(1)?;
+            let weight_millionths = weight
+                .map(|w| {
+                    u32::try_from(w)
+                        .map_err(|_| RunError::Validation("invalid contribution weight"))
+                })
+                .transpose()?;
+            let head: Option<String> = row.get(3)?;
+            let head = head
+                .map(|head| {
+                    GitOid::parse(&head)
+                        .map_err(|_| RunError::Validation("invalid contribution head"))
+                })
+                .transpose()?;
+            result.push(Contribution {
+                attempt,
+                pull_request: pr.clone(),
+                weight_millionths,
+                branch: row.get(2)?,
+                head,
+                role: row.get(4)?,
+                model: row.get(5)?,
+                account: row.get(6)?,
+                run: row
+                    .get::<_, Option<String>>(7)?
+                    .map(|id| {
+                        id.parse()
+                            .map_err(|_| RunError::Validation("invalid contribution run"))
+                    })
+                    .transpose()?,
+                outcome: row
+                    .get::<_, Option<String>>(8)?
+                    .map(|raw| {
+                        serde_json::from_str(&raw)
+                            .map_err(|_| RunError::Validation("invalid contribution outcome"))
+                    })
+                    .transpose()?,
+                queued_at: row
+                    .get::<_, Option<i64>>(9)?
+                    .map(|time| {
+                        WallTime::from_micros(time)
+                            .map_err(|_| RunError::Validation("invalid contribution time"))
+                    })
+                    .transpose()?,
+                finished_at: row
+                    .get::<_, Option<i64>>(10)?
+                    .map(|time| {
+                        WallTime::from_micros(time)
+                            .map_err(|_| RunError::Validation("invalid contribution time"))
+                    })
+                    .transpose()?,
+                pr_count: u64::try_from(row.get::<_, i64>(11)?)
+                    .map_err(|_| RunError::Validation("invalid contribution count"))?,
+                ambiguous: row.get::<_, i64>(11)? > 1 && row.get::<_, bool>(12)?,
+                truncated: row.get(13)?,
+            });
+        }
+        Ok(result)
     }
 }
 

@@ -53,21 +53,11 @@ impl Fixture {
             registrations: Default::default(),
         }
     }
-    fn budget(&self) -> WaitBudget {
-        WaitBudget::cli(self.clock.mono_now(), 5).unwrap()
-    }
     fn service(&self) -> InboxService<'_> {
-        InboxService::open(
-            &self.root,
-            &self.identity,
-            &self.clock,
-            self.budget(),
-            &self.cancel,
-        )
-        .unwrap()
+        InboxService::open(&self.root, &self.identity, &self.clock, &self.cancel).unwrap()
     }
     fn call(&self, input: InboxInput) -> Result<InboxResult, InboxError> {
-        self.service().execute(input, self.budget(), &self.cancel)
+        self.service().execute(input, &self.cancel)
     }
 }
 fn config() -> crate::config::FabricConfig {
@@ -105,7 +95,6 @@ fn offer(
         session,
         limit,
         bytes,
-        f.budget(),
         &f.cancel,
         || {
             f.registrations
@@ -398,9 +387,7 @@ fn delivery_capabilities_publish_only_tested_fabric_fallback_for_each_provider()
         assert_eq!(batch.items[0].answer.id, saved.answer_id.unwrap());
         let request = Request {
             clock: &f.clock,
-            budget: f.budget(),
             cancel: &f.cancel,
-            backoff: &ThreadWait,
         };
         let mail = f
             .service()
@@ -645,9 +632,7 @@ fn inbox_fabric_mail_is_correlated_and_read_cursor_does_not_acknowledge() {
     let service = f.service();
     let request = Request {
         clock: &f.clock,
-        budget: f.budget(),
         cancel: &f.cancel,
-        backoff: &ThreadWait,
     };
     let mail = service
         .store
@@ -691,12 +676,12 @@ fn inbox_concurrent_answers_have_one_winner_and_one_mail() {
         let first = scope.spawn(|| {
             let service = f.service();
             barrier.wait();
-            service.execute(answer(created.request_id, "first"), f.budget(), &f.cancel)
+            service.execute(answer(created.request_id, "first"), &f.cancel)
         });
         let second = scope.spawn(|| {
             let service = f.service();
             barrier.wait();
-            service.execute(answer(created.request_id, "second"), f.budget(), &f.cancel)
+            service.execute(answer(created.request_id, "second"), &f.cancel)
         });
         vec![first.join().unwrap(), second.join().unwrap()]
     });
@@ -712,9 +697,7 @@ fn inbox_concurrent_answers_have_one_winner_and_one_mail() {
     let service = f.service();
     let request = Request {
         clock: &f.clock,
-        budget: f.budget(),
         cancel: &f.cancel,
-        backoff: &ThreadWait,
     };
     assert_eq!(
         service
@@ -838,7 +821,6 @@ fn inbox_worker_mutations_are_refused_without_opening_store() {
         true,
         &f.clock,
         ask(RequestKind::Decision, "create"),
-        f.budget(),
         &f.cancel,
         &|_, _| panic!("lookup must not run"),
     );
@@ -851,7 +833,6 @@ fn inbox_worker_mutations_are_refused_without_opening_store() {
         false,
         &f.clock,
         ask(RequestKind::Decision, "create"),
-        f.budget(),
         &f.cancel,
         &|_, _| panic!("lookup must not run"),
     );
@@ -899,7 +880,7 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
         if let InboxInput::Ask { operation_id, .. } = &mut input {
             *operation_id = op(&format!("linked-{n}"));
         }
-        let result = service.execute(input.clone(), f.budget(), &f.cancel);
+        let result = service.execute(input.clone(), &f.cancel);
         if coverage == WorkCoverage::Mismatch {
             assert_eq!(result.unwrap_err().code(), "work_mismatch");
             continue;
@@ -929,9 +910,7 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
                 1_048_576,
                 &Request {
                     clock: &f.clock,
-                    budget: f.budget(),
                     cancel: &f.cancel,
-                    backoff: &ThreadWait,
                 }
             )
             .unwrap()
@@ -959,7 +938,7 @@ fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
     let created = receipt(
         f.service()
             .with_work_lookup(&|_, _| Ok(WorkCoverage::Verified))
-            .execute(input, f.budget(), &f.cancel)
+            .execute(input, &f.cancel)
             .unwrap(),
     );
     let check = |history_len| {
@@ -1013,9 +992,7 @@ fn request_correlation_absent_links_preserve_old_operation_digest() {
     let f = Fixture::new();
     let request = Request {
         clock: &f.clock,
-        budget: f.budget(),
         cancel: &f.cancel,
-        backoff: &ThreadWait,
     };
     let saved = f.call(input.clone()).unwrap();
     let replay: InboxResult = f
@@ -1057,14 +1034,14 @@ fn request_correlation_lookup_never_holds_fabric_write_lock() {
         // must return that receipt, rather than our later observation.
         f.service()
             .with_work_lookup(&|_, _| Ok(WorkCoverage::Unindexed))
-            .execute(input.clone(), f.budget(), &f.cancel)
+            .execute(input.clone(), &f.cancel)
             .unwrap();
         Ok(WorkCoverage::Verified)
     };
     let saved = receipt(
         f.service()
             .with_work_lookup(&lookup)
-            .execute(input.clone(), f.budget(), &f.cancel)
+            .execute(input.clone(), &f.cancel)
             .unwrap(),
     );
     assert_eq!(saved.work_coverage, Some(WorkCoverage::Unindexed));
@@ -1172,7 +1149,7 @@ fn replacement_work_mismatch_leaves_original_open_and_unindexed_is_saved() {
     assert_eq!(
         f.service()
             .with_work_lookup(&|_, _| Ok(WorkCoverage::Mismatch))
-            .execute(input.clone(), f.budget(), &f.cancel)
+            .execute(input.clone(), &f.cancel)
             .unwrap_err()
             .code(),
         "work_mismatch"
@@ -1181,7 +1158,7 @@ fn replacement_work_mismatch_leaves_original_open_and_unindexed_is_saved() {
     let saved = receipt(
         f.service()
             .with_work_lookup(&|_, _| Ok(WorkCoverage::Unindexed))
-            .execute(input, f.budget(), &f.cancel)
+            .execute(input, &f.cancel)
             .unwrap(),
     );
     assert_eq!(saved.work_coverage, Some(WorkCoverage::Unindexed));
@@ -1270,16 +1247,12 @@ fn request_correlation_supersession_is_atomic_with_receipt_and_concurrent_replac
         let first = scope.spawn(|| {
             let service = f.service();
             barrier.wait();
-            service.execute(input, f.budget(), &f.cancel)
+            service.execute(input, &f.cancel)
         });
         let second = scope.spawn(|| {
             let service = f.service();
             barrier.wait();
-            service.execute(
-                replacement(old.request_id, 1, "second"),
-                f.budget(),
-                &f.cancel,
-            )
+            service.execute(replacement(old.request_id, 1, "second"), &f.cancel)
         });
         vec![first.join().unwrap(), second.join().unwrap()]
     });

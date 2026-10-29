@@ -39,7 +39,7 @@ fn snapshot(path: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
 fn board_read_only() -> Result {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
-        TaskId, WaitBudget,
+        TaskId,
     };
     use provenant_os::clock::SystemClock;
     use provenant_run::{
@@ -73,7 +73,6 @@ fn board_read_only() -> Result {
     let cancel = CancelToken::new();
     let request = Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let task = TaskId::from_bytes([3; 16]);

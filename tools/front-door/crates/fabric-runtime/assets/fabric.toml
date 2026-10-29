@@ -40,6 +40,7 @@ lease_seconds = 3600
 peer_seconds = 30
 graph_timeout_seconds = 14400
 bundle_bytes = 67108864
+store_busy_timeout_ms = 30000 # wait for a contended store before reporting contention, 0-600000; 0 fails fast
 
 [graph]
 ci_poll_overrides = {}

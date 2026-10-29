@@ -517,29 +517,27 @@ impl RunStore {
         request: &CanonicalRequest,
         call: &Request<'_>,
     ) -> Result<ChildAttempts> {
-        call.retry(|| {
-            let mut query = self
-                .db
-                .prepare("SELECT id,record FROM attempts WHERE run=?1 AND project=?2")?;
-            let mut rows = query.query(params![
-                run.to_string(),
-                self.context.project_id.to_string()
-            ])?;
-            let mut attempts = ChildAttempts::default();
-            while let Some(row) = rows.next()? {
-                let id: String = row.get(0)?;
-                let id =
-                    AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-                let raw: Vec<u8> = row.get(1)?;
-                let record: AttemptRecord = decode(&raw)?;
-                if let Some(reason) = self.child_attempt_reason(run, request, &record)? {
-                    attempts.refusals.insert(id, reason);
-                    continue;
-                }
-                *attempts.counts.entry(record.task_id).or_insert(0) += 1;
+        call.check()?;
+        let mut query = self
+            .db
+            .prepare("SELECT id,record FROM attempts WHERE run=?1 AND project=?2")?;
+        let mut rows = query.query(params![
+            run.to_string(),
+            self.context.project_id.to_string()
+        ])?;
+        let mut attempts = ChildAttempts::default();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+            let raw: Vec<u8> = row.get(1)?;
+            let record: AttemptRecord = decode(&raw)?;
+            if let Some(reason) = self.child_attempt_reason(run, request, &record)? {
+                attempts.refusals.insert(id, reason);
+                continue;
             }
-            Ok(attempts)
-        })
+            *attempts.counts.entry(record.task_id).or_insert(0) += 1;
+        }
+        Ok(attempts)
     }
     /// Validate lane-writable ingress against the host's recorded parent and
     /// its sealed task. A child never gains authority its parent lacks, and a
@@ -597,7 +595,7 @@ impl RunStore {
     }
     /// Refuse queued proposals without touching any launched provider.
     pub fn refuse_queued(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
-        let ids: Vec<String> = call.retry(|| {
+        let ids: Vec<String> = {
             let mut query = self
                 .db
                 .prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0")?;
@@ -605,8 +603,8 @@ impl RunStore {
                 rusqlite::params![run.to_string(), self.context.project_id.to_string()],
                 |row| row.get(0),
             )?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
             if matches!(self.record(id, call)?.state, AttemptState::Queued { .. }) {
@@ -629,13 +627,14 @@ impl RunStore {
     /// Bounded ingress for the parent host's child launcher. No provider or
     /// custody action occurs in the submitting lane.
     pub fn queued_runs(&self, call: &Request<'_>) -> Result<Vec<RunId>> {
-        let records: Vec<Vec<u8>> = call.retry(|| {
+        call.check()?;
+        let records: Vec<Vec<u8>> = {
             let mut query = self.db.prepare(
                 "SELECT record FROM attempts WHERE project=?1 AND terminal=0 ORDER BY sequence LIMIT 256",
             )?;
             let rows = query.query_map([self.context.project_id.to_string()], |row| row.get(0))?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         let mut runs = std::collections::BTreeSet::new();
         for raw in records {
             let record: AttemptRecord = crate::db::decode(&raw)?;
@@ -647,16 +646,15 @@ impl RunStore {
         // and the prompts; the operation is only accepted once they exist.
         let mut ready = Vec::new();
         for run in runs {
-            let raw: Option<Vec<u8>> = call.retry(|| {
-                Ok(self
-                    .db
+            let raw: Option<Vec<u8>> = {
+                self.db
                     .query_row(
                         "SELECT record FROM operations WHERE project=?1 AND run=?2",
                         params![self.context.project_id.to_string(), run.to_string()],
                         |row| row.get(0),
                     )
-                    .optional()?)
-            })?;
+                    .optional()?
+            };
             let Some(raw) = raw else { continue };
             let operation: OperationRecord = decode(&raw)?;
             if operation.state != OperationState::Prepared {
@@ -858,7 +856,7 @@ impl RunStore {
             .filter(|_| request.fresh_continuation.is_none())
             .map(|prior| self.record(prior, call))
             .transpose()?;
-        let ids: Vec<String> = call.retry(|| {
+        let ids: Vec<String> = {
             let mut query = self.db.prepare(
                 "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence",
             )?;
@@ -866,8 +864,8 @@ impl RunStore {
                 params![run.to_string(), self.context.project_id.to_string()],
                 |r| r.get(0),
             )?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         let mut started = Vec::new();
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
@@ -1280,7 +1278,7 @@ impl RunStore {
         let mut holder_context = context(record, requester).map_err(|e| local(&e))?;
         let reservation = PublicationReservation::prepare(
             directory()?,
-            call.transaction_budget(),
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )
@@ -1484,7 +1482,7 @@ impl RunStore {
             OwnedLaunch {
                 command,
                 lease: &mut lease,
-                handshake: call.transaction_budget(),
+                handshake: call.handshake_budget(),
                 cancel: call.cancel,
                 clock: call.clock,
             },

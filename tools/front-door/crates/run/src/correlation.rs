@@ -104,14 +104,14 @@ pub struct WorkIndex(Connection);
 impl WorkIndex {
     pub(crate) fn open(host: &Path, call: &Request<'_>) -> Result<Self> {
         let (_, db, _lock) = open_database(host, WORK_INDEX_FILE, call)?;
-        let version = call.retry(|| match provenant_sqlite::read_version(&db, 1) {
+        let version = match provenant_sqlite::read_version(&db, 1) {
             Ok(version) => Ok(version),
             Err(provenant_sqlite::VersionError::Unsupported(version)) => {
                 Err(RunError::Version(version))
             }
             Err(provenant_sqlite::VersionError::Unversioned) => Err(RunError::Version(0)),
             Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
-        })?;
+        }?;
         match version {
             0 => immediate(&db, call, |tx| {
                 tx.execute_batch(
@@ -130,84 +130,83 @@ impl WorkIndex {
         Ok(Self(db))
     }
     pub fn validate(&self, selection: &WorkSelector, call: &Request<'_>) -> Result<WorkCoverage> {
-        call.retry(|| {
-            // Exact predicates let SQLite use the attempt or project/run/task
-            // index even when a selector is absent or names unknown work.
-            let task = if selection.task.is_some() {
-                "task=?3"
-            } else {
-                "?3 IS NULL"
+        call.check()?;
+        // Exact predicates let SQLite use the attempt or project/run/task
+        // index even when a selector is absent or names unknown work.
+        let task = if selection.task.is_some() {
+            "task=?3"
+        } else {
+            "?3 IS NULL"
+        };
+        let attempt = if selection.attempt.is_some() {
+            "attempt=?4"
+        } else {
+            "?4 IS NULL"
+        };
+        let mut query = self.0.prepare(&format!(
+            "SELECT substr(record,1,{read_bytes}) FROM membership
+            WHERE project=?1 AND run=?2 AND {task} AND {attempt}
+            ORDER BY task,attempt LIMIT {row_limit}",
+            read_bytes = MEMBER_BYTES + 1,
+            row_limit = ROW_LIMIT + 1
+        ))?;
+        let mut rows = query.query(params![
+            selection.project.to_string(),
+            selection.run.to_string(),
+            selection.task.map(|id| id.to_string()),
+            selection.attempt.map(|id| id.to_string())
+        ])?;
+        let mut coverage = WorkCoverage::Unindexed;
+        let qualified = selection.task.is_some() || selection.attempt.is_some();
+        for n in 0..=ROW_LIMIT {
+            let Some(row) = rows.next()? else {
+                if !qualified && coverage != WorkCoverage::Unindexed {
+                    return Ok(coverage.max(WorkCoverage::Partial));
+                }
+                return Ok(coverage);
             };
-            let attempt = if selection.attempt.is_some() {
-                "attempt=?4"
-            } else {
-                "?4 IS NULL"
-            };
-            let mut query = self.0.prepare(&format!(
-                "SELECT substr(record,1,{read_bytes}) FROM membership
-                WHERE project=?1 AND run=?2 AND {task} AND {attempt}
-                ORDER BY task,attempt LIMIT {row_limit}",
-                read_bytes = MEMBER_BYTES + 1,
-                row_limit = ROW_LIMIT + 1
-            ))?;
-            let mut rows = query.query(params![
-                selection.project.to_string(),
-                selection.run.to_string(),
-                selection.task.map(|id| id.to_string()),
-                selection.attempt.map(|id| id.to_string())
-            ])?;
-            let mut coverage = WorkCoverage::Unindexed;
-            let qualified = selection.task.is_some() || selection.attempt.is_some();
-            for n in 0..=ROW_LIMIT {
-                let Some(row) = rows.next()? else {
-                    if !qualified && coverage != WorkCoverage::Unindexed {
-                        return Ok(coverage.max(WorkCoverage::Partial));
-                    }
-                    return Ok(coverage);
-                };
-                if n == ROW_LIMIT {
-                    return Ok(if coverage == WorkCoverage::Mismatch {
-                        coverage
-                    } else {
-                        WorkCoverage::Limit
-                    });
-                }
-                let raw: Vec<u8> = row.get(0)?;
-                if raw.len() > MEMBER_BYTES {
-                    return Err(RunError::Validation("work membership size"));
-                }
-                let value: Membership = decode(&raw)?;
-                if value.schema_version != 1
-                    || value.project != selection.project
-                    || value.run != selection.run
-                    || selection.task.is_some_and(|task| task != value.task)
-                    || selection
-                        .attempt
-                        .is_some_and(|attempt| attempt != value.attempt)
-                {
-                    return Err(RunError::Validation("work membership identity"));
-                }
-                if selection
-                    .repository
-                    .as_ref()
-                    .is_some_and(|repo| value.repository.as_ref().is_some_and(|v| v != repo))
-                    || selection
-                        .head
-                        .is_some_and(|head| value.head.is_some_and(|v| v != head))
-                {
-                    coverage = WorkCoverage::Mismatch;
-                    continue;
-                }
-                if selection.repository.is_some() && value.repository.is_none() {
-                    coverage = coverage.max(WorkCoverage::RepositoryUnavailable);
-                } else if selection.head.is_some() && value.head.is_none() {
-                    coverage = coverage.max(WorkCoverage::HeadUnavailable);
+            if n == ROW_LIMIT {
+                return Ok(if coverage == WorkCoverage::Mismatch {
+                    coverage
                 } else {
-                    coverage = coverage.max(WorkCoverage::Verified);
-                }
+                    WorkCoverage::Limit
+                });
             }
-            Ok(coverage)
-        })
+            let raw: Vec<u8> = row.get(0)?;
+            if raw.len() > MEMBER_BYTES {
+                return Err(RunError::Validation("work membership size"));
+            }
+            let value: Membership = decode(&raw)?;
+            if value.schema_version != 1
+                || value.project != selection.project
+                || value.run != selection.run
+                || selection.task.is_some_and(|task| task != value.task)
+                || selection
+                    .attempt
+                    .is_some_and(|attempt| attempt != value.attempt)
+            {
+                return Err(RunError::Validation("work membership identity"));
+            }
+            if selection
+                .repository
+                .as_ref()
+                .is_some_and(|repo| value.repository.as_ref().is_some_and(|v| v != repo))
+                || selection
+                    .head
+                    .is_some_and(|head| value.head.is_some_and(|v| v != head))
+            {
+                coverage = WorkCoverage::Mismatch;
+                continue;
+            }
+            if selection.repository.is_some() && value.repository.is_none() {
+                coverage = coverage.max(WorkCoverage::RepositoryUnavailable);
+            } else if selection.head.is_some() && value.head.is_none() {
+                coverage = coverage.max(WorkCoverage::HeadUnavailable);
+            } else {
+                coverage = coverage.max(WorkCoverage::Verified);
+            }
+        }
+        Ok(coverage)
     }
     fn seal(&self, value: &Membership, call: &Request<'_>) -> Result<()> {
         let canonical = provenant_records::CanonicalV1::bytes(value)?;
@@ -862,21 +861,16 @@ mod tests {
             std::ffi::OsStr::new("work-index.sqlite3.lock"),
             LockMode::Exclusive,
         )?;
-        let nonblocking = Request {
-            budget: provenant_core::WaitBudget::nonblocking(provenant_core::Clock::mono_now(
-                &clock,
-            )),
-            ..call
-        };
-        assert!(matches!(
-            store.start(
-                prepared.run_id,
-                &crate::dispatch_tests::Ready,
-                &|_, _| Err(RunError::Validation("must not reach handoff")),
-                &nonblocking
-            ),
-            Err(RunError::Contention)
-        ));
+        let contended =
+            provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || {
+                store.start(
+                    prepared.run_id,
+                    &crate::dispatch_tests::Ready,
+                    &|_, _| Err(RunError::Validation("must not reach handoff")),
+                    &call,
+                )
+            });
+        assert!(matches!(contended, Err(RunError::Contention)));
         assert_eq!(
             store.record(prepared.attempts[0].attempt_id, &call)?.state,
             AttemptState::Queued {

@@ -1088,7 +1088,7 @@ mod answer_delivery_tests {
     #[test]
     fn hook_walks_oversized_offered_head_to_retry_and_fits_mixed_page() -> Result<(), Error> {
         use provenant_core::{ProjectId, RootInputs};
-        use provenant_fabric_store::{Request, ThreadWait};
+        use provenant_fabric_store::Request;
         use provenant_os::fs::SystemPathResolver;
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
@@ -1102,8 +1102,6 @@ mod answer_delivery_tests {
             &Request {
                 clock: &clock,
                 cancel: &cancel,
-                backoff: &ThreadWait,
-                budget: WaitBudget::cli(clock.mono_now(), 1)?,
             },
         )?;
         let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
@@ -1230,7 +1228,7 @@ mod answer_delivery_tests {
     #[test]
     fn hook_open_marks_oversized_once_and_next_scan_excludes_it() -> Result<(), Error> {
         use provenant_core::{ProjectId, RootInputs};
-        use provenant_fabric_store::{Request, ThreadWait};
+        use provenant_fabric_store::Request;
         use provenant_os::fs::SystemPathResolver;
         const CHILD: &str = "PROVENANT_HOOK_MARK_DIAGNOSTIC_TEST";
         if std::env::var_os(CHILD).is_none() {
@@ -1267,8 +1265,6 @@ mod answer_delivery_tests {
             &Request {
                 clock: &clock,
                 cancel: &cancel,
-                backoff: &ThreadWait,
-                budget: WaitBudget::cli(clock.mono_now(), 1)?,
             },
         )?;
         let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
@@ -1441,7 +1437,7 @@ mod answer_delivery_tests {
     #[test]
     fn committed_offer_survives_worker_response_timeout() -> Result<(), Error> {
         use provenant_core::{ProjectId, RootInputs};
-        use provenant_fabric_store::{Request, ThreadWait};
+        use provenant_fabric_store::Request;
         use provenant_os::fs::SystemPathResolver;
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
@@ -1455,8 +1451,6 @@ mod answer_delivery_tests {
             &Request {
                 clock: &clock,
                 cancel: &cancel,
-                backoff: &ThreadWait,
-                budget: WaitBudget::cli(clock.mono_now(), 1)?,
             },
         )?;
         let item = offer("Retain this answer", 1);

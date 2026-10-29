@@ -503,7 +503,7 @@ pub fn run(chair: Chair, globals: &Globals) -> u8 {
     }
 }
 fn viewer_run(command: ChairViewer, globals: &Globals) -> u8 {
-    use provenant_fabric_store::{Request, RequestView, Store, ThreadWait};
+    use provenant_fabric_store::{Request, RequestView, Store};
     let path = "chair viewer";
     let read_only = matches!(
         command,
@@ -537,9 +537,7 @@ fn viewer_run(command: ChairViewer, globals: &Globals) -> u8 {
         let cancel = provenant_core::CancelToken::new();
         let request = Request {
             clock: &clock,
-            budget: provenant_core::WaitBudget::cli(clock.mono_now(), 5)?,
             cancel: &cancel,
-            backoff: &ThreadWait,
         };
         let store = if read_only {
             match Store::open_existing(&resolved.roots.state, &request) {

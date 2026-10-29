@@ -97,12 +97,8 @@ impl provenant_supervisor::NestedChildStore for HostHolder<'_> {
         };
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
-        let Ok(budget) = provenant_core::WaitBudget::cli(clock.mono_now(), 1) else {
-            return false;
-        };
         let call = run::Request {
             clock: &clock,
-            budget,
             cancel: &cancel,
         };
         let execution = run::ExecutionContext {

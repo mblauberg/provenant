@@ -1,10 +1,10 @@
 //! The MCP dependency edge is runtime-only, including the real-store tests.
 use crate::tools::*;
 use provenant_core::{
-    ActorId, CancelToken, Clock, MonoTime, PathResolver, ProjectId, RootInputs, TestClock,
-    WaitBudget, WallTime,
+    ActorId, CancelToken, MonoTime, PathResolver, ProjectId, RootInputs, TestClock, WaitBudget,
+    WallTime,
 };
-use provenant_fabric_runtime::coordination::{CoordinationService, ThreadWait};
+use provenant_fabric_runtime::coordination::{CoordinationService, ThreadPause};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -117,8 +117,7 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
         ProjectId::from_bytes([1; 16]),
         ActorId::from_bytes([2; 16]),
         &clock,
-        &ThreadWait,
-        WaitBudget::mcp(clock.mono_now(), 5)?,
+        &ThreadPause,
         &CancelToken::new(),
     )?;
     let facade = SubmitFacade {
@@ -149,6 +148,7 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
         lease_seconds: 300,
         peer_seconds: 30,
         graph_timeout_seconds: 14400,
+        store_busy_timeout_ms: 30_000,
         bundle_bytes: 65536,
     };
     service = service.with_limits(limits);
@@ -247,8 +247,7 @@ fn lane_graph_status_reaches_the_owner() -> Result<(), Box<dyn Error>> {
         ProjectId::from_bytes([1; 16]),
         ActorId::from_bytes([2; 16]),
         &clock,
-        &ThreadWait,
-        WaitBudget::mcp(clock.mono_now(), 5)?,
+        &ThreadPause,
         &CancelToken::new(),
     )?;
     let mut service = Service::new(coordination, FakeFacade, &clock).with_lane_restrictions(true);
@@ -294,8 +293,7 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
         ProjectId::from_bytes([1; 16]),
         actor,
         &clock,
-        &ThreadWait,
-        WaitBudget::mcp(clock.mono_now(), 5)?,
+        &ThreadPause,
         &CancelToken::new(),
     )?;
     let mut service = Service::new(coordination, FakeFacade, &clock);

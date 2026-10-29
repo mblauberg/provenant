@@ -151,7 +151,8 @@ impl RunStore {
         self.create_exact(input, call)
     }
     fn adopt(&self, run: RunId, input: &PreparedRun, call: &Request<'_>) -> Result<PreparedRun> {
-        let ids: Vec<(String, String)> = call.retry(|| {
+        call.check()?;
+        let ids: Vec<(String, String)> = {
             let mut query = self
                 .db
                 .prepare("SELECT task,id FROM attempts WHERE run=?1 AND project=?2")?;
@@ -159,8 +160,8 @@ impl RunStore {
                 params![run.to_string(), self.context.project_id.to_string()],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            Ok(rows.collect::<std::result::Result<_, _>>()?)
-        })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         let attempts = input
             .attempts
             .iter()
@@ -240,7 +241,7 @@ impl RunStore {
         let _writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
-            call.transaction_budget(),
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?;
@@ -354,7 +355,7 @@ impl RunStore {
         let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
-            call.transaction_budget(),
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?;
@@ -416,7 +417,7 @@ impl RunStore {
         let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
-            call.transaction_budget(),
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?;
@@ -697,7 +698,7 @@ impl RunStore {
         let _publication = directory.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
-            call.transaction_budget(),
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?;

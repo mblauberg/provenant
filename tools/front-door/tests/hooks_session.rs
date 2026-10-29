@@ -69,9 +69,7 @@ fn checkpoint_text(store: &SessionStore) -> Result<String> {
 }
 /// One queued lane in the project's run store.
 fn create_lane(rig: &TestRig) -> Result<String> {
-    use provenant_core::{
-        ActorId, AttemptId, Digest, OperationId, RunId, TaskId, WaitBudget as Budget,
-    };
+    use provenant_core::{ActorId, AttemptId, Digest, OperationId, RunId, TaskId};
     use provenant_records::CanonicalV1;
     use provenant_run as run;
     let (roots, project_id) = binding(rig)?;
@@ -85,7 +83,6 @@ fn create_lane(rig: &TestRig) -> Result<String> {
     let cancel = CancelToken::new();
     let call = run::Request {
         clock: &clock,
-        budget: Budget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let store = run::RunStore::open(&context, &call)?;

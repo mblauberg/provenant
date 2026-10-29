@@ -899,6 +899,21 @@ fn local_delivery_open_allocates_nothing_and_observes_deadline() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // A held write lock must not outlast the hook deadline.
+fn hook_delivery_gives_up_on_a_held_store_at_its_deadline() {
+    let f = Fixture::new();
+    let holder = f.open();
+    holder.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    let store = Store::open_hook_delivery(&f.root, started + std::time::Duration::from_millis(100))
+        .unwrap()
+        .unwrap();
+    assert!(store.db.execute_batch("BEGIN IMMEDIATE").is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    holder.db.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
 #[allow(clippy::disallowed_methods)] // Fresh processes exercise native SQLite VFS opens.
 fn local_delivery_fresh_process() -> Result<()> {
     use std::{

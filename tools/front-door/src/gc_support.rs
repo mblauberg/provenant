@@ -283,7 +283,6 @@ impl LaneSnapshot {
         let cancel = CancelToken::new();
         let call = provenant_run::Request {
             clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 5)?,
             cancel: &cancel,
         };
         for observed in &self.stores {
@@ -318,7 +317,6 @@ impl LaneSnapshot {
             let cancel = CancelToken::new();
             let call = provenant_run::Request {
                 clock: &clock,
-                budget: WaitBudget::cli(clock.mono_now(), 1)?,
                 cancel: &cancel,
             };
             for observed in &self.stores {
@@ -451,7 +449,6 @@ fn scan_terminal(
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 5)?,
         cancel: &cancel,
     };
     let root = Directory::open_anchor(context.state_root.as_path())?;
@@ -620,12 +617,9 @@ pub(crate) fn disk_alert(
     if projects.is_empty() {
         return Ok(vec![detail]);
     }
-    let backoff = provenant_fabric_store::ThreadWait;
     let request = provenant_fabric_store::Request {
         clock: &clock,
-        budget,
         cancel: &cancel,
-        backoff: &backoff,
     };
     let store = provenant_fabric_store::Store::open(&roots.state, &request)
         .map_err(|_| Error::GcObservation("cannot open Fabric for disk alert"))?;

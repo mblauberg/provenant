@@ -1139,7 +1139,6 @@ fn usage_report(
     let cancel = CancelToken::new();
     let call = Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 10).map_err(|_| EdgeError::Time)?,
         cancel: &cancel,
     };
     let projects = provenant_config::registered_projects(roots)?;

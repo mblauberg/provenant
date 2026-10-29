@@ -111,34 +111,37 @@ impl Store {
         limit: u64,
         request: &Request<'_>,
     ) -> Result<Page<Event>> {
+        request.check()?;
         let limit = page(after, limit)?;
-        request.retry(|| {
-            let mut statement = self.db.prepare(
-                "SELECT seq,substr(record,1,?4) FROM events WHERE project=?1 AND seq>?2 ORDER BY seq LIMIT ?3",
-            )?;
-            let mut rows = statement.query(params![
-                project.to_string(),
-                after,
-                limit,
-                MAX_RECORD_READ_BYTES
-            ])?;
-            let mut output = Vec::new();
-            let mut total = 0;
-            let mut truncated = false;
-            while let Some(row) = rows.next()? {
-                let bytes: Vec<u8> = row.get(1)?;
-                total += bytes.len();
-                if total > MAX_PAGE_BYTES {
-                    truncated = true;
-                    break;
-                }
-                output.push(Event {
-        extra: Default::default(),
-                    seq: row.get(0)?,
-                    record: decode(&bytes)?,
-                });
+        let mut statement = self.db.prepare(
+            "SELECT seq,substr(record,1,?4) FROM events WHERE project=?1 AND seq>?2 ORDER BY seq LIMIT ?3",
+        )?;
+        let mut rows = statement.query(params![
+            project.to_string(),
+            after,
+            limit,
+            MAX_RECORD_READ_BYTES
+        ])?;
+        let mut output = Vec::new();
+        let mut total = 0;
+        let mut truncated = false;
+        while let Some(row) = rows.next()? {
+            let bytes: Vec<u8> = row.get(1)?;
+            total += bytes.len();
+            if total > MAX_PAGE_BYTES {
+                truncated = true;
+                break;
             }
-            Ok(Page { extra: Default::default(),  items: output, truncated })
+            output.push(Event {
+                extra: Default::default(),
+                seq: row.get(0)?,
+                record: decode(&bytes)?,
+            });
+        }
+        Ok(Page {
+            extra: Default::default(),
+            items: output,
+            truncated,
         })
     }
     pub fn event_cursor(
@@ -147,17 +150,16 @@ impl Store {
         consumer: ActorId,
         request: &Request<'_>,
     ) -> Result<i64> {
-        request.retry(|| {
-            Ok(self
-                .db
-                .query_row(
-                    "SELECT seq FROM event_cursors WHERE project=? AND consumer=?",
-                    params![project.to_string(), consumer.to_string()],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .unwrap_or(0))
-        })
+        request.check()?;
+        Ok(self
+            .db
+            .query_row(
+                "SELECT seq FROM event_cursors WHERE project=? AND consumer=?",
+                params![project.to_string(), consumer.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
     pub fn mark_events_read(
         &self,

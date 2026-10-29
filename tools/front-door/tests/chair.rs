@@ -616,7 +616,6 @@ fn chair_snapshot_allows_slow_identity_without_initialising_a_run_store() -> Res
 fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
-        WaitBudget,
     };
     use provenant_os::clock::SystemClock;
     use provenant_records::CanonicalV1;
@@ -640,7 +639,6 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
     let cancel = CancelToken::new();
     let call = run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let store = run::RunStore::open(&context, &call)?;

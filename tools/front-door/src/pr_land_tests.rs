@@ -71,7 +71,6 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
         cancel: &cancel,
     };
     let mut ids = Vec::new();
@@ -1397,7 +1396,6 @@ pub(crate) fn pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores
         let cancel = provenant_core::CancelToken::new();
         let call = provenant_run::Request {
             clock: &clock,
-            budget: WaitBudget::cli(clock.mono_now(), 10)?,
             cancel: &cancel,
         };
         // Keep a normal host store beside the nested store, as the snapshot

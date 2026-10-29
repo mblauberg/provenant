@@ -198,12 +198,7 @@ impl HolderContext {
     }
 }
 fn call<'a>(clock: &'a dyn Clock, cancel: &'a CancelToken) -> Result<Request<'a>> {
-    Ok(Request {
-        clock,
-        budget: WaitBudget::cli(clock.mono_now(), 30)
-            .map_err(|_| RunError::Validation("call budget"))?,
-        cancel,
-    })
+    Ok(Request { clock, cancel })
 }
 
 pub struct RunHolder<'a> {
@@ -449,12 +444,7 @@ impl RunStore {
         scope: custody::Scope,
         call: &Request<'_>,
     ) -> Result<Option<custody::Recovery>> {
-        match custody::acquire_recovery(
-            directory,
-            call.transaction_budget(),
-            call.cancel,
-            call.clock,
-        ) {
+        match custody::acquire_recovery(directory, call.lock_budget(), call.cancel, call.clock) {
             Ok(recovery) => Ok(Some(recovery)),
             Err(error) => {
                 if let CustodyError::Filesystem(filesystem) = &error
@@ -966,8 +956,6 @@ impl RunStore {
         let record_call = Request {
             clock: call.clock,
             cancel: call.cancel,
-            budget: WaitBudget::cli(call.clock.mono_now(), 30)
-                .map_err(|_| RunError::Validation("record budget"))?,
         };
         let call = &record_call;
         let cancelled = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some();
@@ -1320,7 +1308,7 @@ mod writer_recovery_tests {
             directory,
             scope,
             binding,
-            call.budget,
+            call.lock_budget(),
             &cancel,
             &clock,
         )?;
@@ -1442,7 +1430,7 @@ mod writer_recovery_tests {
         drop(custody::acquire_reader(
             directory()?,
             scope,
-            call.budget,
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?);

@@ -796,12 +796,11 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
             .parse()?,
         read_prompts: false,
     };
-    use provenant_core::Clock;
+
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = provenant_core::CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
@@ -1089,7 +1088,7 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
 fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Result {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, HostId, OperationId, ProjectId, RootInputs,
-        RunId, TaskId, WaitBudget,
+        RunId, TaskId,
     };
     use provenant_os::clock::SystemClock;
     use provenant_records::{
@@ -1108,7 +1107,6 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let context = provenant_run::ExecutionContext {
@@ -1327,7 +1325,6 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     configure_fixture_peer(&rig, remote_host)?;
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let records = {
@@ -4183,7 +4180,7 @@ fn seed_attempt(
 )> {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
-        TaskId, WaitBudget,
+        TaskId,
     };
     use provenant_os::clock::SystemClock;
     use provenant_records::{
@@ -4201,7 +4198,6 @@ fn seed_attempt(
     let cancel = CancelToken::new();
     let call = provenant_run::Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 10)?,
         cancel: &cancel,
     };
     let context = provenant_run::ExecutionContext {

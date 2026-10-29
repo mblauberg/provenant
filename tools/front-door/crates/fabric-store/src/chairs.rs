@@ -33,18 +33,17 @@ impl HostStore {
         run: RunId,
         request: &Request<'_>,
     ) -> Result<Option<RunChair>> {
-        request.retry(|| {
-            let raw: Option<Vec<u8>> = self
-                .0
-                .db
-                .query_row(
-                    "SELECT substr(record,1,?3) FROM run_chairs WHERE project=?1 AND run=?2",
-                    params![project.to_string(), run.to_string(), MAX_RECORD_READ_BYTES],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            raw.as_deref().map(decode).transpose()
-        })
+        request.check()?;
+        let raw: Option<Vec<u8>> = self
+            .0
+            .db
+            .query_row(
+                "SELECT substr(record,1,?3) FROM run_chairs WHERE project=?1 AND run=?2",
+                params![project.to_string(), run.to_string(), MAX_RECORD_READ_BYTES],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.as_deref().map(decode).transpose()
     }
 
     /// Insert once; a replay must agree with both the request and binding.

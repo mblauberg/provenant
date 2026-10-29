@@ -1982,7 +1982,7 @@ impl crate::RunStore {
         let _lock = attempt.lock(
             OsStr::new("worktree-settlement.lock"),
             provenant_os::fs::LockMode::Exclusive,
-            call.transaction_budget(),
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?;
@@ -2112,7 +2112,7 @@ impl crate::RunStore {
         let _writer = state.lock(
             OsStr::new("writer.lock"),
             LockMode::Exclusive,
-            call.transaction_budget(),
+            call.lock_budget(),
             call.cancel,
             call.clock,
         )?;

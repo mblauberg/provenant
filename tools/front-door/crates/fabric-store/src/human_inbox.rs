@@ -173,91 +173,101 @@ impl Store {
         request: &Request<'_>,
     ) -> Result<PendingHumanRequests> {
         let rows_limit = page(0, limit)?;
-        request.retry(|| {
-            let at = request.clock.wall_now()?;
-            let mut statement = self.db.prepare(
-                "WITH recent AS (SELECT project,id,length(record) AS bytes FROM human_requests
-                   WHERE state='open' ORDER BY project,id LIMIT ?1),
-                 sized AS (SELECT project,id,bytes,sum(bytes) OVER (ORDER BY project,id) AS total FROM recent)
-                 SELECT s.project,s.id,s.bytes,s.total,
-                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   THEN json_extract(CAST(r.record AS TEXT),'$.schema_version') END,
-                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   THEN json_extract(CAST(r.record AS TEXT),'$.project_id') END,
-                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   THEN json_extract(CAST(r.record AS TEXT),'$.id') END,
-                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   THEN json_extract(CAST(r.record AS TEXT),'$.project_key') END,
-                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   THEN json_extract(CAST(r.record AS TEXT),'$.request.title') END,
-                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   THEN r.session END,
-                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   THEN json_type(CAST(r.record AS TEXT),'$.chair_session_id') END,
-                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   AND json_type(CAST(r.record AS TEXT),'$.owner_host')='text'
-                   THEN json_extract(CAST(r.record AS TEXT),'$.owner_host') END,
-                 CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
-                   THEN json_extract(CAST(r.record AS TEXT),'$.request.deadline') END
-                 FROM sized s JOIN human_requests r ON r.project=s.project AND r.id=s.id ORDER BY s.project,s.id",
-            )?;
-            let mut rows = statement.query(params![rows_limit + 1, MAX_RECORD_BYTES as i64, max_bytes.min(1_048_576) as i64])?;
-            let mut items = Vec::new();
-            let mut bytes_read = 0;
-            let mut truncated = false;
-            let mut scanned = 0;
-            while let Some(row) = rows.next()? {
-                request.check()?;
-                if scanned == limit as usize {
-                    truncated = true;
-                    break;
-                }
-                scanned += 1;
-                let size: i64 = row.get(2)?;
-                let total: i64 = row.get(3)?;
-                if size < 0 || total < 0 || size > MAX_RECORD_BYTES as i64 || total > max_bytes.min(1_048_576) as i64 {
-                    truncated = true;
-                    break;
-                }
-                bytes_read = total as usize;
-                let project_id: String = row.get(0)?;
-                let id: String = row.get(1)?;
-                let version: Option<i64> = row.get(4)?;
-                let record_project: Option<String> = row.get(5)?;
-                let record_id: Option<String> = row.get(6)?;
-                let project_key: Option<String> = row.get(7)?;
-                let title: Option<String> = row.get(8)?;
-                let chair_session_id: Option<String> = row.get(9)?;
-                let session_type: Option<String> = row.get(10)?;
-                let owner_host: Option<String> = row.get(11)?;
-                if !matches!(version, Some(1 | 2))
-                    || record_project.as_deref() != Some(&project_id)
-                    || record_id.as_deref() != Some(&id)
-                    || title.is_none()
-                    || chair_session_id.is_none()
-                    || !matches!(session_type.as_deref(), None | Some("text"))
-                {
-                    return Err(Error::Invalid("stored request identity or version"));
-                }
-                // Expired candidates consume the scan/byte budget, so later
-                // unread rows retain partial coverage rather than appearing empty.
-                let deadline: Option<String> = row.get(12)?;
-                if let Some(deadline) = deadline
-                    && WallTime::parse(&deadline)? <= at
-                {
-                    continue;
-                }
-                let title = title.unwrap_or_default();
-                items.push(PendingHumanRequest {
-                    id,
-                    project_id,
-                    project_key,
-                    title,
-                    chair_session_id,
-                    owner_host,
-                });
+        let at = request.clock.wall_now()?;
+        let mut statement = self.db.prepare(
+            "WITH recent AS (SELECT project,id,length(record) AS bytes FROM human_requests
+               WHERE state='open' ORDER BY project,id LIMIT ?1),
+             sized AS (SELECT project,id,bytes,sum(bytes) OVER (ORDER BY project,id) AS total FROM recent)
+             SELECT s.project,s.id,s.bytes,s.total,
+             CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+               THEN json_extract(CAST(r.record AS TEXT),'$.schema_version') END,
+             CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+               THEN json_extract(CAST(r.record AS TEXT),'$.project_id') END,
+             CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+               THEN json_extract(CAST(r.record AS TEXT),'$.id') END,
+             CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+               THEN json_extract(CAST(r.record AS TEXT),'$.project_key') END,
+             CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+               THEN json_extract(CAST(r.record AS TEXT),'$.request.title') END,
+             CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+               THEN r.session END,
+             CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+               THEN json_type(CAST(r.record AS TEXT),'$.chair_session_id') END,
+             CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+               AND json_type(CAST(r.record AS TEXT),'$.owner_host')='text'
+               THEN json_extract(CAST(r.record AS TEXT),'$.owner_host') END,
+             CASE WHEN s.total<=?3 AND s.bytes<=?2 AND json_valid(CAST(r.record AS TEXT))
+               THEN json_extract(CAST(r.record AS TEXT),'$.request.deadline') END
+             FROM sized s JOIN human_requests r ON r.project=s.project AND r.id=s.id ORDER BY s.project,s.id",
+        )?;
+        let mut rows = statement.query(params![
+            rows_limit + 1,
+            MAX_RECORD_BYTES as i64,
+            max_bytes.min(1_048_576) as i64
+        ])?;
+        let mut items = Vec::new();
+        let mut bytes_read = 0;
+        let mut truncated = false;
+        let mut scanned = 0;
+        while let Some(row) = rows.next()? {
+            request.check()?;
+            if scanned == limit as usize {
+                truncated = true;
+                break;
             }
-            Ok(PendingHumanRequests { items, truncated, bytes_read })
+            scanned += 1;
+            let size: i64 = row.get(2)?;
+            let total: i64 = row.get(3)?;
+            if size < 0
+                || total < 0
+                || size > MAX_RECORD_BYTES as i64
+                || total > max_bytes.min(1_048_576) as i64
+            {
+                truncated = true;
+                break;
+            }
+            bytes_read = total as usize;
+            let project_id: String = row.get(0)?;
+            let id: String = row.get(1)?;
+            let version: Option<i64> = row.get(4)?;
+            let record_project: Option<String> = row.get(5)?;
+            let record_id: Option<String> = row.get(6)?;
+            let project_key: Option<String> = row.get(7)?;
+            let title: Option<String> = row.get(8)?;
+            let chair_session_id: Option<String> = row.get(9)?;
+            let session_type: Option<String> = row.get(10)?;
+            let owner_host: Option<String> = row.get(11)?;
+            if !matches!(version, Some(1 | 2))
+                || record_project.as_deref() != Some(&project_id)
+                || record_id.as_deref() != Some(&id)
+                || title.is_none()
+                || chair_session_id.is_none()
+                || !matches!(session_type.as_deref(), None | Some("text"))
+            {
+                return Err(Error::Invalid("stored request identity or version"));
+            }
+            // Expired candidates consume the scan/byte budget, so later
+            // unread rows retain partial coverage rather than appearing empty.
+            let deadline: Option<String> = row.get(12)?;
+            if let Some(deadline) = deadline
+                && WallTime::parse(&deadline)? <= at
+            {
+                continue;
+            }
+            let title = title.unwrap_or_default();
+            items.push(PendingHumanRequest {
+                id,
+                project_id,
+                project_key,
+                title,
+                chair_session_id,
+                owner_host,
+            });
+        }
+        Ok(PendingHumanRequests {
+            items,
+            truncated,
+            bytes_read,
         })
     }
 
@@ -354,14 +364,13 @@ impl Store {
     }
 
     pub fn human_generation(&self, project: ProjectId, request: &Request<'_>) -> Result<u64> {
-        request.retry(|| {
-            let generation: i64 = self.db.query_row(
-                "SELECT coalesce(sum(revision),0) FROM human_requests WHERE project=?1",
-                [project.to_string()],
-                |row| row.get(0),
-            )?;
-            u64::try_from(generation).map_err(|_| Error::Invalid("inbox generation"))
-        })
+        request.check()?;
+        let generation: i64 = self.db.query_row(
+            "SELECT coalesce(sum(revision),0) FROM human_requests WHERE project=?1",
+            [project.to_string()],
+            |row| row.get(0),
+        )?;
+        u64::try_from(generation).map_err(|_| Error::Invalid("inbox generation"))
     }
     pub fn human_request(
         &self,
@@ -369,12 +378,10 @@ impl Store {
         id: HumanRequestId,
         request: &Request<'_>,
     ) -> Result<HumanRequest> {
-        request.retry(|| {
-            Ok(view(
-                load(&self.db, project, id)?,
-                request.clock.wall_now()?,
-            ))
-        })
+        Ok(view(
+            load(&self.db, project, id)?,
+            request.clock.wall_now()?,
+        ))
     }
 
     pub fn human_item(
@@ -383,14 +390,12 @@ impl Store {
         id: HumanRequestId,
         request: &Request<'_>,
     ) -> Result<InboxItem> {
-        request.retry(|| {
-            // One SQLite snapshot for the request, answer, outbox and history.
-            let tx = self.db.unchecked_transaction()?;
-            let mut item = item(&tx, project, id)?;
-            item.request = view(item.request, request.clock.wall_now()?);
-            tx.commit()?;
-            Ok(item)
-        })
+        // One SQLite snapshot for the request, answer, outbox and history.
+        let tx = self.db.unchecked_transaction()?;
+        let mut item = item(&tx, project, id)?;
+        item.request = view(item.request, request.clock.wall_now()?);
+        tx.commit()?;
+        Ok(item)
     }
 
     pub fn human_requests(
@@ -403,27 +408,39 @@ impl Store {
         request: &Request<'_>,
     ) -> Result<Page<HumanRequest>> {
         let rows_limit = page(0, limit)?;
-        request.retry(|| {
-            let at = request.clock.wall_now()?;
-            // Canonical UTC timestamps sort chronologically. Filter before LIMIT
-            // so expired rows cannot hide a later open item or break pagination.
-            let mut statement = self.db.prepare("SELECT substr(record,1,?6) FROM human_requests WHERE project=?1 AND (?2 IS NULL OR session=?2) AND (?3 OR (state='open' AND (json_extract(CAST(record AS TEXT),'$.request.deadline') IS NULL OR json_extract(CAST(record AS TEXT),'$.request.deadline') > ?7))) AND (?4 IS NULL OR id>?4) ORDER BY id LIMIT ?5")?;
-            let mut rows = statement.query(params![project.to_string(),session,all,after.map(|id|id.to_string()),rows_limit + 1,MAX_RECORD_READ_BYTES,at.to_string()])?;
-            let mut items = Vec::new();
-            let mut bytes = 0;
-            let mut truncated = false;
-            while let Some(row) = rows.next()? {
-                let record: Vec<u8> = row.get(0)?;
-                if items.len() == limit as usize || bytes + record.len() > 512 * 1024 {
-                    truncated = true;
-                    break;
-                }
-                let value = request_record(&record)?;
-                if value.project_id != project { return Err(Error::Invalid("stored request identity")); }
-                bytes += record.len();
-                items.push(view(value, at));
+        let at = request.clock.wall_now()?;
+        // Canonical UTC timestamps sort chronologically. Filter before LIMIT
+        // so expired rows cannot hide a later open item or break pagination.
+        let mut statement = self.db.prepare("SELECT substr(record,1,?6) FROM human_requests WHERE project=?1 AND (?2 IS NULL OR session=?2) AND (?3 OR (state='open' AND (json_extract(CAST(record AS TEXT),'$.request.deadline') IS NULL OR json_extract(CAST(record AS TEXT),'$.request.deadline') > ?7))) AND (?4 IS NULL OR id>?4) ORDER BY id LIMIT ?5")?;
+        let mut rows = statement.query(params![
+            project.to_string(),
+            session,
+            all,
+            after.map(|id| id.to_string()),
+            rows_limit + 1,
+            MAX_RECORD_READ_BYTES,
+            at.to_string()
+        ])?;
+        let mut items = Vec::new();
+        let mut bytes = 0;
+        let mut truncated = false;
+        while let Some(row) = rows.next()? {
+            let record: Vec<u8> = row.get(0)?;
+            if items.len() == limit as usize || bytes + record.len() > 512 * 1024 {
+                truncated = true;
+                break;
             }
-            Ok(Page { extra: Default::default(),  items, truncated })
+            let value = request_record(&record)?;
+            if value.project_id != project {
+                return Err(Error::Invalid("stored request identity"));
+            }
+            bytes += record.len();
+            items.push(view(value, at));
+        }
+        Ok(Page {
+            extra: Default::default(),
+            items,
+            truncated,
         })
     }
 

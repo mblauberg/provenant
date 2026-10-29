@@ -2,7 +2,7 @@
 use crate::roots;
 use provenant_cli::{Globals, RenderError, RenderMode};
 use provenant_confinement::{UtilityBudget, UtilityRuntime, cache::CacheGcPolicy};
-use provenant_core::{ActorId, CancelToken, Clock, ProjectId, WaitBudget};
+use provenant_core::{ActorId, CancelToken, Clock, ProjectId};
 use provenant_os::{clock::SystemClock, disk::DiskReport, exec::SystemExecutor, fs::Directory};
 use provenant_records::{CommandError, CommandResult, Outcome};
 use provenant_run::{ExecutionContext, Request, RunStore};
@@ -219,7 +219,6 @@ fn collect_resolved(
     };
     let request = Request {
         clock: &clock,
-        budget: WaitBudget::cli(clock.mono_now(), 5)?,
         cancel: &cancel,
     };
     let indexed = match RunStore::open_disk_read_only(&context, &request) {

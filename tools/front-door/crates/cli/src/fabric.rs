@@ -636,7 +636,7 @@ fn execute(
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
-    let backoff = ThreadWait;
+    let backoff = ThreadPause;
     let service = CoordinationService::for_identity(
         &ctx.roots.state,
         &ctx.identity,
@@ -646,7 +646,6 @@ fn execute(
         &ctx.executor,
         &clock,
         &backoff,
-        budget,
         &cancel,
     )?;
     let mutate = |input, operation: Operation| {

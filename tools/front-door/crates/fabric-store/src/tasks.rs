@@ -162,7 +162,8 @@ impl Store {
         self.write(request, |tx| insert_task(tx, task).map(|_| ()))
     }
     pub fn task(&self, project: ProjectId, id: TaskId, request: &Request<'_>) -> Result<Task> {
-        request.retry(|| load(&self.db, project, id))
+        request.check()?;
+        load(&self.db, project, id)
     }
     /// Lists in ID order; resume a truncated page after its last task ID.
     pub fn tasks(
@@ -173,13 +174,36 @@ impl Store {
         limit: u64,
         request: &Request<'_>,
     ) -> Result<Page<Task>> {
+        request.check()?;
         let limit = page(0, limit)?;
-        request.retry(|| {
-            let mut statement=self.db.prepare("SELECT substr(record,1,?7) FROM tasks WHERE project=?1 AND (?2 IS NULL OR state=?3) AND (?4 IS NULL OR id>?5) ORDER BY id LIMIT ?6")?;
-            let state=state.map(TaskState::sql);let after=after.map(|id|id.to_string());let mut rows=statement.query(params![project.to_string(),state,state,after,after,limit,MAX_RECORD_READ_BYTES])?;
-            let mut items=Vec::new();let mut total=0;let mut truncated=false;
-            while let Some(row)=rows.next()? {let bytes:Vec<u8>=row.get(0)?;total+=bytes.len();if total>MAX_PAGE_BYTES {truncated=true;break;} items.push(decode(&bytes)?);}
-            Ok(Page { extra: Default::default(), items,truncated})
+        let mut statement=self.db.prepare("SELECT substr(record,1,?7) FROM tasks WHERE project=?1 AND (?2 IS NULL OR state=?3) AND (?4 IS NULL OR id>?5) ORDER BY id LIMIT ?6")?;
+        let state = state.map(TaskState::sql);
+        let after = after.map(|id| id.to_string());
+        let mut rows = statement.query(params![
+            project.to_string(),
+            state,
+            state,
+            after,
+            after,
+            limit,
+            MAX_RECORD_READ_BYTES
+        ])?;
+        let mut items = Vec::new();
+        let mut total = 0;
+        let mut truncated = false;
+        while let Some(row) = rows.next()? {
+            let bytes: Vec<u8> = row.get(0)?;
+            total += bytes.len();
+            if total > MAX_PAGE_BYTES {
+                truncated = true;
+                break;
+            }
+            items.push(decode(&bytes)?);
+        }
+        Ok(Page {
+            extra: Default::default(),
+            items,
+            truncated,
         })
     }
     pub fn claim_task(&self, claim: &TaskClaim, request: &Request<'_>) -> Result<TaskFence> {
@@ -232,13 +256,11 @@ impl Store {
         fence: &TaskFence,
         request: &Request<'_>,
     ) -> Result<Task> {
-        request.retry(|| {
-            // A short read transaction gives one snapshot for record and token.
-            let tx = self.db.unchecked_transaction()?;
-            let task = fenced(&tx, project, fence, request.clock.wall_now()?, true)?;
-            tx.commit()?;
-            Ok(task)
-        })
+        // A short read transaction gives one snapshot for record and token.
+        let tx = self.db.unchecked_transaction()?;
+        let task = fenced(&tx, project, fence, request.clock.wall_now()?, true)?;
+        tx.commit()?;
+        Ok(task)
     }
     pub fn renew_task(
         &self,

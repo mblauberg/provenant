@@ -159,6 +159,15 @@ fn unresolved(
     id.map(|s| OperationId::parse(&s).map_err(|_| Error::Invalid("stored operation id")))
         .transpose()
 }
+/// Digest's fixed ASCII hex is safe as a single filesystem component.
+pub(crate) fn landing_lock_name(project: ProjectId, branch: &str) -> Result<String> {
+    let key = scope_key("fabric-landing-lock", &(project, branch))?;
+    Ok(format!(
+        "{}.lock",
+        key.strip_prefix("sha256:")
+            .ok_or(Error::Invalid("lock digest"))?
+    ))
+}
 impl Store {
     pub fn lock_landing(
         &self,
@@ -168,13 +177,7 @@ impl Store {
     ) -> Result<LandingGuard> {
         reference(branch)?;
         request.check()?;
-        let key = scope_key("fabric-landing-lock", &(project, branch))?;
-        // Digest's fixed ASCII hex is safe as a single filesystem component.
-        let name = format!(
-            "{}.lock",
-            key.strip_prefix("sha256:")
-                .ok_or(Error::Invalid("lock digest"))?
-        );
+        let name = landing_lock_name(project, branch)?;
         let locks = self
             .locks
             .as_ref()
@@ -182,7 +185,7 @@ impl Store {
         let lock = locks.lock(
             OsStr::new(&name),
             LockMode::Exclusive,
-            request.budget,
+            request.lock_budget(),
             request.cancel,
             request.clock,
         )?;
@@ -337,8 +340,7 @@ impl Store {
         fence: &ClaimFence,
         request: &Request<'_>,
     ) -> Result<Landing> {
-        request
-            .retry(|| self.landing_fence(&self.db, guard, fence, Some(request.clock.wall_now()?)))
+        self.landing_fence(&self.db, guard, fence, Some(request.clock.wall_now()?))
     }
     /// Observation only: callers can compare holder/generation/expiry for wait.
     pub fn landing(
@@ -347,14 +349,13 @@ impl Store {
         branch: &str,
         request: &Request<'_>,
     ) -> Result<Option<Landing>> {
+        request.check()?;
         reference(branch)?;
-        request.retry(|| {
-            let bytes: Option<Vec<u8>> = self.db.query_row(
-                "SELECT substr(record,1,?3) FROM claims WHERE project=?1 AND kind='landing' AND scope_key=?2",
-                params![project.to_string(), branch, MAX_RECORD_READ_BYTES], |row| row.get(0),
-            ).optional()?;
-            bytes.map(|bytes| decode(&bytes)).transpose()
-        })
+        let bytes: Option<Vec<u8>> = self.db.query_row(
+            "SELECT substr(record,1,?3) FROM claims WHERE project=?1 AND kind='landing' AND scope_key=?2",
+            params![project.to_string(), branch, MAX_RECORD_READ_BYTES], |row| row.get(0),
+        ).optional()?;
+        bytes.map(|bytes| decode(&bytes)).transpose()
     }
     pub fn renew_landing(
         &self,
@@ -488,7 +489,8 @@ impl Store {
         id: &OperationId,
         request: &Request<'_>,
     ) -> Result<PushOperation> {
-        request.retry(|| load_operation(&self.db, project, id))
+        request.check()?;
+        load_operation(&self.db, project, id)
     }
     pub fn change_push(
         &self,

@@ -1,104 +1,71 @@
-use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
+use provenant_core::{DurationMicros, MonoTime, WaitBudget};
 #[allow(unsafe_code)]
 mod read_only_vfs;
 use provenant_os::fs::{Directory, FileKind, FsError, Metadata, verify_directory_identity};
 use rusqlite::{Connection, OpenFlags};
 use std::{
+    cell::Cell,
     ffi::{OsStr, OsString},
     path::Path,
-    time::{Duration, Instant},
+    sync::OnceLock,
+    time::Duration,
 };
 
-pub trait RetryWait {
-    fn wait(&self, delay: DurationMicros, cancel: &CancelToken);
+/// How long a connection waits for a contended store before SQLite reports it
+/// busy, unless the host configuration sets another wait.
+pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
+static CONFIGURED: OnceLock<Duration> = OnceLock::new();
+thread_local! {
+    static THREAD_TIMEOUT: Cell<Option<Duration>> = const { Cell::new(None) };
 }
 
-pub struct ThreadWait;
+/// Set the process-wide busy timeout once, from host configuration, before
+/// the first store opens. Later calls are ignored. Zero fails fast.
+pub fn set_busy_timeout(timeout: Duration) {
+    let _ = CONFIGURED.set(timeout);
+}
 
-impl RetryWait for ThreadWait {
-    // SQLite retry waiting must observe cancellation against real elapsed time.
-    #[allow(clippy::disallowed_methods)]
-    fn wait(&self, delay: DurationMicros, cancel: &CancelToken) {
-        let started = Instant::now();
-        let delay = Duration::from_micros(delay.as_micros().min(250_000));
-        while !cancel.is_cancelled() {
-            let remaining = delay.saturating_sub(started.elapsed());
-            if remaining.is_zero() {
-                break;
-            }
-            std::thread::park_timeout(remaining.min(Duration::from_millis(10)));
+/// The busy timeout every store connection sets once at open. The same wait
+/// bounds the stores' own advisory locks, so one setting governs contention.
+pub fn busy_timeout() -> Duration {
+    THREAD_TIMEOUT
+        .with(Cell::get)
+        .or_else(|| CONFIGURED.get().copied())
+        .unwrap_or(DEFAULT_BUSY_TIMEOUT)
+}
+
+/// Run `f` with another busy timeout for connections and locks this thread
+/// opens or takes, so a contention test need not wait out the default.
+pub fn with_busy_timeout<T>(timeout: Duration, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Duration>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            THREAD_TIMEOUT.with(|timeout| timeout.set(self.0));
         }
     }
+    let _restore = Restore(THREAD_TIMEOUT.with(|current| current.replace(Some(timeout))));
+    f()
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum RetryError<E> {
-    Busy,
-    Cancelled,
-    Action(E),
-}
-
-/// Retry only the errors selected by `is_busy`, within the caller's budget.
-/// The shared capped exponential schedule: 1 ms initially, capped at 250 ms.
-pub fn retry<T, E>(
-    clock: &dyn Clock,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    wait: &dyn RetryWait,
-    mut is_busy: impl FnMut(&E) -> bool,
-    mut action: impl FnMut() -> Result<T, E>,
-) -> Result<T, RetryError<E>> {
-    observe(clock, budget, cancel, wait, || match action() {
-        Ok(value) => Ok(Some(value)),
-        Err(error) if is_busy(&error) => Ok(None),
-        Err(error) => Err(error),
-    })
-}
-
-/// Retry incomplete observations on the same schedule as `retry`.
-/// The real elapsed cap also bounds a frozen or inaccurate injected clock.
-/// An explicit nonblocking budget makes one observation without retrying.
-// An injected clock cannot replace the hard wall-time safety cap.
-#[allow(clippy::disallowed_methods)]
-pub fn observe<T, E>(
-    clock: &dyn Clock,
-    budget: WaitBudget,
-    cancel: &CancelToken,
-    wait: &dyn RetryWait,
-    mut action: impl FnMut() -> Result<Option<T>, E>,
-) -> Result<T, RetryError<E>> {
-    if budget.is_nonblocking() {
-        if cancel.is_cancelled() {
-            return Err(RetryError::Cancelled);
-        }
-        return action()
-            .map_err(RetryError::Action)?
-            .ok_or(RetryError::Busy);
+/// The busy timeout as a wait for a store's own advisory locks. Zero makes the
+/// locks nonblocking too.
+pub fn lock_budget(now: MonoTime) -> WaitBudget {
+    let timeout = busy_timeout();
+    if timeout.is_zero() {
+        return WaitBudget::nonblocking(now);
     }
-    let started = Instant::now();
-    let cap = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
-    let mut delay = 1_000_u64;
-    loop {
-        if cancel.is_cancelled() {
-            return Err(RetryError::Cancelled);
-        }
-        let remaining = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros())
-            .min(cap.saturating_sub(started.elapsed()));
-        if remaining.is_zero() {
-            return Err(RetryError::Busy);
-        }
-        match action() {
-            Ok(Some(value)) => return Ok(value),
-            Ok(None) => {
-                let micros = u64::try_from(remaining.as_micros())
-                    .unwrap_or(u64::MAX)
-                    .min(delay);
-                wait.wait(DurationMicros::from_micros(micros), cancel);
-                delay = delay.saturating_mul(2).min(250_000);
-            }
-            Err(error) => return Err(RetryError::Action(error)),
-        }
-    }
+    let micros = u64::try_from(timeout.as_micros()).unwrap_or(u64::MAX);
+    WaitBudget::up_to(now, DurationMicros::from_micros(micros))
+}
+
+/// Whether SQLite gave up on a contended store after the busy timeout.
+pub fn is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 /// Verify a directory's before/open/after identity and optional device.
@@ -130,7 +97,7 @@ pub enum CompanionFault {
     Links,
 }
 
-/// Return false when the observed inode disappeared so the caller can retry.
+/// Return false when the observed inode disappeared so it is observed again.
 fn companion_is_safe(metadata: Metadata) -> Result<bool, CompanionFault> {
     if metadata.kind == FileKind::Symlink {
         return Err(CompanionFault::Symlink);
@@ -150,19 +117,17 @@ fn companion_is_safe(metadata: Metadata) -> Result<bool, CompanionFault> {
     Ok(metadata.links == 1)
 }
 
-/// Check each database and companion name through the caller's budgeted
-/// observation retry, preserving each caller's error type and path context.
+/// Check each database and companion name once, preserving each caller's
+/// error type and path context.
 pub fn check_companions<E>(
     directory: &Directory,
     names: &[OsString],
-    mut retry: impl FnMut(&mut dyn FnMut() -> Result<Option<()>, E>) -> Result<(), E>,
     mut filesystem_error: impl FnMut(FsError) -> E,
     mut unsafe_name: impl FnMut(&OsStr, CompanionFault) -> E,
 ) -> Result<(), E> {
     for name in names {
         check_companion(
             || directory.metadata_at(name, false),
-            &mut retry,
             &mut filesystem_error,
             |fault| unsafe_name(name, fault),
         )?;
@@ -170,28 +135,31 @@ pub fn check_companions<E>(
     Ok(())
 }
 
-/// Check one companion, retrying an observation when its name vanished after
-/// stat. The supplied retry retains the caller's budget and cancellation.
+/// Check one companion. A name SQLite unlinked between lookup and stat is
+/// observed again at once; one that keeps vanishing is absent, not an error.
 pub fn check_companion<E>(
     mut metadata: impl FnMut() -> Result<Metadata, FsError>,
-    mut retry: impl FnMut(&mut dyn FnMut() -> Result<Option<()>, E>) -> Result<(), E>,
     mut filesystem_error: impl FnMut(FsError) -> E,
     mut unsafe_error: impl FnMut(CompanionFault) -> E,
 ) -> Result<(), E> {
-    let mut check = || match metadata() {
-        Ok(metadata) => match companion_is_safe(metadata) {
-            Ok(true) => Ok(Some(())),
-            Ok(false) => Ok(None),
-            Err(fault) => Err(unsafe_error(fault)),
-        },
-        Err(error) if error.is_not_found() => Ok(Some(())),
-        Err(error) => Err(filesystem_error(error)),
-    };
-    retry(&mut check)
+    for _ in 0..COMPANION_OBSERVATIONS {
+        match metadata() {
+            Ok(metadata) => match companion_is_safe(metadata) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(fault) => return Err(unsafe_error(fault)),
+            },
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(filesystem_error(error)),
+        }
+    }
+    Ok(())
 }
+const COMPANION_OBSERVATIONS: usize = 4;
 
 /// Open a database without following symlinks, with SQLite's internal mutexes
-/// disabled because each store is owned by one thread. Busy waits are external.
+/// disabled because each store is owned by one thread. SQLite itself waits up
+/// to [`busy_timeout`] for a contended store.
 pub fn open_connection(path: &Path, read_only: bool) -> rusqlite::Result<Connection> {
     let access = if read_only {
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -202,7 +170,7 @@ pub fn open_connection(path: &Path, read_only: bool) -> rusqlite::Result<Connect
         path,
         access | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
-    db.busy_timeout(Duration::ZERO)?;
+    db.busy_timeout(busy_timeout())?;
     Ok(db)
 }
 
@@ -225,7 +193,7 @@ pub fn open_read_only_connection(path: &Path) -> rusqlite::Result<Connection> {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         "provenant-read-only",
     )?;
-    db.busy_timeout(Duration::ZERO)?;
+    db.busy_timeout(busy_timeout())?;
     Ok(db)
 }
 
@@ -306,8 +274,6 @@ pub fn apply_migrations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{MonoTime, TestClock, WallTime};
-    use std::cell::{Cell, RefCell};
 
     fn safe_companion() -> Metadata {
         Metadata {
@@ -343,11 +309,6 @@ mod tests {
                             source: std::io::Error::from_raw_os_error(2),
                         })
                     }
-                },
-                |check| {
-                    assert_eq!(check()?, None);
-                    assert_eq!(check()?, Some(()));
-                    Ok(())
                 },
                 |_| "filesystem",
                 |_| "unsafe",
@@ -403,10 +364,6 @@ mod tests {
                         unsafe_metadata
                     })
                 },
-                |check| {
-                    assert_eq!(check()?, None);
-                    check().map(|_| ())
-                },
                 |_| CompanionFault::NotRegular,
                 |fault| fault,
             );
@@ -417,283 +374,90 @@ mod tests {
     }
 
     #[test]
-    fn companion_unlink_retry_preserves_wait_errors() -> Result<(), Box<dyn std::error::Error>> {
+    fn a_companion_that_keeps_vanishing_is_absent() {
         let removed = Metadata {
             links: 0,
             ..safe_companion()
         };
-        for error in ["cancelled", "contention"] {
-            let result = check_companion(
-                || Ok(removed),
-                |check| {
-                    assert_eq!(check()?, None);
-                    Err(error)
-                },
-                |_| "filesystem",
-                |_| "unsafe",
-            );
-            assert_eq!(result, Err(error));
-        }
-        Ok(())
-    }
-
-    struct AdvancingWait {
-        clock: RefCell<TestClock>,
-        delays: RefCell<Vec<u64>>,
-    }
-
-    impl Clock for AdvancingWait {
-        fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
-            self.clock.borrow().wall_now()
-        }
-
-        fn mono_now(&self) -> MonoTime {
-            self.clock.borrow().mono_now()
-        }
-
-        fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
-            self.clock.borrow().wait_until(deadline)
-        }
-    }
-
-    impl RetryWait for AdvancingWait {
-        fn wait(&self, delay: DurationMicros, _: &CancelToken) {
-            self.delays.borrow_mut().push(delay.as_micros());
-            self.clock.borrow_mut().advance(delay).unwrap();
-        }
-    }
-
-    #[derive(Default)]
-    struct CountingWait(Cell<usize>);
-
-    impl RetryWait for CountingWait {
-        fn wait(&self, _: DurationMicros, _: &CancelToken) {
-            self.0.set(self.0.get() + 1);
-        }
-    }
-
-    #[test]
-    fn nonblocking_retry_attempts_once_without_waiting() -> Result<(), Box<dyn std::error::Error>> {
-        let mut clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        let budget = WaitBudget::nonblocking(clock.mono_now());
-        clock.advance(DurationMicros::from_micros(10))?;
-        for (outcome, expected) in [
-            (Ok(42), Ok(42)),
-            (Err(true), Err(RetryError::Busy)),
-            (Err(false), Err(RetryError::Action(false))),
-        ] {
-            for cancelled in [false, true] {
-                let cancel = CancelToken::new();
-                if cancelled {
-                    cancel.cancel();
-                }
-                let wait = CountingWait::default();
-                let mut attempts = 0;
-                let result = retry(
-                    &clock,
-                    budget,
-                    &cancel,
-                    &wait,
-                    |busy: &bool| *busy,
-                    || {
-                        attempts += 1;
-                        outcome
-                    },
-                );
-                if cancelled {
-                    assert_eq!(result, Err(RetryError::Cancelled));
-                } else {
-                    assert_eq!(result, expected);
-                }
-                assert_eq!(attempts, usize::from(!cancelled));
-                assert_eq!(wait.0.get(), 0);
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn nonblocking_observe_attempts_once_without_waiting() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        let cancel = CancelToken::new();
-        for (outcome, expected) in [
-            (Ok(Some(42)), Ok(42)),
-            (Ok(None), Err(RetryError::Busy)),
-            (Err(false), Err(RetryError::Action(false))),
-        ] {
-            let wait = CountingWait::default();
-            let mut attempts = 0;
-            let result = observe(
-                &clock,
-                WaitBudget::nonblocking(clock.mono_now()),
-                &cancel,
-                &wait,
-                || {
-                    attempts += 1;
-                    outcome
-                },
-            );
-            assert_eq!(result, expected);
-            assert_eq!(attempts, 1);
-            assert_eq!(wait.0.get(), 0);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn expired_retry_budget_never_starts_an_action() -> Result<(), Box<dyn std::error::Error>> {
-        let mut clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        let budget = WaitBudget::cli(clock.mono_now(), 1)?;
-        clock.advance(DurationMicros::from_seconds(1)?)?;
-        let cancel = CancelToken::new();
-        let wait = CountingWait::default();
-        let mut attempts = 0;
-        let result = retry(
-            &clock,
-            budget,
-            &cancel,
-            &wait,
-            |busy: &bool| *busy,
+        let mut observations = 0;
+        let result: Result<(), &'static str> = check_companion(
             || {
-                attempts += 1;
-                Ok(42)
+                observations += 1;
+                Ok(removed)
             },
+            |_| "filesystem",
+            |_| "unsafe",
         );
-        assert_eq!(result, Err(RetryError::Busy));
-        assert_eq!(attempts, 0);
-        assert_eq!(wait.0.get(), 0);
-        Ok(())
+        assert_eq!(result, Ok(()));
+        assert_eq!(observations, COMPANION_OBSERVATIONS);
     }
 
     #[test]
-    fn retry_retries_busy_errors_and_stops_on_success() -> Result<(), Box<dyn std::error::Error>> {
-        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        let cancel = CancelToken::new();
-        let wait = CountingWait::default();
-        let budget = WaitBudget::cli(clock.mono_now(), 1)?;
-        let mut attempts = 0;
-        let result = retry(
-            &clock,
-            budget,
-            &cancel,
-            &wait,
-            |error: &bool| *error,
-            || {
-                attempts += 1;
-                if attempts < 3 { Err(true) } else { Ok(42) }
-            },
-        );
-        assert_eq!(result, Ok(42));
-        assert_eq!(attempts, 3);
-        assert_eq!(wait.0.get(), 2);
-        Ok(())
-    }
-
-    #[test]
-    fn retry_exhausts_budget_with_capped_delays() -> Result<(), Box<dyn std::error::Error>> {
-        let wait = AdvancingWait {
-            clock: RefCell::new(TestClock::new(
-                WallTime::from_micros(0)?,
-                MonoTime::from_micros(0),
-            )),
-            delays: RefCell::default(),
-        };
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(wait.mono_now(), 1)?;
-        let mut attempts = 0;
-        let result: Result<(), _> = retry(
-            &wait,
-            budget,
-            &cancel,
-            &wait,
-            |error: &bool| *error,
-            || {
-                attempts += 1;
-                Err(true)
-            },
-        );
-        assert_eq!(result, Err(RetryError::Busy));
-        assert_eq!(attempts, 11);
-        assert_eq!(
-            *wait.delays.borrow(),
-            [
-                1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 250_000, 250_000,
-                245_000
-            ]
-        );
-        assert_eq!(budget.remaining(wait.mono_now()).as_micros(), 0);
-        Ok(())
-    }
-
-    #[test]
-    fn retry_stops_on_cancellation() -> Result<(), Box<dyn std::error::Error>> {
-        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        for already_cancelled in [false, true] {
-            let cancel = CancelToken::new();
-            let wait = CountingWait::default();
-            let budget = WaitBudget::cli(clock.mono_now(), 1)?;
-            if already_cancelled {
-                cancel.cancel();
-            }
-            let mut attempts = 0;
-            let result: Result<(), _> = retry(
-                &clock,
-                budget,
-                &cancel,
-                &wait,
-                |error: &bool| *error,
-                || {
-                    attempts += 1;
-                    cancel.cancel();
-                    Err(true)
-                },
-            );
-            assert_eq!(result, Err(RetryError::Cancelled));
-            assert_eq!(attempts, usize::from(!already_cancelled));
-            assert_eq!(wait.0.get(), attempts);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn retry_returns_non_busy_errors_without_waiting() -> Result<(), Box<dyn std::error::Error>> {
-        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        let cancel = CancelToken::new();
-        let wait = CountingWait::default();
-        let budget = WaitBudget::cli(clock.mono_now(), 1)?;
-        let mut attempts = 0;
-        let result: Result<(), _> = retry(
-            &clock,
-            budget,
-            &cancel,
-            &wait,
-            |error: &bool| *error,
-            || {
-                attempts += 1;
-                Err(false)
-            },
-        );
-        assert_eq!(result, Err(RetryError::Action(false)));
-        assert_eq!(attempts, 1);
-        assert_eq!(wait.0.get(), 0);
-        Ok(())
-    }
-
-    #[test]
-    fn observe_retries_incomplete_observations() -> Result<(), Box<dyn std::error::Error>> {
-        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
-        let cancel = CancelToken::new();
-        let wait = CountingWait::default();
-        let budget = WaitBudget::cli(clock.mono_now(), 1)?;
-        let mut attempts = 0;
-        let result: Result<_, RetryError<()>> = observe(&clock, budget, &cancel, &wait, || {
-            attempts += 1;
-            Ok((attempts == 3).then_some(42))
+    fn a_thread_timeout_bounds_locks_and_then_restores() {
+        let now = MonoTime::from_micros(0);
+        let outer = busy_timeout();
+        with_busy_timeout(Duration::from_millis(50), || {
+            assert_eq!(busy_timeout(), Duration::from_millis(50));
+            assert_eq!(lock_budget(now).remaining(now).as_micros(), 50_000);
         });
-        assert_eq!(result, Ok(42));
-        assert_eq!(attempts, 3);
-        assert_eq!(wait.0.get(), 2);
+        with_busy_timeout(Duration::ZERO, || {
+            assert!(lock_budget(now).is_nonblocking());
+        });
+        assert_eq!(busy_timeout(), outer);
+    }
+
+    // The writer holds its lock across a real-time sleep to make the reader wait.
+    #[allow(clippy::disallowed_methods)]
+    #[test]
+    fn a_contended_store_waits_for_the_writer_instead_of_failing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = std::env::temp_dir().canonicalize()?.join(format!(
+            "provenant-sqlite-busy-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&temp)?;
+        let path = temp.join("store.sqlite3");
+        std::fs::File::create(&path)?;
+        let writer = open_connection(&path, false)?;
+        enable_wal(&writer).map_err(|_| "wal")?;
+        writer.execute_batch(
+            "CREATE TABLE t (v INTEGER); BEGIN IMMEDIATE; INSERT INTO t VALUES (1);",
+        )?;
+        let contender = open_connection(&path, false)?;
+        let started = std::time::Instant::now();
+        let released = std::thread::spawn(move || -> rusqlite::Result<()> {
+            std::thread::sleep(Duration::from_millis(300));
+            writer.execute_batch("COMMIT")
+        });
+        contender.execute_batch("BEGIN IMMEDIATE; INSERT INTO t VALUES (2); COMMIT;")?;
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        released.join().map_err(|_| "writer thread")??;
+        let rows: i64 = contender.query_row("SELECT count(*) FROM t", [], |row| row.get(0))?;
+        assert_eq!(rows, 2);
+        std::fs::remove_dir_all(&temp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_store_held_past_the_timeout_reports_busy() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = std::env::temp_dir().canonicalize()?.join(format!(
+            "provenant-sqlite-held-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&temp)?;
+        let path = temp.join("store.sqlite3");
+        std::fs::File::create(&path)?;
+        let writer = open_connection(&path, false)?;
+        enable_wal(&writer).map_err(|_| "wal")?;
+        writer.execute_batch("CREATE TABLE t (v INTEGER); BEGIN IMMEDIATE;")?;
+        let contender =
+            with_busy_timeout(Duration::from_millis(20), || open_connection(&path, false))?;
+        let error = contender.execute_batch("BEGIN IMMEDIATE").unwrap_err();
+        assert!(is_busy(&error));
+        writer.execute_batch("COMMIT")?;
+        std::fs::remove_dir_all(&temp)?;
         Ok(())
     }
 
