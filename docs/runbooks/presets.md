@@ -311,9 +311,8 @@ The graph is `write`, then `ci` (a CI gate and its repair loop), `review`
    `repairer` agent on the same worktree and branch (`continues = "write"`).
    Its brief holds the failed checks with their log excerpts, the writer's
    final report and the previous repair's, never an earlier transcript. Each
-   report the 4 KiB excerpt cuts short also carries its closing `remaining`
-   window, so work handed off at the end of a long report reaches every
-   round. The host pushes the repair to the same pull request
+   report that declared a handoff block also carries its `remaining` items,
+   so work handed off reaches every round even when the report is clipped. The host pushes the repair to the same pull request
    and the CI gate runs again on the new head.
 4. After `max_iterations` red rounds the loop stops. With
    `decision_session` set, the session receives a loop ask offering stop,

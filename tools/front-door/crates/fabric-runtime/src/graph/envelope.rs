@@ -247,7 +247,7 @@ fn node_bound(
                 branch: Some(String::new()),
                 commit: Some(String::new()),
                 warnings: Vec::new(),
-                remaining: Some(String::new()),
+                remaining: Some(Vec::new()),
             }
         }),
         attempts: Vec::new(),

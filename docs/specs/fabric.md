@@ -388,7 +388,8 @@ composite `ci` holding a CI gate bound to the writer's pushed head and a
 repair loop the gate routes to on failure. Each loop round runs a fresh
 `repairer` that `continues` the writer's branch, whose inputs are the failed
 gate's findings (check names with log excerpts), the writer's `result` and
-`remaining` in every round and the previous repair's, never a transcript,
+`remaining` handoff items in every round and the previous repair's, never a
+transcript,
 followed by the CI gate again. The composite
 succeeds on either path. A `review-council` then reviews a `head` source
 binding to the writer, so it judges the newest repaired head; a verdict gate
@@ -1114,10 +1115,13 @@ complete redacted stream. Writers can also provide a branch or commit.
 
 A node's `inputs` list selects `result`, `verdict`, `findings`, `branch`,
 `commit` or `remaining` from named direct dependencies. `remaining` is the
-closing window, at most 2048 canonical bytes starting on a line boundary, of a
-report whose `result` excerpt was cut short, so remaining work a final report
-states last survives; it is null when the excerpt holds the whole report, so
-select it with `result`. Each dependency and output selector
+`remaining[]` list of the handoff v2 block the node declared, in any status,
+rendered as a JSON array of at most 4096 canonical bytes (leading items kept, with a warning when cut); it is null when no valid
+handoff was declared or it lists no items. It is the only carrier of
+unfinished work across a clipped `result` excerpt. Decision (#2279): the
+earlier closing-window selector is removed rather than kept as a fallback,
+because handoff v2 is bounded, structured and parsed from the complete stream;
+a provider that emits no handoff gets the head excerpt and digest only. Each dependency and output selector
 may occur only once. The selected data is rendered into its brief, which is
 bounded by the effective per-node prompt byte limit. If the node prompt leaves
 no room for the block, or the selected outputs do not fit, the node fails

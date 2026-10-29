@@ -4,8 +4,8 @@ stages = [
   # The CI gate waits on the writer's pushed head with no model running. A red
   # gate routes to the repair loop; each round continues the same branch and
   # gates the new head again. Exhaustion pauses the loop and asks.
-  # Every round sees the writer's report and its closing `remaining` window,
-  # so work handed off at the end of a long report survives every round.
+  # Every round sees the writer's report and the `remaining` items of its
+  # handoff block, so work handed off survives a clipped report in every round.
   { id = "ci", inputs = [], stages = [
     { id = "check", kind = "gate", on_fail = "repair", condition = { type = "ci", target = { node = "write" }, checks = "${checks}", timeout_seconds = "${ci_timeout_seconds}" } },
     { id = "repair", depends_on = ["write"], inputs = [{ node = "check", outputs = ["findings"] }], loop = { max_rounds = "${max_iterations}", until = "check", decision_session = "${decision_session}", stages = [
@@ -67,8 +67,8 @@ prompt = """
 Repair the failing CI checks on the pull request for: ${prompt}
 Spec (acceptance criteria): ${spec}
 The inputs carry the failing check names with log excerpts, the writer's final
-report and the previous repair's report. A report cut short also carries its
-closing `remaining` window, where remaining work is handed off. Work from those
+report and the previous repair's report, each with the `remaining` items of its
+handoff block where one was declared. Work from those
 and the worktree. Fix the cause rather than the symptom, keep within the write
 scope and commit on the current branch; the host pushes it to the same pull
 request and CI runs again on the new head.
