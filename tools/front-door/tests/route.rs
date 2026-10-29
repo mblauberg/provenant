@@ -407,30 +407,52 @@ fn override_list_shows_active_future_and_expired_schedules() -> Result {
 }
 
 #[test]
-fn retired_schedule_keys_are_refused_naming_their_replacement() -> Result {
+fn retired_schedule_keys_drop_only_their_record_with_a_named_warning() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
     for (config, path, replacement) in [
         (
-            "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\nexpires_unix_seconds=2000000000\n",
-            "domains.routing.pacing_overrides.0.expires_unix_seconds",
+            "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\nexpires_unix_seconds=2000000000\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n",
+            "domains.routing.pacing_overrides.0",
             "moved_to_schedule.expires",
         ),
         (
-            "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nwindows=[{start_hour=1,end_hour=4}]\n[domains.routing.model_policy.rules.policy.cache]\nttl_seconds=60\n",
-            "domains.routing.model_policy.rules.0.windows",
+            "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nwindows=[{start_hour=1,end_hour=4}]\n[domains.routing.model_policy.rules.policy.cache]\nttl_seconds=60\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n",
+            "domains.routing.model_policy.rules.0",
             "moved_to_schedule.windows",
         ),
     ] {
         fs::write(rig.state.join("config.toml"), config)?;
-        let refused = call(&rig, &["route", "override", "list"], 2)?;
-        assert_eq!(refused["error"]["code"], "CONFIG", "{refused}");
-        let message = refused["error"]["message"].as_str().ok_or("message")?;
-        assert!(message.contains(path), "{message}");
-        assert!(message.contains(replacement), "{message}");
+        let out = rig.command(&["route", "override", "list", "--json"])?;
+        assert_eq!(code(&out), 0);
+        let stderr = String::from_utf8(out.stderr.bytes)?;
+        assert!(
+            stderr.contains(&format!(
+                "{path}: ignored invalid configuration (domain: {replacement})"
+            )),
+            "{stderr}"
+        );
+        let listed: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        let rows = listed["data"]["overrides"].as_array().ok_or("overrides")?;
+        assert_eq!(rows.len(), 1, "{listed}");
+        assert_eq!(rows[0]["scope"], "provider claude");
     }
+    // A rule that enforces a lane restriction stays strict.
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nexpires_unix_seconds=1\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=5\n",
+    )?;
+    let refused = call(&rig, &["route", "override", "list"], 2)?;
+    assert_eq!(refused["error"]["code"], "CONFIG", "{refused}");
+    let message = refused["error"]["message"].as_str().ok_or("message")?;
+    assert!(
+        message.contains("domains.routing.model_policy.rules.0.expires_unix_seconds"),
+        "{message}"
+    );
+    assert!(message.contains("moved_to_schedule.expires"), "{message}");
     Ok(())
 }
+
 #[test]
 fn cached_account_pacing_is_visible_without_probing() -> Result {
     use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow};

@@ -1027,7 +1027,13 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
         rule: issue.rule.into(),
         path: user_path()?,
         line: issue.location.line,
-        message: format!("{key}: ignored invalid configuration ({})", issue.rule),
+        message: match &issue.source {
+            Some(source) => format!(
+                "{key}: ignored invalid configuration ({}: {})",
+                issue.rule, source.code
+            ),
+            None => format!("{key}: ignored invalid configuration ({})", issue.rule),
+        },
     })
 }
 fn qualify(name: &str, field: &str) -> String {

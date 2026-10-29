@@ -125,9 +125,11 @@ expiry. `provenant route override set|list|clear` records, displays and
 removes pacing overrides; `list` also shows scheduled policy rules, each with
 its active state and remaining expiry time, and `set` echoes the recorded rule
 and any it replaced. The retired keys `starts_unix_seconds`,
-`expires_unix_seconds` and a record's top-level `windows` refuse the
-configuration with code `moved_to_schedule.starts`, `.expires` or `.windows`;
-there is no conversion.
+`expires_unix_seconds` and a record's top-level `windows` are not converted:
+the section validator reports the record with code `moved_to_schedule.starts`,
+`.expires` or `.windows`, and recovery drops only that record with a located
+warning carrying the code. In a rule that enforces a lane restriction the
+error is reported at the key and refuses the configuration.
 
 ### Go monthly allowance floor
 

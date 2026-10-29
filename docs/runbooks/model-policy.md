@@ -66,10 +66,14 @@ configuration when it carries an enforced lane restriction.
 `provenant route override list` shows policy and pacing schedules, whether
 each is active and the time remaining to expiry.
 
-The timing keys that predate `schedule` are refused at load, naming their
-replacement: move `starts_unix_seconds` to `schedule.starts`,
-`expires_unix_seconds` to `schedule.expires` and a rule's top-level `windows`
-to `schedule.windows`.
+The timing keys that predate `schedule` are not converted. A pacing override or
+policy rule that still carries one is dropped with a located warning that names
+the replacement, such as
+`domains.routing.pacing_overrides.0: ignored invalid configuration (domain: moved_to_schedule.expires)`;
+other records still load. A rule that enforces a lane restriction refuses the
+configuration instead, at the retired key. Move `starts_unix_seconds` to
+`schedule.starts`, `expires_unix_seconds` to `schedule.expires` and a
+top-level `windows` to `schedule.windows`.
 
 The bundled policy follows issues #2177 and #2185 and the repository's price
 table. These are adjustable operating defaults:

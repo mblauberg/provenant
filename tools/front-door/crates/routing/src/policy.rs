@@ -311,10 +311,14 @@ pub(crate) const RETIRED_SCHEDULE_KEYS: [(&str, &str); 3] = [
     ("windows", "moved_to_schedule.windows"),
 ];
 /// Report each retired timing key in the array of records at `path`, so the
-/// configuration names its replacement instead of dropping it as unknown.
+/// warning names its replacement instead of dropping the key as unknown, which
+/// would leave the record active without its bounds. A tolerant record is
+/// reported at the record, so recovery drops only that record. A `strict`
+/// record is reported at the key itself, which [`boundary`] refuses.
 pub(crate) fn retired_schedule_keys(
     table: &toml_edit::Table,
     path: &[&str],
+    strict: impl Fn(&toml_edit::Table) -> bool,
     errors: &mut Vec<SectionError>,
 ) {
     let Some((last, parents)) = path.split_last() else {
@@ -329,30 +333,40 @@ pub(crate) fn retired_schedule_keys(
     else {
         return;
     };
-    let rows: Vec<&dyn toml_edit::TableLike> = match item {
-        toml_edit::Item::ArrayOfTables(rows) => rows
-            .iter()
-            .map(|row| row as &dyn toml_edit::TableLike)
-            .collect(),
+    let rows: Vec<toml_edit::Table> = match item {
+        toml_edit::Item::ArrayOfTables(rows) => rows.iter().cloned().collect(),
         toml_edit::Item::Value(toml_edit::Value::Array(rows)) => rows
             .iter()
             .filter_map(|row| {
                 row.as_inline_table()
-                    .map(|row| row as &dyn toml_edit::TableLike)
+                    .cloned()
+                    .map(toml_edit::InlineTable::into_table)
             })
             .collect(),
         _ => return,
     };
-    for (index, row) in rows.into_iter().enumerate() {
+    for (index, row) in rows.iter().enumerate() {
+        let record = format!("{}.{index}", path.join("."));
         for (key, code) in RETIRED_SCHEDULE_KEYS {
             if row.contains_key(key) {
                 errors.push(SectionError {
-                    field: format!("{}.{index}.{key}", path.join(".")),
+                    field: if strict(row) {
+                        format!("{record}.{key}")
+                    } else {
+                        record.clone()
+                    },
                     code,
                 });
             }
         }
     }
+}
+/// Whether a policy rule row sets an enforced lane restriction, so a retired
+/// key in it refuses the configuration. A row that does not decode counts as
+/// restricting.
+pub(crate) fn restricting_rule(row: &toml_edit::Table) -> bool {
+    toml_edit::de::from_document::<ModelPolicyRule>(toml_edit::DocumentMut::from(row.clone()))
+        .map_or(true, |rule| rule.policy.restricts())
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -600,11 +614,15 @@ const ENFORCED: [&str; 3] = ["max_context", "max_turns", "read_only"];
 /// Whether invalid routing input must refuse the configuration: an enforced
 /// restriction, or a malformed value at or above one, which recovery would drop.
 pub(crate) fn boundary(error: &SectionError) -> bool {
-    if error.code == "restriction"
-        || RETIRED_SCHEDULE_KEYS
-            .iter()
-            .any(|(_, code)| *code == error.code)
+    // A retired key reported at the key, not its record, is in a restricting
+    // rule; a record-level report recovers by dropping the record.
+    if let Some((key, _)) = RETIRED_SCHEDULE_KEYS
+        .iter()
+        .find(|(_, code)| *code == error.code)
     {
+        return error.field.rsplit('.').next() == Some(*key);
+    }
+    if error.code == "restriction" {
         return true;
     }
     if error.code == "policy" {
@@ -1124,34 +1142,33 @@ mod tests {
     }
 
     #[test]
-    fn retired_schedule_keys_are_refused_with_their_replacement()
+    fn retired_schedule_keys_drop_their_record_unless_it_restricts()
     -> Result<(), Box<dyn std::error::Error>> {
-        let table: toml_edit::DocumentMut = "pacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n[[model_policy.rules]]\nstarts_unix_seconds=1\nwindows=[]\n".parse()?;
+        let table: toml_edit::DocumentMut = "pacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n[[model_policy.rules]]\nstarts_unix_seconds=1\nwindows=[]\n[[model_policy.rules]]\nexpires_unix_seconds=1\n[model_policy.rules.policy.lane]\nread_only=true\n".parse()?;
         let errors = (crate::SECTION.validate)(table.as_table());
         let named: Vec<_> = errors
             .iter()
             .filter(|error| error.code.starts_with("moved_to_schedule."))
-            .map(|error| (error.field.as_str(), error.code))
+            .map(|error| {
+                (
+                    error.field.as_str(),
+                    error.code,
+                    (crate::SECTION.boundary)(error),
+                )
+            })
             .collect();
         assert_eq!(
             named,
             [
+                ("pacing_overrides.0", "moved_to_schedule.expires", false),
+                ("model_policy.rules.0", "moved_to_schedule.starts", false),
+                ("model_policy.rules.0", "moved_to_schedule.windows", false),
                 (
-                    "pacing_overrides.0.expires_unix_seconds",
-                    "moved_to_schedule.expires"
+                    "model_policy.rules.1.expires_unix_seconds",
+                    "moved_to_schedule.expires",
+                    true
                 ),
-                (
-                    "model_policy.rules.0.starts_unix_seconds",
-                    "moved_to_schedule.starts"
-                ),
-                ("model_policy.rules.0.windows", "moved_to_schedule.windows"),
             ]
-        );
-        assert!(
-            errors
-                .iter()
-                .all(|error| !error.code.starts_with("moved_to_schedule.")
-                    || (crate::SECTION.boundary)(error))
         );
         // Serde never reads a retired value into the schedule.
         let rule: ModelPolicyRule = toml_edit::de::from_str("expires_unix_seconds=1\n")?;

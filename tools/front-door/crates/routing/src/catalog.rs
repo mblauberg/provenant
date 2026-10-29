@@ -831,8 +831,8 @@ mod pacing_profile_tests {
 fn defaults(_: Profile) -> &'static str {
     include_str!("../assets/review-defaults.toml")
 }
-/// Enforced model policy restrictions and retired schedule keys are a
-/// boundary; other routing input recovers.
+/// Enforced model policy restrictions, including a retired schedule key in a
+/// restricting rule, are a boundary; other routing input recovers.
 pub const SECTION: DomainSection = DomainSection {
     validate: validate_section,
     ..DomainSection::new::<RoutingConfig>("routing", defaults)
@@ -841,8 +841,13 @@ pub const SECTION: DomainSection = DomainSection {
 /// Retired timing keys are named first; serde never reads their values.
 fn validate_section(table: &toml_edit::Table) -> Vec<SectionError> {
     let mut errors = Vec::new();
-    crate::policy::retired_schedule_keys(table, &["pacing_overrides"], &mut errors);
-    crate::policy::retired_schedule_keys(table, &["model_policy", "rules"], &mut errors);
+    crate::policy::retired_schedule_keys(table, &["pacing_overrides"], |_| false, &mut errors);
+    crate::policy::retired_schedule_keys(
+        table,
+        &["model_policy", "rules"],
+        crate::policy::restricting_rule,
+        &mut errors,
+    );
     errors.extend((DomainSection::new::<RoutingConfig>("routing", defaults).validate)(table));
     errors
 }
