@@ -326,6 +326,14 @@ limit is four, so start with six for two rounds:
 expansion_depth = 6
 ```
 
+Preset and graph `read_roots` must lie inside the project or its linked
+worktrees. List any other directory by absolute path:
+
+```toml
+[domains.fabric.graph]
+allowed_read_roots = ["/absolute/path/to/shared-reference"]
+```
+
 All allowed rounds count
 towards structural and prompt limits even if the first round passes. An
 extension adds to that expansion and must fit host limits. The safety bounds

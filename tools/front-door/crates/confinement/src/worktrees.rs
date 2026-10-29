@@ -75,6 +75,10 @@ pub enum WorktreeError {
     StaleRegistration,
     #[error("worktree is dirty")]
     Dirty,
+    #[error("worktree HEAD {current} is not an ancestor of source commit {target}")]
+    SourceDiverged { current: GitOid, target: GitOid },
+    #[error("worktree could not fast-forward to source commit {target}")]
+    SourceAdvanceFailed { target: GitOid },
     #[error("worktree has undeclared ignored paths: {0}")]
     IgnoredPaths(String),
     #[error("worktree has an in-progress Git operation")]
@@ -1438,6 +1442,88 @@ fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), WorktreeError> 
     Ok(())
 }
 
+/// Advance a free, registered linked worktree to a pinned descendant commit.
+/// Writer exclusion covers verification and mutation. Local edits, divergence
+/// and ignored files that would be overwritten always refuse the handoff. A
+/// checkout already ahead of the pin is left as it is.
+pub fn fast_forward(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+    head: GitOid,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    validate_binding(context)?;
+    let _registry = repository_lock(context, LockMode::Exclusive, cancel)?;
+    context.repo.revalidate()?;
+    let path = canonicalize(path)?;
+    if path == canonicalize(context.repo.root_path())? {
+        return Err(WorktreeError::Primary);
+    }
+    let entries = read_worktrees(context, cancel)?;
+    let entry = entries
+        .iter()
+        .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&path))
+        .ok_or(WorktreeError::NotFound)?;
+    let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
+    let locked = lock_worktree_for_mutation(context, entry, cancel)?;
+    let fresh = read_worktrees(context, cancel)?;
+    let current = matching_worktree(&fresh, branch, context.repo.root_path())?
+        .ok_or(WorktreeError::IdentityChanged)?;
+    if canonicalize(&current.path)? != path
+        || current.head != entry.head
+        || current.locked
+        || current.prunable
+    {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    let repo = locked.verified.repo();
+    match worktree_dirty_at(context, repo, cancel)? {
+        WorktreeCondition::Clean | WorktreeCondition::Ignored => {}
+        WorktreeCondition::Dirty => return Err(WorktreeError::Dirty),
+        WorktreeCondition::GitOperationInProgress => {
+            return Err(WorktreeError::GitOperationInProgress);
+        }
+        WorktreeCondition::Unknown => return Err(WorktreeError::UnknownWriter),
+    }
+    // A retry or fallback writer resumes in a checkout that already holds work
+    // committed past the pin; that descendant of the pin is not a divergence.
+    if current.head != head && is_ancestor(context, head, current.head, cancel)? {
+        return Ok(());
+    }
+    if !is_ancestor(context, current.head, head, cancel)? {
+        return Err(WorktreeError::SourceDiverged {
+            current: current.head,
+            target: head,
+        });
+    }
+    repo.revalidate()?;
+    locked.identity.check_tree(&locked.verified)?;
+    let actual = run_git(context, repo, GitRead::RevParseHead, cancel)?;
+    if exit_code(&actual)? != 0 || parse_oid(trim_ascii(&actual.stdout.bytes))? != current.head {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    if current.head != head {
+        let outcome = execute_git_mutation(
+            context.executor,
+            repo,
+            context.utility,
+            GitMutation::FastForward { head },
+            context.mutation_budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::SourceAdvanceFailed { target: head });
+        }
+    }
+    repo.revalidate()?;
+    check_writer_terminal(repo)?;
+    let actual = run_git(context, repo, GitRead::RevParseHead, cancel)?;
+    if exit_code(&actual)? != 0 || parse_oid(trim_ascii(&actual.stdout.bytes))? != head {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    Ok(())
+}
+
 /// Bounded, unpaged repository-scoped worktree inventory.
 pub fn list(
     context: &WorktreeContext<'_>,
@@ -2750,6 +2836,192 @@ mod lifecycle_tests {
     use std::os::unix::fs::PermissionsExt;
 
     struct FreeWorkers;
+
+    #[test]
+    fn source_fast_forward_advances_clean_tree_and_preserves_ignored_output()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore build output"])?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "source-writer".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::create_dir(info.path.join("target"))?;
+        fs::write(info.path.join("target/cache"), "retained output")?;
+        fs::write(fixture.root.join("source-file"), "pinned source")?;
+        fixture.run(&["add", "source-file"])?;
+        fixture.run(&["commit", "-m", "combined source"])?;
+        let target = fixture.head()?;
+        let hooks = fixture.repo.common_git_dir().join("hooks");
+        fs::create_dir_all(&hooks)?;
+        fs::write(hooks.join("post-merge"), "#!/bin/sh\n: > hook-ran\n")?;
+        fs::set_permissions(hooks.join("post-merge"), fs::Permissions::from_mode(0o700))?;
+        fast_forward(&context, &info.path, target, &cancel())?;
+        let actual = list(&context, &cancel())?
+            .into_iter()
+            .find(|entry| entry.path == info.path)
+            .ok_or("missing source writer")?;
+        assert_eq!(actual.head, target);
+        assert_eq!(actual.dirty, WorktreeCondition::Ignored);
+        assert_eq!(
+            fs::read_to_string(info.path.join("source-file"))?,
+            "pinned source"
+        );
+        assert_eq!(
+            fs::read_to_string(info.path.join("target/cache"))?,
+            "retained output"
+        );
+        assert!(!info.path.join("hook-ran").exists());
+        fast_forward(&context, &info.path, target, &cancel())?;
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(), Box<dyn Error>>
+    {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "source-writer".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let pin = fixture.head()?;
+        fast_forward(&context, &info.path, pin, &cancel())?;
+        run_in_worktree(
+            &fixture,
+            &info.path,
+            &["commit", "--allow-empty", "-m", "partial work"],
+        )?;
+        let ahead = read_worktrees(&context, &cancel())?
+            .into_iter()
+            .find(|entry| entry.path == info.path)
+            .ok_or("missing writer")?
+            .head;
+        assert_ne!(ahead, pin);
+        fast_forward(&context, &info.path, pin, &cancel())?;
+        let after = read_worktrees(&context, &cancel())?
+            .into_iter()
+            .find(|entry| entry.path == info.path)
+            .ok_or("missing writer")?
+            .head;
+        assert_eq!(after, ahead);
+        Ok(())
+    }
+
+    #[test]
+    fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box<dyn Error>> {
+        for scenario in ["dirty", "diverged", "leased"] {
+            let fixture = Fixture::new()?;
+            let test = TestContext::new(&fixture)?;
+            let context = test.context();
+            let info = create(
+                &context,
+                WorktreeCreate {
+                    branch: "source-writer".into(),
+                    base: None,
+                },
+                &cancel(),
+            )?;
+            fixture.run(&["commit", "--allow-empty", "-m", "combined source"])?;
+            let target = fixture.head()?;
+            let state = context
+                .project_state
+                .open_verified_directory(&state_dir_name(&info.path))?;
+            let lease = if scenario == "leased" {
+                Some(state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?)
+            } else {
+                None
+            };
+            if scenario == "dirty" {
+                fs::write(info.path.join("keep"), "uncommitted")?;
+            } else if scenario == "diverged" {
+                run_in_worktree(
+                    &fixture,
+                    &info.path,
+                    &["commit", "--allow-empty", "-m", "diverged writer"],
+                )?;
+            }
+            let before = read_worktrees(&context, &cancel())?
+                .into_iter()
+                .find(|entry| entry.path == info.path)
+                .ok_or("missing writer")?
+                .head;
+            let error = fast_forward(&context, &info.path, target, &cancel())
+                .err()
+                .ok_or_else(|| format!("{scenario} source writer advanced"))?;
+            match scenario {
+                "dirty" => assert!(matches!(error, WorktreeError::Dirty)),
+                "diverged" => assert!(
+                    matches!(error, WorktreeError::SourceDiverged { current, target: requested } if current == before && requested == target)
+                ),
+                "leased" => assert!(matches!(error, WorktreeError::LiveWriter)),
+                _ => unreachable!(),
+            }
+            let after = read_worktrees(&context, &cancel())?
+                .into_iter()
+                .find(|entry| entry.path == info.path)
+                .ok_or("missing writer")?
+                .head;
+            assert_eq!(after, before, "{scenario}");
+            if scenario == "dirty" {
+                assert_eq!(fs::read_to_string(info.path.join("keep"))?, "uncommitted");
+            }
+            drop(lease);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_fast_forward_preserves_ignored_files_that_become_tracked()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "cache\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore local cache"])?;
+        let test = TestContext::new(&fixture)?;
+        let context = test.context();
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "source-writer".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::write(info.path.join("cache"), "keep ignored content")?;
+        fs::write(fixture.root.join("cache"), "tracked source content")?;
+        fixture.run(&["add", "-f", "cache"])?;
+        fixture.run(&["commit", "-m", "track cache path"])?;
+        let target = fixture.head()?;
+        assert!(matches!(
+            fast_forward(&context, &info.path, target, &cancel()),
+            Err(WorktreeError::SourceAdvanceFailed { target: requested }) if requested == target
+        ));
+        let after = read_worktrees(&context, &cancel())?
+            .into_iter()
+            .find(|entry| entry.path == info.path)
+            .ok_or("missing writer")?
+            .head;
+        assert_eq!(after, info.head);
+        assert_eq!(
+            fs::read_to_string(info.path.join("cache"))?,
+            "keep ignored content"
+        );
+        Ok(())
+    }
 
     #[test]
     fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners()

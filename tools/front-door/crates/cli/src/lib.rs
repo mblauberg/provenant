@@ -179,9 +179,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         {
             request.worktree_branch = Some(branch);
         }
-        if request.access.worktree.is_some()
-            || request.worktree_branch.is_some()
-            || request.branch.is_some()
+        if request.preset.is_none()
+            && (request.access.worktree.is_some()
+                || request.worktree_branch.is_some()
+                || request.branch.is_some())
         {
             request.access.mode = Mode::WorktreeWrite;
         }
@@ -359,7 +360,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
         }
         if path == "provenant run" {
             command = command
-                .mut_arg("worktree", |arg| arg.help("Use a writer worktree; a missing branch name creates an owned local worktree"))
+                .mut_arg("worktree", |arg| arg.help("Bind an existing preset writer worktree; single tasks can create an owned worktree for a missing branch name"))
                 .mut_arg("wait", |arg| arg.default_value("240"))
                 .mut_arg("branch", |arg| {
                     arg.requires(clap::builder::Resettable::Reset)
@@ -377,6 +378,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 "prompt_stdin",
                 "preset",
                 "preset_set",
+                "preset_params_file",
                 "explain",
                 "route",
                 "model",
@@ -510,18 +512,23 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             route_valid(&resolve.request)?
         }
         Command::Dispatch(dispatch) | Command::Run(dispatch) => {
-            if dispatch.preset.is_none() && (!dispatch.preset_set.is_empty() || dispatch.explain) {
-                return invalid("--set and --explain require --preset");
+            if dispatch.preset.is_none()
+                && (!dispatch.preset_set.is_empty()
+                    || dispatch.preset_params_file.is_some()
+                    || dispatch.explain)
+            {
+                return invalid("--set, --params-file and --explain require --preset");
             }
             if matches!(inv.command, Command::Dispatch(_)) && dispatch.preset.is_some() {
                 return invalid("--preset is supported by run, not dispatch");
             }
             let access = &dispatch.access;
             route_valid(&dispatch.route)?;
-            if (access.mode == Mode::WorktreeWrite)
-                != (access.worktree.is_some()
-                    || dispatch.branch.is_some()
-                    || dispatch.worktree_branch.is_some())
+            if dispatch.preset.is_none()
+                && (access.mode == Mode::WorktreeWrite)
+                    != (access.worktree.is_some()
+                        || dispatch.branch.is_some()
+                        || dispatch.worktree_branch.is_some())
             {
                 return invalid(
                     "--worktree, --worktree-branch, or a peer writer's --branch, is required with, and only valid \
@@ -530,6 +537,12 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             }
             if access.mode == Mode::WorktreeWrite && !dispatch.route.fallback.is_empty() {
                 return invalid("writers cannot use fallback models");
+            }
+            if dispatch.concurrency.is_some()
+                && dispatch.input.manifest.is_none()
+                && dispatch.preset.is_none()
+            {
+                return invalid("--concurrency requires --manifest or --preset");
             }
             if access.read_root.len() > 32
                 || access.write_root.len() > 32
@@ -701,12 +714,22 @@ pub fn usage_verbs() -> Vec<String> {
 }
 fn constraints(path: &str) -> Vec<String> {
     let values: &[&str] = match path {
-        "provenant dispatch" | "provenant run" => &[
+        "provenant dispatch" => &[
             "single prompt requires exactly one of model or route",
             "operation-id is generated when omitted; supply it for planned retries",
             "manifest conflicts with per-task route, access, metadata and provider-timeout",
             "concurrency requires manifest",
             "worktree, or a peer writer's branch, is required with, and only valid for, worktree-write",
+            "fallback conflicts with a writer and has at most two distinct models",
+            "prompt and manifest inputs are at most 1 MiB",
+        ],
+        "provenant run" => &[
+            "single prompt requires exactly one of model or route, or a named preset",
+            "operation-id is generated when omitted; supply it for planned retries",
+            "manifest conflicts with per-task route, access, metadata and provider-timeout",
+            "concurrency requires manifest or preset",
+            "single-task worktree, or a peer writer's branch, requires worktree-write",
+            "preset worktree bindings require an existing registered worktree",
             "fallback conflicts with a writer and has at most two distinct models",
             "prompt and manifest inputs are at most 1 MiB",
         ],
@@ -758,7 +781,7 @@ fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
 fn requirements(path: &str, name: &str) -> Vec<String> {
     let names: &[&str] = match (path, name) {
         (_, "condition") => &["wait"],
-        (_, "concurrency") => &["manifest"],
+        ("provenant dispatch", "concurrency") => &["manifest"],
         ("provenant chair log append", "operation_id") => &["issued_at"],
         ("provenant chair log append", "issued_at") => &["operation_id"],
         ("provenant check release", "base") => &["head"],
@@ -1166,7 +1189,6 @@ mod tests {
             vec!["--account", "account"],
             vec!["--fallback", "codex/model"],
             vec!["--mode", "read-only"],
-            vec!["--worktree", "tree"],
             vec!["--branch", "branch"],
             vec!["--worktree-branch", "branch"],
             vec!["--host", "host"],
@@ -1174,7 +1196,6 @@ mod tests {
             vec!["--deliver-remote", "host"],
             vec!["--deliver-branch", "branch"],
             vec!["--open-pr"],
-            vec!["--read-root", "dir"],
             vec!["--write-root", "dir"],
             vec!["--network", "off"],
             vec!["--capability", "postgres"],
@@ -1189,8 +1210,6 @@ mod tests {
             vec!["--allow-free"],
             vec!["--provider-timeout", "1"],
             vec!["--operation-id", "id"],
-            vec!["--wait", "1"],
-            vec!["--concurrency", "2"],
         ] {
             let mut args = vec!["run", "--preset", "single", "--prompt-file", "brief"];
             args.extend(flag.iter().copied());
@@ -1199,6 +1218,57 @@ mod tests {
                 "accepted {flag:?}"
             );
         }
+    }
+    #[test]
+    fn preset_runs_accept_graph_controls_without_dispatch_writer_mode() {
+        let invocation = valid(&[
+            "run",
+            "--preset",
+            "implement-with-lens",
+            "--prompt-file",
+            "brief",
+            "--worktree",
+            "/fixture/writer",
+            "--read-root",
+            "/fixture/source",
+            "--read-root",
+            "/fixture/other",
+            "--wait",
+            "30m",
+            "--concurrency",
+            "3",
+        ]);
+        let Command::Run(request) = invocation.command else {
+            panic!("run")
+        };
+        assert_eq!(request.wait, Some(1800));
+        assert_eq!(request.concurrency, Some(3));
+        assert_eq!(request.access.mode, Mode::ReadOnly);
+        assert_eq!(
+            request.access.worktree,
+            Some(std::path::PathBuf::from("/fixture/writer"))
+        );
+        assert_eq!(request.access.read_root.len(), 2);
+        for concurrency in ["0", "17"] {
+            invalid(&[
+                "run",
+                "--preset",
+                "single",
+                "--prompt-file",
+                "brief",
+                "--concurrency",
+                concurrency,
+            ]);
+        }
+        invalid(&[
+            "dispatch",
+            "--preset",
+            "single",
+            "--prompt-file",
+            "brief",
+            "--wait",
+            "10s",
+        ]);
     }
     #[test]
     fn run_accepts_dispatch_effort_and_network() {

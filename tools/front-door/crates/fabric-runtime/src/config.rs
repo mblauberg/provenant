@@ -32,6 +32,9 @@ pub struct GraphConfig {
         deserialize_with = "ignore_limit_ceiling"
     )]
     _limit_ceiling: (),
+    /// Absolute host directories graph nodes may read besides the project's own
+    /// registered worktrees. Empty confines read roots to the project.
+    pub allowed_read_roots: Vec<String>,
 }
 
 const LIMIT_CEILING_WARNING: &str = "warning: domains.fabric.graph.limit_ceiling is deprecated and ignored; host graph limits apply";
@@ -330,6 +333,14 @@ impl DomainConfig for FabricConfig {
         if l.graph_timeout_seconds == 0 || l.graph_timeout_seconds > 14_400 {
             reject("limits.graph_timeout_seconds".into());
         }
+        if self
+            .graph
+            .allowed_read_roots
+            .iter()
+            .any(|root| !std::path::Path::new(root).is_absolute())
+        {
+            reject("graph.allowed_read_roots".into());
+        }
         let limits = &self.graph.limits;
         for (name, value) in [
             ("nodes", limits.nodes),
@@ -601,6 +612,8 @@ mod tests {
     #[test]
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
+        assert_eq!(config.graph.limits.expansion_depth, 4);
+        assert_eq!(config.graph.limit_ceiling.expansion_depth, 64);
         assert_eq!(config.graph.limits.nodes, 512);
         assert_eq!(config.graph.limits.continuations, 2);
         config.graph.limits.continuations = 0;

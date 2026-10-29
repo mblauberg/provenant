@@ -1,0 +1,64 @@
+integration_branch = "${integration_branch}"
+stages = [
+  { id = "scout", preset = "scout-swarm", parameters = { width = "${width}", read_roots = "${read_roots}" } },
+  { id = "lanes", parallel = [
+    { id = "lane", for_each = "${lanes}", preset = "implement-with-lens", parameters = { worktree = "${item.worktree}", scope = "${item.scope}", spec = "${item.spec}", base = "${base}", delivery = "integrate:${integration_branch}" } },
+  ] },
+  { id = "council", preset = "review-council", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk = "${risk}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+  { id = "refactor", role = "refactor-principal" },
+  { id = "repair", loop = { max_rounds = 2, until = "accept", stages = [
+    { id = "fix", role = "repairer" },
+    { id = "review", preset = "review-council", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk = "${risk}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+    { id = "accept", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
+  ] } },
+]
+
+[limits]
+expansion_depth = 64
+
+[parameters]
+width = 4
+read_roots = []
+integration_branch = "batch/graph"
+batch_worktree = ""
+base = ""
+spec = ""
+risk = ""
+review_shape = ""
+risk_tags = []
+# One entry per lane: name, worktree, scope and spec. Supply with --params-file.
+lanes = [
+  { name = "one", worktree = "", scope = ["."], spec = "" },
+  { name = "two", worktree = "", scope = ["."], spec = "" },
+]
+
+[roles.refactor-principal]
+tier = "principal"
+access = "worktree_write"
+worktree = "${batch_worktree}"
+write_scope = ["."]
+source = { type = "node", node = "council" }
+outputs = ["result", "findings", "commit"]
+delivery = "integrate:${integration_branch}"
+acceptance_checks = ["Preserve externally observable behaviour", "Run targeted checks and commit"]
+prompt = """
+At batch end, inspect long-horizon boundaries, migrations and SOLID for:
+${prompt}
+Start from the council's pinned combined commit. Remove unnecessary machinery
+and improve the approved design without speculative abstraction. Run checks
+and commit. Independent principal review follows in the repair loop.
+"""
+
+[roles.repairer]
+tier = "senior"
+access = "worktree_write"
+worktree = "${batch_worktree}"
+write_scope = ["."]
+inputs = [{ node = "previous.review", outputs = ["result", "findings"] }]
+acceptance_checks = ["Resolve accepted findings", "Run targeted checks and commit"]
+prompt = """
+Repair accepted batch findings for: ${prompt}
+Use the serial batch worktree advanced by the principal and earlier repairs.
+Inspect preceding review evidence, preserve scope, run targeted checks and
+commit. Reviewers will pin and review this round's changed head.
+"""

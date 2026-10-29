@@ -5,6 +5,156 @@
 use std::{path::PathBuf, process::Command};
 
 #[test]
+fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "seed",
+        ],
+    ] {
+        let output = Command::new("git")
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n",
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "accept the bounded graph")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_provenant"))
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "gate-only", "--prompt-file"])
+            .arg(&prompt)
+            .args(["--wait", "1s"])
+            .output()
+    };
+    let first = run()?;
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stdout)
+    );
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout)?;
+    assert_eq!(first["data"]["graph"]["status"], "complete");
+    assert_eq!(
+        first["data"]["graph"]["checkpoint"]["nodes"][0]["state"],
+        "succeeded"
+    );
+    assert!(
+        PathBuf::from(
+            first["data"]["document"]
+                .as_str()
+                .ok_or("retained document")?
+        )
+        .exists()
+    );
+    let replay = run()?;
+    assert!(replay.status.success());
+    let replay: serde_json::Value = serde_json::from_slice(&replay.stdout)?;
+    assert_eq!(
+        replay["data"]["graph"]["checkpoint"],
+        first["data"]["graph"]["checkpoint"]
+    );
+    Ok(())
+}
+
+#[test]
+fn explain_pins_source_refs_before_hashing_without_creating_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let output = Command::new("git")
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().into())
+    };
+    git(&["init", "-q"])?;
+    let commit = || {
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "advance",
+        ])
+    };
+    commit()?;
+    let head = git(&["rev-parse", "HEAD"])?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "review this immutable subject")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "review-council", "--prompt-file"])
+            .arg(&prompt)
+            .arg("--explain")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let first = run()?;
+    assert_eq!(first["data"]["graph"]["nodes"][0]["source"]["commit"], head);
+    commit()?;
+    let second = run()?;
+    assert_ne!(
+        first["data"]["graph"]["graph_id"],
+        second["data"]["graph"]["graph_id"]
+    );
+    assert_eq!(
+        second["data"]["graph"]["nodes"][0]["source"]["commit"],
+        git(&["rev-parse", "HEAD"])?
+    );
+    assert!(!temp.path().join("state").exists());
+    Ok(())
+}
+
+#[test]
 fn run_announces_contributing_repo_file() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let presets = temp.path().join(".provenant/presets");
@@ -76,6 +226,65 @@ fn explain_does_not_create_state() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn explain_applies_writer_read_root_and_concurrency_bindings_without_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let presets = temp.path().join(".provenant/presets");
+    let writer = temp.path().join("writer");
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::create_dir(&writer)?;
+    std::fs::create_dir(&source)?;
+    std::fs::write(
+        presets.join("bound.toml"),
+        "stages = [{ id = 'write', role = 'implementer' }]\n\
+         [roles.implementer]\n\
+         tier = 'senior'\n\
+         access = 'worktree_write'\n\
+         worktree = ''\n\
+         write_scope = ['src']\n\
+         prompt = '${prompt}'\n",
+    )?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "Implement the bounded slice")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .current_dir(temp.path())
+        .env("PROVENANT_ROOT", root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["run", "--preset", "bound", "--prompt-file"])
+        .arg(&prompt)
+        .arg("--worktree")
+        .arg(&writer)
+        .arg("--read-root")
+        .arg(&source)
+        .args(["--concurrency", "3", "--wait", "30m", "--explain"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let graph = &result["data"]["graph"];
+    assert_eq!(graph["limits"]["concurrency"], 3);
+    assert_eq!(
+        graph["nodes"][0]["worktree"],
+        writer.to_str().ok_or("writer path")?
+    );
+    assert_eq!(
+        graph["nodes"][0]["read_roots"],
+        serde_json::json!([std::fs::canonicalize(&source)?])
+    );
+    assert_eq!(graph["nodes"][0]["write_scope"], serde_json::json!(["src"]));
+    assert!(!state.exists());
+    Ok(())
+}
+
+#[test]
 fn show_validates_and_list_reports_bad_files() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let presets = temp.path().join("provenant/presets");
@@ -137,5 +346,154 @@ fn oversized_expansions_fail_before_graph_state_for_run_and_explain()
         assert!(String::from_utf8_lossy(&output.stdout).contains("8 MiB"));
         assert!(!state.exists());
     }
+    Ok(())
+}
+
+#[test]
+fn run_refuses_a_read_root_outside_the_project() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "Read elsewhere")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .current_dir(temp.path())
+        .env("PROVENANT_ROOT", root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", "single", "--prompt-file"])
+        .arg(&prompt)
+        .arg("--read-root")
+        .arg(outside.path())
+        .arg("--explain")
+        .output()?;
+    assert!(!output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("allowed_read_roots"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn integration_sourced_graph_identity_follows_the_integration_head()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    let git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
+        let output = Command::new("git")
+            .current_dir(&project)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=f@example.invalid",
+            ])
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    };
+    git(&["init", "-q"])?;
+    git(&["commit", "--allow-empty", "-qm", "seed"])?;
+    git(&["branch", "batch"])?;
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("integrated.toml"),
+        "integration_branch = 'batch'\n\
+         stages = [{ id = 'review', role = 'reviewer' }]\n\
+         [roles.reviewer]\ntier = 'senior'\nsource = { type = 'integration' }\nprompt = '${prompt}'\n",
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "review the batch")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "integrated", "--prompt-file"])
+            .arg(&prompt)
+            .arg("--explain")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let first = run()?;
+    assert_eq!(
+        first["data"]["graph"]["graph_id"],
+        run()?["data"]["graph"]["graph_id"]
+    );
+    git(&["checkout", "-q", "batch"])?;
+    git(&["commit", "--allow-empty", "-qm", "lane delivered"])?;
+    assert_ne!(
+        first["data"]["graph"]["graph_id"],
+        run()?["data"]["graph"]["graph_id"]
+    );
+    Ok(())
+}
+
+#[test]
+fn params_file_supplies_lists_and_set_wins_over_it() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let prompt = temp.path().join("prompt");
+    std::fs::write(&prompt, "brief")?;
+    let params = temp.path().join("params.toml");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let root_text = root.display().to_string();
+    std::fs::write(
+        &params,
+        format!(
+            "batch_worktree = '{root_text}'\nlanes = [{{name='a',worktree='{root_text}',scope=['x'],spec='#1'}},{{name='b',worktree='{root_text}',scope=['y'],spec='#2'}}]\n"
+        ),
+    )?;
+    let run = |extra: &[String]| -> Result<std::process::Output, std::io::Error> {
+        Command::new(env!("CARGO_BIN_EXE_provenant"))
+            .current_dir(&root)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path())
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--preset", "big-batch", "--prompt-file"])
+            .arg(&prompt)
+            .arg("--params-file")
+            .arg(&params)
+            .arg("--explain")
+            .args(extra)
+            .output()
+    };
+    let output = run(&[])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("lane-a") && text.contains("lane-b"), "{text}");
+    assert!(!text.contains("lane-c"));
+    let output = run(&[
+        "--set".to_owned(),
+        format!("parameters.lanes=[{{name='c',worktree='{root_text}',scope=['z'],spec='#3'}}]"),
+    ])?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("lane-c") && !text.contains("lane-a"),
+        "{text}"
+    );
     Ok(())
 }

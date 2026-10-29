@@ -254,6 +254,9 @@ pub enum GitRead {
 /// narrower policy services that own each operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GitMutation {
+    FastForward {
+        head: GitOid,
+    },
     WorktreeAdd {
         branch: GitRefName,
         base: Option<GitOid>,
@@ -1919,6 +1922,17 @@ fn run_git_probe(
 fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError> {
     let mut args = GIT_COMMON.iter().map(OsString::from).collect::<Vec<_>>();
     let input = match mutation {
+        GitMutation::FastForward { head } => {
+            args.extend([
+                "merge".into(),
+                "--ff-only".into(),
+                "--no-edit".into(),
+                "--no-stat".into(),
+                "--no-overwrite-ignore".into(),
+                head.to_string().into(),
+            ]);
+            None
+        }
         GitMutation::WorktreeAdd {
             branch,
             base,

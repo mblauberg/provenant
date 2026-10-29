@@ -533,3 +533,28 @@ fn an_inactive_recovery_writer_does_not_skip_an_overlapping_required_writer() {
         assert_eq!(owner.calls.len(), if sibling { 4 } else if explicit_dependency { 2 } else { 3 });
     }
 }
+
+#[test]
+fn fragment_cannot_widen_read_roots_source_or_role() {
+    let mut wide = slice("wide", &["src"]);
+    wide["read_roots"] = json!(["/elsewhere"]);
+    let mut roled = slice("roled", &["src"]);
+    roled["role"] = json!("admin");
+    let mut sourced = slice("sourced", &["src"]);
+    sourced["source"] = json!({"type":"integration"});
+    for (node, reason) in [(wide, "read root"), (roled, "role"), (sourced, "source")] {
+        let mut doc = planner(1);
+        doc.nodes[0].read_roots = vec!["/granted".into()];
+        let mut owner = fixture_owner(&[&result(vec![node])]);
+        let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.status, GraphStatus::Paused);
+        assert!(run.checkpoint.pause_reason.as_ref().unwrap().contains(reason), "{:?}", run.checkpoint.pause_reason);
+        assert!(run.checkpoint.expansions.is_empty());
+    }
+    let mut same = slice("same", &["src"]);
+    same["read_roots"] = json!(["/granted"]);
+    let mut doc = planner(1);
+    doc.nodes[0].read_roots = vec!["/granted".into()];
+    let run = advance(&doc, &mut fixture_owner(&[&result(vec![same]), "done", "done"]), &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.expansions.len(), 1);
+}

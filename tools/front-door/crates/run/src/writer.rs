@@ -135,6 +135,18 @@ pub struct WriterLaunch {
     pub(crate) base: GitOid,
     pub(crate) custody: Option<(Directory, WriterBinding)>,
 }
+impl WriterLaunch {
+    /// Bind a graph writer to its immutable source. The instruction snapshot
+    /// rechecks this prepared base while holding writer custody before launch.
+    pub fn require_source(&self, expected: GitOid) -> Result<()> {
+        if self.base != expected {
+            return Err(RunError::Validation(
+                "writer differs from pinned source commit",
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
