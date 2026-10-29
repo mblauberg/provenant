@@ -512,3 +512,27 @@ fn control_ops_are_strict_local_mutations_with_bounded_text() {
         assert!(ToolCall::parse("fabric_inbox", blank).is_err());
     }
 }
+
+#[test]
+fn coordination_store_errors_include_safe_context() {
+    use provenant_fabric_store::Error;
+    let invalid = ServiceError::Coordination(CoordinationError::Store(Error::Invalid("through")));
+    assert_eq!(invalid.structured_error()["field"], "through");
+    let io = ServiceError::Coordination(CoordinationError::Store(Error::Io {
+        path: "/state/inbox.db".into(),
+        source: std::io::Error::other("private"),
+    }));
+    let detail = io.structured_error();
+    assert_eq!(detail["path"], "/state/inbox.db");
+    assert!(!detail.to_string().contains("private"));
+}
+
+#[test]
+fn continuation_conflict_includes_current_generation() {
+    let error = ServiceError::Facade(FacadeError::GenerationConflict {
+        current_generation: 1,
+    });
+    let detail = error.structured_error();
+    assert_eq!(detail["code"], "conflict");
+    assert_eq!(detail["current_generation"], 1);
+}

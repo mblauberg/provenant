@@ -325,6 +325,7 @@ fn is_definitive_refusal(error: &facade::FacadeError) -> bool {
         FacadeError::InvalidInput
             | FacadeError::NotFound
             | FacadeError::Conflict
+            | FacadeError::GenerationConflict { .. }
             | FacadeError::NotTerminal
             | FacadeError::OperationConflict
             | FacadeError::StaleFence

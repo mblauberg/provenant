@@ -85,6 +85,11 @@ impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
         use provenant_fabric_runtime::coordination::facade::FacadeError;
         let detail = match &error {
+            run::RunError::GenerationConflict { current_generation } => {
+                Some(FacadeError::GenerationConflict {
+                    current_generation: *current_generation,
+                })
+            }
             run::RunError::WorktreeUnregistered(path) => Some(FacadeError::WorktreeUnregistered {
                 path: path.to_string_lossy().into_owned(),
             }),

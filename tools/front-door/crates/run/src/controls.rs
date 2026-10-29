@@ -1829,7 +1829,10 @@ impl RunStore {
                 )?
             };
             if u64::try_from(generation).ok() != Some(input.expected_generation) {
-                return Err(RunError::Conflict);
+                return Err(RunError::GenerationConflict {
+                    current_generation: u64::try_from(generation)
+                        .map_err(|_| RunError::Conflict)?,
+                });
             }
         }
         // Derived final paths are deterministic. Preflight in this call's

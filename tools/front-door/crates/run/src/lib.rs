@@ -269,6 +269,8 @@ pub enum RunError {
     ProviderStateExpired,
     #[error("run record revision conflicts or is immutable")]
     Conflict,
+    #[error("continuation generation conflict; current generation is {current_generation}")]
+    GenerationConflict { current_generation: u64 },
     #[error("read or record exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
     #[error("artifact digest or length does not match its record")]
