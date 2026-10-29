@@ -859,6 +859,22 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Telemetry(provenant_cli::Telemetry::Stats(cmd)) => {
             if cmd.usage {
                 usage::run(&cmd, globals)
+            } else if cmd.by == Some(provenant_cli::StatsBy::Pr) {
+                let merged = match pr::contributions::merged_prs(globals, cmd.since, cmd.until) {
+                    Ok(merged) => merged,
+                    Err(error) => {
+                        return fail(
+                            "telemetry stats",
+                            Outcome::Error,
+                            "MERGED_PR_READ",
+                            &error.to_string(),
+                            globals,
+                        );
+                    }
+                };
+                run_edge_workspace(&inv.leaf, globals, Workspace::Project, |edge| {
+                    provenant_cli::run::stats_by_pr(cmd, edge, merged)
+                })
             } else {
                 let workspace = if cmd.claude_subagents.is_some() {
                     Workspace::Directory

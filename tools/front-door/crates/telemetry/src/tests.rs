@@ -938,3 +938,36 @@ fn groups_by_context_including_missing() {
         1
     );
 }
+
+#[test]
+fn external_groups_include_only_joined_facts() {
+    let first = fact(1, Some(100));
+    let second = fact(2, Some(20));
+    let mut labels = BTreeMap::new();
+    labels.insert(
+        first.attempt_id,
+        vec![
+            ExternalGroup {
+                value: "owner/repo#42".into(),
+                weight_millionths: Some(250_000),
+            },
+            ExternalGroup {
+                value: "owner/repo#43".into(),
+                weight_millionths: Some(750_000),
+            },
+        ],
+    );
+    let report = stats_by_external_key(
+        [first, second],
+        &prices(Some(1)),
+        Window::default(),
+        &labels,
+    )
+    .unwrap();
+    let groups = report.context_groups.unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].value.as_deref(), Some("owner/repo#42"));
+    assert_eq!(groups[0].totals.attempts, 1);
+    assert_eq!(groups[0].totals.usage.uncached_input.known, 25);
+    assert_eq!(groups[1].totals.usage.uncached_input.known, 75);
+}

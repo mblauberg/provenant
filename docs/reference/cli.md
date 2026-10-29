@@ -2377,11 +2377,12 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id"], "name": "claude_subagents"}` |
+| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id", "by"], "name": "claude_subagents"}` |
 | `--usage` | `{"defaults": ["false"], "name": "usage", "values": ["true", "false"]}` |
 | `--since` | `{"name": "since"}` |
 | `--until` | `{"name": "until"}` |
 | `--run-id` | `{"name": "run_id"}` |
+| `--by` | `{"conflicts": ["usage"], "name": "by", "values": ["pr", "issue", "graph", "preset", "role"]}` |
 | `--detail` | `{"conflicts": ["usage"], "defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
@@ -2400,6 +2401,7 @@ Accepted by every command, before or after the subcommand.
         "since",
         "until",
         "run_id",
+        "by",
         "detail"
       ],
       "multiple": true,

@@ -910,10 +910,18 @@ pub struct Trace {
     #[arg(long)]
     pub peers: bool,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum StatsBy {
+    Pr,
+    Issue,
+    Graph,
+    Preset,
+    Role,
+}
 #[derive(Debug, Args)]
 pub struct Stats {
     /// Report native Claude subagents from one session's subagents directory instead of supervised attempts
-    #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id"])]
+    #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id", "by"])]
     pub claude_subagents: Option<PathBuf>,
     /// Count local CLI verbs and MCP tools, including unused installed units.
     #[arg(long)]
@@ -927,6 +935,9 @@ pub struct Stats {
     /// Restrict usage and cost to one run.
     #[arg(long)]
     pub run_id: Option<Target>,
+    /// Group supervised attempts by work context or merged pull request
+    #[arg(long, value_enum, conflicts_with = "usage")]
+    pub by: Option<StatsBy>,
     /// Include per-attempt detail
     #[arg(long, conflicts_with = "usage")]
     pub detail: bool,

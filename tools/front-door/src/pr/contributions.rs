@@ -159,6 +159,64 @@ impl Tracker {
     }
 }
 
+/// Read the repository's merged PR snapshot for telemetry grouping.
+pub(crate) fn merged_prs(
+    globals: &Globals,
+    since: Option<jiff::Timestamp>,
+    until: Option<jiff::Timestamp>,
+) -> Result<Vec<PullRequest>> {
+    #[derive(serde::Deserialize)]
+    struct Merged {
+        number: u64,
+        #[serde(rename = "mergedAt")]
+        merged_at: Option<String>,
+    }
+    let tracker = Tracker::resolve(globals)?;
+    let mut argv = vec![
+        "gh".to_owned(),
+        "pr".into(),
+        "list".into(),
+        "--repo".into(),
+        tracker.repository.clone(),
+        "--state".into(),
+        "merged".into(),
+        "--json".into(),
+        "number,mergedAt".into(),
+        "--limit".into(),
+        "1001".into(),
+    ];
+    let mut search = Vec::new();
+    if let Some(since) = since {
+        search.push(format!("merged:>={}", since.strftime("%Y-%m-%d")));
+    }
+    if let Some(until) = until {
+        search.push(format!("merged:<={}", until.strftime("%Y-%m-%d")));
+    }
+    if !search.is_empty() {
+        argv.extend(["--search".into(), search.join(" ")]);
+    }
+    let args = argv.iter().map(String::as_str).collect::<Vec<_>>();
+    let bytes = successful(execute(&tracker.resolved.project, &args, false)?)?;
+    let rows: Vec<Merged> = serde_json::from_slice(&bytes)?;
+    if rows.len() > 1000 {
+        return Err("merged PR snapshot exceeds 1,000 rows; narrow the time window".into());
+    }
+    let mut merged_prs = Vec::new();
+    for row in rows {
+        let raw = row.merged_at.ok_or("merged PR has no merge timestamp")?;
+        let merged_at = raw.parse::<jiff::Timestamp>()?;
+        if since.is_none_or(|since| merged_at >= since)
+            && until.is_none_or(|until| merged_at < until)
+        {
+            merged_prs.push(PullRequest {
+                repository: tracker.repository.clone(),
+                number: row.number,
+            });
+        }
+    }
+    Ok(merged_prs)
+}
+
 /// Workflow success must not depend on optional attribution storage.
 pub(super) fn warn(number: Option<u64>, error: &dyn std::fmt::Display) {
     use std::io::Write;

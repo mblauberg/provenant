@@ -266,6 +266,8 @@ pub struct RouteGroup {
 #[derive(Clone, Copy, Debug)]
 pub enum ContextKey {
     WorkItem,
+    /// Work item labels that name GitHub issues use the same P7 field.
+    Issue,
     GraphId,
     NodeId,
     Preset,
@@ -278,7 +280,7 @@ pub enum ContextKey {
 impl ContextKey {
     fn value(self, context: &provenant_records::run::WorkContext) -> &Option<String> {
         match self {
-            Self::WorkItem => &context.work_item,
+            Self::WorkItem | Self::Issue => &context.work_item,
             Self::GraphId => &context.graph_id,
             Self::NodeId => &context.node_id,
             Self::Preset => &context.preset,
@@ -294,6 +296,12 @@ impl ContextKey {
 pub struct ContextGroup {
     pub value: Option<String>,
     pub totals: Totals,
+}
+#[derive(Clone, Debug)]
+pub struct ExternalGroup {
+    pub value: String,
+    /// Missing allocation is retained as a full attempt and remains visible as unknown.
+    pub weight_millionths: Option<u32>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct DailyGroup {
@@ -402,6 +410,41 @@ impl Accumulator {
             add(self.outcomes.entry(outcome).or_default(), 1)?;
         }
         Ok(())
+    }
+    fn record_weighted(
+        &mut self,
+        fact: &AttemptFact,
+        numerator: u128,
+        missing: bool,
+        subscription: bool,
+        weight_millionths: u32,
+    ) -> Result<(), TelemetryError> {
+        let scale = |value: Option<u64>| -> Result<Option<u64>, TelemetryError> {
+            value
+                .map(|value| {
+                    u64::try_from(u128::from(value) * u128::from(weight_millionths) / 1_000_000)
+                        .map_err(|_| TelemetryError::Overflow)
+                })
+                .transpose()
+        };
+        let mut usage = fact.usage.clone();
+        usage.uncached_input = scale(usage.uncached_input)?;
+        usage.cache_read = scale(usage.cache_read)?;
+        usage.cache_write = scale(usage.cache_write)?;
+        usage.cache_write_1h = scale(usage.cache_write_1h)?;
+        usage.output_excluding_reasoning = scale(usage.output_excluding_reasoning)?;
+        usage.reasoning = scale(usage.reasoning)?;
+        let numerator = numerator
+            .checked_mul(u128::from(weight_millionths))
+            .ok_or(TelemetryError::Overflow)?
+            / 1_000_000;
+        self.record_usage(
+            &usage,
+            Some(fact.terminal_state),
+            numerator,
+            missing,
+            subscription,
+        )
     }
     fn finish(self) -> Result<Totals, TelemetryError> {
         let known_lower_bound = Money::from_numerator(self.numerator)?;
@@ -546,7 +589,7 @@ pub fn stats_with_chair(
     prices: &PriceTable,
     window: Window,
 ) -> Stats {
-    stats_inner(facts, chairs, prices, window, None)
+    stats_inner(facts, chairs, prices, window, None, None)
 }
 
 /// Reduce attempts by one work-context dimension as well as the usual totals.
@@ -556,7 +599,24 @@ pub fn stats_by_context(
     window: Window,
     key: ContextKey,
 ) -> Stats {
-    stats_inner(facts, std::iter::empty(), prices, window, Some(key))
+    stats_inner(facts, std::iter::empty(), prices, window, Some(key), None)
+}
+
+/// Reduce attempts by labels joined from an external read, such as merged PRs.
+pub fn stats_by_external_key(
+    facts: impl IntoIterator<Item = AttemptFact>,
+    prices: &PriceTable,
+    window: Window,
+    labels: &BTreeMap<AttemptId, Vec<ExternalGroup>>,
+) -> Stats {
+    stats_inner(
+        facts,
+        std::iter::empty(),
+        prices,
+        window,
+        None,
+        Some(labels),
+    )
 }
 
 fn stats_inner(
@@ -565,6 +625,7 @@ fn stats_inner(
     prices: &PriceTable,
     window: Window,
     context_key: Option<ContextKey>,
+    external_groups: Option<&BTreeMap<AttemptId, Vec<ExternalGroup>>>,
 ) -> Stats {
     if window.since.zip(window.until).is_some_and(|(s, u)| s >= u) {
         return Err(TelemetryError::InvalidWindow);
@@ -643,18 +704,50 @@ fn stats_inner(
         {
             return Err(TelemetryError::InvalidFact("work context"));
         }
-        if let Some(dimension) = context_key {
-            let value = fact
-                .context
-                .as_ref()
-                .and_then(|context| dimension.value(context).clone());
-            let size = value.as_ref().map_or(0, String::len);
-            budget.group(&mut context_groups, value, size)?.record(
-                &fact,
-                cost.numerator,
-                cost.missing_cost,
-                cost.subscription,
-            )?;
+        let group_values = context_key
+            .map(|dimension| {
+                vec![(
+                    fact.context
+                        .as_ref()
+                        .and_then(|context| dimension.value(context).clone()),
+                    None,
+                )]
+            })
+            .or_else(|| {
+                external_groups.and_then(|groups| {
+                    groups.get(&fact.attempt_id).map(|values| {
+                        values
+                            .iter()
+                            .map(|value| (Some(value.value.clone()), value.weight_millionths))
+                            .collect::<Vec<_>>()
+                    })
+                })
+            });
+        if let Some(values) = group_values {
+            for (value, weight) in values {
+                if value
+                    .as_ref()
+                    .is_some_and(|value| value.trim().is_empty() || value.len() > 256)
+                {
+                    return Err(TelemetryError::InvalidFact("external group key"));
+                }
+                let size = value.as_ref().map_or(0, String::len);
+                let group = budget.group(&mut context_groups, value, size)?;
+                if let Some(weight) = weight {
+                    if weight > 1_000_000 {
+                        return Err(TelemetryError::InvalidFact("external group weight"));
+                    }
+                    group.record_weighted(
+                        &fact,
+                        cost.numerator,
+                        cost.missing_cost,
+                        cost.subscription,
+                        weight,
+                    )?;
+                } else {
+                    group.record(&fact, cost.numerator, cost.missing_cost, cost.subscription)?;
+                }
+            }
         }
         budget.group(&mut routes, key.clone(), bytes)?.record(
             &fact,
@@ -705,7 +798,7 @@ fn stats_inner(
         prices: prices.identity.clone(),
         totals: total.finish()?,
         routes,
-        context_groups: if context_key.is_some() {
+        context_groups: if context_key.is_some() || external_groups.is_some() {
             Some(groups(context_groups, |value, totals| ContextGroup {
                 value,
                 totals,
