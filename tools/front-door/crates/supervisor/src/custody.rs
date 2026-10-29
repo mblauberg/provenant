@@ -38,36 +38,43 @@ pub enum CustodyError {
     Cancelled,
     #[error("wait budget expired; custody is retained")]
     Timeout,
-    /// Admission could not judge startup spacing. The reason is fixed text, so
-    /// it can reach the user without any path.
-    #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
-    AdmissionClock,
-    #[error(
-        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs and cargo_debug"
-    )]
-    AdmissionBuildSettings,
-    #[error("guardian process identity unavailable; retry when process observation is available")]
-    AdmissionGuardianIdentity,
-    /// Numeric host observations are safe to publish as the lane's refusal.
-    #[error(
-        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
-    )]
-    AdmissionDisk { free: u64, floor: u64 },
-    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
-    AdmissionMemoryPressure { level: String },
-    #[error(
-        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
-        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
-    )]
-    AdmissionLaneCap {
-        active: u64,
-        limit: u64,
-        scope: &'static str,
-    },
+    #[error(transparent)]
+    Admission(#[from] AdmissionError),
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
     Filesystem(#[from] FsError),
+}
+/// Why admission could not judge a lane start. The guardian publishes these
+/// refusals, so each message is fixed text that cannot expose a path.
+#[derive(Debug, Error)]
+pub enum AdmissionError {
+    /// Admission could not judge startup spacing. The reason is fixed text, so
+    /// it can reach the user without any path.
+    #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
+    Clock,
+    #[error(
+        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs and cargo_debug"
+    )]
+    BuildSettings,
+    #[error("guardian process identity unavailable; retry when process observation is available")]
+    GuardianIdentity,
+    /// Numeric host observations are safe to publish as the lane's refusal.
+    #[error(
+        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
+    )]
+    Disk { free: u64, floor: u64 },
+    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
+    MemoryPressure { level: String },
+    #[error(
+        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
+        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
+    )]
+    LaneCap {
+        active: u64,
+        limit: u64,
+        scope: &'static str,
+    },
 }
 pub type Result<T> = std::result::Result<T, CustodyError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

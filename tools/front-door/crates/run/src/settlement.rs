@@ -1,5 +1,5 @@
 //! Durable settlement progress. Kernel locks protect only journal updates.
-use crate::{RECORD_LIMIT, Result, RunError, artifacts::read_sealed};
+use crate::{AdmissionError, RECORD_LIMIT, Result, RunError, artifacts::read_sealed};
 use provenant_core::{CancelToken, Clock, GitOid};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use provenant_supervisor::{
@@ -79,7 +79,7 @@ fn now_ms() -> Result<u64> {
         .wall_now()
         .ok()
         .and_then(|time| u64::try_from(time.as_micros() / 1000).ok())
-        .ok_or(RunError::HostClock)
+        .ok_or(RunError::Admission(AdmissionError::Clock))
 }
 
 fn alive(owner: &ProcessIdentity, since_ms: u64, now_ms: u64) -> bool {
@@ -159,7 +159,7 @@ impl Guard {
         }
         let owner = match SystemProcessObserver.observe(i64::from(std::process::id())) {
             ProcessObservation::Present(fact) if !fact.zombie => fact.identity,
-            _ => return Err(RunError::GuardianIdentityUnavailable),
+            _ => return Err(RunError::Admission(AdmissionError::GuardianIdentity)),
         };
         journal.owner = Some(owner.clone());
         journal.owner_since_ms = now_ms;
