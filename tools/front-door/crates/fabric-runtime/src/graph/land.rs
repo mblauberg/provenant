@@ -159,6 +159,19 @@ pub(super) fn validate_relations(
     positions: &BTreeMap<String, usize>,
 ) -> Result<(), &'static str> {
     for node in nodes {
+        if let Some(SourceBinding::Head { node: target }) = &node.source {
+            let upstream = ancestors(nodes, positions, &node.id);
+            let valid = positions.get(target).is_some_and(|index| {
+                let writer = &nodes[*index];
+                upstream.contains(index)
+                    && plans::writer(writer)
+                    && matches!(writer.delivery, Some(DeliveryMode::Pr | DeliveryMode::Push))
+                    && writer.continues.is_none()
+            });
+            if !valid {
+                return Err("head source must name an upstream writer that delivers pr or push");
+            }
+        }
         if let Some(target) = &node.continues {
             let upstream = ancestors(nodes, positions, &node.id);
             let valid = positions.get(target).is_some_and(|index| {
@@ -267,7 +280,19 @@ fn reviewed_head(
     if let Some(commit) = &checkpoint.nodes[index].source_commit {
         return Some(commit.clone());
     }
-    let upstream = ancestors(&plan.nodes, positions, reviewer);
+    chain_head(plan, checkpoint, positions, reviewer, writer)
+}
+
+/// The newest head of `writer`'s chain among `node`'s upstream nodes, which a
+/// `head` source binding pins.
+pub(super) fn chain_head(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    node: &str,
+    writer: &str,
+) -> Option<String> {
+    let upstream = ancestors(&plan.nodes, positions, node);
     delivered_within(plan, checkpoint, writer, |index| upstream.contains(&index))
         .map(|(_, head)| head)
 }

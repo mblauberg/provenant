@@ -645,3 +645,66 @@ fn land_records_keep_unknown_fields() {
     let record: LandRecord = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(record).unwrap(), value);
 }
+
+#[test]
+fn a_head_source_reviews_the_newest_continuation_and_lands_it() {
+    // write H1, CI, repair H2, review bound to the writer chain's head, land.
+    let mut nodes = nodes("routine");
+    nodes[3]["source"] = json!({"type":"head", "node":"write"});
+    let (landed, land) = land_outcome(nodes.clone(), "VERDICT: PASS");
+    assert_eq!(land.state, NodeState::Succeeded, "{:?}", land.advance_error);
+    assert_eq!(
+        landed.lands,
+        [(
+            "feature/x".to_owned(),
+            REPAIR_HEAD.to_owned(),
+            LandAuthority::Policy
+        )]
+    );
+    let document: GraphDocument =
+        serde_json::from_value(json!({"schema_version":1, "graph_id":"g-land", "nodes":nodes}))
+            .unwrap();
+    let mut owner = owner();
+    let mut journal = Journal::default();
+    let checkpoint = run(&document, &mut owner, &mut journal);
+    assert_eq!(
+        node(&checkpoint, "review").source_commit.as_deref(),
+        Some(REPAIR_HEAD)
+    );
+    // The pinned head replays unchanged.
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        checkpoint
+    );
+}
+
+#[test]
+fn a_head_source_inside_a_composite_names_an_outer_writer() {
+    let mut nodes = nodes("routine");
+    let mut review = nodes[3].clone();
+    review["source"] = json!({"type":"head", "node":"write"});
+    review["depends_on"] = json!([]);
+    nodes[3] = json!({"id":"review", "kind":"composite", "access":"read_only",
+        "depends_on":["repair"],
+        "composite":{"nodes":[review], "exports":[{"node":"review", "outputs":["verdict"]}]}});
+    let (owner, land) = land_outcome(nodes, "VERDICT: PASS");
+    assert_eq!(land.state, NodeState::Succeeded, "{:?}", land.advance_error);
+    assert_eq!(owner.lands[0].1, REPAIR_HEAD);
+}
+
+#[test]
+fn a_head_source_must_name_an_upstream_writer() {
+    for (target, depends_on) in [("write", json!([])), ("accepted", json!(["accepted"]))] {
+        let mut nodes = nodes("routine");
+        nodes
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"late", "access":"read_only",
+            "prompt":"look", "depends_on":depends_on, "route":{"alias":"senior"},
+            "source":{"type":"head", "node":target}}));
+        let refused = refusal(json!({"schema_version":1, "graph_id":"g-land", "nodes":nodes}));
+        assert!(refused.contains("head source"), "{target}: {refused}");
+    }
+}
