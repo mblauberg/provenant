@@ -872,6 +872,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
 ];
 pub const SECTION: DomainSection = DomainSection {
     validate: validate_section,
+    advisories: crate::policy::fallback_advisories,
     ..DomainSection::new::<RoutingConfig>("routing", defaults)
         .with_boundary_check(crate::policy::boundary)
         .with_fields(FIELD_METADATA)

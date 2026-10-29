@@ -582,6 +582,17 @@ fn inspect<T: DeserializeOwned + Serialize>(
                     origin,
                 ));
             }
+            for advisory in (entry.advisories)(table) {
+                let key = qualify(entry.name, &advisory.field);
+                let origin = origins.get(&key).unwrap_or(&compiled);
+                issues.push(domain_issue(
+                    entry.name,
+                    advisory,
+                    table,
+                    &semantic_sites,
+                    origin,
+                ));
+            }
             let baseline = defaults
                 .get("domains")
                 .and_then(|item| item.get(entry.name))
@@ -1145,6 +1156,15 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
         path: user_path()?,
         line: issue.location.line,
         message: match &issue.source {
+            Some(source)
+                if source.code == "unknown_fallback"
+                    || source.code == "unsupported_fallback_effort" =>
+            {
+                format!(
+                    "{key}: invalid model fallback ({}); effective fallback checked after overlays",
+                    source.code
+                )
+            }
             Some(source) if source.code.starts_with("moved_to_schedule.") => {
                 let replacement = source.code.trim_start_matches("moved_to_schedule.");
                 format!(
