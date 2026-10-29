@@ -95,15 +95,6 @@ fn configure_commands(rig: &TestRig, commands: Value) -> Result {
 }
 
 fn dispatch(rig: &TestRig, name: &str, timeout: u64) -> Result<Value> {
-    dispatch_network(rig, name, timeout, None)
-}
-
-fn dispatch_network(
-    rig: &TestRig,
-    name: &str,
-    timeout: u64,
-    network: Option<&str>,
-) -> Result<Value> {
     let manifest = rig.root.join(format!("{name}.json"));
     let task = json!({
         "prompt":"Ignore this prompt: it cannot change command argv.",
@@ -114,7 +105,9 @@ fn dispatch_network(
         serde_json::to_vec(&json!({"schema_version":1,"tasks":[task]}))?,
     )?;
     let timeout = timeout.to_string();
-    let mut args = vec![
+    // Adapter routes exist only in manifests, which refuse --network: command
+    // lanes always run at the adapter's provider-only default.
+    let output = rig.command(&[
         "dispatch",
         "--manifest",
         manifest.to_str().ok_or("manifest")?,
@@ -123,11 +116,7 @@ fn dispatch_network(
         "--provider-timeout",
         &timeout,
         "--json",
-    ];
-    if let Some(network) = network {
-        args.extend(["--network", network]);
-    }
-    let output = rig.command(&args)?;
+    ])?;
     assert_eq!(
         code(&output),
         0,
@@ -249,12 +238,15 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         ("pass", "succeeded", "PASS"),
         ("fail", "failed", "FAIL"),
         ("tail", "succeeded", "PASS"),
-        ("missing", "adapter_unavailable", ""),
+        ("missing", "rejected", ""),
     ] {
         let submitted = dispatch(&rig, name, 10)?;
         let id = attempt_id(&submitted)?;
         let lane = settled(&rig, id)?;
         assert_eq!(lane["state"], expected, "{lane}");
+        if name == "missing" {
+            assert!(lane.to_string().contains("/missing/command"), "{lane}");
+        }
         assert!(lane["applied_route"]["model"].is_null(), "{lane}");
         if !verdict.is_empty() {
             let run = submitted["data"]["run_id"].as_str().ok_or("run id")?;
@@ -290,6 +282,14 @@ fn command_custom_shebang_runtime_keeps_credentials_and_writes_denied() -> Resul
     let runtime = rig.root.join("custom-runtime/bin/interpreter");
     fs::create_dir_all(runtime.parent().ok_or("runtime parent")?)?;
     rig.copy_executable(std::path::Path::new("/bin/sh"), &runtime)?;
+    // A copied platform binary is killed by the kernel until it is re-signed.
+    if std::path::Path::new("/usr/bin/codesign").exists() {
+        let signed = std::process::Command::new("/usr/bin/codesign")
+            .args(["-s", "-", "--force"])
+            .arg(&runtime)
+            .output()?;
+        assert!(signed.status.success(), "{signed:?}");
+    }
     fs::write(runtime.with_file_name("neighbour"), "private runtime data")?;
     let script = rig.project.join("check-script");
     fs::write(
@@ -341,19 +341,26 @@ printf 'custom interpreter ran; credentials and writes denied\n'
         &rig,
         json!({
             "no-runtime": {"argv": [script]},
-            "offline": {"argv": [script], "runtimes": [runtime]},
-            "online": {"argv": [script], "runtimes": [runtime]}
+            "granted": {"argv": [script], "runtimes": [runtime]}
         }),
     )?;
     // The same script cannot launch without its non-system interpreter grant.
     let submitted = dispatch(&rig, "no-runtime", 10)?;
     let lane = settled(&rig, attempt_id(&submitted)?)?;
     assert_eq!(lane["state"], "failed", "{lane}");
-    for (name, network) in [("offline", "off"), ("online", "on")] {
-        let submitted = dispatch_network(&rig, name, 10, Some(network))?;
+    for name in ["granted"] {
+        let submitted = dispatch(&rig, name, 10)?;
         let id = attempt_id(&submitted)?;
         let lane = settled(&rig, id)?;
+        let diag = String::from_utf8_lossy(
+            &rig.command(&["output", id, "--part", "transcript", "--json"])?
+                .stdout
+                .bytes,
+        )
+        .to_string();
         assert_eq!(lane["state"], "succeeded", "{lane}");
+        // Command lanes never get open network.
+        assert_ne!(lane["network"], "open", "{lane}");
         let run = submitted["data"]["run_id"].as_str().ok_or("run id")?;
         let result = fs::read_to_string(
             rig.state
