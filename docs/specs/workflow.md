@@ -467,13 +467,13 @@ roots. The runtime validates parameters against their schemas and expands the
 pattern at the same composite boundary a statically written preset uses, with
 the pattern name and effective parameters retained in the expansion. Unlisted
 patterns, invalid parameters and widening attempts pause the graph without
-admitting children, and graph node, edge, fan-out and depth ceilings include
-the expanded nodes. Pattern expansion grants no review, delivery or merge
-authority.
+admitting children. Expanded nodes count against the graph node limit and the
+plan's node limit.
 - Why: a plan may grow a pipeline from known-good shapes without letting the
   planner choose authority or exceed host limits.
 - Test: `crates/fabric-runtime/src/graph/plan_tests.rs::allowed_pattern_instantiation_records_parameters_and_matches_a_static_composite`;
   `::plan_patterns_refuse_unlisted_invalid_and_widening_instances`;
-  `::pattern_expansion_counts_against_the_graph_node_limit`.
+  `::pattern_expansion_counts_against_the_graph_node_limit`;
+  `::pattern_children_obey_plan_node_and_kind_limits`.
 - Owner: `crates/fabric-runtime/src/graph/plans.rs`,
   `crates/fabric-runtime/src/graph/pattern_plan.rs`
