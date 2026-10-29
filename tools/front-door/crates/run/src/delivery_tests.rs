@@ -1791,10 +1791,7 @@ fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state
         .ok_or("destination")?;
     assert!(matches!(
         HostDeliveryContext::new(fixture.environment.clone()).prepare(&fixture.writer, &request),
-        Err(RunError::DeliveryPrepare {
-            step: "integration target",
-            ..
-        })
+        Err(RunError::ProtectedDeliveryBranch)
     ));
     Ok(())
 }
