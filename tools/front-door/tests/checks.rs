@@ -324,57 +324,6 @@ fn cursors_recheck_all_inputs_and_later_pages_keep_findings_exit() -> Result {
     rig.assert_legacy_unchanged()
 }
 #[test]
-fn harness_uses_tracked_yaml_links_anchors_and_json_routes() -> Result {
-    use std::fs;
-    let rig = check_rig()?;
-    fs::create_dir_all(rig.project.join("skills/example/evals"))?;
-    fs::write(
-        rig.project.join("skills/example/SKILL.md"),
-        "---\nname: example\ndescription: Example fixture skill.\n---\n# Hello\n# Hello\n[duplicate](#hello-1)\n",
-    )?;
-    fs::write(
-        rig.project.join("skills/example/evals/trigger_cases.json"),
-        r#"{"schema_version":1,"target_skill":"example","cases":[{"id":"q1","relation":"positive","prompt":"use this skill","tags":["direct"],"expected":{"primary_skill":"example","companion_skills":[]}}]}"#,
-    )?;
-    git(&rig, &["add", "."])?;
-    fs::write(rig.project.join("untracked.md"), "[untracked](missing)")?;
-    let clean = rig.command(&["check", "harness", "--json"])?;
-    assert_eq!(
-        code(&clean),
-        0,
-        "{}",
-        String::from_utf8_lossy(&clean.stdout.bytes)
-    );
-    fs::write(
-        rig.project.join("skills/example/SKILL.md"),
-        "---\nname: example\ndescription: 123\n---\n[bad](#missing)\n",
-    )?;
-    let findings = rig.command(&["check", "harness", "--limit", "1", "--json"])?;
-    assert_eq!(code(&findings), 1);
-    let findings = json(&findings)?;
-    let cursor = findings["data"]["next_cursor"]
-        .as_str()
-        .ok_or("harness cursor")?;
-    let next = rig.command(&["check", "harness", "--cursor", cursor, "--json"])?;
-    assert_eq!(code(&next), 1);
-    fs::write(
-        rig.project.join("skills/example/evals/trigger_cases.json"),
-        "{}",
-    )?;
-    assert_eq!(
-        code(&rig.command(&["check", "harness", "--cursor", cursor, "--json"])?),
-        2
-    );
-    fs::remove_file(rig.project.join("skills/example/SKILL.md"))?;
-    std::os::unix::fs::symlink(
-        rig.home.join("outside.md"),
-        rig.project.join("skills/example/SKILL.md"),
-    )?;
-    fs::write(rig.home.join("outside.md"), "private fixture content")?;
-    assert_eq!(code(&rig.command(&["check", "harness", "--json"])?), 3);
-    rig.assert_legacy_unchanged()
-}
-#[test]
 fn release_scans_added_then_deleted_blobs_and_commit_identity_bytes() -> Result {
     use std::fs;
     let rig = check_rig()?;
@@ -592,43 +541,6 @@ fn release_checks_legal_private_symlink_and_bounded_utf8_evidence() -> Result {
 }
 
 #[test]
-fn harness_accepts_recorded_agent_skill_and_openai_sidecar() -> Result {
-    let rig = check_rig()?;
-    let dir = rig.project.join("skills/refactor");
-    std::fs::create_dir_all(dir.join("agents"))?;
-    // These external-format files are tracked tool inputs, not Python oracles.
-    let skill = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../skills/refactor/SKILL.md"
-    ));
-    // Keep frontmatter; the full reference graph belongs to the real repository.
-    let end = skill
-        .get(4..)
-        .and_then(|s| s.find("\n---"))
-        .ok_or("recorded frontmatter")?
-        + 8;
-    std::fs::write(
-        dir.join("SKILL.md"),
-        skill.get(..end).ok_or("frontmatter boundary")?,
-    )?;
-    std::fs::write(
-        dir.join("agents/openai.yaml"),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../skills/refactor/agents/openai.yaml"
-        )),
-    )?;
-    git(&rig, &["add", "."])?;
-    let output = rig.command(&["check", "harness", "--json"])?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stdout.bytes)
-    );
-    rig.assert_legacy_unchanged()
-}
-#[test]
 fn release_reads_packed_objects_native_alternates_and_linked_worktrees() -> Result {
     let rig = check_rig()?;
     legal(&rig)?;
@@ -717,32 +629,9 @@ fn check_target_outside_a_checkout_is_invalid_input() -> Result {
     let mut rig = check_rig()?;
     rig.project = rig.root.join("not-a-checkout");
     std::fs::create_dir(&rig.project)?;
-    let output = rig.command(&["check", "harness", "--json"])?;
+    let output = rig.command(&["check", "release", "--json"])?;
     assert_eq!(code(&output), 2);
     assert_eq!(json(&output)?["status"], "invalid");
-    rig.assert_legacy_unchanged()
-}
-
-#[test]
-fn harness_ignores_inline_code_links_and_checks_real_links() -> Result {
-    let rig = check_rig()?;
-    let path = rig.project.join("README.md");
-    std::fs::write(
-        &path,
-        "`[literal](missing.md)` and `` `[other](missing.md)` ``\n[real](#heading)\n# Heading\n",
-    )?;
-    git(&rig, &["add", "."])?;
-    assert_eq!(code(&rig.command(&["check", "harness", "--json"])?), 0);
-    std::fs::write(&path, "Use `example\n[not a link](missing.md)\n` here.\n")?;
-    assert_eq!(code(&rig.command(&["check", "harness", "--json"])?), 0);
-    std::fs::write(&path, "# Title `\n[broken](missing.md)\n# End `\n")?;
-    let output = rig.command(&["check", "harness", "--json"])?;
-    assert_eq!(code(&output), 1);
-    assert_eq!(json(&output)?["data"]["findings"][0]["line"], 2);
-    std::fs::write(path, "`[literal](missing.md)` and [real](missing.md)\n")?;
-    let output = rig.command(&["check", "harness", "--json"])?;
-    assert_eq!(code(&output), 1);
-    assert_eq!(json(&output)?["data"]["count"], 1);
     rig.assert_legacy_unchanged()
 }
 

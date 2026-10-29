@@ -73,15 +73,14 @@ bytes as a separate type. Domain owners choose which fields enter a digest.
   `crates/records/src/canonical.rs::record_digest_uses_exact_domain_framing_and_canonical_input_bytes`
 - Owner: `crates/records/src/canonical.rs`
 
-### YAML subset
+### YAML frontmatter
 
-Skill frontmatter and `skills/*/agents/*.yaml` use a bounded YAML subset (ADR 0028)
-that refuses anchors, aliases, tags, flow maps, multiple documents, tabs,
-duplicate keys and multiline plain scalars; only `true` and `false` resolve.
-- Why: YAML's implicit typing and references are a parsing hazard.
-- Test: `crates/records/tests/contracts.rs::yaml_subset_parses_frontmatter_and_sidecars_and_refuses_ambiguous_values`;
-  `crates/records/tests/external_yaml.rs::skill_frontmatter_and_agent_sidecars_use_the_subset`
-- Owner: `crates/records/src/`
+Session summaries use a bounded YAML frontmatter header parsed with
+serde-saphyr and validated against the summary schema. Repository skill
+frontmatter and agent sidecars are checked by `scripts/check-harness`.
+- Why: validate metadata using maintained YAML parsers.
+- Test: `crates/workflow/src/session/summary.rs::tests`
+- Owner: `crates/workflow/src/session/summary.rs`, `scripts/check-harness`
 
 ## Configuration
 

@@ -14,7 +14,6 @@ mod jsonc;
 mod path_wire;
 mod source;
 mod trace;
-mod yaml;
 
 pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
@@ -29,10 +28,6 @@ pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError};
 pub use source::{SourceDigest, SourceDigestError, SourceInput, source_digest};
 pub use trace::Trace;
-pub use yaml::{
-    Span as YamlSpan, SpannedYaml, YamlError, YamlErrorKind, YamlValue, parse_frontmatter,
-    parse_frontmatter_integers, parse_sidecar,
-};
 
 pub mod inbox;
 pub mod workflow;

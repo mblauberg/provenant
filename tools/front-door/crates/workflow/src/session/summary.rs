@@ -1,5 +1,7 @@
-use provenant_records::{YamlValue, parse_frontmatter_integers};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as YamlValue};
+
+type Mapping = JsonMap<String, YamlValue>;
 use thiserror::Error;
 
 /// Chair-authored summary in checkpoint frontmatter.
@@ -234,6 +236,88 @@ fn empty_header(text: &str, end: usize) -> bool {
         .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
 }
 
+fn yaml_options() -> serde_saphyr::Options {
+    let mut budget = serde_saphyr::Budget::default();
+    budget.max_reader_input_bytes = Some(256 * 1024);
+    budget.max_depth = 32;
+    budget.max_nodes = 10_000;
+    let mut options = serde_saphyr::Options::default();
+    options.budget = Some(budget);
+    options
+}
+
+fn header_content(text: &str, end: usize) -> &str {
+    let start = text.find('\n').map_or(0, |i| i + 1);
+    let closing = text[..end].trim_end_matches(['\r', '\n']);
+    let stop = closing.rfind('\n').map_or(start, |i| i + 1);
+    &text[start..stop]
+}
+
+fn parse_header(text: &str, end: usize) -> Result<Mapping, SummaryError> {
+    let header = header_content(text, end);
+    if header.len() > 256 * 1024 {
+        return Err(SummaryError);
+    }
+    serde_saphyr::from_str_with_options(header, yaml_options()).map_err(|_| SummaryError)
+}
+
+// Capture root key locations from the YAML parser. Values may contain
+// multiline keys, flow collections or block scalars resembling root keys.
+struct RootKeys(Vec<(String, usize)>);
+
+impl<'de> Deserialize<'de> for RootKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = RootKeys;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a YAML mapping")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<RootKeys, A::Error> {
+                let mut keys = Vec::new();
+                while let Some(key) = map.next_key::<serde_saphyr::Spanned<String>>()? {
+                    let line =
+                        usize::try_from(key.referenced.line()).map_err(serde::de::Error::custom)?;
+                    keys.push((key.value, line));
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+                Ok(RootKeys(keys))
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
+}
+
+// Explicit keys may put the scalar on the line after the `?` indicator.
+// Keep the indicator with the entry and reject flow mappings, whose entries
+// do not occupy whole lines.
+fn root_key_line(lines: &[&str], line: usize, end: usize) -> Result<usize, SummaryError> {
+    if line == 0 || line >= end {
+        return Err(SummaryError);
+    }
+    let mut start = line;
+    if lines[start].starts_with(char::is_whitespace) {
+        while start > 1 {
+            start -= 1;
+            let candidate = lines[start].trim();
+            if candidate.is_empty() || candidate.starts_with('#') {
+                continue;
+            }
+            if candidate != "?" {
+                return Err(SummaryError);
+            }
+            break;
+        }
+    }
+    if lines[start].starts_with(char::is_whitespace) || lines[start].starts_with('{') {
+        return Err(SummaryError);
+    }
+    Ok(start)
+}
+
 fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::SessionError> {
     let newline = if text.starts_with("---\r\n") {
         "\r\n"
@@ -255,13 +339,9 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::Sessi
     } else {
         let header_end = header_end(text)?.ok_or(SummaryError)?;
         let root = if empty_header(text, header_end) {
-            std::collections::BTreeMap::new()
+            Mapping::new()
         } else {
-            let parsed = parse_frontmatter_integers(text).map_err(|_| SummaryError)?;
-            let YamlValue::Mapping(root) = parsed.value else {
-                return Err(SummaryError.into());
-            };
-            root
+            parse_header(text, header_end)?
         };
         let lines: Vec<&str> = text.split_inclusive('\n').collect();
         let end = lines
@@ -271,25 +351,25 @@ fn replace_summary(text: &str, summary: &Summary) -> Result<String, super::Sessi
             .find(|(_, line)| line.trim_end_matches('\n').trim_end_matches('\r') == "---")
             .map(|(i, _)| i)
             .ok_or(SummaryError)?;
-        let (start, stop) = if let Some(node) = root.get("provenant_summary") {
-            let child = node.span.line.checked_sub(1).ok_or(SummaryError)?;
-            let start = (1..=child)
-                .rev()
-                .find(|&i| {
-                    let line = lines[i].trim_end_matches(['\r', '\n']);
-                    !line.is_empty()
-                        && !line.starts_with(char::is_whitespace)
-                        && !line.starts_with('#')
-                })
+        let (start, stop) = if root.contains_key("provenant_summary") {
+            let keys: RootKeys = serde_saphyr::from_str_with_options(
+                header_content(text, header_end),
+                yaml_options(),
+            )
+            .map_err(|_| SummaryError)?;
+            let key_index = keys
+                .0
+                .iter()
+                .position(|(key, _)| key == "provenant_summary")
                 .ok_or(SummaryError)?;
-            let mut stop = (start + 1..end)
-                .find(|&i| {
-                    let line = lines[i].trim_end_matches(['\r', '\n']);
-                    !line.is_empty()
-                        && !line.starts_with(char::is_whitespace)
-                        && !line.starts_with('#')
-                })
-                .unwrap_or(end);
+            let start = root_key_line(&lines, keys.0[key_index].1, end)?;
+            let mut stop = match keys.0.get(key_index + 1) {
+                Some((_, line)) => root_key_line(&lines, *line, end)?,
+                None => end,
+            };
+            if stop <= start || stop > end {
+                return Err(SummaryError.into());
+            }
             while stop > start + 1 {
                 let trimmed = lines[stop - 1].trim();
                 if !trimmed.is_empty() && !trimmed.starts_with('#') {
@@ -339,22 +419,19 @@ pub fn parse_summary(markdown: &str) -> Result<Option<Summary>, SummaryError> {
     if empty_header(markdown, end) {
         return Ok(None);
     }
-    let parsed = parse_frontmatter_integers(markdown).map_err(|_| SummaryError)?;
-    let YamlValue::Mapping(mut root) = parsed.value else {
-        return Err(SummaryError);
-    };
+    let mut root = parse_header(markdown, end)?;
     let Some(node) = root.remove("provenant_summary") else {
         return Ok(None);
     };
-    let YamlValue::Mapping(mut fields) = node.value else {
+    let YamlValue::Object(mut fields) = node else {
         return Err(SummaryError);
     };
-    fn string(
-        fields: &mut std::collections::BTreeMap<String, provenant_records::SpannedYaml>,
-        key: &str,
-    ) -> Result<String, SummaryError> {
-        match fields.remove(key).map(|n| n.value) {
+    fn string(fields: &mut Mapping, key: &str) -> Result<String, SummaryError> {
+        match fields.remove(key) {
             Some(YamlValue::String(s)) => Ok(s),
+            Some(YamlValue::Number(n)) if key == "schema_version" || key == "revision" => {
+                Ok(n.to_string())
+            }
             _ => Err(SummaryError),
         }
     }
@@ -377,10 +454,10 @@ pub fn parse_summary(markdown: &str) -> Result<Option<Summary>, SummaryError> {
     let now = string(&mut fields, "now")?;
     let next = string(&mut fields, "next")?;
     let risk = string(&mut fields, "risk")?;
-    let needs_you = match fields.remove("needs_you").map(|n| n.value) {
-        Some(YamlValue::Sequence(items)) => items
+    let needs_you = match fields.remove("needs_you") {
+        Some(YamlValue::Array(items)) => items
             .into_iter()
-            .map(|item| match item.value {
+            .map(|item| match item {
                 YamlValue::String(s) => Ok(s),
                 _ => Err(SummaryError),
             })
@@ -435,5 +512,48 @@ mod tests {
         let oversized = header.replacen("  now: \"", "  now: \"x", 1);
         assert_eq!(oversized.len(), 8193);
         assert!(parse_summary(&oversized).is_err());
+    }
+
+    #[test]
+    fn replace_summary_uses_root_key_locations() {
+        let summary = Summary {
+            schema_version: 1,
+            revision: 1,
+            updated_at: "2026-10-28T03:00:00Z".into(),
+            now: "Now".into(),
+            next: "Next".into(),
+            needs_you: vec![],
+            risk: "None".into(),
+        };
+        let original = replace_summary("---\n---\nBody\n", &summary).unwrap();
+        for prefix in [
+            "? \"multiline\n  key\"\n: value\n",
+            "'quoted key': value\n",
+            "description: |\n  first line\n  provenant_summary: not a key\n",
+        ] {
+            let source = original.replacen(
+                "provenant_summary:",
+                &format!("{prefix}\"provenant_summary\":"),
+                1,
+            );
+            let mut updated_summary = summary.clone();
+            updated_summary.revision = 2;
+            let updated = replace_summary(&source, &updated_summary).unwrap();
+            assert!(updated.contains(prefix));
+            assert!(updated.ends_with("---\nBody\n"));
+            assert_eq!(parse_summary(&updated).unwrap(), Some(updated_summary));
+        }
+        let source = original.replace('\n', "\r\n");
+        let updated = replace_summary(&source, &summary).unwrap();
+        assert_eq!(updated, source);
+
+        let source = original.replacen(
+            "---\nBody",
+            "# adjacent comment\n?\n  'following key'\n: value\n---\nBody",
+            1,
+        );
+        let updated = replace_summary(&source, &summary).unwrap();
+        assert!(updated.contains("# adjacent comment\n?\n  'following key'\n: value\n"));
+        assert_eq!(parse_summary(&updated).unwrap(), Some(summary));
     }
 }

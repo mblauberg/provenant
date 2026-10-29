@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Exercise the harness checker against tracked and broken fixture files."""
+
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parent.parent
+CHECK = ROOT / "scripts/check-harness"
+
+
+class HarnessChecks(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        self.skill = self.root / "skills/example/SKILL.md"
+        self.fixture = self.root / "skills/example/evals/trigger_cases.json"
+        self.skill.parent.mkdir(parents=True)
+        self.fixture.parent.mkdir(parents=True)
+        self.skill.write_text("---\nname: example\ndescription: Example fixture skill.\n---\n# Hello\n# Hello\n[duplicate](#hello-1)\n")
+        self.fixture.write_text(json.dumps({"schema_version": 1, "target_skill": "example", "cases": [{"id": "q1", "relation": "positive", "prompt": "Use this skill", "tags": ["direct"], "expected": {"primary_skill": "example", "companion_skills": []}}]}))
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def check(self, expected=0):
+        output = subprocess.run([str(CHECK), str(self.root)], capture_output=True, text=True)
+        self.assertEqual(output.returncode, expected, output.stdout + output.stderr)
+        return output.stderr
+
+    def test_tracked_yaml_links_and_routes(self):
+        (self.root / "untracked.md").write_text("[untracked](missing.md)")
+        self.check()
+        self.skill.write_text("---\nname: example\ndescription: 123\n---\n[bad](#missing)\n")
+        errors = self.check(1)
+        self.assertIn("description", errors)
+        self.assertIn("unresolved Markdown anchor", errors)
+        self.fixture.write_text("{}")
+        self.assertIn("invalid route fixture", self.check(1))
+
+    def test_duplicate_yaml_is_rejected(self):
+        self.skill.write_text("---\nname: example\nname: example\ndescription: A skill\n---\n")
+        self.assertIn("duplicate key", self.check(1))
+
+    def test_skill_frontmatter_allowlist_and_stale_pin(self):
+        self.skill.write_text("---\nname: example\ndescription: A skill\nextra: value\n---\n")
+        self.assertIn("unsupported frontmatter keys: extra", self.check(1))
+        (self.root / "package.json").write_text(json.dumps({"dependencies": {"example": "1.5.0"}}))
+        self.skill.write_text("---\nname: example\ndescription: A skill\nverified-against: example@1.4\n---\n")
+        self.assertIn("pinned to 1.4", self.check(1))
+
+    def test_sidecar_description_and_icon(self):
+        sidecar = self.root / "skills/example/agents/openai.yaml"
+        sidecar.parent.mkdir()
+        def write_sidecar(description, icon=""):
+            sidecar.write_text(f"interface:\n  display_name: Example\n  short_description: '{description}'\n  default_prompt: Use $example\n{icon}")
+        write_sidecar("A" * 25)
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        self.check()
+        for description in ("A" * 24, "A" * 65):
+            write_sidecar(description)
+            self.assertIn("25..64", self.check(1))
+        write_sidecar("A" * 64, "  icon_small: missing.svg\n")
+        self.assertIn("tracked local asset", self.check(1))
+
+    def test_issue_form_keys_and_input(self):
+        form = self.root / ".github/ISSUE_TEMPLATE/bug.yml"
+        form.parent.mkdir(parents=True)
+        header = "name: Bug\ndescription: Report a bug\n"
+        input_field = "body:\n  - type: input\n    id: summary\n    attributes:\n      label: Summary\n"
+        form.write_text(header + input_field)
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        self.check()
+        form.write_text(header + "extra: value\n" + input_field)
+        self.assertIn("unsupported issue form keys: extra", self.check(1))
+        form.write_text(header + input_field + "    placeholder: misplaced\n")
+        self.assertIn("unsupported issue body keys: placeholder", self.check(1))
+        form.write_text(header + "body:\n  - type: markdown\n    attributes:\n      value: Instructions\n")
+        self.assertIn("at least one input is required", self.check(1))
+
+    def test_recorded_skill_and_sidecar(self):
+        skill = ROOT / "skills/refactor/SKILL.md"
+        sidecar = ROOT / "skills/refactor/agents/openai.yaml"
+        target = self.root / "skills/refactor"
+        (target / "agents").mkdir(parents=True)
+        header = skill.read_text().split("---", 2)
+        (target / "SKILL.md").write_text("---" + header[1] + "---\n")
+        (target / "agents/openai.yaml").write_text(sidecar.read_text())
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        self.check()
+
+    def test_inline_code_and_real_links(self):
+        readme = self.root / "README.md"
+        readme.write_text("`[literal](missing.md)` and `` `[other](missing.md)` ``\n[real](#heading)\n# Heading\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        self.check()
+        readme.write_text("`[literal](missing.md)` and [real](missing.md)\n")
+        self.assertIn("unresolved local link", self.check(1))
+
+
+if __name__ == "__main__":
+    unittest.main()
