@@ -420,11 +420,15 @@ pub(crate) fn git_global_files(config_home: &Path) -> Vec<PathGrant> {
 }
 
 /// A Homebrew Node toolchain (node, npm, pnpm, corepack) for every
-/// shell-capable lane. The host's pnpm home and store, npm cache and Corepack
-/// cache are never writable: the host later runs what they hold unconfined.
-/// Writers redirect each into the lane-private cache, so installs download
-/// there. Read-only lanes get a scratch npm and pnpm cache, and read and exec
-/// (no write) on the host's existing Corepack cache so pnpm runs.
+/// shell-capable lane. The host's pnpm store, npm cache and Corepack cache are
+/// never writable: the host later runs what they hold unconfined. Writers
+/// redirect the npm and pnpm caches and the Corepack home into the lane-private
+/// cache. pnpm derives the store from `PNPM_HOME` or the home default and
+/// records it in `node_modules/.modules.yaml`, so lanes leave `PNPM_HOME` and
+/// the store unset: an override makes a worktree the chair installed natively
+/// look stale, and the lane cannot reinstall into the shared store. Read-only
+/// lanes get a scratch npm and pnpm cache, and read and exec (no write) on the
+/// host's existing Corepack cache so pnpm runs.
 pub(crate) fn node_tools(
     home: &Path,
     access: Access,
@@ -444,18 +448,25 @@ pub(crate) fn node_tools(
             } else {
                 cache.join("corepack")
             };
+            // The host store is readable but never writable, and stays at the
+            // default pnpm derives when `PNPM_HOME` and the store are unset.
+            for store in [home.join("Library/pnpm"), home.join(".local/share/pnpm")] {
+                if store.is_dir() {
+                    runtime_reads.push(subtree(store));
+                }
+            }
             // pnpm 12 reads the pnpm_config_* names; older pnpm and npm read
-            // npm_config_*. Set both so every version stays in the lane cache.
-            let store = cache.join("pnpm-store");
+            // npm_config_*. Set both so every version keeps its cache in the lane.
             let pnpm_cache = cache.join("pnpm-cache");
             env.extend([
                 ("npm_config_cache".into(), cache.join("npm").into()),
-                ("PNPM_HOME".into(), cache.join("pnpm-home").into()),
-                ("npm_config_store_dir".into(), store.clone().into()),
-                ("pnpm_config_store_dir".into(), store.into()),
                 ("npm_config_cache_dir".into(), pnpm_cache.clone().into()),
                 ("pnpm_config_cache_dir".into(), pnpm_cache.into()),
                 ("COREPACK_HOME".into(), corepack.into()),
+                // pnpm 11 checks the dependency configuration before `run` and
+                // installs by default. The lane must run what the host installed,
+                // not reinstall into a store it cannot write.
+                ("pnpm_config_verify_deps_before_run".into(), "false".into()),
             ]);
             // Run the installed pnpm whatever version a project pins. Switching
             // downloads `@pnpm/exe`, whose launcher stays a non-executable
@@ -466,6 +477,13 @@ pub(crate) fn node_tools(
                     env.push((format!("{prefix}_config_{name}").into(), "false".into()));
                 }
             }
+            // Corepack may wrap pnpm as a shim. Ignore a project's
+            // `packageManager` field and refuse downloads, so a pinned version
+            // can never arrive as the non-executable placeholder above.
+            env.extend([
+                ("COREPACK_ENABLE_PROJECT_SPEC".into(), "0".into()),
+                ("COREPACK_ENABLE_DOWNLOAD".into(), "0".into()),
+            ]);
             return;
         }
     }
