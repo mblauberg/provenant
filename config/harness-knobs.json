@@ -35,6 +35,34 @@
       "limits.expansion_depth": {"type": "int", "allowed": "1 or more", "default": "32", "effect": "Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 29. Graph documents cannot raise it."}
     }
   },
+  "host_model_policy_settings": {
+    "path": "domains.routing.model_policy",
+    "settings": {
+      "bundled": {"type": "bool", "allowed": "true or false", "default": "true", "effect": "Start from the bundled per-model policy (cache prices, compaction windows, lane guidance, result checks). false starts empty."},
+      "defaults.cache.read_share_target": {"type": "number", "allowed": "0 to 1", "default": "unset (bundled 0.9)", "effect": "Advisory cache-read share a lane should reach; reported in stats, never enforced."},
+      "defaults.cache.price_multiplier": {"type": "number", "allowed": "number above 0", "default": "1.0 (bundled: 2.0 in DeepSeek weekday peak)", "effect": "Current price multiplier; divides the read-heavy preference weight."},
+      "defaults.cache.read_ratio": {"type": "number", "allowed": "0 or more", "default": "per model", "effect": "Cache-read price divided by uncached input price."},
+      "defaults.cache.write_ratio": {"type": "number", "allowed": "0 or more", "default": "per model", "effect": "Cache-write price divided by uncached input price."},
+      "defaults.cache.output_ratio": {"type": "number", "allowed": "0 or more", "default": "per model", "effect": "Output price divided by uncached input price, for compaction break-even guidance."},
+      "defaults.cache.ttl_seconds": {"type": "number", "allowed": "seconds, 1 or more", "default": "unset", "effect": "Provider cache time to live."},
+      "defaults.cache.min_prefix": {"type": "number", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Smallest prefix the provider caches."},
+      "defaults.cache.context_window": {"type": "number", "allowed": "tokens, 1 or more", "default": "per model", "effect": "Context window size; read-heavy preference needs at least 1000000."},
+      "defaults.cache.read_heavy_weight": {"type": "number", "allowed": "1 to 255", "default": "3", "effect": "Weight multiplier for read-heavy and review work on cheap-cache models."},
+      "defaults.compaction.window": {"type": "int", "allowed": "tokens, 1 or more", "default": "per model", "effect": "Context size at which compaction is advised."},
+      "defaults.compaction.mode": {"type": "enum", "allowed": "auto, task_boundary or never", "default": "per model", "effect": "When compaction is advised."},
+      "defaults.compaction.min_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "per model", "effect": "Fewest turns before compaction is advised."},
+      "defaults.lane.max_context": {"type": "int", "allowed": "tokens, 1 or more", "default": "unset", "effect": "Enforced largest context for a lane on this model."},
+      "defaults.lane.max_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "unset", "effect": "Enforced most turns for a lane on this model."},
+      "defaults.lane.stop_early_ok": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "false marks a model prone to stopping early; an unfinished result then gets a bounded continuation."},
+      "defaults.lane.max_continuations": {"type": "int", "allowed": "0 to 255", "default": "2 where stop_early_ok is false", "effect": "Most continuations after an unfinished result."},
+      "defaults.lane.read_only": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "true refuses write lanes on this model."},
+      "defaults.result.check": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "Check the result for the required sections before accepting it."},
+      "defaults.result.sections": {"type": "string_list", "allowed": "exact section heading lines; empty clears", "default": "per model", "effect": "Heading lines a result must contain."},
+      "defaults.result.fallback": {"type": "string", "allowed": "model id", "default": "per model", "effect": "Model for the one fallback attempt when the result check fails."},
+      "defaults.result.fallback_effort": {"type": "string", "allowed": "effort name", "default": "per model", "effect": "Effort for the fallback attempt."},
+      "rules": {"type": "array of tables", "allowed": "tables with adapter, model, account, starts_unix_seconds, expires_unix_seconds, windows (list of {start_hour, end_hour}, UTC) and policy (the same fields as defaults, under rules.policy)", "default": "empty", "effect": "Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Inclusive start, exclusive expiry; an overnight window wraps midnight; inactive rules have no effect."}
+    }
+  },
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {

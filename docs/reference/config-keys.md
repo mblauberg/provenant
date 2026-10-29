@@ -30,6 +30,36 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | `allowed_read_roots` | empty (read roots stay inside the project and its registered worktrees) | Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees. (absolute directory paths). |
 | `limits.expansion_depth` | 32 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 29. Graph documents cannot raise it. (1 or more). |
 
+## Host model policy settings
+
+Set these in `[domains.routing.model_policy]` in the host configuration. Omit a key for its bundled or empty default. `rules.policy` takes the same fields as `defaults`.
+
+| Key | Default | Effect |
+|---|---|---|
+| `bundled` | true | Start from the bundled per-model policy (cache prices, compaction windows, lane guidance, result checks). false starts empty. (true or false). |
+| `defaults.cache.read_share_target` | unset (bundled 0.9) | Advisory cache-read share a lane should reach; reported in stats, never enforced. (0 to 1). |
+| `defaults.cache.price_multiplier` | 1.0 (bundled: 2.0 in DeepSeek weekday peak) | Current price multiplier; divides the read-heavy preference weight. (number above 0). |
+| `defaults.cache.read_ratio` | per model | Cache-read price divided by uncached input price. (0 or more). |
+| `defaults.cache.write_ratio` | per model | Cache-write price divided by uncached input price. (0 or more). |
+| `defaults.cache.output_ratio` | per model | Output price divided by uncached input price, for compaction break-even guidance. (0 or more). |
+| `defaults.cache.ttl_seconds` | unset | Provider cache time to live. (seconds, 1 or more). |
+| `defaults.cache.min_prefix` | unset | Smallest prefix the provider caches. (tokens, 1 or more). |
+| `defaults.cache.context_window` | per model | Context window size; read-heavy preference needs at least 1000000. (tokens, 1 or more). |
+| `defaults.cache.read_heavy_weight` | 3 | Weight multiplier for read-heavy and review work on cheap-cache models. (1 to 255). |
+| `defaults.compaction.window` | per model | Context size at which compaction is advised. (tokens, 1 or more). |
+| `defaults.compaction.mode` | per model | When compaction is advised. (auto, task_boundary or never). |
+| `defaults.compaction.min_turns` | per model | Fewest turns before compaction is advised. (turns, 1 or more). |
+| `defaults.lane.max_context` | unset | Enforced largest context for a lane on this model. (tokens, 1 or more). |
+| `defaults.lane.max_turns` | unset | Enforced most turns for a lane on this model. (turns, 1 or more). |
+| `defaults.lane.stop_early_ok` | per model | false marks a model prone to stopping early; an unfinished result then gets a bounded continuation. (true or false). |
+| `defaults.lane.max_continuations` | 2 where stop_early_ok is false | Most continuations after an unfinished result. (0 to 255). |
+| `defaults.lane.read_only` | per model | true refuses write lanes on this model. (true or false). |
+| `defaults.result.check` | per model | Check the result for the required sections before accepting it. (true or false). |
+| `defaults.result.sections` | per model | Heading lines a result must contain. (exact section heading lines; empty clears). |
+| `defaults.result.fallback` | per model | Model for the one fallback attempt when the result check fails. (model id). |
+| `defaults.result.fallback_effort` | per model | Effort for the fallback attempt. (effort name). |
+| `rules` | empty | Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Inclusive start, exclusive expiry; an overnight window wraps midnight; inactive rules have no effect. (tables with adapter, model, account, starts_unix_seconds, expires_unix_seconds, windows (list of {start_hour, end_hour}, UTC) and policy (the same fields as defaults, under rules.policy)). |
+
 ## Provider updates
 
 ```json
