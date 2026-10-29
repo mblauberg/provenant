@@ -85,13 +85,6 @@ impl<E: std::fmt::Display> From<E> for Refusal {
     }
 }
 
-/// Whole Unix seconds for lease records; zero when the clock cannot be read.
-fn unix_now(clock: &dyn Clock) -> i64 {
-    clock
-        .wall_now()
-        .map_or(0, provenant_core::WallTime::unix_seconds)
-}
-
 fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), Refusal> {
     let binary = provenant_os::git::git_executable()
         .ok_or_else(|| Refusal::new(Outcome::Error, "GIT", "Git executable unavailable"))?;
@@ -799,7 +792,7 @@ fn execute(
             previous: Some(local),
             operation_id,
             session_id: session.map(String::from),
-            at_unix: unix_now(&clock),
+            at_unix: clock.unix_seconds(),
         };
         let lease_error = write_owner(&lease_dir, &lease).err().map(|e| e.to_string());
         data["owner"] = serde_json::to_value(&lease)?;
@@ -1146,7 +1139,7 @@ pub(crate) fn receive(
                 previous: Some(target.source),
                 operation_id: input.operation_id.clone(),
                 session_id: None,
-                at_unix: unix_now(target.clock),
+                at_unix: target.clock.unix_seconds(),
             },
         );
     }

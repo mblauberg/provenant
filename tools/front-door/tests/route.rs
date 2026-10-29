@@ -401,7 +401,7 @@ fn override_set_resolves_labels_and_rejects_ambiguous_keys() -> Result {
 fn override_list_shows_active_future_and_expired_schedules() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
-    let now = jiff::Timestamp::now().as_second();
+    let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
     let at = |seconds: i64| jiff::Timestamp::from_second(seconds).map(|at| at.to_string());
     let config = format!(
         "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\n[domains.routing.pacing_overrides.schedule]\nstarts='{}'\nexpires='{}'\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n[domains.routing.pacing_overrides.schedule]\nstarts='{}'\nexpires='{}'\n[[domains.routing.pacing_overrides]]\nprovider='agy'\npolicy='off'\n[domains.routing.pacing_overrides.schedule]\nstarts='{}'\nexpires='{}'\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nschedule={{windows=[{{weekdays=[5,6],start_hour=0,end_hour=24}}]}}\n[domains.routing.model_policy.rules.policy.cache]\nttl_seconds=60\n",
@@ -485,7 +485,7 @@ fn retired_schedule_keys_drop_only_their_record_with_a_named_warning() -> Result
 fn cached_account_pacing_is_visible_without_probing() -> Result {
     use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow};
     let rig = rig()?;
-    let at = jiff::Timestamp::now().as_second();
+    let at = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
     let directory = rig.state.join("quota/opaque-one");
     fs::create_dir_all(&directory)?;
     for path in [&rig.state, &rig.state.join("quota"), &directory] {

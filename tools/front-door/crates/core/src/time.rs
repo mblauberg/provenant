@@ -278,6 +278,11 @@ impl WaitBudget {
 /// Sampled by the edge; state machines receive values, never ambient time.
 pub trait Clock {
     fn wall_now(&self) -> Result<WallTime, TimeError>;
+    /// Whole Unix seconds now, for second-granular records; zero when the
+    /// wall clock is outside the supported range.
+    fn unix_seconds(&self) -> i64 {
+        self.wall_now().map_or(0, WallTime::unix_seconds)
+    }
     fn mono_now(&self) -> MonoTime;
     /// Wait until a monotonic deadline according to this clock's time source.
     fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError>;
@@ -407,6 +412,12 @@ mod tests {
         assert!(matches!(Plain.boot_identity(), Err(TimeError::HostClock)));
         let test = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(7));
         assert_eq!(test.host_monotonic_micros().unwrap(), 7);
+        assert_eq!(Plain.unix_seconds(), 0);
+        let mut later = test.clone();
+        later
+            .advance(DurationMicros::from_seconds(90).unwrap())
+            .unwrap();
+        assert_eq!(later.unix_seconds(), 90);
         assert_eq!(test.boot_identity().unwrap(), "test-boot");
     }
     #[test]

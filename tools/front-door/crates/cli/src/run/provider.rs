@@ -414,7 +414,7 @@ fn prepare_candidates(
     }
     .with_derived_accounts();
     let entries: Vec<_> = settings.entries.into_values().collect();
-    let timestamp = jiff::Timestamp::now().as_second();
+    let timestamp = clock.unix_seconds();
     let mut availability = Vec::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
     let probe = Probe {
@@ -564,7 +564,7 @@ fn prepare_candidates(
             .effective(
                 &provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?,
                 route.account_key.as_deref(),
-                jiff::Timestamp::now().as_second(),
+                clock.unix_seconds(),
             )
             .policy;
         if !model_policy.permits(request.intent) {
@@ -797,7 +797,13 @@ fn prepare_candidates(
                     continue;
                 }
             };
-            let now = || u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0);
+            let now = || {
+                clock
+                    .wall_now()
+                    .ok()
+                    .and_then(|at| u64::try_from(at.unix_millis()).ok())
+                    .unwrap_or(0)
+            };
             match provenant_providers::claude::refresh_for_account_authorised(
                 &executor,
                 &login,

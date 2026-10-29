@@ -1208,7 +1208,7 @@ pub(crate) fn check_dispatch_candidate(
         .domains;
     provenant_routing::check_go_allowance(&model, &domains.routing, &catalogue)?;
     let pools = admission_pools(&route.adapter, &catalogue, &model);
-    let now = jiff::Timestamp::now().as_second();
+    let now = SystemClock::new().unix_seconds();
     let mut records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
     domains.quota.apply_calibration(&mut records, now);
     provenant_quota::Admission {
@@ -2359,7 +2359,7 @@ mod route_tests {
         )?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let catalogue = super::Catalogue::bundled()?;
-        let now = jiff::Timestamp::now().as_second();
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
         let availability = [provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: "opencode".into(),
@@ -2517,7 +2517,7 @@ mod route_tests {
             provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
         inputs.state_dir = Some(temp.path().join("state"));
         let roots = inputs.resolve(&Resolver)?;
-        let now = jiff::Timestamp::now().as_second();
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
         let catalogue = super::Catalogue::bundled()?;
         let mut availability = Vec::new();
         for (key, status) in [
@@ -2644,7 +2644,7 @@ mod route_tests {
             roots.state.as_path(),
             std::fs::Permissions::from_mode(0o700),
         )?;
-        let now = jiff::Timestamp::now().as_second();
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
         let catalogue = super::Catalogue::bundled()?;
         let availability: Vec<_> = ["first", "second"]
             .into_iter()
@@ -2888,7 +2888,7 @@ mod route_tests {
         )?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let catalogue = super::Catalogue::bundled()?;
-        let now = jiff::Timestamp::now().as_second();
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
         let availability: Vec<_> = [("codex", "gpt-6-luna"), ("claude", "claude-haiku-5-5")]
             .into_iter()
             .map(|(adapter, model)| provenant_providers::AvailabilityRecord {

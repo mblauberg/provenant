@@ -292,14 +292,14 @@ fn wait_for_lock(env: &[(OsString, OsString)], settings: &Settings) -> Result<()
 
 /// Tell the host this build waits, now. Best effort: the wait shows on
 /// stderr whatever happens here.
-#[allow(clippy::disallowed_methods)]
 fn mark(settings: &Settings, kind: WaitKind) {
     let Some(marker) = &settings.marker else {
         return;
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
+    let now = u64::try_from(provenant_core::Clock::unix_seconds(
+        &provenant_os::clock::SystemClock::new(),
+    ))
+    .unwrap_or(0);
     let _ = std::fs::write(own_marker(marker), kind.marker(now));
 }
 

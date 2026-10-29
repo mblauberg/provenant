@@ -4,6 +4,8 @@ allow-panic-in-tests = true
 
 disallowed-methods = [
   { path = "std::time::SystemTime::now", reason = "Sample wall time only at the production clock boundary." },
+  { path = "jiff::Timestamp::now", reason = "Sample wall time through an injected provenant_core::Clock." },
+  { path = "jiff::Zoned::now", reason = "Sample wall time through an injected provenant_core::Clock." },
   { path = "std::time::Instant::now", reason = "Sample monotonic time only at explicit real-time boundaries." },
   { path = "std::thread::park_timeout", reason = "Wait only at an explicit real-time boundary." },
   { path = "std::thread::sleep", reason = "Use an injected clock or the OS wait boundary so cancellation remains observable." },

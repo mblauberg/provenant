@@ -75,7 +75,7 @@ impl Context {
         })
     }
     fn now(&self) -> i64 {
-        unix_now(&self.clock)
+        self.clock.unix_seconds()
     }
     fn store(&self) -> HandoffStore {
         HandoffStore::new(self.roots.state.clone(), self.cwd.clone())
@@ -88,12 +88,6 @@ impl Context {
             assets: &self.assets,
         }
     }
-}
-/// Whole Unix seconds for chair records; zero when the clock cannot be read.
-fn unix_now(clock: &dyn Clock) -> i64 {
-    clock
-        .wall_now()
-        .map_or(0, provenant_core::WallTime::unix_seconds)
 }
 fn current<'a>(
     accounts: &'a [RegisteredAccount],
@@ -973,7 +967,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 operation_id,
                 issued_at,
             } => {
-                let created_at = unix_now(&clock);
+                let created_at = clock.unix_seconds();
                 let operation_id = match operation_id {
                     Some(id) => id,
                     None => {
@@ -1070,7 +1064,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                     project,
                     HostSessionId::parse(&session)?,
                 )
-                .page(after, limit as usize, retention, unix_now(&clock))?;
+                .page(after, limit as usize, retention, clock.unix_seconds())?;
                 Ok(serde_json::to_value(page)?)
             }
         }

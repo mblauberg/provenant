@@ -1123,11 +1123,7 @@ mod tests {
             policies.defaults.result.fallback_effort.as_deref(),
             Some("max")
         );
-        let effective = policies.effective(
-            &ModelId::parse("codex/gpt-6-luna")?,
-            Some("work"),
-            jiff::Timestamp::now().as_second(),
-        );
+        let effective = policies.effective(&ModelId::parse("codex/gpt-6-luna")?, Some("work"), 0);
         assert_eq!(
             effective
                 .policy

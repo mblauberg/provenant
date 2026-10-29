@@ -6,7 +6,7 @@ mod opencode;
 use crate::accounts::Settings;
 use crate::host::PROBE_DIR_OPERATION;
 use crate::identity::{agy_fingerprint, base64url, codex_account, cursor_account};
-use provenant_core::{Clock, WallTime};
+use provenant_core::Clock;
 use provenant_os::clock::SystemClock;
 use provenant_os::exec::{
     ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
@@ -133,9 +133,8 @@ impl LiveQuota {
             clock: SystemClock::new(),
         })
     }
-    /// Whole Unix seconds; zero when the clock cannot be read.
     fn now(&self) -> i64 {
-        self.clock.wall_now().map_or(0, WallTime::unix_seconds)
+        self.clock.unix_seconds()
     }
     fn command(
         &self,
