@@ -1,5 +1,6 @@
 //! Durable settlement progress. Kernel locks protect only journal updates.
 use crate::{RECORD_LIMIT, Result, RunError, artifacts::read_sealed};
+use provenant_core::retry::Backoff;
 use provenant_core::{CancelToken, Clock, GitOid};
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use provenant_supervisor::{
@@ -12,7 +13,7 @@ use std::{ffi::OsStr, sync::mpsc, time::Duration};
 const FILE: &str = "settlement-progress.json";
 const LIMIT: u32 = 3;
 const UNKNOWN_OWNER_LIMIT_MS: u64 = 10 * 60 * 1000;
-const CLAIM_BACKOFF_MS: [u64; 3] = [5_000, 30_000, 120_000];
+const CLAIM_BACKOFF: Backoff = Backoff::new(Duration::from_secs(5), 6, Duration::from_secs(120));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,7 +106,9 @@ fn observed_alive(
 }
 
 fn backoff_ms(attempts: u32) -> u64 {
-    CLAIM_BACKOFF_MS[attempts.saturating_sub(1).min(2) as usize]
+    CLAIM_BACKOFF
+        .delay(u64::from(attempts.saturating_sub(1)))
+        .as_millis() as u64
 }
 
 fn journal_lock(attempt: &Directory) -> Result<provenant_os::fs::LockGuard> {
@@ -753,7 +756,7 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
-    for delay_ms in std::iter::once(0).chain(CLAIM_BACKOFF_MS) {
+    for delay_ms in std::iter::once(0).chain((1..=LIMIT).map(backoff_ms)) {
         if delay_ms != 0 {
             let (_wake, sleep) = mpsc::channel::<()>();
             let _ = sleep.recv_timeout(Duration::from_millis(delay_ms));

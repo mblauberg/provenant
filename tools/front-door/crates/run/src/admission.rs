@@ -8,6 +8,7 @@ use crate::{
     *,
 };
 use provenant_confinement::valid_read_only_writable;
+use provenant_core::retry::Backoff;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, GitOid, WallTime};
 use provenant_os::{
     fs::Directory,
@@ -474,7 +475,8 @@ impl RunStore {
         clock: &dyn Clock,
         cancel: &CancelToken,
     ) -> Result<AttemptRecord> {
-        let mut delay = Duration::from_millis(100);
+        let backoff = Backoff::new(Duration::from_millis(100), 2, Duration::from_secs(2));
+        let mut retries = 0_u64;
         let mut refusal = None;
         let mut below_floor = 0_u32;
         loop {
@@ -580,7 +582,7 @@ impl RunStore {
                     .saturating_sub(now.as_micros()),
             )
             .unwrap_or(0);
-            let pause = delay.min(Duration::from_micros(left));
+            let pause = backoff.delay(retries).min(Duration::from_micros(left));
             let deadline = clock
                 .mono_now()
                 .checked_add(provenant_core::DurationMicros::from_micros(
@@ -590,7 +592,7 @@ impl RunStore {
             clock
                 .wait_until(deadline)
                 .map_err(|_| RunError::Validation("admission budget"))?;
-            delay = (delay * 2).min(Duration::from_secs(2));
+            retries = retries.saturating_add(1);
         }
     }
     #[cfg(test)]

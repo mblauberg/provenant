@@ -6,6 +6,7 @@
 //! returns its terminal rows immediately. Both modes poll a `fetch` of the
 //! candidate lanes, so the local store and peers share one rule.
 use super::{Condition, ErrorKind, Fail, Status, condition_met, settled, state_name};
+use provenant_core::retry::{RetryCause, is_transient};
 use provenant_core::{AttemptId, Clock, HostId, WallTime};
 use provenant_os::clock::SystemClock;
 use provenant_run as run;
@@ -195,8 +196,13 @@ pub(super) enum Tick {
 pub(super) fn tick(fetch: &mut Fetch<'_>, deadline: Instant) -> Result<Tick, Fail> {
     match fetch(deadline.saturating_duration_since(Instant::now())) {
         Ok(lanes) => Ok(Tick::Lanes(lanes)),
-        Err(fail) if fail.kind == ErrorKind::Contention => Ok(Tick::Retry(fail)),
-        Err(fail) if fail.kind == ErrorKind::PeerUnavailable && Instant::now() < deadline => {
+        Err(fail)
+            if is_transient(match fail.kind {
+                ErrorKind::Contention => RetryCause::Contention,
+                ErrorKind::PeerUnavailable => RetryCause::Transport,
+                _ => RetryCause::Permanent,
+            }) && (fail.kind == ErrorKind::Contention || Instant::now() < deadline) =>
+        {
             Ok(Tick::Retry(fail))
         }
         Err(fail) => Err(fail),
