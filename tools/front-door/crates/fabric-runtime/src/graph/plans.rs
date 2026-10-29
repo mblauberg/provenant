@@ -39,7 +39,7 @@ pub(super) fn prompt(node: &GraphNode) -> String {
     let mut prompt = node.prompt.clone();
     if let Some(spec) = &node.plan {
         let kinds = serde_json::to_string(&spec.kinds).unwrap_or_default();
-        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, write_scope (relative literal files/directories), `acceptance_checks` and local depends_on. Route defaults to {{\"alias\":\"senior\"}}. Writers require the `worktree` key naming an existing registered worktree. Synthesise nodes require `inputs` selecting dependency outputs. Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", spec.max_nodes));
+        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs. Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", spec.max_nodes));
     }
     prompt
 }
@@ -284,19 +284,24 @@ fn fragment(
             ));
         }
         // Gate evidence lives in its condition and a decision in its question.
-        // Agent nodes carry explicit scope and acceptance prose in their brief.
+        // Writer nodes carry explicit scope; all agents carry acceptance prose.
         if !matches!(child.kind, Some(NodeKind::Gate | NodeKind::Decide)) {
             if child.prompt.trim().is_empty()
-                || child.write_scope.is_empty()
                 || child.acceptance_checks.is_empty()
                 || child.acceptance_checks.iter().any(|s| s.trim().is_empty())
+                || child.access == AccessMode::WorktreeWrite && child.write_scope.is_empty()
                 || child.write_scope.iter().any(|s| !valid_scope(s))
             {
-                return Err("fragment agent requires goal or brief, relative literal write_scope and acceptance_checks".into());
+                return Err("fragment agent requires goal or brief and acceptance_checks; writers also require relative literal write_scope".into());
+            }
+            child.prompt.push_str("\n\n");
+            if !child.write_scope.is_empty() {
+                child
+                    .prompt
+                    .push_str(&format!("Write scope: {}\n", child.write_scope.join(", ")));
             }
             child.prompt.push_str(&format!(
-                "\n\nWrite scope: {}\nAcceptance checks:\n{}",
-                child.write_scope.join(", "),
+                "Acceptance checks:\n{}",
                 child.acceptance_checks.join("\n")
             ));
             if child.route.is_none() && child.routes.is_none() {

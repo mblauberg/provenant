@@ -981,9 +981,10 @@ fn execute(
             .find(|s| s.adapter_id() == account.adapter);
         let outcome = match source {
             Some(source) => {
+                let probe_deadline = schedule::probe_deadline(plan.deadline_unix_seconds, at)?;
                 let input = QuotaProbeInput {
                     now_unix_seconds: at,
-                    deadline_unix_seconds: plan.deadline_unix_seconds,
+                    deadline_unix_seconds: probe_deadline,
                     authority_ref: Some("configured-local-quota".into()),
                 };
                 match source.probe(account, &input) {
@@ -1006,7 +1007,7 @@ fn execute(
             .as_second();
         let _lock = lock()?;
         let mut records = read_records(&dir)?;
-        if finished < at + schedule::TICK_BUDGET_SECONDS
+        if finished <= schedule::probe_deadline(plan.deadline_unix_seconds, at)?
             && let Some(reserved) = records.iter().find(|r| {
                 r.account.adapter == account.adapter && r.account.account_key == account.account_key
             })

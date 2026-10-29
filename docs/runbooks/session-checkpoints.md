@@ -115,7 +115,9 @@ VIEWER SESSION` clears a baseline.
 presentation state. `chair viewer set-request VIEWER ID [--seen-revision N]
 [--snoozed-until UTC] [--dismissed]` replaces the whole presentation state;
 omitted values clear their fields. These operations do not answer, close or
-change the blocking flag. Each viewer has a limit of 10,000 request rows and
+change the blocking flag. A lane may run `set-request` for those three bounded
+presentation fields; `rendered` and `forget` still change a summary baseline
+only outside a lane. Each viewer has a limit of 10,000 request rows and
 10,000 summary rows per project, and the project has a combined limit of
 100,000 viewer rows. Writes reclaim closed or expired requests; if all retained
 requests remain open, resolve or close one before retrying. At the summary

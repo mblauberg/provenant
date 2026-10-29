@@ -163,6 +163,25 @@ fn planner_prompt_uses_wire_kinds_and_required_field_names() {
 }
 
 #[test]
+fn planner_requires_write_scope_only_for_writers() {
+    let doc = planner(1);
+    let reader = json!({"id":"read","goal":"Read","access":"read_only","acceptance_checks":["check"]});
+    let mut owner = fixture_owner(&[&result(vec![reader]), "read", "checked"]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.checkpoint.expansions.len(), 1, "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(run.status, GraphStatus::Complete);
+
+    let writer = json!({"id":"write","goal":"Write","access":"worktree_write","worktree":".worktrees/write","acceptance_checks":["check"]});
+    let mut owner = fixture_owner(&[&result(vec![writer])]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert!(run.checkpoint.pause_reason.as_ref().unwrap().contains("write_scope"));
+    assert!(run.checkpoint.expansions.is_empty());
+}
+
+#[test]
 fn continuation_rejects_original_pr_delivery_before_integration_rewrite() {
     let mut doc = writer_graph();
     doc.integration_branch = Some("integration".into());

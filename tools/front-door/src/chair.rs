@@ -27,7 +27,9 @@ use std::{
 
 type Error = Box<dyn std::error::Error>;
 #[derive(Debug, thiserror::Error)]
-#[error("viewer state cannot be changed inside a lane")]
+#[error(
+    "viewer baselines cannot be changed inside a lane; only seen, snoozed and dismissed request presentation state is allowed"
+)]
 struct ViewerLane;
 #[derive(Deserialize)]
 struct Input {
@@ -510,7 +512,10 @@ fn viewer_run(command: ChairViewer, globals: &Globals) -> u8 {
         ChairViewer::Request { .. } | ChairViewer::Summary { .. }
     );
     let result = (|| -> Result<Value, Error> {
-        if !read_only && provenant_cli::fabric::in_lane() {
+        if !read_only
+            && !matches!(&command, ChairViewer::SetRequest { .. })
+            && provenant_cli::fabric::in_lane()
+        {
             return Err(ViewerLane.into());
         }
         let resolved = crate::roots::resolve(
@@ -703,9 +708,10 @@ fn viewer_run(command: ChairViewer, globals: &Globals) -> u8 {
                     "VIEWER_INVALID",
                     "Correct the viewer name or revision and retry.",
                 ),
-                _ if error.is::<ViewerLane>() => {
-                    ("VIEWER_LANE", "Change viewer state outside the lane.")
-                }
+                _ if error.is::<ViewerLane>() => (
+                    "VIEWER_LANE",
+                    "Change summary baselines outside the lane; request presentation state may change inside one.",
+                ),
                 _ if error.is::<provenant_workflow::session::HostSessionIdError>() => {
                     ("VIEWER_INVALID", "Correct the session ID and retry.")
                 }

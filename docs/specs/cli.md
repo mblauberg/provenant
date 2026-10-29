@@ -247,6 +247,9 @@ has restarted at an earlier revision. Summary responses include `to`, `summary`
 and `coverage`: an unavailable session has no summary, and a baseline ahead of
 the current revision reports `baseline_ahead` while returning the current summary.
 An explicit `--to` remains visible even when the summary is unavailable.
+A lane may run `chair viewer set-request` for the bounded `seen_revision`,
+`snoozed_until` and `dismissed` fields; it cannot answer, resolve or unblock a
+request, and `rendered` and `forget` remain outside a lane.
 Closed or expired requests refuse presentation-state writes. Closed and expired
 request state is reclaimed on successful writes for that viewer. Each viewer is limited to 10,000 request
 rows and 10,000 summary baselines per project; the project also has a combined
@@ -652,8 +655,10 @@ The guard is advisory: confinement and custody stay authoritative.
 ### Pre-push refuses data loss
 
 `hook git pre-push` refuses default-branch deletion, non-fast-forward
-updates, pushes from linked worktrees to the default branch and conflict
-markers, each with an accepted example on stderr. It identifies the default
+updates, pushes from linked worktrees to the default branch and, by default,
+literal conflict markers, each with an accepted example on stderr. The
+conflict-marker check is advisory and `[domains.run] push_conflict_markers =
+false` turns it off; the other refusals remain. It identifies the default
 branch from the remote's advertisement, refuses when any inspection fails,
 disables inherited redirects and never fetches.
 - Why: the last local guard before shared history changes.
