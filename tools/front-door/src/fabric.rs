@@ -1031,7 +1031,9 @@ pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObser
 fn peer_read_only(action: &PeerAction) -> bool {
     use provenant_fabric_runtime::inbox::InboxInput;
     match action {
-        PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. } => true,
+        PeerAction::ConsoleBoard { .. }
+        | PeerAction::ConsoleTree { .. }
+        | PeerAction::Doctor { .. } => true,
         PeerAction::Inbox { input, .. } => !matches!(
             input,
             InboxInput::Answer {
@@ -1394,6 +1396,24 @@ pub fn peer(
                 },
                 extra: Default::default(),
             },
+            PeerAction::Doctor { .. } => {
+                match crate::hosts::local(&home, &context.roots).and_then(|report| {
+                    serde_json::to_value(report)
+                        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+                }) {
+                    Ok(data) => PeerResult::Doctor {
+                        data,
+                        extra: Default::default(),
+                    },
+                    Err(_) => PeerResult::Error {
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::io("build the local doctor report"),
+                        },
+                        extra: Default::default(),
+                    },
+                }
+            }
             PeerAction::LandingPush {
                 proof,
                 operation_id,

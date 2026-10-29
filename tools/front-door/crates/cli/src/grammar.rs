@@ -446,7 +446,7 @@ pub enum ChairLog {
 pub enum Hosts {
     /// Probe sign-in without inference or credential access.
     Doctor {
-        /// SSH alias to probe; all configured hosts when omitted
+        /// Configured peer to probe; the local host when omitted
         #[arg(value_parser = host_alias)]
         host: Option<String>,
     },
@@ -459,7 +459,7 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
     {
-        return Err("host must be a bounded SSH alias");
+        return Err("host must be a bounded peer name");
     }
     Ok(value.into())
 }
