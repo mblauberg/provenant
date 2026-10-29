@@ -1105,7 +1105,7 @@ fn adopt_settings(globals: &cli::Globals, account: &str) -> Result<Vec<String>, 
             .flat_map(|receipt| receipt.entries)
             .filter(|e| e.path.to_path_buf().is_ok_and(|p| canonical(&p) == file))
             .filter_map(|e| match e.expected {
-                provenant_records::OwnedValue::Selector { value } => e
+                provenant_records::OwnedValue::Selector { value, .. } => e
                     .selector
                     .strip_prefix("setting:")
                     .map(|key| (key.to_owned(), value)),

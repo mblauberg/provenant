@@ -182,7 +182,7 @@ fn settings_findings(
                 .entries
                 .iter()
                 .find_map(|entry| match (&entry.expected, entry.path == *hook) {
-                    (OwnedValue::Selector { value }, true)
+                    (OwnedValue::Selector { value, .. }, true)
                         if entry.selector.strip_prefix(shared_settings::PREFIX) == Some(key) =>
                     {
                         Some(value)
