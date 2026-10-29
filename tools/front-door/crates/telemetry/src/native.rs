@@ -388,13 +388,9 @@ output_excluding_reasoning = 2000000
         );
         std::fs::remove_file(session.join("agent-torn.jsonl"))?;
         std::fs::write(session.join("unexpected.jsonl"), "{}\n")?;
-        assert!(
-            import_subagents(&session, dir.path(), &validate_prices(&config)?)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("invalid or non-regular")
-        );
+        let report = import_subagents(&session, dir.path(), &validate_prices(&config)?)?;
+        assert_eq!(report.agents, 2);
+        assert_eq!(report.models[0].messages, 1);
         std::fs::remove_file(session.join("unexpected.jsonl"))?;
         let mut max_line = b"{}".to_vec();
         max_line.resize(MAX_LINE_BYTES as usize, b' ');
@@ -423,7 +419,7 @@ output_excluding_reasoning = 2000000
                     .err()
                     .unwrap()
                     .to_string()
-                    .contains("non-regular")
+                    .contains("not a regular file")
             );
         }
         Ok(())

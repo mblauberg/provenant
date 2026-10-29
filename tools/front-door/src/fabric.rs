@@ -116,6 +116,7 @@ impl stdio::Factory for Factory {
     }
     type Facade<'a> = BoundFacade<'a>;
     fn preflight(&self, call: &provenant_fabric_mcp::tools::ToolCall) -> Result<(), ServiceError> {
+        use provenant_fabric_mcp::tools::ToolCall;
         if let provenant_fabric_mcp::tools::ToolCall::Inbox(input, _) = call {
             let ctx = &self.context;
             provenant_fabric_runtime::inbox::validate_request(
@@ -124,6 +125,13 @@ impl stdio::Factory for Factory {
                 ctx.in_lane,
                 input,
             )?;
+        }
+        if matches!(
+            call,
+            ToolCall::Submit(SubmitInput::Submit { host: None, .. })
+                | ToolCall::SubmitWait(SubmitInput::Submit { host: None, .. }, ..)
+        ) {
+            provenant_cli::run::nested_dispatch_context(&self.context.roots).map_err(fail_error)?;
         }
         Ok(())
     }

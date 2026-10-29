@@ -3156,7 +3156,8 @@ fn own_worktree(
     })
 }
 
-fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
+/// Validate the inherited lane context and determine the next submission depth.
+pub fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
     let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
     let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)

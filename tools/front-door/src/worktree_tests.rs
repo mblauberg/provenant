@@ -2756,6 +2756,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
         "{}",
         String::from_utf8_lossy(&identity.stderr.bytes)
     );
+    // The host owns and initialises the Fabric store before a lane opens it
+    // read-only. Identity alone does not create the coordination database.
+    ok(&rig, &["fabric", "events", "read", "--json"])?;
     let home = rig.root.join("fixture-home");
     fs::create_dir_all(home.join(".claude-fixture"))?;
     if !cfg!(target_os = "macos") {

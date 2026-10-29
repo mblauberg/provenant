@@ -282,6 +282,16 @@ fn configuration_cannot_raise_probe_limits_and_publication_failure_is_io() -> Re
         rig.state.join("config.toml"),
         "schema_version = 1\n[domains.quota]\nmax_parallel = 4\n",
     )?;
+    assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 0);
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.quota]\nmax_parallel = 17\n",
+    )?;
+    assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 2);
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.quota]\nwall_budget_seconds = 601\n",
+    )?;
     assert_eq!(code(&rig.command(&["quota", "tick", "--json"])?), 2);
     fs::write(
         rig.state.join("config.toml"),
