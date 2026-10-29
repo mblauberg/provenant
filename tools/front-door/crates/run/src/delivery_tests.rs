@@ -613,7 +613,7 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
     let Err(error) = host().refresh_origin_with(&writer, &git_dir) else {
         return Err("colliding default must fail".into());
     };
-    assert!(error.to_string().contains("default branch"));
+    assert!(matches!(error, RunError::OriginDefaultCollision));
     assert_eq!(
         run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
         expected
@@ -739,7 +739,7 @@ impl OriginFixture {
         Ok(())
     }
 
-    fn refresh(&self, git: Option<&Path>) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn refresh(&self, git: Option<&Path>) -> crate::Result<()> {
         let mut environment: Vec<(OsString, OsString)> = vec![
             ("PATH".into(), "/usr/bin:/bin".into()),
             ("HOME".into(), self.home.as_os_str().to_owned()),
@@ -855,7 +855,7 @@ fn origin_refresh_never_writes_through_head_or_a_tracking_symref()
         .refresh(None)
         .err()
         .ok_or("default `head` must fail")?;
-    assert!(error.to_string().contains("default branch"), "{error}");
+    assert!(matches!(error, RunError::OriginDefaultCollision), "{error}");
     assert_eq!(
         fixture.local(&["rev-parse", "refs/remotes/origin/main"])?,
         kept
@@ -890,9 +890,12 @@ fn origin_refresh_refuses_names_that_differ_only_in_unicode_normalisation()
     let error = fixture
         .refresh(None)
         .err()
-        .ok_or("NFD default with an NFC sibling must be refused")?
-        .to_string();
-    assert!(error.contains("Unicode NFC"), "{error}");
+        .ok_or("NFD default with an NFC sibling must be refused")?;
+    assert!(
+        matches!(error, RunError::OriginNormalisationCollision(_)),
+        "{error}"
+    );
+    let error = error.to_string();
     for spelling in ["caf\\u{e9}", "cafe\\u{301}"] {
         assert!(error.contains(spelling), "{spelling} missing: {error}");
     }
@@ -1026,7 +1029,13 @@ fn origin_refresh_routes_advertisement_and_fetch_through_one_hardened_transport(
         .err()
         .ok_or("lane helper must fail")?;
     assert!(
-        error.to_string().contains("where lanes can write"),
+        matches!(
+            error,
+            RunError::DeliveryTransport {
+                kind: crate::TransportRefusal::LaneProgram,
+                ..
+            }
+        ),
         "{error}"
     );
     let calls = std::fs::read_to_string(&log)?;
@@ -1067,7 +1076,13 @@ fn origin_refresh_refuses_includes_that_name_a_lane_area_before_they_exist()
             .err()
             .ok_or_else(|| format!("{key}={value} must be refused"))?;
         assert!(
-            error.to_string().contains("where lanes can write"),
+            matches!(
+                error,
+                RunError::DeliveryTransport {
+                    kind: crate::TransportRefusal::LaneConfig,
+                    ..
+                }
+            ),
             "{key}={value}: {error}"
         );
         fixture.local(&["config", "--unset", key])?;
@@ -1124,13 +1139,7 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
             HostDeliveryContext::destination(DeliveryMode::Integrate(target.into()), "lane")?
                 .ok_or("destination")?;
         assert!(
-            matches!(
-                fixture.prepare(),
-                Err(RunError::DeliveryPrepare {
-                    step: "integration target",
-                    ..
-                })
-            ),
+            matches!(fixture.prepare(), Err(RunError::ProtectedDeliveryBranch)),
             "{target}"
         );
     }
@@ -1144,13 +1153,7 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
             HostDeliveryContext::destination(DeliveryMode::Integrate(target.into()), "lane")?
                 .ok_or("destination")?;
         assert!(
-            matches!(
-                fixture.prepare(),
-                Err(RunError::DeliveryPrepare {
-                    step: "integration target",
-                    ..
-                })
-            ),
+            matches!(fixture.prepare(), Err(RunError::ProtectedDeliveryBranch)),
             "{target}"
         );
     }
@@ -1214,17 +1217,11 @@ fn integration_refuses_the_default_branch_of_a_non_origin_remote()
             .ok_or("destination")?;
     assert!(matches!(
         fixture.prepare(),
-        Err(RunError::DeliveryPrepare {
-            step: "integration target",
-            ..
-        })
+        Err(RunError::ProtectedDeliveryBranch)
     ));
     assert!(matches!(
         HostDeliveryContext::validate_integration_target(&fixture.writer.project, "release"),
-        Err(RunError::DeliveryPrepare {
-            step: "integration target",
-            ..
-        })
+        Err(RunError::ProtectedDeliveryBranch)
     ));
     Ok(())
 }

@@ -351,14 +351,8 @@ fn task_title_roundtrip() -> TestResult {
         let error = Service::new(&store)
             .dispatch(invalid, temp.path(), &call)
             .unwrap_err();
-        assert!(matches!(
-            error,
-            RunError::Input {
-                kind: ErrorKind::Invalid,
-                ..
-            }
-        ));
-        assert!(error.to_string().contains("control characters"));
+        assert!(matches!(error, RunError::InvalidTaskTitle(_)));
+        assert_eq!(error.code(), "INVALID");
     }
     Ok(())
 }

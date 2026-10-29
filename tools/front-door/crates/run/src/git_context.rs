@@ -244,10 +244,14 @@ fn check_transport(
     if timed_out || listing.truncated {
         return Err(execution_error("Git configuration listing was incomplete"));
     }
-    let entries = transport::parse_listing(&listing.bytes).map_err(execution_error)?;
+    let refusal = |error: transport::TransportError| RunError::GitTransport {
+        kind: (&error).into(),
+        reason: error.to_string(),
+    };
+    let entries = transport::parse_listing(&listing.bytes).map_err(refusal)?;
     let roots = lane_roots(cwd, env);
-    transport::check_environment(transport_env, cwd, &roots).map_err(execution_error)?;
-    transport::check_listing(&entries, cwd, &roots).map_err(execution_error)
+    transport::check_environment(transport_env, cwd, &roots).map_err(refusal)?;
+    transport::check_listing(&entries, cwd, &roots).map_err(refusal)
 }
 
 /// Look up the exact object ID the remote advertises for a tracking ref named
@@ -1308,7 +1312,13 @@ mod tests {
             .err()
             .ok_or("lane helper must fail")?;
         assert!(
-            refused.to_string().contains("where lanes can write"),
+            matches!(
+                refused,
+                RunError::GitTransport {
+                    kind: crate::TransportRefusal::LaneProgram,
+                    ..
+                }
+            ),
             "{refused}"
         );
         run(&["config", "remote.origin.uploadpack", "git-upload-pack"])?;

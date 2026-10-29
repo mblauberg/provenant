@@ -42,6 +42,17 @@ pub(super) fn prepare(
         },
         None,
     )
+    .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ProviderLeaseError {
+    #[error("provider lease wait cancelled")]
+    Cancelled,
+    #[error("all candidate providers are updating; retry the lane")]
+    AllUpdating,
+    #[error("{0}")]
+    Other(String),
 }
 
 // Try every candidate before waiting. One shared deadline applies only while
@@ -52,10 +63,10 @@ fn available_provider_leases(
     budget: provenant_core::WaitBudget,
     clock: &dyn provenant_core::Clock,
     cancel: &provenant_core::CancelToken,
-) -> Result<std::collections::BTreeMap<String, provenant_os::fs::LockGuard>, String> {
+) -> Result<std::collections::BTreeMap<String, provenant_os::fs::LockGuard>, ProviderLeaseError> {
     loop {
         if cancel.is_cancelled() {
-            return Err("provider lease wait cancelled".into());
+            return Err(ProviderLeaseError::Cancelled);
         }
         let mut leases = std::collections::BTreeMap::new();
         for provider in providers {
@@ -68,11 +79,11 @@ fn available_provider_leases(
                     leases.insert((*provider).to_owned(), lease);
                 }
                 Err(FsError::LockTimeout { .. }) => {}
-                Err(error) => return Err(error.to_string()),
+                Err(error) => return Err(ProviderLeaseError::Other(error.to_string())),
             }
         }
         if cancel.is_cancelled() {
-            return Err("provider lease wait cancelled".into());
+            return Err(ProviderLeaseError::Cancelled);
         }
         if !leases.is_empty() || providers.is_empty() {
             return Ok(leases);
@@ -80,15 +91,50 @@ fn available_provider_leases(
         let now = clock.mono_now();
         let remaining = budget.remaining(now).as_micros();
         if remaining == 0 {
-            return Err("all candidate providers are updating; retry the lane".into());
+            return Err(ProviderLeaseError::AllUpdating);
         }
         let next = now
             .checked_add(provenant_core::DurationMicros::from_micros(
                 remaining.min(50_000),
             ))
-            .map_err(|e| e.to_string())?;
-        clock.wait_until(next).map_err(|e| e.to_string())?;
+            .map_err(|e| ProviderLeaseError::Other(e.to_string()))?;
+        clock
+            .wait_until(next)
+            .map_err(|e| ProviderLeaseError::Other(e.to_string()))?;
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum PrepareError {
+    #[error(transparent)]
+    Prompt(#[from] LaunchPromptError),
+    #[error(transparent)]
+    Run(#[from] run::RunError),
+    #[error("{message}")]
+    Candidates {
+        message: String,
+        plans: Vec<provenant_confinement::PlanError>,
+    },
+    #[error("{0}")]
+    Other(String),
+}
+impl From<String> for PrepareError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+impl From<&str> for PrepareError {
+    fn from(message: &str) -> Self {
+        Self::Other(message.into())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum PlanCheckError {
+    #[error(transparent)]
+    Plan(#[from] provenant_confinement::PlanError),
+    #[error("{0}")]
+    Other(String),
 }
 
 fn prepare_with(
@@ -99,7 +145,7 @@ fn prepare_with(
     resume: Option<&run::AttemptRecord>,
     locate: impl Fn(&str) -> Result<PathBuf, String>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
-) -> Result<run::PreparedLaunch, String> {
+) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
         && provider == "host-native"
     {
@@ -180,17 +226,17 @@ fn prepare_candidates(
     locate: &dyn Fn(&str) -> Result<PathBuf, String>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     redirected: bool,
-) -> Result<run::PreparedLaunch, String> {
+) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
-        return prepare_command(registry, task, paths, resume, locate, provider, name);
+        return prepare_command(registry, task, paths, resume, locate, provider, name)
+            .map_err(PrepareError::from);
     }
-    check_launch_prompt(prompt_text, paths, None).map_err(|error| error.to_string())?;
+    check_launch_prompt(prompt_text, paths, None)?;
     if task.fallback.is_empty()
         && let run::RequestedRoute::Model { model, .. } = &task.route
         && let Some((adapter, _)) = model.split_once('/')
     {
-        check_launch_prompt(prompt_text, paths, Some(adapter))
-            .map_err(|error| error.to_string())?;
+        check_launch_prompt(prompt_text, paths, Some(adapter))?;
     }
     // Only fixture builds may stand a supplied token in for host authority.
     #[cfg(not(feature = "fixture"))]
@@ -244,8 +290,7 @@ fn prepare_candidates(
             Some(head) => run::GitContext::capture_at(&git, &cwd, base, head),
             None => run::GitContext::capture(&git, &cwd, base),
         })
-        .transpose()
-        .map_err(|error| error.to_string())?;
+        .transpose()?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?
@@ -282,7 +327,8 @@ fn prepare_candidates(
         provenant_core::WaitBudget::cli(clock.mono_now(), 30).map_err(|e| e.to_string())?,
         &clock,
         cancel,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     let eligible = |name: &str| provider_leases.contains_key(name);
     let settings = config.domains.accounts.with_derived_accounts();
     let host_writes = config.domains.run;
@@ -381,6 +427,7 @@ fn prepare_candidates(
     for entry in entries.iter().filter(|entry| eligible(&entry.adapter)) {
         match locate(&entry.adapter).and_then(|executable| {
             observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
+                .map_err(|error| error.to_string())
         }) {
             Ok(record) => availability.push(record),
             Err(error) => reasons.push(skip(
@@ -409,6 +456,7 @@ fn prepare_candidates(
     let digest = task.authority_digest.to_string();
     let mut access = Vec::new();
     let mut plan_errors = std::collections::BTreeMap::new();
+    let mut reported_plan_errors = std::collections::BTreeSet::new();
     for adapter in REGISTRY
         .iter()
         .map(|entry| entry.adapter.id())
@@ -431,7 +479,8 @@ fn prepare_candidates(
             adapter,
             publishing_gh.is_some(),
         )
-        .and_then(|request| ConfinedPlan::new(request).map_err(|error| error.to_string()))
+        .map_err(PlanCheckError::Other)
+        .and_then(|request| ConfinedPlan::new(request).map_err(PlanCheckError::from))
         {
             Ok(_) => access.push(provenant_routing::AccessContext {
                 adapter,
@@ -495,7 +544,8 @@ fn prepare_candidates(
             } => Some((excluded_families.as_slice(), *require_distinct)),
             _ => None,
         },
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     if let Some(selection) = &resolved.pool_selection {
         for redraw in &selection.redraws {
             reasons.push(skip(
@@ -577,7 +627,10 @@ fn prepare_candidates(
                 })
                 .map_or_else(
                     || format!("{reason:?}"),
-                    |error| format!("confinement plan: {error}"),
+                    |error| {
+                        reported_plan_errors.insert(route.adapter.clone());
+                        format!("confinement plan: {error}")
+                    },
                 );
             reasons.push(skip(&label, SkipKind::Unavailable, detail));
             continue;
@@ -957,11 +1010,21 @@ fn prepare_candidates(
             }),
         });
     }
-    Err(reasons
-        .iter()
-        .map(|skipped| format!("{}: {}", skipped.route, skipped.detail))
-        .collect::<Vec<_>>()
-        .join("; "))
+    Err(PrepareError::Candidates {
+        message: reasons
+            .iter()
+            .map(|skipped| format!("{}: {}", skipped.route, skipped.detail))
+            .collect::<Vec<_>>()
+            .join("; "),
+        plans: plan_errors
+            .into_iter()
+            .filter(|(adapter, _)| reported_plan_errors.contains(*adapter))
+            .filter_map(|(_, error)| match error {
+                PlanCheckError::Plan(error) => Some(error),
+                PlanCheckError::Other(_) => None,
+            })
+            .collect(),
+    })
 }
 
 /// Resolve only a host-configured entry. The result enters the ordinary lane
@@ -1894,13 +1957,31 @@ fn detect_failure(
     message
 }
 
+#[derive(Debug, thiserror::Error)]
+enum AccountObservationError {
+    #[error("{0}")]
+    VersionUnavailable(String),
+    #[error("{0}")]
+    Other(String),
+}
+impl From<String> for AccountObservationError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+impl From<&str> for AccountObservationError {
+    fn from(message: &str) -> Self {
+        Self::Other(message.into())
+    }
+}
+
 fn observe_account(
     entry: &provenant_providers::accounts::Registration,
     executable: &Path,
     probe: &Probe<'_>,
     catalogue_revision: &str,
     timestamp: i64,
-) -> Result<provenant_providers::AvailabilityRecord, String> {
+) -> Result<provenant_providers::AvailabilityRecord, AccountObservationError> {
     let Probe {
         roots,
         executor,
@@ -1915,7 +1996,8 @@ fn observe_account(
         return Err(format!(
             "{} account {} has no fixed canonical identity directory",
             entry.adapter, entry.label
-        ));
+        )
+        .into());
     }
     let (detected, org) =
         if !AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.registered_account) {
@@ -1936,14 +2018,16 @@ fn observe_account(
         return Err(format!(
             "{} account {} changed identity; re-register it",
             entry.adapter, entry.label
-        ));
+        )
+        .into());
     }
     match entry.check_org(org.as_deref()) {
         Err(_) => {
             return Err(format!(
                 "{} account {} changed identity; re-register it",
                 entry.adapter, entry.label
-            ));
+            )
+            .into());
         }
         Ok(Some(org)) => {
             if let Some(roots) = roots {
@@ -1974,14 +2058,17 @@ fn observe_account(
         || out.timed_out
         || out.stdout.truncated
     {
-        return Err(unavailable());
+        return Err(AccountObservationError::VersionUnavailable(unavailable()));
     }
     let version = std::str::from_utf8(&out.stdout.bytes)
         .map_err(|_| "invalid provider version")?
         .trim()
         .to_owned();
     if version.is_empty() {
-        return Err(format!("{}: empty version output", unavailable()));
+        return Err(AccountObservationError::VersionUnavailable(format!(
+            "{}: empty version output",
+            unavailable()
+        )));
     }
     Ok(provenant_providers::AvailabilityRecord {
         schema_version: 1,
@@ -2768,6 +2855,7 @@ pub fn prepare_fixture(
         },
         token,
     )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -3017,7 +3105,11 @@ mod tests {
             match detail {
                 Some(detail) => {
                     let error = result.err().ok_or("failed version probe accepted")?;
-                    assert!(error.contains("provider version is unavailable"), "{error}");
+                    assert!(
+                        matches!(error, AccountObservationError::VersionUnavailable(_)),
+                        "{error}"
+                    );
+                    let error = error.to_string();
                     assert!(error.contains(detail), "{error}");
                     assert!(!error.contains("private output"));
                 }
@@ -3222,7 +3314,10 @@ mod tests {
             )
             .err()
             .ok_or("oversized launch accepted")?;
-            assert!(error.contains("1 MiB"), "{adapter}: {error}");
+            assert!(
+                matches!(error, PrepareError::Prompt(LaunchPromptError::TooLarge)),
+                "{adapter}: {error}"
+            );
             if matches!(adapter, "cursor" | "agy") {
                 let mut nested = prompt_paths(&attempt)?;
                 nested.lane_depth = 2;
@@ -3237,8 +3332,13 @@ mod tests {
                 )
                 .err()
                 .ok_or("nested argv launch accepted")?;
-                assert!(error.contains("invalid input"), "{error}");
-                assert!(error.contains("64 KiB"), "{error}");
+                assert!(
+                    matches!(
+                        error,
+                        PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge)
+                    ),
+                    "{error}"
+                );
                 assert!(!attempt.join("prompt.md").exists());
             }
         }
@@ -3301,7 +3401,7 @@ mod tests {
         )
         .err()
         .ok_or("busy providers admitted")?;
-        assert!(error.contains("all candidate providers"));
+        assert!(matches!(error, ProviderLeaseError::AllUpdating));
         assert_eq!(clock.mono_now().as_micros(), 30_000_000);
         Ok(())
     }
@@ -3346,7 +3446,7 @@ mod tests {
         )
         .err()
         .ok_or("cancelled lease wait admitted")?;
-        assert!(error.contains("cancelled"));
+        assert!(matches!(error, ProviderLeaseError::Cancelled));
         assert_eq!(clock.mono_now().as_micros(), 50_000);
         // Cancellation is also checked when the provider becomes available.
         drop(updating);
@@ -3613,7 +3713,7 @@ mod tests {
         .err()
         .ok_or("stale writer source was accepted")?;
         assert_eq!(
-            error,
+            error.to_string(),
             "invalid run record: writer differs from pinned source commit"
         );
         let call = run::Request {
@@ -4192,7 +4292,9 @@ mod tests {
             |_| Err("provider lookup must not happen for an invalid base".into()),
             None,
         );
-        assert!(matches!(result, Err(error) if error.contains("invalid Git base \"absent-base\"")));
+        assert!(
+            matches!(result, Err(PrepareError::Run(run::RunError::InvalidBase(base))) if base == "absent-base")
+        );
         // A writable tree the plan cannot cover names that error, not a disclosure denial.
         std::fs::write(
             state.join("config.toml"),
@@ -4212,8 +4314,10 @@ mod tests {
         )
         .err()
         .ok_or("unconfinable worktree accepted")?;
-        assert!(!error.contains("DisclosureDenied"), "{error}");
-        assert!(error.contains("plan roots are invalid"), "{error}");
+        assert!(
+            matches!(error, PrepareError::Candidates { ref plans, .. } if plans.iter().any(|plan| matches!(plan, provenant_confinement::PlanError::InvalidRoots))),
+            "{error}"
+        );
         Ok(())
     }
 

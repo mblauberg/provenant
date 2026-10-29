@@ -89,7 +89,7 @@ impl<'a> Service<'a> {
             Self::scan(&task.prompt)?;
             if let Some(title) = &task.title {
                 provenant_core::validate_task_title(title)
-                    .map_err(|message| input_error(ErrorKind::Invalid, message))?;
+                    .map_err(|message| RunError::InvalidTaskTitle(message.into()))?;
             }
             // A lane's child launches outside the lane's sandbox, so it may not
             // name access its parent never had.
@@ -600,6 +600,7 @@ impl From<&RunError> for ErrorKind {
     fn from(error: &RunError) -> Self {
         match error {
             RunError::Input { kind, .. } => *kind,
+            RunError::InvalidTaskTitle(_) | RunError::AttemptReservationRetained => Self::Invalid,
             RunError::WorktreeMissing(_) => Self::WorktreeMissing,
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,
             RunError::Writer(_) => Self::WriterScope,

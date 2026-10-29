@@ -180,10 +180,7 @@ impl HostDeliveryContext {
             .lines()
             .find_map(|line| line.strip_prefix("branch refs/heads/"));
         if protected_default || primary_branch == Some(target) {
-            return Err(prepare_error(
-                "integration target",
-                "default and primary checkout branches require PR delivery",
-            ));
+            return Err(RunError::ProtectedDeliveryBranch);
         }
         Ok(())
     }
@@ -736,14 +733,13 @@ impl HostDeliveryContext {
         let on_disk: Vec<&str> = existing.iter().map(String::as_str).collect();
         if let Some((name, other)) = provenant_core::find_normalisation_alias(&advertised, &on_disk)
         {
-            return Err(prepare_error(
-                "origin refresh",
+            return Err(RunError::OriginNormalisationCollision(prepare_reason(
                 format!(
                     "branch names {} and {} are equivalent under Unicode NFC normalisation; refusing to refresh {remote} until one spelling is gone",
                     spelled(name),
                     spelled(other),
                 ),
-            ));
+            )));
         }
         let mut refspecs = Vec::new();
         for name in &heads {
@@ -754,10 +750,7 @@ impl HostDeliveryContext {
                     .iter()
                     .any(|held| *name == held || provenant_core::refs_collide(name, held));
             if collides && default.as_deref() == Some(*name) {
-                return Err(prepare_error(
-                    "origin refresh",
-                    "default branch collides with another branch name",
-                ));
+                return Err(RunError::OriginDefaultCollision);
             }
             if collides || GitRefName::branch(name).is_err() {
                 use std::io::Write;
@@ -1224,7 +1217,10 @@ impl HostDeliveryContext {
         use provenant_confinement::transport;
         let refuse = |error: transport::TransportError| {
             if stage == Stage::Prepare {
-                prepare_error("transport", error)
+                RunError::DeliveryTransport {
+                    kind: (&error).into(),
+                    reason: prepare_reason(error),
+                }
             } else {
                 RunError::Delivery(stage)
             }
@@ -1786,6 +1782,13 @@ fn spelled(name: &str) -> String {
 }
 
 pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
+    RunError::DeliveryPrepare {
+        step,
+        reason: prepare_reason(detail),
+    }
+}
+
+fn prepare_reason(detail: impl std::fmt::Display) -> String {
     let detail = detail.to_string();
     let redacted = provenant_confinement::redact::delivery_diagnostics(&detail);
     let mut reason = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1793,7 +1796,7 @@ pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) 
         reason.truncate(reason.floor_char_boundary(1024));
         reason.push_str("...");
     }
-    RunError::DeliveryPrepare { step, reason }
+    reason
 }
 
 fn credential_helper(path: &Path, writer: &WriterRequest) -> Result<()> {
