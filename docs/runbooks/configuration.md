@@ -442,8 +442,10 @@ Each Claude account directory must be exactly `~/.claude-<label>`, already exist
 and be signed in separately. Labels and directories must be distinct, with no
 nested account directories. The current `CLAUDE_CONFIG_DIR` must match a
 registration. When unset, `~/.claude` is the sign-in source only; it cannot be
-registered or used as a switch target. Credentials and settings are never copied
-between directories.
+registered or used as a switch target. Credentials and user settings are never
+copied between directories. Provenant's own skills, MCP entry and hooks are kept
+identical in every registered directory by `install`, `accounts register` and
+`accounts sync` (see the [install runbook](install.md#account-sync)).
 
 ```sh
 provenant config set chair.switch_accounts '["work-spare","personal-spare"]'

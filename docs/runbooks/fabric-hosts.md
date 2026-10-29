@@ -21,7 +21,10 @@ provenant workflow session handoff --help
 
 `hosts` reads local and configured peer health. `hosts doctor`
 probes only Claude identities under `~/.claude` and `~/.claude-*`; it is not a
-general provider sign-in check. Remote doctor uses
+general provider sign-in check. It also lists, for every registered account,
+whether its managed skills, MCP entry and hooks match the installed release
+(`provenant accounts sync` repairs drift; see the
+[install runbook](install.md#account-sync)). Remote doctor uses
 `~/.local/bin/provenant` on the peer. Peer calls run `provenant fabric peer`
 through the peer's non-interactive `PATH`. The hidden `fabric peer` command is
 the fixed SSH protocol entrypoint; the hidden `fabric peer-agent` command is the

@@ -313,6 +313,32 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant accounts sync`
+
+| Argument | Contract |
+|---|---|
+| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "dry_run"
+      ],
+      "multiple": true,
+      "name": "Sync",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant accounts set`
 
 | Argument | Contract |

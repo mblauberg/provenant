@@ -228,6 +228,77 @@ fn run_edge_workspace(
         }
     }
 }
+/// Adds each account's sync state to `accounts list`: one line per account
+/// and the full findings in `data.sync`.
+fn report_account_sync(
+    globals: &provenant_cli::Globals,
+    accounts: &provenant_providers::accounts::Settings,
+    reply: &mut provenant_cli::run::Reply,
+) {
+    match install::account_status(globals) {
+        Ok(statuses) => {
+            reply.human = accounts
+                .entries
+                .values()
+                .map(|entry| {
+                    let state = statuses
+                        .iter()
+                        .find(|status| {
+                            status.label == entry.label
+                                && status.harness.spec().name == entry.adapter
+                        })
+                        .map_or(provenant_config::AccountState::NotInstalled, |s| s.state);
+                    let state = serde_json::to_value(state)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    format!("{} {} {} {state}\n", entry.adapter, entry.label, entry.key)
+                })
+                .collect();
+            reply.result.data["sync"] = serde_json::json!(statuses);
+        }
+        Err(message) => {
+            reply.result.data["sync"] = serde_json::json!({"error": message});
+        }
+    }
+}
+/// Registration is saved before this runs. Install the managed settings,
+/// hooks and skills into the new account directory, so the account matches the
+/// others without a further command. A failure leaves the registration in place.
+fn sync_registered_account(
+    globals: &provenant_cli::Globals,
+    reply: &mut provenant_cli::run::Reply,
+) {
+    match install::sync_after_registration(globals) {
+        Ok(Some(outcome)) => {
+            reply.human.push_str(&format!(
+                "synced managed content: {} changes\n",
+                outcome.actions.len()
+            ));
+            reply.result.data["sync"] = serde_json::json!({
+                "changes": outcome.actions.len(),
+                "findings": outcome.findings,
+            });
+        }
+        Ok(None) => {
+            reply
+                .human
+                .push_str("not synced: no install receipt; run `provenant install`\n");
+            reply.result.data["sync"] = serde_json::json!({"skipped": "no install receipt"});
+        }
+        Err(message) => {
+            reply.result.status = Outcome::Error;
+            reply.result.error = Some(CommandError {
+                code: "ACCOUNT_SYNC".into(),
+                message: format!(
+                    "account registered, but syncing managed content failed: {message}"
+                ),
+                cause: None,
+                repair: Some("Resolve the failure, then run `provenant accounts sync`".into()),
+            });
+        }
+    }
+}
 /// Apply an optional knob edit, then print the effective config read back.
 fn config_command(
     command: &str,
@@ -381,19 +452,38 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Hosts {
             command: Some(command),
         } => hosts::run(command, globals),
+        Command::Accounts(provenant_cli::accounts::Accounts::Sync { dry_run }) => {
+            install::run_sync(dry_run, globals)
+        }
         Command::Accounts(command) => {
             run_edge(
                 &inv.leaf,
                 globals,
                 |edge| match provenant_cli::accounts::execute(&command, edge.roots, edge.home) {
-                    Ok(data) => provenant_cli::run::Reply {
-                        human: data
-                            .entries
-                            .values()
-                            .map(|e| format!("{} {} {}\n", e.adapter, e.label, e.key))
-                            .collect(),
-                        result: CommandResult::new(&inv.leaf, Outcome::Ok, serde_json::json!(data)),
-                    },
+                    Ok(data) => {
+                        let mut reply = provenant_cli::run::Reply {
+                            human: data
+                                .entries
+                                .values()
+                                .map(|e| format!("{} {} {}\n", e.adapter, e.label, e.key))
+                                .collect(),
+                            result: CommandResult::new(
+                                &inv.leaf,
+                                Outcome::Ok,
+                                serde_json::json!(data),
+                            ),
+                        };
+                        match command {
+                            provenant_cli::accounts::Accounts::Register { .. } => {
+                                sync_registered_account(globals, &mut reply);
+                            }
+                            provenant_cli::accounts::Accounts::List => {
+                                report_account_sync(globals, &data, &mut reply);
+                            }
+                            _ => {}
+                        }
+                        reply
+                    }
                     Err(message) => {
                         let mut result = CommandResult::new(
                             &inv.leaf,

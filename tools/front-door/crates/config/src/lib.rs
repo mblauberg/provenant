@@ -5,6 +5,7 @@
 //! library errors retain their typed cause; CLI classifies inspected defects.
 #![forbid(unsafe_code)]
 
+mod account_sync;
 mod domains;
 mod gc;
 mod github_policy;
@@ -201,11 +202,11 @@ pub struct ConfigInspection {
 }
 
 pub use managed::{
-    Action, Disposition, EntryIdentity, HarnessTarget, InstallContext, InstallError,
-    InstallFinding, InstallInspection, InstallOutcome, InstallPlan, InstallReporter, ManualInclude,
-    ReleaseSmoke, SelectorChange, Snapshots, Targets, gc_agent_plist, inspect_install, install,
-    installed_binary, peer_agent_plist, plan_and_install, plan_install, private_directory,
-    uninstall,
+    AccountHome, AccountState, AccountStatus, Action, Disposition, EntryIdentity, HarnessTarget,
+    InstallContext, InstallError, InstallFinding, InstallInspection, InstallOutcome, InstallPlan,
+    InstallReporter, ManualInclude, ReleaseSmoke, SelectorChange, Snapshots, Targets,
+    gc_agent_plist, inspect_accounts, inspect_install, install, installed_binary, peer_agent_plist,
+    plan_and_install, plan_install, private_directory, release_root, uninstall,
 };
 pub use provenant_records::Harness;
 pub use release::{Release, package_release};

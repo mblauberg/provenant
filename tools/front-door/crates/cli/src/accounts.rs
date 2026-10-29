@@ -54,6 +54,17 @@ pub enum Accounts {
         #[arg(long)]
         billing_anchor: Option<String>,
     },
+    /// Repair managed settings, hooks and skills in every registered account
+    ///
+    /// Reapplies the installed release to each registered account directory and
+    /// to every recorded install target, so all of them hold the same managed
+    /// content. User-owned settings, edited hooks and credentials are never
+    /// touched. `provenant check install` reports the drift this repairs.
+    Sync {
+        /// Plan the repair without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Set how an account appears in the menu bar
     ///
     /// ACCOUNT is an entry id such as `claude-work`, or a label that is unique
@@ -96,6 +107,26 @@ pub fn resolve(settings: &Settings, account: &str) -> Result<String, String> {
         _ => Err(format!("unknown account `{account}`")),
     }
 }
+/// Account configuration directories, in entry order. Only adapters whose
+/// accounts are separate configuration directories (`registered_account`:
+/// Claude and Codex) qualify. For the others the registered directory is an
+/// identity or ledger location, not where the client reads skills and settings.
+pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
+    settings
+        .entries
+        .values()
+        .filter_map(|entry| {
+            let spec = provenant_records::AdapterSpec::get(&entry.adapter)?;
+            spec.registered_account
+                .then(|| provenant_config::AccountHome {
+                    harness: spec.id,
+                    label: entry.label.clone(),
+                    home: entry.directory.clone(),
+                })
+        })
+        .collect()
+}
+
 pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Settings, String> {
     let mut settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
         .map_err(|e| e.to_string())?
@@ -462,4 +493,58 @@ fn ensure_state_directory(path: &Path) -> Result<Directory, String> {
         };
     }
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registration(
+        adapter: &str,
+        label: &str,
+        directory: &str,
+    ) -> provenant_providers::accounts::Registration {
+        provenant_providers::accounts::Registration {
+            adapter: adapter.into(),
+            label: label.into(),
+            key: format!("{adapter}-{label}"),
+            org_fingerprint: None,
+            directory: directory.into(),
+            plan: None,
+            priority: None,
+            billing_anchor: None,
+            limits: None,
+            display_name: None,
+            hidden: false,
+            order: None,
+            headline: None,
+        }
+    }
+
+    #[test]
+    fn only_accounts_that_are_configuration_directories_become_install_targets() {
+        let mut settings = Settings::default();
+        for (adapter, label, directory) in [
+            ("claude", "work", "/home/u/.claude-work"),
+            ("codex", "alt", "/home/u/.codex-alt"),
+            ("cursor", "me", "/home/u/Library/Cursor"),
+            ("opencode", "local", "/home/u/ledger"),
+        ] {
+            settings.entries.insert(
+                format!("{adapter}-{label}"),
+                registration(adapter, label, directory),
+            );
+        }
+        let homes: Vec<_> = homes(&settings)
+            .into_iter()
+            .map(|account| (account.harness.spec().name, account.home))
+            .collect();
+        assert_eq!(
+            homes,
+            [
+                ("claude", PathBuf::from("/home/u/.claude-work")),
+                ("codex", PathBuf::from("/home/u/.codex-alt")),
+            ]
+        );
+    }
 }

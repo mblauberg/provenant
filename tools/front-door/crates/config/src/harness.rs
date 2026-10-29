@@ -416,14 +416,12 @@ pub(crate) fn capture(
             selector: sel.into(),
             expected: OwnedValue::Selector { value: want },
         });
+        // Hooks are one choice for every target of a harness. A target whose
+        // account directory has none yet follows the targets that do.
         let inherited_hooks = !targets.remove_hooks
             && previous.is_some_and(|receipt| {
                 receipt.entries.iter().any(|entry| {
-                    entry.harness == Some(target.harness)
-                        && entry.selector.starts_with("hook:")
-                        && target.hook_file.as_ref().is_some_and(|hook| {
-                            entry.path.to_path_buf().is_ok_and(|path| &path == hook)
-                        })
+                    entry.harness == Some(target.harness) && entry.selector.starts_with("hook:")
                 })
             });
         let hooks = targets.hooks || inherited_hooks;
@@ -483,7 +481,11 @@ pub(crate) fn capture(
                 return Err(InstallError::ConfigFile(hook.clone()));
             };
             let (mut updated, mut changes, owned) = if hooks && target.harness == Harness::Claude {
-                let registration = crate::hooks::register(&base, targets, &inherited)?;
+                // A target with no hooks of its own yet takes the full set its
+                // siblings own; an established target keeps what it relinquished.
+                let follows_siblings = inherited_hooks && inherited.is_empty();
+                let registration =
+                    crate::hooks::register(&base, targets, &inherited, follows_siblings)?;
                 if registration.relinquished_modified {
                     add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
                 }

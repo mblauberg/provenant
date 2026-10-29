@@ -48,6 +48,8 @@ without writing; `--json` keeps one result envelope. Explicit `--harness`
 selects particular clients. Without it, an existing receipt determines the
 exact targets and binary directory, ignoring newly detected clients and
 environment overrides. Hook ownership is retained when `--hooks` is omitted.
+Every registered account directory is also a target, whatever the selection
+(see [account sync](#account-sync)).
 
 ```sh
 provenant upgrade
@@ -190,15 +192,20 @@ CLAUDE_CONFIG_DIR=~/.claude-$LABEL claude
 
 Repeat the account registration for each account, with a unique label and
 `--adapter codex` for Codex accounts. Dispatch needs registered accounts; run
-`quota tick` afterwards to initialise quota state.
+`quota tick` afterwards to initialise quota state. Registering an account also
+installs the managed skills, MCP entry and hooks into its directory when an
+install exists (see [account sync](#account-sync)).
 
 Review every planned change before applying it; a failed preview prevents
 writes. `--dry-run` creates no state root, lock or receipt. A first install
 leaves hooks disabled unless requested. Re-install without `--hooks` keeps
 ownership of previously installed hooks and refreshes unchanged entries for the
 new installation. Edited hooks stay in place, leave the receipt and produce
-findings. Missing hooks also leave the receipt. `--hooks off` removes unchanged
-owned hooks and relinquishes modified ones, reporting them. Explicit
+findings. Missing hooks also leave the receipt. Hooks are one choice for every
+target of a harness: a target that owns no hooks yet, such as a newly registered
+account, takes the full set while another target of the harness owns them.
+`--hooks off` removes unchanged owned hooks from every selected target and
+relinquishes modified ones, reporting them. Explicit
 `--hooks on` refuses an edited Claude hook; use `--hooks off` to relinquish its
 ownership before reinstalling.
 `--hooks on` registers hooks for each selected harness that has a
@@ -210,15 +217,57 @@ harness must have a specification. Unmanaged paths are preserved, and
 conflicts are refused unless
 `--adopt-existing` is given for files that match exactly.
 
-To install into a further Claude config directory, rerun
-`install --harness claude` with `CLAUDE_CONFIG_DIR` set; its MCP entry then goes
-to that directory's `.claude.json`. Each directory is a separate target in the
-one receipt, so runs accumulate and touch only the selected directory. The same
-applies to Codex with `CODEX_HOME`.
+To install into a Claude config directory that is not a registered account,
+rerun `install --harness claude` with `CLAUDE_CONFIG_DIR` set; its MCP entry
+then goes to that directory's `.claude.json`. Each directory is a separate
+target in the one receipt, so runs accumulate. The same applies to Codex with
+`CODEX_HOME`. Registered accounts need no such run.
 
 `check install` compares the installed binary, assets, receipt and owned
-selectors of every recorded target, without repair. Reapply `install` after
-resolving a partial-write error.
+selectors of every recorded target, without repair, and reports account drift
+(see [account sync](#account-sync)). Reapply `install` after resolving a
+partial-write error.
+
+## Account sync
+
+Every registered account directory holds the same managed content: the skill links, the Fabric MCP entry and, when any target of the
+harness owns hooks, the hooks. `provenant install` (including each upgrade),
+`provenant accounts register` and `provenant accounts sync` all apply it, so a
+new or upgraded install leaves the accounts identical. An account directory is
+`~/.claude-<label>` for Claude and the `--directory` given at registration for
+Codex, the adapters whose accounts are separate configuration directories.
+Cursor, Agy and OpenCode accounts are local logins of one client directory, so
+their registrations add no target. `~/.claude` is a target when installed, but
+never a registered account.
+
+Only Provenant's own entries are written. Hooks, MCP entries and settings the
+user owns, other keys in `settings.json` and `.claude.json`, and credentials are
+never read, copied or changed. An edited managed hook is left in place and
+reported as `relinquished_modified_entry`; resolve it with `--hooks off` and
+then `--hooks on`.
+
+`provenant accounts sync [--dry-run]` is the repair command. It reapplies the
+installed release to every registered account directory and recorded target,
+and needs an install receipt. A conflict in any target (an unmanaged file where
+a managed link belongs, or a foreign `fabric` MCP entry) refuses the whole
+command before any write; fix or adopt it (`install --adopt-existing`), then
+rerun. Registration is never undone by a failed sync: `accounts register`
+reports `ACCOUNT_SYNC` and the same repair.
+
+Drift appears in three places, each per account:
+
+- `provenant check install` adds `unsynced_account` (registered, never
+  installed), `missing_account_directory`, `unusable_account_directory` and
+  `account_missing_entry` (the account lacks a skill, MCP entry or hook that a
+  sibling account of the harness owns) to its `owned_entry_drift` findings.
+  Each message names the account and the repair.
+- `provenant accounts list` adds a `state` per account: `synced`, `drift`,
+  `unsynced`, `missing_directory` or `not_installed`, with the findings in
+  `data.sync`.
+- `provenant hosts doctor` reports the same `managed` rows beside the sign-in
+  rows, locally and for a peer.
+
+An account whose directory is gone is skipped and reported, never recreated.
 
 On macOS, an install into this account's default state root also manages
 `~/Library/LaunchAgents/dev.provenant.peer.plist`. The dry-run and install

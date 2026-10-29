@@ -230,8 +230,15 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                     Release::read(&path, env!("PROVENANT_TARGET_TRIPLE"))
                 })
                 .transpose()?;
+            let mut targets = Targets::new(roots.clone(), &home, &[]);
+            // A configuration defect is `check config`'s finding. It must not
+            // stop this check, which then has no registered accounts to compare.
+            targets.accounts =
+                provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)
+                    .map(|config| provenant_cli::accounts::homes(&config.domains.accounts))
+                    .unwrap_or_default();
             let inspection = provenant_config::inspect_install(
-                &Targets::new(roots.clone(), &home, &[]),
+                &targets,
                 release.as_ref(),
                 env!("PROVENANT_TARGET_TRIPLE"),
                 &smoke,
@@ -241,6 +248,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 inspection,
                 &home,
                 roots.state.as_path(),
+                &targets.accounts,
                 (
                     "install",
                     &source.as_ref().map(|p| p.as_os_str().as_encoded_bytes()),
