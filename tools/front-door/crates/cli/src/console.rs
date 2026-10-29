@@ -49,6 +49,8 @@ pub enum Console {
     },
     /// Summarise local attention and running work
     Overview,
+    /// Open the native console app (macOS)
+    Open,
     /// List registered local projects
     Projects,
     /// List explicitly registered local chair sessions
@@ -140,6 +142,7 @@ fn read_with_budget(
     let (session, limit, cursor) = match command {
         Console::Board { .. } => unreachable!("board handled above"),
         Console::Tree { .. } => unreachable!("tree handled above"),
+        Console::Open => unreachable!("open is handled at the process edge"),
         Console::Overview => return overview::read(roots, &projects),
         Console::Projects => {
             return Ok(json!({"projects":projects, "coverage":{"scope":"local"}}));

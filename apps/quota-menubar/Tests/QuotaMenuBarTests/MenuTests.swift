@@ -1,5 +1,6 @@
 import XCTest
 @testable import QuotaMenuBar
+import ProvenantKit
 
 final class MenuTests: XCTestCase {
     private func fixture() throws -> QuotaReport {
