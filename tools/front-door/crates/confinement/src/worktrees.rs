@@ -61,6 +61,10 @@ pub enum WorktreeError {
     NotFound,
     #[error("base {base} did not resolve to a commit")]
     BaseNotFound { base: String },
+    #[error(
+        "base {base} names a remote-tracking ref that its remote did not advertise; use the remote's exact spelling, such as origin/main"
+    )]
+    BaseUnverified { base: String },
     #[error("worktree registration is stale; git worktree prune clears it")]
     StaleRegistration,
     #[error("worktree is dirty")]
@@ -1086,10 +1090,26 @@ struct LockedWorktree {
     writer: Option<LockGuard>,
 }
 
+/// Verify a registered worktree and probe its own effective Git configuration,
+/// so every host Git operation on it neutralises what lanes can influence
+/// there (an `onbranch:` include of a lane-writable file, for one).
+fn verify_probed_worktree(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+    cancel: &CancelToken,
+) -> Result<VerifiedWorktree, WorktreeError> {
+    let mut tree = verify_worktree(context.repo, path)?;
+    context
+        .utility
+        .probe_worktree(context.executor, &mut tree, context.utility_budget, cancel)?;
+    Ok(tree)
+}
+
 fn read_worktree_identity(
     context: &WorktreeContext<'_>,
     entry: &GitWorktree,
     require_active: bool,
+    cancel: &CancelToken,
 ) -> Result<(VerifiedWorktree, Directory, WorktreeIdentity), WorktreeError> {
     if entry.locked || entry.prunable {
         return Err(WorktreeError::GitEntryHeld {
@@ -1100,14 +1120,17 @@ fn read_worktree_identity(
         .branch
         .as_ref()
         .ok_or(WorktreeError::RegistrationMismatch { field: "branch" })?;
-    let verified = verify_worktree(context.repo, &entry.path).map_err(|error| match error {
-        RepoError::InvalidGitMarker
-        | RepoError::InvalidRegistration
-        | RepoError::InvalidGitDirectory => WorktreeError::RegistrationMismatch {
-            field: "worktree git directory",
-        },
-        other => other.into(),
-    })?;
+    let verified =
+        verify_probed_worktree(context, &entry.path, cancel).map_err(|error| match error {
+            WorktreeError::Repository(
+                RepoError::InvalidGitMarker
+                | RepoError::InvalidRegistration
+                | RepoError::InvalidGitDirectory,
+            ) => WorktreeError::RegistrationMismatch {
+                field: "worktree git directory",
+            },
+            other => other,
+        })?;
     let canonical = canonicalize(verified.path())?;
     let name = state_dir_name(&canonical);
     let state = context
@@ -1315,7 +1338,7 @@ fn lock_worktree_for_mutation(
     entry: &GitWorktree,
     cancel: &CancelToken,
 ) -> Result<LockedWorktree, WorktreeError> {
-    let (verified, state, identity) = read_worktree_identity(context, entry, true)?;
+    let (verified, state, identity) = read_worktree_identity(context, entry, true, cancel)?;
     ensure_unreserved(&state)?;
     let writer = match state.lock(
         OsStr::new(WRITER_LOCK),
@@ -1411,7 +1434,7 @@ pub fn list(
                     .unwrap_or(WorktreeCondition::Unknown),
                 combine_worker_state(WorkerState::Unknown, observed),
             ),
-            (Some(branch), false) => match read_worktree_identity(context, entry, true) {
+            (Some(branch), false) => match read_worktree_identity(context, entry, true, cancel) {
                 Ok((worktree, _, _)) => (
                     worktree_dirty_at(context, worktree.repo(), cancel)
                         .unwrap_or(WorktreeCondition::Unknown),
@@ -1421,7 +1444,7 @@ pub fn list(
                     ),
                 ),
                 Err(_) => (
-                    verify_worktree(context.repo, &path)
+                    verify_probed_worktree(context, &path, cancel)
                         .ok()
                         .and_then(|tree| worktree_dirty_at(context, tree.repo(), cancel).ok())
                         .unwrap_or(WorktreeCondition::Unknown),
@@ -1703,7 +1726,7 @@ pub fn create(
     {
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
-    let verified = verify_worktree(context.repo, &entry.path)?;
+    let verified = verify_probed_worktree(context, &entry.path, cancel)?;
     if worktree_dirty_at(context, verified.repo(), cancel)? != WorktreeCondition::Clean {
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
@@ -1870,15 +1893,23 @@ fn pin_revision(
     } else {
         ""
     };
-    let remote_head = (symbolic_name.starts_with("refs/remotes/")
-        && !root.contains('/')
-        && GitRefName::branch(root).is_ok())
-    .then(|| format!("{root}/HEAD"));
+    let tracking = symbolic_name.starts_with("refs/remotes/");
+    let remote_head = (tracking && !root.contains('/') && GitRefName::branch(root).is_ok())
+        .then(|| format!("{root}/HEAD"));
+    // `remotes/origin/HEAD` and `refs/remotes/origin/HEAD` name the same
+    // advertised default as `origin/HEAD`; symbolic resolution has already
+    // followed them to a branch, so recover the remote from the spelling.
+    let explicit_head = root
+        .strip_prefix("refs/remotes/")
+        .or_else(|| root.strip_prefix("remotes/"))
+        .filter(|rest| rest.ends_with("/HEAD"));
     let candidate = if let Some(head) = &remote_head {
         head.as_str()
+    } else if let Some(head) = explicit_head {
+        head
     } else if root.ends_with("/HEAD") {
         root
-    } else if symbolic_name.starts_with("refs/remotes/") {
+    } else if tracking {
         symbolic_name
     } else {
         root
@@ -1896,6 +1927,15 @@ fn pin_revision(
         crate::utility::RemoteBase::Found(oid) => format!("{oid}{suffix}"),
         crate::utility::RemoteBase::Missing => {
             return Err(WorktreeError::BaseNotFound {
+                base: revision.to_owned(),
+            });
+        }
+        // Git resolved the root to a remote-tracking ref, but the remote could
+        // not vouch for it (for example `Origin/main` on a case-insensitive
+        // filesystem, where the lookup finds `origin/main`). Falling back to the
+        // local tracking OID would trust a ref the remote never advertised.
+        crate::utility::RemoteBase::NotRemote if tracking => {
+            return Err(WorktreeError::BaseUnverified {
                 base: revision.to_owned(),
             });
         }
@@ -2948,7 +2988,7 @@ mod lifecycle_tests {
         write_identity(&state, &legacy, PublishMode::Replace)?;
         {
             let _lock = repository_lock(&context, LockMode::Exclusive, &cancel())?;
-            read_worktree_identity(&context, &entry, true)?;
+            read_worktree_identity(&context, &entry, true, &CancelToken::new())?;
         }
         let refreshed = read_identity(&state)?;
         assert_eq!(refreshed.root_device, original.root_device);
@@ -2986,7 +3026,7 @@ mod lifecycle_tests {
         let mut changed = refreshed.clone();
         changed.root_inode ^= 1;
         write_identity(&state, &changed, PublishMode::Replace)?;
-        let error = read_worktree_identity(&context, &entry, true)
+        let error = read_worktree_identity(&context, &entry, true, &CancelToken::new())
             .err()
             .ok_or("changed inode accepted")?;
         assert!(matches!(
@@ -3008,7 +3048,7 @@ mod lifecycle_tests {
             .ok_or("missing git identity")?
             .private_inode ^= 1;
         write_identity(&state, &changed, PublishMode::Replace)?;
-        let error = read_worktree_identity(&context, &entry, true)
+        let error = read_worktree_identity(&context, &entry, true, &CancelToken::new())
             .err()
             .ok_or("changed gitdir accepted")?;
         assert!(matches!(
@@ -3116,7 +3156,7 @@ mod lifecycle_tests {
             }
             write_identity(&state, &record, PublishMode::Replace)?;
             let _lock = repository_lock(&context, LockMode::Exclusive, &cancel())?;
-            let error = read_worktree_identity(&context, &entry, true)
+            let error = read_worktree_identity(&context, &entry, true, &CancelToken::new())
                 .err()
                 .ok_or_else(|| format!("{scenario} unexpectedly refreshed"))?;
             match scenario {
@@ -3185,7 +3225,7 @@ mod lifecycle_tests {
         write_identity(&state, &record, PublishMode::Replace)?;
         let _lock = repository_lock(&context, LockMode::Exclusive, &cancel())?;
         assert!(matches!(
-            read_worktree_identity(&context, &entry, true),
+            read_worktree_identity(&context, &entry, true, &CancelToken::new()),
             Err(WorktreeError::RegistrationMismatch { .. })
         ));
         let after = read_identity(&state)?;
@@ -3215,7 +3255,7 @@ mod lifecycle_tests {
                 .ok_or_else(|| "worktree missing".into())
         };
         fixture.run(&["worktree", "lock", path_text])?;
-        let locked = read_worktree_identity(&context, &entry()?, true).err();
+        let locked = read_worktree_identity(&context, &entry()?, true, &CancelToken::new()).err();
         assert!(matches!(
             locked,
             Some(WorktreeError::GitEntryHeld { locked: true })
@@ -3234,7 +3274,8 @@ mod lifecycle_tests {
                 PublishMode::Replace,
             )?
             .require_durable()?;
-        let unreadable = read_worktree_identity(&context, &entry()?, true).err();
+        let unreadable =
+            read_worktree_identity(&context, &entry()?, true, &CancelToken::new()).err();
         assert!(matches!(unreadable, Some(WorktreeError::UnreadableRecord)));
         assert!(unreadable.is_some_and(|error| error.with_repair().contains("worktree adopt")));
         Ok(())
@@ -4973,6 +5014,8 @@ mod lifecycle_tests {
     {
         let source = Fixture::new()?;
         source.run(&["branch", "-M", "main"])?;
+        let parent = source.head()?;
+        source.run(&["commit", "--allow-empty", "-m", "advertised tip"])?;
         let expected = source.head()?;
         let mut fixture = Fixture::new()?;
         let clone = fixture._temp.path().join("clone");
@@ -5033,6 +5076,38 @@ mod lifecycle_tests {
                 "{expression}"
             );
         }
+        // Every spelling of a tracking root verifies against the advertisement
+        // and applies its suffix to that, never to the stale local tip (whose
+        // first parent is `expected`, not `parent`).
+        for root in [
+            "origin/main",
+            "remotes/origin/main",
+            "refs/remotes/origin/main",
+            "origin/HEAD",
+            "remotes/origin/HEAD",
+            "refs/remotes/origin/HEAD",
+            "origin",
+            "@{u}",
+            "@{push}",
+        ] {
+            for (suffix, oid) in [
+                ("", expected),
+                ("~1", parent),
+                ("^", parent),
+                ("^{commit}", expected),
+                ("~1^{commit}", parent),
+            ] {
+                assert_eq!(
+                    pin_revision(
+                        &test_context.context(),
+                        &format!("{root}{suffix}"),
+                        &cancel()
+                    )?,
+                    oid,
+                    "{root}{suffix}"
+                );
+            }
+        }
         let (_, integration) = pin_integration(&test_context.context(), "origin/main", &cancel())?;
         assert_eq!(integration, expected);
         let (_, default_integration) =
@@ -5052,6 +5127,47 @@ mod lifecycle_tests {
             String::from_utf8(tracking.stdout.bytes)?.trim(),
             wrong.to_string()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn tracking_base_the_remote_cannot_vouch_for_fails_closed() -> Result<(), Box<dyn Error>> {
+        let mut fixture = Fixture::new()?;
+        let head = fixture.head()?;
+        fixture.run(&[
+            "remote",
+            "add",
+            "origin",
+            fixture.root.to_str().ok_or("non-UTF8 root")?,
+        ])?;
+        // A tracking ref whose remote is not configured, and one whose remote
+        // is spelled in another case: Git resolves both locally.
+        fixture.run(&["update-ref", "refs/remotes/gone/main", &head.to_string()])?;
+        fixture.run(&["update-ref", "refs/remotes/origin/main", &head.to_string()])?;
+        fixture.repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &cancel(),
+        )?;
+        let test_context = TestContext::new(&fixture)?;
+        let mut unverifiable = vec!["gone/main", "gone/main~1", "remotes/gone/main^{commit}"];
+        // On a case-insensitive filesystem `Origin/main` finds origin/main.
+        let probe = fixture._temp.path().join("CaseProbe");
+        fs::write(&probe, b"")?;
+        let insensitive = fixture._temp.path().join("caseprobe").exists();
+        if insensitive {
+            unverifiable.extend(["Origin/main", "Origin/main~1", "remotes/Origin/main"]);
+        }
+        for base in unverifiable {
+            let error = pin_revision(&test_context.context(), base, &cancel())
+                .err()
+                .ok_or_else(|| format!("{base} must not fall back to the local tracking OID"))?;
+            assert!(
+                matches!(&error, WorktreeError::BaseUnverified { base: named } if named == base),
+                "{base}: {error}"
+            );
+        }
         Ok(())
     }
 

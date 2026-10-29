@@ -23,9 +23,11 @@ pub const CONFIG: [(&str, &str); 7] = [
     ("protocol.file.allow", "always"),
 ];
 
-/// Environment variables that select a repository, replace its configuration
-/// or answer a prompt. The host's transport variables (`GIT_SSH`,
-/// `GIT_ASKPASS` and the like) are kept: they are the user's.
+/// Environment variables that select a repository or answer a prompt. The
+/// host's own transport and configuration variables (`GIT_SSH`,
+/// `GIT_ASKPASS`, `GIT_CONFIG_COUNT` for an `http.extraHeader` token, and the
+/// like) are kept: they are the user's, and `check_listing` still refuses any
+/// program they name inside a lane area.
 fn removed_from_host(name: &str) -> bool {
     matches!(
         name,
@@ -38,10 +40,7 @@ fn removed_from_host(name: &str) -> bool {
             | "GIT_NAMESPACE"
             | "GIT_SHALLOW_FILE"
             | "GIT_TERMINAL_PROMPT"
-            | "GIT_CONFIG_PARAMETERS"
-            | "GIT_CONFIG_COUNT"
-    ) || name.starts_with("GIT_CONFIG_KEY_")
-        || name.starts_with("GIT_CONFIG_VALUE_")
+    )
 }
 
 /// The `-c key=value` arguments of [`CONFIG`], to place before the subcommand.
@@ -434,7 +433,7 @@ mod tests {
         let host = [
             ("GIT_DIR", "/lane/.git"),
             ("GIT_CONFIG_COUNT", "1"),
-            ("GIT_CONFIG_KEY_0", "core.sshCommand"),
+            ("GIT_INDEX_FILE", "/lane/index"),
             ("GIT_TERMINAL_PROMPT", "1"),
             ("GIT_SSH", "/usr/bin/ssh"),
             ("PATH", "/usr/bin"),
@@ -450,8 +449,8 @@ mod tests {
         assert_eq!(get("GIT_DIR"), ["/host/.git"]);
         assert_eq!(get("GIT_TERMINAL_PROMPT"), ["0"]);
         assert_eq!(get("GIT_SSH"), ["/usr/bin/ssh"]);
-        assert!(get("GIT_CONFIG_COUNT").is_empty());
-        assert!(get("GIT_CONFIG_KEY_0").is_empty());
+        assert_eq!(get("GIT_CONFIG_COUNT"), ["1"]);
+        assert!(get("GIT_INDEX_FILE").is_empty());
         assert_eq!(get("PATH"), ["/usr/bin"]);
     }
 

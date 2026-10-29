@@ -284,6 +284,12 @@ pub struct UtilityRuntime {
     lane_roots: LaneRoots,
 }
 
+/// Where a run's lane scratch and provider state live below the state
+/// directory: lanes write there, and the user's config never should.
+pub fn lane_state_roots(state: &Path) -> Vec<PathBuf> {
+    vec![state.join("runs"), state.join("children")]
+}
+
 /// Canonical project location and its verified Git origin, when present.
 pub struct DiscoveredProject {
     pub location: provenant_config::ProjectLocation,
@@ -1188,6 +1194,7 @@ fn git_args(
             validate_limit(limit)?;
             vec![
                 "log".into(),
+                "--no-show-signature".into(),
                 "--no-decorate".into(),
                 "--no-color".into(),
                 "--format=%H%x00%an%x00%at%x00%s%x00".into(),
@@ -1222,6 +1229,7 @@ fn git_args(
         GitRead::PushPatch { base, head } => {
             let mut args = vec![
                 "log".into(),
+                "--no-show-signature".into(),
                 "--format=".into(),
                 "-m".into(),
                 "-p".into(),
@@ -2267,6 +2275,138 @@ pub(crate) mod tests {
             &CancelToken::new(),
         )?;
         Ok(())
+    }
+
+    type Call = (Vec<OsString>, Vec<(OsString, OsString)>);
+
+    /// Records the argv and environment of every Git process it forwards.
+    struct RecordsGit<'a> {
+        executor: &'a SystemExecutor,
+        calls: std::sync::Mutex<Vec<Call>>,
+    }
+
+    impl Executor for RecordsGit<'_> {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            self.calls.lock().map_err(|_| ExecError::Busy)?.push((
+                options.argv.to_vec(),
+                options.env.unwrap_or_default().to_vec(),
+            ));
+            self.executor.execute(options)
+        }
+    }
+
+    #[test]
+    fn host_transport_is_hardened_and_refuses_lane_writable_programs() -> Result<(), Box<dyn Error>>
+    {
+        let mut fixture = Fixture::new()?;
+        let root = fixture.root.to_str().ok_or("non-UTF8 root")?.to_owned();
+        fixture.run(&["remote", "add", "origin", &root])?;
+        // A helper where lanes write, and one the user keeps elsewhere.
+        let script = |path: &Path| -> Result<String, Box<dyn Error>> {
+            executable(path, 0o755)?;
+            Ok(path.to_str().ok_or("non-UTF8 helper")?.to_owned())
+        };
+        let lane = script(&fixture.root.join(".worktrees/lane-1/helper"))?;
+        let user = script(&fixture._temp.path().join("bin/helper"))?;
+        let budget = fixture.budget()?;
+        let cancel = CancelToken::new();
+        let recorder = RecordsGit {
+            executor: &fixture.executor,
+            calls: Default::default(),
+        };
+        let advertise = |fixture: &Fixture| -> Result<ExecOutcome, UtilityError> {
+            let repo = fixture
+                .runtime
+                .open_read_repo(&recorder, &fixture.root, budget, &cancel)?;
+            advertised_remote_head(
+                &recorder,
+                &repo,
+                &fixture.runtime,
+                "origin",
+                budget,
+                &cancel,
+            )
+        };
+        let fetch = |fixture: &Fixture| -> Result<RemoteBase, UtilityError> {
+            let repo = fixture
+                .runtime
+                .open_repo(&recorder, &fixture.root, budget, &cancel)?;
+            fetch_missing_remote_branch(
+                &recorder,
+                &repo,
+                &fixture.runtime,
+                &fixture.home,
+                "origin/main",
+                budget,
+                &cancel,
+            )
+        };
+
+        // Baseline: the advertisement works, and every network-facing process
+        // carries the same hardening and none of the ambient overrides.
+        let outcome = advertise(&fixture)?;
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        let calls = recorder.calls.lock().map_err(|_| "calls poisoned")?;
+        let (argv, env) = calls
+            .iter()
+            .rev()
+            .find(|(argv, _)| argv.iter().any(|arg| arg == "ls-remote"))
+            .ok_or("no ls-remote")?;
+        for (key, value) in transport::CONFIG {
+            let expected = OsString::from(format!("{key}={value}"));
+            assert!(argv.contains(&expected), "{key}");
+        }
+        assert!(env.contains(&("GIT_TERMINAL_PROMPT".into(), "0".into())));
+        drop(calls);
+
+        // The same programs, named by the user's config, are refused where
+        // lanes can write and accepted anywhere else.
+        for (key, value) in [
+            ("core.sshCommand", format!("{lane} -o BatchMode=yes")),
+            ("credential.helper", format!("!{lane}")),
+            ("credential.https://example.invalid.helper", lane.clone()),
+            ("remote.origin.uploadpack", lane.clone()),
+        ] {
+            fixture.run(&["config", key, &value])?;
+            for result in [advertise(&fixture).map(|_| ()), fetch(&fixture).map(|_| ())] {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(UtilityError::Transport(TransportError::LaneProgram { key: named, .. }))
+                            if named.eq_ignore_ascii_case(key)
+                    ),
+                    "{key}: {result:?}"
+                );
+            }
+            fixture.run(&["config", "--unset", key])?;
+        }
+        for (key, value) in [
+            ("core.sshCommand", format!("{user} -o BatchMode=yes")),
+            ("credential.helper", format!("!{user}")),
+            ("remote.origin.uploadpack", "git-upload-pack".to_owned()),
+        ] {
+            fixture.run(&["config", key, &value])?;
+            assert_eq!(advertise(&fixture)?.termination, Termination::Exit(0));
+            fixture.run(&["config", "--unset", key])?;
+        }
+
+        // Configuration read from a lane-writable file is refused outright.
+        let included = fixture.root.join(".worktrees/lane-1/extra.cfg");
+        fs::write(&included, "[user]\n\tname = Lane\n")?;
+        fixture.run(&["config", "include.path", &script_path(&included)?])?;
+        assert!(matches!(
+            advertise(&fixture),
+            Err(UtilityError::Transport(TransportError::LaneConfig { .. }))
+        ));
+        fixture.run(&["config", "--unset", "include.path"])?;
+        fixture.root = fs::canonicalize(&fixture.root)?;
+        fixture.repo = open(&fixture)?;
+        assert_eq!(advertise(&fixture)?.termination, Termination::Exit(0));
+        Ok(())
+    }
+
+    fn script_path(path: &Path) -> Result<String, Box<dyn Error>> {
+        Ok(path.to_str().ok_or("non-UTF8 path")?.to_owned())
     }
 
     #[test]

@@ -103,7 +103,10 @@ impl Context {
         private_dir(roots.state.as_path(), &utility_home)?;
         let lane = in_lane();
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::new(&git, &utility_home)?;
+        let runtime = provenant_confinement::UtilityRuntime::new(&git, &utility_home)?
+            .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                roots.state.as_path(),
+            ));
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
