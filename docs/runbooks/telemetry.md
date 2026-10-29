@@ -47,6 +47,25 @@ counts, usage, price-table billing and cost by model, with `cost_basis` set to
 null when its usage or price is incomplete. Model prices are matched exactly;
 dated aliases are not inferred.
 
+## Native session ingest
+
+`provenant telemetry ingest [--provider claude] [--since T]` records native
+Claude usage from every registered account directory and from every other
+`~/.claude*` directory under home. Registered accounts use their label; any
+other directory, including the default `~/.claude`, is `unattributed`. Each
+assistant message becomes one row keyed by session and message ID, so running
+the command again adds nothing. `--since` takes seconds ago, a date or an
+RFC3339 timestamp and skips older files and messages. The chair's SessionStart
+hook runs the last day of ingest automatically, so an interactive session is
+captured without a manual command.
+
+The store is `ingest.jsonl` under the state root. It holds counts, model,
+effort, account, timestamp, session and message IDs and a `source` of `chair`,
+`subagent` or `lane`; it never holds prompt, reply, tool or path text. A row
+whose message streamed repeatedly keeps the largest count of each bucket.
+Reads never follow links, and a message without a timestamp is counted as
+skipped rather than guessed.
+
 ## Cache-read share
 
 `telemetry stats` prints each model's, account's and source's cache-read share:

@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod chair;
+pub mod ingest;
 mod native;
 mod prices;
 mod reducer;

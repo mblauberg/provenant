@@ -2,8 +2,9 @@
 
 Owner: `crates/telemetry` (reducer, prices, trace, usage log)
 Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/usage/tests.rs`,
-`crates/telemetry/src/native.rs`, `crates/telemetry/src/chair/tests.rs`, `tests/usage.rs`,
-`tests/telemetry_native.rs`, `tests/chair.rs`
+`crates/telemetry/src/native.rs`, `crates/telemetry/src/ingest/tests.rs`,
+`crates/telemetry/src/chair/tests.rs`, `tests/usage.rs`,
+`tests/telemetry_native.rs`, `tests/telemetry_ingest.rs`, `tests/chair.rs`
 
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
@@ -128,6 +129,42 @@ shows them per account and project beside lane tokens.
   `::chair_on_an_unregistered_config_directory_is_recorded_as_unattributed`
 - Owner: `crates/telemetry/src/chair.rs`, `src/chair.rs`, `crates/cli/src/quota.rs`
 
+## Native session ingest
+
+`provenant telemetry ingest [--provider P] [--since T]` reads each Claude
+session transcript under a config directory's `projects/<project>/<session>.jsonl`
+and its `subagents/agent-*.jsonl`, and stores one row per assistant message in
+`ingest.jsonl` under the state root. A row carries the account label, provider,
+model, effort when the transcript names one, the five disjoint token buckets,
+the message timestamp, session ID, message ID and a `source` of `chair`,
+`subagent` or `lane`. Prompt, reply, tool and path text is never stored, and a
+row is keyed by session and message ID, so a re-run adds nothing. A message
+that streams repeatedly is kept once at its largest counts, mixing the
+short-TTL and one-hour cache-write parts into separate buckets.
+`--since` skips files last written before it and messages stamped before it;
+`--provider` other than `claude` ingests nothing.
+
+Attribution uses directories only, never credentials. Each registered account's
+`directory` and its extra `directories` attribute to its label; a directory
+claimed twice is visited once. Every other `~/.claude*` directory with a
+`projects` child, including the default `~/.claude`, is stored under
+`unattributed` and never dropped. A session recorded by the chair's
+SessionStart hook is a `chair`, a file under a session's `subagents` directory
+is a `subagent`, and every other session is a `lane`. The chair's SessionStart
+hook also runs the last day of ingest, best effort, so the interactive session
+is captured without a manual command.
+Reads are bounded (1 GiB a transcript, 128 MiB a store, 8 MiB a line, 100,000
+sessions, 2,000 subagent files a session) and never follow links. A message
+without a timestamp is counted as skipped, not guessed. When the store reaches
+its cap, ingest stops adding rows and the report says the store is full.
+- Why: most Claude spend is the interactive chair and its native sub-agents,
+  which no supervised attempt record sees.
+- Test: `crates/telemetry/src/ingest/tests.rs::rerun_adds_nothing_and_accounts_stay_distinct`;
+  `::registered_directories_get_their_label_and_the_rest_are_unattributed`;
+  `tests/telemetry_ingest.rs::ingest_is_idempotent_and_attributes_by_directory`;
+  `::chair_session_start_ingests_the_session_as_chair`
+- Owner: `crates/telemetry/src/ingest.rs`, `src/usage.rs`, `src/hooks.rs`
+
 ## Trace export
 
 `telemetry trace` writes Chrome Trace Event JSON, with one process per host and
@@ -164,4 +201,4 @@ to `most_constrained` with a warning and leaves config unchanged.
 ## Not provided
 
 - A ledger, OpenTelemetry ingest or collector; prompt and tool logging stays off.
-- Delivery cost columns, a telemetry MCP tool or an `--account` selector.
+- Delivery cost columns, a telemetry MCP tool or an `--account` selector on `telemetry stats`.

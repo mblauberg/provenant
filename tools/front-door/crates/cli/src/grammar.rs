@@ -941,6 +941,17 @@ pub enum Telemetry {
     Stats(Stats),
     /// Write attempts as a Chrome Trace Event file for ui.perfetto.dev
     Trace(Trace),
+    /// Record native chair and sub-agent token usage per account
+    Ingest(Ingest),
+}
+#[derive(Debug, Args)]
+pub struct Ingest {
+    /// Ingest only this provider's sessions (only `claude` writes native transcripts)
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Ingest transcripts written, and messages stamped, from this date or timestamp, or this many seconds ago
+    #[arg(long, value_parser = since)]
+    pub since: Option<jiff::Timestamp>,
 }
 #[derive(Debug, Args)]
 pub struct Trace {

@@ -2598,6 +2598,31 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant telemetry ingest`
+
+| Argument | Contract |
+|---|---|
+| `--provider` | `{"name": "provider"}` |
+| `--since` | `{"name": "since"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "provider",
+        "since"
+      ],
+      "multiple": true,
+      "name": "Ingest",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant quota`
 
 | Argument | Contract |

@@ -1001,6 +1001,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 provenant_cli::run::trace(cmd, edge)
             })
         }
+        Command::Telemetry(provenant_cli::Telemetry::Ingest(cmd)) => usage::ingest(&cmd, globals),
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Console(cmd) => console::run(cmd, globals),
         Command::Quota { command } => {
