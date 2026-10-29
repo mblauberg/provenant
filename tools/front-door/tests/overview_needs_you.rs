@@ -298,7 +298,7 @@ fn overview_needs_you() -> Result {
     }
     fabric_db.execute("UPDATE human_requests SET record=?1", [&original])?;
 
-    let human = rig.command(&["console", "overview"])?;
+    let human = rig.command(&["console", "overview", "--full"])?;
     assert_eq!(code(&human), 0);
     let human = String::from_utf8(human.stdout.bytes)?;
     assert!(human.contains("Choose a repair"));

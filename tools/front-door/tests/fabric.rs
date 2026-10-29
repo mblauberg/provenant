@@ -675,7 +675,7 @@ fn hosts_lists_readiness_and_fabric_host_is_gone() -> Result {
     assert_eq!(hosts["command"], "hosts");
     let rows = hosts["data"].as_array().ok_or("hosts")?;
     assert!(rows.iter().any(|row| row["available"] == true));
-    let human = rig.command(&["hosts"])?;
+    let human = rig.command(&["hosts", "--full"])?;
     let text = String::from_utf8(human.stdout.bytes.clone())?;
     assert_eq!(text.lines().count(), rows.len());
     assert!(text.contains("available=true") && !text.contains('{'));

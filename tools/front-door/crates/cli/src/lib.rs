@@ -248,6 +248,12 @@ fn clap_error(mut error: clap::Error, argv: &[OsString]) -> CliError {
 }
 fn usage_suggestion(error: &clap::Error, argv: &[OsString]) -> Option<String> {
     use clap::error::ContextKind;
+    if !matches!(
+        error.kind(),
+        clap::error::ErrorKind::UnknownArgument | clap::error::ErrorKind::InvalidSubcommand
+    ) {
+        return None;
+    }
     let flag = error.get(ContextKind::InvalidArg);
     let rejected = flag
         .or_else(|| error.get(ContextKind::InvalidSubcommand))?
@@ -439,7 +445,11 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             .disable_version_flag(true)
             .version(env!("CARGO_PKG_VERSION"));
         if command.get_name() == "resolve" {
-            command = command.group(ArgGroup::new("route_choice").args(["name", "model", "route"]));
+            command = command.group(
+                ArgGroup::new("route_choice")
+                    .args(["name", "model", "route"])
+                    .required(true),
+            );
         }
         if matches!(path.as_str(), "provenant dispatch" | "provenant run") {
             command = command
@@ -484,6 +494,8 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             let visible = [
                 "full",
                 "json",
+                "host",
+                "account",
                 "prompt_file",
                 "prompt_stdin",
                 "preset",

@@ -249,9 +249,10 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     fs::write(landing.rig.project.join("checks-fail"), "")?;
     let unbound_land = command(&landing.rig, &["land", NUMBER, "--json"])?;
     assert_ne!(code(&unbound_land), 0);
+    assert_eq!(json(&unbound_land)?["error"]["code"], "CI_UNAVAILABLE");
     assert!(
         String::from_utf8_lossy(&unbound_land.stderr.bytes)
-            .contains("no open contribution binding")
+            .contains("provenant pr contributions 1668 --bind")
     );
     fs::write(landing.rig.project.join("view.json"), closed_view)?;
     fs::remove_file(landing.rig.project.join("checks-fail"))?;
@@ -355,7 +356,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         before["coverage"]["known_peer_hosts"],
         serde_json::json!(["unreachable"])
     );
-    let text = command(&landing.rig, &["pr", "contributions", NUMBER])?;
+    let text = command(&landing.rig, &["pr", "contributions", NUMBER, "--full"])?;
     assert_eq!(code(&text), 0);
     let text = String::from_utf8(text.stdout.bytes)?;
     assert!(text.contains("role=repair model=unknown account=unknown weight=unknown"));

@@ -962,7 +962,7 @@ fn session_checkpoints_round_trip_and_reject_unsafe_keys() -> Result {
     let shown = call(&rig, &["workflow", "session", "show", "s-1"], 0)?;
     assert_eq!(shown["data"]["markdown"], "# Goal\nship it\n");
     // Human output is terse: one line per record, never pretty JSON.
-    let human = rig.command(&["workflow", "session", "show", "s-1"])?;
+    let human = rig.command(&["workflow", "session", "show", "s-1", "--full"])?;
     assert_eq!(code(&human), 0);
     let text = String::from_utf8_lossy(&human.stdout.bytes);
     assert_eq!(text.lines().count(), 1, "{text}");
@@ -1022,9 +1022,18 @@ fn session_checkpoints_keep_bounded_revisions_and_show_what_changed() -> Result 
     let current = call(&rig, &["workflow", "session", "show", "s-rev"], 0)?;
     assert_eq!(current["data"]["revision"], 2);
     // Plain text: the revision as written, the list and the diff.
-    let text = rig.command(&["workflow", "session", "show", "s-rev", "--rev", "1"])?;
+    let text = rig.command(&[
+        "workflow", "session", "show", "s-rev", "--rev", "1", "--full",
+    ])?;
     assert_eq!(String::from_utf8(text.stdout.bytes)?, "# Goal\nship it\n");
-    let list = rig.command(&["workflow", "session", "show", "s-rev", "--revisions"])?;
+    let list = rig.command(&[
+        "workflow",
+        "session",
+        "show",
+        "s-rev",
+        "--revisions",
+        "--full",
+    ])?;
     let list = String::from_utf8(list.stdout.bytes)?;
     assert_eq!(list.lines().count(), 2, "{list}");
     assert!(list.starts_with("1 parent=none sha256:"), "{list}");
@@ -1034,12 +1043,12 @@ fn session_checkpoints_keep_bounded_revisions_and_show_what_changed() -> Result 
             .is_some_and(|l| l.starts_with("2 parent=1 ")),
         "{list}"
     );
-    let diff = rig.command(&["workflow", "session", "diff", "s-rev", "1"])?;
+    let diff = rig.command(&["workflow", "session", "diff", "s-rev", "1", "--full"])?;
     assert_eq!(
         String::from_utf8(diff.stdout.bytes)?,
         "--- revision 1\n+++ revision 2 (current)\n@@ -1,2 +1,3 @@\n # Goal\n-ship it\n+ship it fast\n+next: review\n"
     );
-    let same = rig.command(&["workflow", "session", "diff", "s-rev", "2"])?;
+    let same = rig.command(&["workflow", "session", "diff", "s-rev", "2", "--full"])?;
     assert_eq!(String::from_utf8(same.stdout.bytes)?, "no differences\n");
     // Unknown revisions are not found, and the session is bounded by retention.
     call(

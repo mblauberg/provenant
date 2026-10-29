@@ -621,7 +621,9 @@ unavailable rather than guessing a diff.
 
 `--tail N` works locally and on peers, is clamped to 500 lines and retains at
 most `--max-bytes`. Peer tails page within a shared 30-second budget and
-refuse a changing artifact. For a settled local attempt, `output RUN --part receipt`
+refuse a changing artifact. Event tails retain whole records; local receipt
+tails return the requested provenance lines, including `tail_text` in JSON.
+For a settled local attempt, `output RUN --part receipt`
 prints its provenance when the run has exactly one attempt. Read-only tasks
 use `Reviewer:` and writer tasks use `Writer:`; JSON includes the matching `role`.
 Missing route, effort, catalogue family or resolution evidence is `unknown`, never

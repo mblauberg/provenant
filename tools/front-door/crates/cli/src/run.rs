@@ -1571,7 +1571,23 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                         .unwrap_or_default();
                     format!("{human}more: provenant status {target} --all --cursor {cursor}\n")
                 }
-                None => human,
+                None => {
+                    let next = rows
+                        .iter()
+                        .find(|row| !settled(&row.state).0)
+                        .or_else(|| rows.first())
+                        .map_or_else(
+                            || "provenant help run".into(),
+                            |row| {
+                                if settled(&row.state).0 {
+                                    format!("provenant output {}", row.attempt_id)
+                                } else {
+                                    format!("provenant lanes --id {} --wait 4m", row.attempt_id)
+                                }
+                            },
+                        );
+                    format!("{human}next: {next}\n")
+                }
             };
             Ok((json!({"lanes": rows, "next_cursor": next}), human))
         })(),

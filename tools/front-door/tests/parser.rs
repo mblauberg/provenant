@@ -84,8 +84,18 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert!(lanes[0]["state"].is_object(), "full record: {value}");
     let human = rig.command(&["status"])?;
     let text = String::from_utf8(human.stdout.bytes)?;
-    assert_eq!(text.lines().count(), 20, "{text}");
+    assert!(text.len() <= 2048, "{text}");
     assert!(text.starts_with(&attempts[24][..8]), "{text}");
+    assert!(
+        text.contains(&format!("next: provenant output {}", attempts[24])),
+        "{text}"
+    );
+    let full = rig.command(&["status", "--full"])?;
+    let full = String::from_utf8(full.stdout.bytes)?;
+    assert!(
+        full.contains(&attempts[0]) && full.contains(&attempts[24]),
+        "{full}"
+    );
     let all = rig.command(&["status", "--all", "--json"])?;
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
     assert_eq!(all["data"]["lanes"].as_array().ok_or("all")?.len(), 25);
@@ -116,7 +126,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert!(stats["data"]["totals"]["cost"]["known_lower_bound"].is_null());
     assert_eq!(stats["data"]["totals"]["cost"]["priced_attempts"], 0);
     assert_eq!(stats["data"]["totals"]["cost"]["missing_attempts"], 25);
-    let stats = rig.command(&["telemetry", "stats"])?;
+    let stats = rig.command(&["telemetry", "stats", "--full"])?;
     assert_eq!(code(&stats), 0);
     assert_eq!(
         String::from_utf8(stats.stdout.bytes)?,
@@ -370,7 +380,7 @@ fn lanes_watch_and_session_selection_report_an_empty_store() -> Result {
     assert_eq!(code(&watch), 0);
     assert_eq!(
         String::from_utf8(watch.stdout.bytes)?,
-        "end settled lanes=0\n"
+        "end settled lanes=0\nnext: provenant lanes --full\n"
     );
     let json = rig.command(&["lanes", "--watch", "--json"])?;
     assert_eq!(code(&json), 0);
@@ -640,7 +650,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     assert_eq!(hops[0]["run"], lane["run_id"]);
     assert_eq!(hops[0]["attempt"], lane["attempt_id"]);
     assert!(hops[0]["parent"].is_null());
-    let human = rig.command(&["output", &attempt, "--trace"])?;
+    let human = rig.command(&["output", &attempt, "--trace", "--full"])?;
     let line = String::from_utf8(human.stdout.bytes.clone())?;
     assert_eq!(line.lines().count(), 1, "{line}");
     assert!(line.contains(&format!(
@@ -879,7 +889,7 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
     let compact = rig.execute(&executable, &["root"], None)?;
     assert_eq!(code(&compact), 0);
     let text = String::from_utf8_lossy(&compact.stdout.bytes);
-    assert!(text.contains("next: provenant help root"), "{text}");
+    assert!(text.contains("next: provenant root --full"), "{text}");
     assert!(compact.stdout.bytes.len() <= 2048);
     let human = rig.execute(&executable, &["root", "--full"], None)?;
     assert_eq!(code(&human), 0);
@@ -1046,7 +1056,7 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
     let value: serde_json::Value = serde_json::from_slice(&defaults.stdout.bytes)?;
     assert_eq!(value["data"]["profile"], "balanced");
     assert!(value["data"]["domains"]["quota"].is_object());
-    let human = rig.command(&["config", "show"])?;
+    let human = rig.command(&["config", "show", "--full"])?;
     assert_eq!(code(&human), 0);
     let text = String::from_utf8_lossy(&human.stdout.bytes);
     assert_eq!(text.lines().count(), 1, "{text}");

@@ -1866,7 +1866,7 @@ bounds are null. Positional arguments have no long flag.
       ],
       "multiple": false,
       "name": "route_choice",
-      "required": false
+      "required": true
     }
   ]
 }

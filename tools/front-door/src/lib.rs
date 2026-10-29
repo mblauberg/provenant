@@ -217,7 +217,12 @@ fn run_edge_workspace(
             if let Some(error) = &mut reply.result.error {
                 apply_repair(leaf, error, globals.json);
             }
-            emit(&reply.result, globals, &reply.human, false)
+            emit(
+                &reply.result,
+                globals,
+                &reply.human,
+                matches!(leaf, "status" | "output" | "lanes" | "telemetry stats"),
+            )
         }
         Err(error) => {
             let status = match error {

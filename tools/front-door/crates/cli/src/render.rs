@@ -37,7 +37,7 @@ pub fn bounded_text(text: &str, max: usize) -> String {
 
 /// Shared human envelope: at most eight rows, 2 KiB including the next step.
 /// Owners retain their complete data and human text for --json and --full.
-pub fn compact_text(command: &str, text: &str) -> String {
+fn compact_text(command: &str, text: &str, read_only: bool) -> String {
     let lines: Vec<_> = text
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -72,11 +72,30 @@ pub fn compact_text(command: &str, text: &str) -> String {
     if let Some(next) = next {
         out.push_str(next);
     } else {
-        out.push_str("provenant help ");
-        out.push_str(if command == "parse" { "--all" } else { command });
+        out.push_str(&detail_command(command, read_only));
     }
     out.push('\n');
     out
+}
+fn detail_command(command: &str, read_only: bool) -> String {
+    let model = crate::command_model();
+    let selected = command
+        .split_whitespace()
+        .try_fold(&model, |parent, name| parent.find_subcommand(name));
+    if read_only
+        && selected.is_some_and(|leaf| {
+            !leaf.is_subcommand_required_set()
+                && !leaf.get_arguments().any(|arg| arg.is_required_set())
+                && !leaf.get_groups().any(|group| group.is_required_set())
+        })
+    {
+        format!("provenant {command} --full")
+    } else {
+        format!(
+            "provenant help {}",
+            if command == "parse" { "--all" } else { command }
+        )
+    }
 }
 #[derive(Debug, Error)]
 pub enum RenderError {
@@ -158,7 +177,14 @@ pub fn render<T: Serialize>(
             let text = error_text.as_deref().unwrap_or(text);
             let compacted;
             let text = if matches!(mode, RenderMode::Compact { .. }) {
-                compacted = compact_text(&result.command, text);
+                let read_only = matches!(
+                    mode,
+                    RenderMode::Compact {
+                        read_only: true,
+                        ..
+                    }
+                );
+                compacted = compact_text(&result.command, text, read_only);
                 compacted.as_str()
             } else {
                 text
@@ -307,7 +333,7 @@ mod tests {
             "{}keep waiting: provenant lanes --id 11111111 --wait 4m\nmore: provenant output 11111111\n",
             "detail\n".repeat(100)
         );
-        let compact = compact_text("run", &text);
+        let compact = compact_text("run", &text, false);
         assert!(
             compact.ends_with("next: provenant lanes --id 11111111 --wait 4m\n"),
             "{compact}"
@@ -334,7 +360,7 @@ mod tests {
         let compact = String::from_utf8(bytes)?;
         assert!(compact.contains("row 0"));
         assert!(compact.contains("--full"));
-        assert!(compact.contains("next: provenant help route list"));
+        assert!(compact.contains("next: provenant route list --full"));
         let mut full = Vec::new();
         render(
             &result,
