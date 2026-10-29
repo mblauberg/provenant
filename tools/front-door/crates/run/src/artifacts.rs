@@ -148,6 +148,16 @@ impl RunStore {
             .map_err(|_| RunError::Validation("output redaction failed"))?;
         capture.push(&safe);
         let mut result = capture.finish();
+        // Graph continuations consume decoded handoff data. Byte redaction
+        // alone cannot see token boundaries hidden behind JSON escapes.
+        result.handoff = result.handoff.and_then(|handoff| {
+            handoff
+                .map(|handoff| {
+                    crate::completion::sanitise_handoff(&handoff)
+                        .map_err(|_| "handoff sanitisation failed")
+                })
+                .transpose()
+        });
         result.digest = digest.to_string();
         result.source_truncated =
             artifact.bytes > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;

@@ -141,7 +141,7 @@ impl AttemptOwner for Owner {
             attempt_ref: None,
             outcome: AttemptOutcome::Succeeded,
             launched: true,
-            result,
+            result: result.map(Box::new),
             result_warning: None,
             result_path: None,
             branch,

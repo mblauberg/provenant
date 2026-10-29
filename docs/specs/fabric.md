@@ -1012,7 +1012,10 @@ writers do not constrain checkout selection for later fragments. Worktree
 custody excludes concurrent managed writers across graphs.
 
 A successful writer task may report a structured `handoff` block with schema
-version 1, status `stopped_early` and a non-empty note of at most 4096 bytes.
+version 2, status `stopped_early`, a non-empty note, and `remaining[]`,
+`decisions[]` and `verify[]`. It uses the shared handoff codec and bounds from
+[the run contract](run.md#a-partial-finish-is-flagged-not-failed). The fence
+must end the answer; `done` and `blocked` do not request graph continuation.
 This must create exactly one continuation per stopped node, in the same
 checkout, carrying the handoff and original completion contract. Consumers'
 selected outputs must follow the continuation. Prose alone must never trigger

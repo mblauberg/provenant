@@ -878,7 +878,7 @@ pub enum AttemptObservation {
         attempt_ref: Option<String>,
         outcome: AttemptOutcome,
         launched: bool,
-        result: Option<crate::result_capture::CapturedResult>,
+        result: Option<Box<crate::result_capture::CapturedResult>>,
         result_warning: Option<String>,
         result_path: Option<String>,
         branch: Option<String>,
@@ -2608,7 +2608,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             // Provider success alone does not satisfy an explicit result contract.
                             let warned = result_warning.is_some();
                             let outputs = make_outputs(
-                                result.as_ref(),
+                                result.as_deref(),
                                 result_warning,
                                 result_path,
                                 branch,
@@ -2684,7 +2684,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         document,
                         &expanded,
                         &mut checkpoint,
-                        settled_result.as_ref(),
+                        settled_result.as_deref(),
                         limits,
                     )
                 } else {
@@ -5393,7 +5393,7 @@ mod tests {
             capture.push(text.as_bytes());
             let mut observation = terminal(AttemptOutcome::Succeeded);
             if let AttemptObservation::Terminal { result, .. } = &mut observation {
-                *result = Some(capture.finish());
+                *result = Some(Box::new(capture.finish()));
             }
             owner.observations.push_back(observation);
             nodes.push(review);
@@ -6518,7 +6518,7 @@ mod tests {
             attempt_ref: None,
             outcome,
             launched: true,
-            result: Some(capture(result)),
+            result: Some(Box::new(capture(result))),
             result_warning: None,
             result_path: None,
             branch: None,
@@ -6545,7 +6545,7 @@ mod tests {
         capture.push(text.as_bytes());
         let mut observation = terminal(AttemptOutcome::Succeeded);
         if let AttemptObservation::Terminal { result, .. } = &mut observation {
-            *result = Some(capture.finish());
+            *result = Some(Box::new(capture.finish()));
         }
         let mut owner = FakeOwner {
             observations: VecDeque::from([observation]),
@@ -8010,7 +8010,7 @@ mod tests {
                     attempt_ref: None,
                     outcome: AttemptOutcome::Succeeded,
                     launched: true,
-                    result: text.map(capture),
+                    result: text.map(|text| Box::new(capture(text))),
                     result_warning: None,
                     result_path: None,
                     branch: None,

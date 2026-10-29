@@ -11,6 +11,7 @@ mod attempt_fact;
 mod attempt_file;
 mod canonical;
 mod finding;
+pub mod handoff;
 mod install;
 mod json;
 mod jsonc;

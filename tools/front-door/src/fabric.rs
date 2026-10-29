@@ -4925,7 +4925,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     || outcome == Outcome::Succeeded
                 {
                     match store.stream_result(attempt.attempt_id, &call, node.required_verdict) {
-                        Ok(result) => (Some(result), None),
+                        Ok(result) => (Some(Box::new(result)), None),
                         Err(error) => (None, Some(graph_result_warning(&error).to_owned())),
                     }
                 } else {

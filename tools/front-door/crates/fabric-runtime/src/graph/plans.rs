@@ -35,13 +35,6 @@ struct Fragment {
     nodes: Vec<GraphNode>,
 }
 
-#[derive(Deserialize)]
-struct Handoff {
-    schema_version: u64,
-    status: String,
-    note: String,
-}
-
 pub(super) fn prompt(node: &GraphNode) -> String {
     let mut prompt = node.prompt.clone();
     if let Some(spec) = &node.plan {
@@ -82,8 +75,9 @@ pub(super) fn validate_spec(node: &GraphNode) -> Result<(), &'static str> {
 /// occupy once stored in a checkpoint.
 const BLOCK_BYTES: usize = 12 * 1024;
 pub(super) const STORED_BLOCK_BYTES: usize = 2 * BLOCK_BYTES;
-const NOTE_RAW_BYTES: usize = 4096;
-pub(super) const STORED_NOTE_BYTES: usize = 2 * NOTE_RAW_BYTES;
+/// A stopped-early handoff is stored whole: its fenced block plus escapes.
+pub(super) const STORED_HANDOFF_BYTES: usize =
+    2 * (provenant_records::handoff::HANDOFF_BYTES + "```handoff\n\n```".len());
 
 fn block<'a>(
     capture: &'a crate::result_capture::CapturedResult,
@@ -125,22 +119,19 @@ fn block<'a>(
 pub(super) fn handoff(
     capture: &crate::result_capture::CapturedResult,
 ) -> Result<Option<String>, String> {
-    let Some(json) = block(capture, "handoff")? else {
+    let handoff = capture.handoff.clone().map_err(str::to_owned)?;
+    let Some(fenced) = handoff
+        .filter(|handoff| handoff.status == provenant_records::handoff::HandoffStatus::StoppedEarly)
+        .map(|handoff| handoff.fenced())
+    else {
         return Ok(None);
     };
-    let handoff: Handoff =
-        serde_json::from_str(json).map_err(|e| format!("invalid handoff: {e}"))?;
-    if handoff.schema_version != 1
-        || handoff.status != "stopped_early"
-        || handoff.note.trim().is_empty()
-        || handoff.note.len() > NOTE_RAW_BYTES
-        || encoded_len(&handoff.note) > STORED_NOTE_BYTES
-    {
+    if encoded_len(&fenced) > STORED_HANDOFF_BYTES {
         return Err(format!(
-            "handoff requires schema_version 1, status stopped_early and a note of 1..{NOTE_RAW_BYTES} bytes that stores in {STORED_NOTE_BYTES}"
+            "handoff block has too many escaped characters to store in {STORED_HANDOFF_BYTES} bytes"
         ));
     }
-    Ok(Some(handoff.note))
+    Ok(Some(fenced))
 }
 
 pub(super) fn writer(node: &PlannedNode) -> bool {
