@@ -3025,7 +3025,7 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
     )?;
     assert_eq!(status, 1, "{dispatch}");
     assert_eq!(dispatch["status"], "refused", "{dispatch}");
-    assert_eq!(dispatch["error"]["code"], "REFUSED", "{dispatch}");
+    assert_eq!(dispatch["error"]["code"], "DISK_FLOOR", "{dispatch}");
     reason(&dispatch["error"]["message"])?;
     assert!(!rig.state.join("runs").exists());
     rig.assert_legacy_unchanged()

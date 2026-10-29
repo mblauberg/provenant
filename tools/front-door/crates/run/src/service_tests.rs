@@ -594,3 +594,52 @@ fn every_task_is_checked_before_any_writer_is_prepared() -> TestResult {
     assert!(store.operation(&operation, &call)?.is_none());
     Ok(())
 }
+
+#[test]
+fn each_refusal_has_its_own_stable_code() {
+    use provenant_confinement::{permissions::PermissionError, worktrees::WorktreeError};
+    for (error, code) in [
+        (
+            RunError::Writer(WorktreeError::InvalidRequest),
+            "WRITER_SCOPE",
+        ),
+        (
+            RunError::Confinement(PermissionError::BroadRoot),
+            "CONFINEMENT",
+        ),
+        (RunError::Refused, "REFUSED"),
+        (RunError::DiskFloor { free: 1, floor: 2 }, "DISK_FLOOR"),
+        (
+            RunError::MemoryPressure {
+                level: "critical".into(),
+            },
+            "MEMORY_PRESSURE",
+        ),
+        (
+            RunError::LaneCap {
+                active: 3,
+                limit: 3,
+                scope: "host",
+            },
+            "LANE_CAP",
+        ),
+        (RunError::BuildSettings, "BUILD_SETTINGS"),
+        (RunError::GuardianIdentityUnavailable, "GUARDIAN_IDENTITY"),
+        (RunError::HostClock, "HOST_CLOCK"),
+        (
+            RunError::WriterRefLocked("ref.lock".into()),
+            "WRITER_REF_LOCKED",
+        ),
+        (
+            RunError::ObjectImportLimit("fixture"),
+            "OBJECT_IMPORT_LIMIT",
+        ),
+    ] {
+        assert_eq!(error.code(), code, "{error:?}");
+    }
+    let mut codes: Vec<_> = ErrorKind::ALL.iter().map(|kind| kind.code()).collect();
+    let listed = codes.len();
+    codes.sort_unstable();
+    codes.dedup();
+    assert_eq!(codes.len(), listed, "every code is distinct");
+}

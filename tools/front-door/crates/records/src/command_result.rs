@@ -44,6 +44,14 @@ impl<T> CommandResult<T> {
 #[derive(Debug, Serialize)]
 pub struct HelpCatalogue {
     pub commands: Vec<HelpCommand>,
+    /// Stable `error.code` values and their meanings. Only the whole
+    /// catalogue lists them; a scoped `help COMMAND` leaves this empty.
+    pub error_codes: Vec<HelpErrorCode>,
+}
+#[derive(Debug, Serialize)]
+pub struct HelpErrorCode {
+    pub code: String,
+    pub summary: String,
 }
 #[derive(Debug, Serialize)]
 pub struct HelpCommand {

@@ -1010,15 +1010,10 @@ mod cargo_setup_tests {
             .err()
             .ok_or("stale tracking lock must refuse")?;
         assert!(
-            failure
-                .to_string()
-                .contains(&tracking_lock.display().to_string())
+            matches!(&failure, RunError::WriterRefLocked(path) if *path == tracking_lock),
+            "{failure:?}"
         );
-        assert!(
-            failure
-                .to_string()
-                .contains("check for a running Git process")
-        );
+        assert_eq!(failure.code(), "WRITER_REF_LOCKED");
         assert_eq!(std::fs::read(&tracking_lock)?, b"held");
         std::fs::remove_file(&tracking_lock)?;
         run(&["remote", "remove", "origin"])?;
@@ -1027,11 +1022,7 @@ mod cargo_setup_tests {
         let failure = prepare_writer_git(&mut writer, &state, &root, None)
             .err()
             .ok_or("stale lock must refuse")?;
-        assert!(
-            failure
-                .to_string()
-                .contains("check for a running Git process")
-        );
+        assert_eq!(failure.code(), "WRITER_REF_LOCKED", "{failure}");
         assert_eq!(std::fs::read(&stale)?, b"held");
         Ok(())
     }

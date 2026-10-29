@@ -1986,7 +1986,16 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
 fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
     use provenant_run::ErrorKind as E;
     match kind {
-        E::SecretInput | E::Refused | E::Unsupported => FacadeError::ConfinementRefused,
+        E::SecretInput
+        | E::Refused
+        | E::Unsupported
+        | E::WriterScope
+        | E::Confinement
+        | E::DiskFloor
+        | E::MemoryPressure
+        | E::LaneCap
+        | E::BuildSettings
+        | E::GuardianIdentity => FacadeError::ConfinementRefused,
         E::LaneDepth => FacadeError::LaneDepth,
         E::LaneContext
         | E::ParentAttempt
