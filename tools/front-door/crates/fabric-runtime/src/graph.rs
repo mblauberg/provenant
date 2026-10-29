@@ -1571,6 +1571,23 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
     Journal(#[source] JournalError),
 }
 
+impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
+    /// Stable identifier independent of the displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Instance(_) => "instance",
+            Self::Invalid(_) => "invalid_graph",
+            Self::Extension(_) => "invalid_extension",
+            Self::Refused(_) => "graph_refused",
+            Self::PlanChanged => "plan_changed",
+            Self::BadCheckpoint => "bad_checkpoint",
+            Self::Canonical(_) => "canonical",
+            Self::Run(_) => "run",
+            Self::Journal(_) => "journal",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedGraph {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5612,11 +5629,11 @@ mod tests {
             agent.kind = kind;
             let mut wire = serde_json::to_value(graph(vec![agent])).unwrap();
             wire["nodes"][0].as_object_mut().unwrap().remove("access");
-            assert!(
+            assert_eq!(
                 serde_json::from_value::<GraphDocument>(wire)
                     .unwrap_err()
-                    .to_string()
-                    .contains("missing field `access`")
+                    .classify(),
+                serde_json::error::Category::Data
             );
         }
     }
@@ -7569,11 +7586,11 @@ mod tests {
         assert!(owner.prompts[1].starts_with("Rank and deduplicate findings"));
         let mut invalid = wire;
         invalid["nodes"][1]["kind"] = serde_json::json!("synthesis");
-        assert!(
+        assert_eq!(
             serde_json::from_value::<GraphDocument>(invalid)
                 .unwrap_err()
-                .to_string()
-                .contains("unknown variant")
+                .classify(),
+            serde_json::error::Category::Data
         );
     }
 
