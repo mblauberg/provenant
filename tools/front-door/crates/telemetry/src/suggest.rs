@@ -65,6 +65,8 @@ pub struct Arm {
     pub escaped_defect_rate: Rate,
     pub ci: &'static str,
     pub status: &'static str,
+    /// Explains why an arm cannot participate in a stratified comparison.
+    pub insufficient_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -199,10 +201,21 @@ pub fn rank(
                 && dispositions > 0
                 && interval.is_some()
                 && outcomes.ci == "measured"
+                && rows.iter().all(|row| row.signals.ci_failures.is_some())
                 && attribution == "attributed"
-                && choice != "unknown";
+                && choice != "unknown"
+                && risk_tier != "unknown"
+                && task_kind != "unknown";
+            let insufficient_reason = if risk_tier == "unknown" || task_kind == "unknown" {
+                Some("risk tier and task kind must both be known")
+            } else if !sufficient {
+                Some("insufficient or incomplete evidence")
+            } else {
+                None
+            };
             let mut escaped_defect_rate = rate(escaped.len() as u64, merges.len() as u64);
-            if outcomes.ci != "measured" {
+            if outcomes.ci != "measured" || rows.iter().any(|row| row.signals.ci_failures.is_none())
+            {
                 escaped_defect_rate.value = None;
                 escaped_defect_rate.interval = None;
             }
@@ -228,6 +241,7 @@ pub fn rank(
                 } else {
                     "insufficient"
                 },
+                insufficient_reason,
             });
         }
     }
@@ -269,4 +283,64 @@ pub fn rank(
         arms,
         suggestions,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::outcome::{Evidence, Signals};
+
+    #[test]
+    fn unknown_strata_cannot_generate_comparisons() {
+        let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse().unwrap();
+        for (risk, task) in [
+            (None, Some("repair")),
+            (Some("high"), None),
+            (Some("unknown"), Some("repair")),
+        ] {
+            let mut rows = Vec::new();
+            for (choice, confirmed, cost) in [("good", 10, 1_000_000), ("poor", 1, 10_000_000)] {
+                for i in 0..20 {
+                    let sample = format!("{choice}-{i}");
+                    rows.push(Attributed {
+                        evidence: Evidence {
+                            sample: sample.clone(),
+                            graph: Some(sample.clone()),
+                            pattern: Some(choice.into()),
+                            risk_tier: risk.map(str::to_owned),
+                            task_kind: task.map(str::to_owned),
+                            cost_microdollars: Some(cost),
+                            confirmed: Some(confirmed),
+                            false_positives: Some(0),
+                            ..Evidence::default()
+                        },
+                        stratum: "attributed",
+                        merge: Some(sample),
+                        mature: true,
+                        signals: Signals {
+                            ci_failures: Some(0),
+                            ..Signals::default()
+                        },
+                    });
+                }
+            }
+            let outcomes = Outcomes {
+                ci_coverage_from: None,
+                skipped_ci_runs: 0,
+                window_days: 14,
+                ci: "measured",
+                unattributed_rows: 0,
+                rows,
+            };
+            let result = rank(&outcomes, 20, 14, now).unwrap();
+            assert!(result.suggestions.is_empty());
+            for arm in &result.arms {
+                assert_eq!(arm.status, "insufficient");
+                assert_eq!(
+                    arm.insufficient_reason,
+                    Some("risk tier and task kind must both be known")
+                );
+            }
+        }
+    }
 }

@@ -7013,8 +7013,8 @@ fn pipeline_report(
         if let Some(graph) = fact.context.as_ref().and_then(|c| c.graph_id.as_ref())
             && !checkpoints.contains_key(graph)
         {
-            let checkpoint = FileJournal::read_checkpoint(&edge.roots.state, project, graph)
-                .map_err(|e| invalid(e.to_string()))?;
+            let checkpoint =
+                FileJournal::read_checkpoint(&edge.roots.state, project, graph).unwrap_or(None);
             checkpoints.insert(graph.clone(), checkpoint);
         }
     }

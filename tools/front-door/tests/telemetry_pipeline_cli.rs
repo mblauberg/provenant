@@ -101,6 +101,40 @@ fn offline_pipeline_preserves_unattributed_and_unmeasured_evidence() -> Result {
 }
 
 #[test]
+fn unreadable_graph_checkpoint_does_not_abort_pipeline() -> Result {
+    let rig = rig()?;
+    let manifest = rig.project.join("unreadable-graph.json");
+    std::fs::write(
+        &manifest,
+        serde_json::to_vec(&json!({"schema_version":1,"tasks":[{
+            "prompt":"Review a slice", "context":{"graph_id":"invalid/graph","node_id":"review"},
+            "route":{"kind":"model","provider":"fixture","model":"fixture/model"}
+        }]}))?,
+    )?;
+    let output = rig.command(&[
+        "dispatch",
+        "--manifest",
+        manifest.to_str().ok_or("path")?,
+        "--operation-id",
+        "unreadable-graph-fixture",
+        "--json",
+    ])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let output = rig.command(&[
+        "telemetry",
+        "stats",
+        "--outcomes",
+        "--main-ref",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert!(report["data"]["pipeline"]["outcomes"]["rows"][0]["evidence"]["confirmed"].is_null());
+    Ok(())
+}
+
+#[test]
 fn repeated_node_labels_without_a_graph_preserve_each_unattributed_row() -> Result {
     let rig = rig()?;
     let manifest = rig.project.join("unattributed.json");

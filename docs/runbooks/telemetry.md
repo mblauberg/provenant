@@ -134,8 +134,11 @@ gh run list --branch main --limit 1000 --json headSha,conclusion,createdAt,workf
 provenant telemetry stats --suggest --ci-file main-ci.json --main-ref main --json
 ```
 
-The export must cover the merges and following observation windows being
-compared. Increase the limit or export additional pages for a busy repository.
+Check `pipeline.outcomes.ci_coverage_from` against the merge dates being
+compared. Mature merges older than the earliest `createdAt` in the export have
+null CI counts. The export must cover the merges and following observation
+windows being compared. Runs with a head SHA unavailable locally are counted
+as unattributed and skipped. Increase the limit or export additional pages for a busy repository.
 The telemetry command itself uses no network. Omit `--ci-file` to inspect local
 reverts and line-overlapping follow-up fixes with CI marked `not_measured`.
 Use `--outcomes` instead of `--suggest` to request the same outcome and ranking
@@ -146,7 +149,9 @@ sets the post-merge observation window (default 14 days).
 alongside counts; unmatched evidence stays `unattributed`.
 `pipeline.ranking.arms` shows sample counts, cost coverage, verifier counts,
 rates and 95% intervals by risk tier and task kind. Missing strata are
-`unknown`. Ranking waits for the full observation window and at least 20
+`unknown`; comparisons with an unknown risk tier or task kind are insufficient
+and include a reason. Escapes are attributed per PR, so every node arm in that
+PR is charged with the PR outcome. Ranking waits for the full observation window and at least 20
 graphs and mature merges per arm. Set `--min-samples`, `--outcome-days` and
 `--expiry-days` to change these defaults; expiry is 14 days.
 

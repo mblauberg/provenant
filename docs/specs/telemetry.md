@@ -233,8 +233,8 @@ matches and rows without a graph or matching merge remain `unattributed`.
 Origin merges come from first-parent history; reachable non-merge descendants
 also include changes delivered through later pull requests.
 The configurable `--outcome-days` window defaults to 14 days after merge.
-Reverts identify the merge by the canonical revert trailer or its quoted
-subject. Follow-up commits count once when their subject starts with `fix`,
+Reverts identify the merge or a commit in its second-parent range by the
+canonical revert trailer or its quoted subject. Follow-up commits count once when their subject begins with the word `fix`,
 `bugfix` or `hotfix` (case insensitive), and a removed or replaced line blames
 to a line the merge introduced. Blame identities handle shifted line numbers;
 renames, insertion-only fixes, binary files and later edits that have already
@@ -246,12 +246,17 @@ An optional `--ci-file` accepts the recorded main-branch run-list JSON described
 in the runbook. A failed run joins the nearest preceding merge in its head's
 first-parent ancestry, within the window. Identical head, workflow and creation
 time rows count once. Without this file, `ci` is `not_measured` and per-row CI
-counts are null. A supplied empty file measures zero runs; it does not prove
-that the export covers every workflow or date.
+counts are null. The earliest `createdAt` is exposed as `ci_coverage_from`;
+mature merges older than that date have null CI counts. A supplied empty file has no known coverage, so merge CI counts are null.
+A coverage date does not prove that the export covers every workflow. Runs whose head SHA is unavailable locally are counted as unattributed
+and skipped.
 
 Ranking compares pattern, lens (explicit context lens, otherwise role) and
 model separately within risk-tier and task-kind strata. Retained context extras
-supply these strata where present; absent values stay `unknown`. This change
+supply these strata where present; absent values stay `unknown`. Both strata
+must be known for a comparison to be sufficient; unknown strata are reported
+as insufficient with a reason. Escapes are attributed per PR, so every node
+arm in that PR is charged with the PR outcome. This change
 adds no context capture. Nodes combine selected attempts' costs, including
 retries. A node attributes to a model only when every selected attempt names
 the same model; mixed or missing identities stay `unknown` for model ranking.

@@ -1,6 +1,6 @@
 //! Offline post-merge outcome attribution.
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsString,
     path::Path,
     time::Duration,
@@ -53,6 +53,7 @@ fn timestamp<'de, D: serde::Deserializer<'de>>(
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Signals {
+    pub unmeasured: bool,
     pub reverts: u64,
     pub follow_up_fixes: u64,
     /// None means no CI input was supplied, never measured zero.
@@ -75,6 +76,8 @@ pub struct Attributed {
 
 #[derive(Debug, Serialize)]
 pub struct Outcomes {
+    pub ci_coverage_from: Option<String>,
+    pub skipped_ci_runs: usize,
     pub window_days: u32,
     pub ci: &'static str,
     pub unattributed_rows: usize,
@@ -194,23 +197,39 @@ pub fn attribute(
         repo,
         &["rev-parse", "--verify", &format!("{main}^{{commit}}")],
     )?;
-    let commits = parse_commits(&git(
+    let mut commits = parse_commits(&git(
         repo,
         &[
             "log",
             "--first-parent",
             "--reverse",
-            "--format=%H%x00%ct%x00%P%x00%s%x00%b%x00%x1e",
+            "--format=%H%x00%ct%x00%P%x00%s%x00%x00%x1e",
             head.trim(),
         ],
     )?)?;
+    if evidence
+        .iter()
+        .any(|row| row.pr.is_none() && row.issue.is_some())
+    {
+        for commit in commits.iter_mut().filter(|c| c.parents.len() > 1) {
+            commit.body = git(repo, &["show", "-s", "--format=%b", &commit.sha])?;
+        }
+    }
     let window = i64::from(window_days) * 86400;
+    let ci_coverage_from = ci.and_then(|runs| runs.iter().map(|r| r.created_at).min());
+    let merge_indices: HashMap<_, _> = commits
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.parents.len() > 1)
+        .map(|(i, c)| (c.sha.as_str(), i))
+        .collect();
+    let mut skipped_ci_runs = 0;
     let mut rows = Vec::new();
     let mut signal_cache = BTreeMap::<usize, Signals>::new();
     let mut seen_ci = BTreeSet::new();
     let mut ci_by_merge = BTreeMap::<usize, u64>::new();
     if let Some(runs) = ci {
-        for run in runs.iter().filter(|r| r.conclusion == "failure") {
+        for run in runs {
             if !seen_ci.insert((&run.head_sha, &run.workflow_name, run.created_at)) {
                 continue;
             }
@@ -219,12 +238,19 @@ pub fn attribute(
             }
             // Reachability, rather than timestamp order, assigns a run to the
             // nearest preceding main-line merge, including ordinary main commits.
-            let ancestors = git(repo, &["rev-list", "--first-parent", &run.head_sha])?;
-            let nearest = ancestors.lines().find_map(|sha| {
-                commits
-                    .iter()
-                    .position(|c| c.sha == sha && c.parents.len() > 1)
-            });
+            let ancestors = match git(repo, &["rev-list", "--first-parent", &run.head_sha]) {
+                Ok(value) => value,
+                Err(_) => {
+                    skipped_ci_runs += 1;
+                    continue;
+                }
+            };
+            if run.conclusion != "failure" {
+                continue;
+            }
+            let nearest = ancestors
+                .lines()
+                .find_map(|sha| merge_indices.get(sha).copied());
             if let Some(index) = nearest {
                 let merge = &commits[index];
                 let elapsed = run.created_at.as_second() - merge.time;
@@ -234,6 +260,23 @@ pub fn attribute(
             }
         }
     }
+    let descendants = if let Some(first) = commits.first() {
+        git(
+            repo,
+            &[
+                "log",
+                "--ancestry-path",
+                "--no-merges",
+                "--reverse",
+                "--format=%H%x00%ct%x00%P%x00%s%x00%x00%x1e",
+                &format!("{}..{}", first.sha, head.trim()),
+            ],
+        )
+        .and_then(|log| parse_commits(&log))
+    } else {
+        Ok(Vec::new())
+    };
+    let mut cache = CandidateCache::default();
     for row in evidence {
         let matches: Vec<_> = commits
             .iter()
@@ -264,62 +307,23 @@ pub fn attribute(
                 signals.clone()
             } else {
                 let mut signals = Signals {
-                    ci_failures: ci.map(|_| ci_by_merge.get(&index).copied().unwrap_or(0)),
+                    ci_failures: ci_coverage_from
+                        .filter(|t| t.as_second() <= commit.time)
+                        .map(|_| ci_by_merge.get(&index).copied().unwrap_or(0)),
                     ..Signals::default()
                 };
-                let changed = changed_lines(repo, &commit.parents[0], &commit.sha, false)?;
-                let mut lines = BTreeSet::new();
-                for (file, ranges) in changed {
-                    for (start, count) in ranges {
-                        lines.extend(blamed_lines(repo, &commit.sha, &file, start, count)?);
-                    }
-                }
-                let descendants = parse_commits(&git(
+                if measure_merge(
                     repo,
-                    &[
-                        "log",
-                        "--ancestry-path",
-                        "--no-merges",
-                        "--reverse",
-                        "--format=%H%x00%ct%x00%P%x00%s%x00%b%x00%x1e",
-                        &format!("{}..{}", commit.sha, head.trim()),
-                    ],
-                )?)?;
-                for later in descendants.iter().filter(|c| {
-                    c.time >= commit.time
-                        && c.time <= commit.time + window
-                        && c.time <= now
-                        && c.parents.len() == 1
-                }) {
-                    let reverts = later
-                        .body
-                        .split("This reverts commit ")
-                        .skip(1)
-                        .any(|part| part.starts_with(&commit.sha))
-                        || later.subject == format!("Revert \"{}\"", commit.subject);
-                    if reverts {
-                        signals.reverts += 1;
-                        continue;
-                    }
-                    // Only explicit fix subjects count, avoiding routine same-line edits.
-                    if !["fix", "bugfix", "hotfix"]
-                        .iter()
-                        .any(|word| later.subject.to_ascii_lowercase().starts_with(word))
-                    {
-                        continue;
-                    }
-                    let changed = changed_lines(repo, &later.parents[0], &later.sha, true)?;
-                    let mut overlaps = false;
-                    for (file, ranges) in changed {
-                        for (start, count) in ranges {
-                            overlaps |= blamed_lines(repo, &later.parents[0], &file, start, count)?
-                                .iter()
-                                .any(|line| lines.contains(line));
-                        }
-                    }
-                    if overlaps {
-                        signals.follow_up_fixes += 1;
-                    }
+                    commit,
+                    &descendants,
+                    window,
+                    now,
+                    &mut signals,
+                    &mut cache,
+                )
+                .is_err()
+                {
+                    signals.unmeasured = true;
                 }
                 signal_cache.insert(index, signals.clone());
                 signals
@@ -341,7 +345,9 @@ pub fn attribute(
         };
         rows.push(Attributed {
             evidence: row,
-            stratum: if merge.is_some() {
+            stratum: if signals.unmeasured {
+                "unmeasured"
+            } else if merge.is_some() {
                 "attributed"
             } else {
                 "unattributed"
@@ -353,6 +359,8 @@ pub fn attribute(
     }
     Ok(Outcomes {
         window_days,
+        ci_coverage_from: ci_coverage_from.map(|t| t.to_string()),
+        skipped_ci_runs,
         ci: if ci.is_some() {
             "measured"
         } else {
@@ -363,8 +371,123 @@ pub fn attribute(
     })
 }
 
+const MAX_FILES_PER_MERGE: usize = 200;
+const MAX_HUNKS_PER_MERGE: usize = 2_000;
+
+fn fix_subject(subject: &str) -> bool {
+    let lower = subject.to_ascii_lowercase();
+    ["fix", "bugfix", "hotfix"].iter().any(|word| {
+        lower.strip_prefix(word).is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '!')
+        })
+    })
+}
+
+#[derive(Default)]
+struct CandidateCache {
+    fixes: HashMap<String, Option<(BTreeSet<String>, usize, usize)>>,
+    bodies: HashMap<String, Option<String>>,
+}
+
+fn measure_merge(
+    repo: &Path,
+    commit: &Commit,
+    descendants: &Result<Vec<Commit>>,
+    window: i64,
+    now: i64,
+    signals: &mut Signals,
+    cache: &mut CandidateCache,
+) -> Result<()> {
+    let descendants = descendants
+        .as_ref()
+        .map_err(|e| OutcomeError::Evidence(e.to_string()))?;
+    let (changed, mut files_used, mut hunks_used) =
+        changed_lines(repo, &commit.parents[0], &commit.sha, false)?;
+    let mut lines = BTreeSet::new();
+    for (file, ranges) in changed {
+        for (start, count) in ranges {
+            lines.extend(blamed_lines(repo, &commit.sha, &file, start, count)?);
+        }
+    }
+    let merged = git(
+        repo,
+        &[
+            "rev-list",
+            &format!("{}..{}", commit.parents[0], commit.parents[1]),
+        ],
+    )?;
+    for later in descendants.iter().filter(|c| {
+        c.time >= commit.time
+            && c.time <= commit.time + window
+            && c.time <= now
+            && c.parents.len() == 1
+    }) {
+        if !later.subject.starts_with("Revert ") && !fix_subject(&later.subject) {
+            continue;
+        }
+        // A candidate must descend from this merge, not merely share its time window.
+        if git(
+            repo,
+            &["merge-base", "--is-ancestor", &commit.sha, &later.sha],
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let body = cache
+            .bodies
+            .entry(later.sha.clone())
+            .or_insert_with(|| git(repo, &["show", "-s", "--format=%b", &later.sha]).ok())
+            .as_ref()
+            .ok_or_else(|| OutcomeError::Evidence("commit body unavailable".into()))?;
+        let reverts = body.split("This reverts commit ").skip(1).any(|part| {
+            part.starts_with(&commit.sha) || merged.lines().any(|sha| part.starts_with(sha))
+        }) || later.subject == format!("Revert \"{}\"", commit.subject);
+        if reverts {
+            signals.reverts += 1;
+            continue;
+        }
+        if !fix_subject(&later.subject) {
+            continue;
+        }
+        let candidate = cache.fixes.entry(later.sha.clone()).or_insert_with(|| {
+            let (changed, files, hunks) =
+                changed_lines(repo, &later.parents[0], &later.sha, true).ok()?;
+            let mut blamed = BTreeSet::new();
+            for (file, ranges) in changed {
+                for (start, count) in ranges {
+                    blamed.extend(blamed_lines(repo, &later.parents[0], &file, start, count).ok()?);
+                }
+            }
+            Some((blamed, files, hunks))
+        });
+        let candidate = candidate
+            .as_ref()
+            .ok_or_else(|| OutcomeError::Evidence("fix measurement unavailable".into()))?;
+        files_used += candidate.1;
+        hunks_used += candidate.2;
+        if files_used > MAX_FILES_PER_MERGE || hunks_used > MAX_HUNKS_PER_MERGE {
+            return Err(OutcomeError::Evidence(
+                "merge measurement limit exceeded".into(),
+            ));
+        }
+        let overlaps = candidate.0.iter().any(|line| lines.contains(line));
+        if overlaps {
+            signals.follow_up_fixes += 1;
+        }
+    }
+    Ok(())
+}
+
 type Ranges = BTreeMap<String, Vec<(u64, u64)>>;
-fn changed_lines(repo: &Path, before: &str, after: &str, old: bool) -> Result<Ranges> {
+fn changed_lines(
+    repo: &Path,
+    before: &str,
+    after: &str,
+    old: bool,
+) -> Result<(Ranges, usize, usize)> {
     let files = git(
         repo,
         &[
@@ -379,7 +502,13 @@ fn changed_lines(repo: &Path, before: &str, after: &str, old: bool) -> Result<Ra
         ],
     )?;
     let mut result = BTreeMap::new();
+    let mut file_count = 0;
+    let mut hunk_count = 0;
     for file in files.split('\0').filter(|s| !s.is_empty()) {
+        file_count += 1;
+        if file_count > MAX_FILES_PER_MERGE {
+            return Err(OutcomeError::Evidence("file limit exceeded".into()));
+        }
         let diff = git(
             repo,
             &[
@@ -394,8 +523,20 @@ fn changed_lines(repo: &Path, before: &str, after: &str, old: bool) -> Result<Ra
                 file,
             ],
         )?;
+        if diff.lines().any(|line| {
+            line.trim_start_matches(['+', '-', ' '])
+                .starts_with("Subproject commit ")
+                || line == "new file mode 160000"
+                || line == "deleted file mode 160000"
+        }) {
+            continue;
+        }
         let mut ranges = Vec::new();
         for line in diff.lines().filter(|line| line.starts_with("@@ ")) {
+            hunk_count += 1;
+            if hunk_count > MAX_HUNKS_PER_MERGE {
+                return Err(OutcomeError::Evidence("hunk limit exceeded".into()));
+            }
             let range = line
                 .split_whitespace()
                 .nth(if old { 1 } else { 2 })
@@ -416,7 +557,7 @@ fn changed_lines(repo: &Path, before: &str, after: &str, old: bool) -> Result<Ra
             result.insert(file.into(), ranges);
         }
     }
-    Ok(result)
+    Ok((result, file_count, hunk_count))
 }
 
 fn blamed_lines(
@@ -436,6 +577,7 @@ fn blamed_lines(
         &[
             "blame",
             "--line-porcelain",
+            "--no-textconv",
             "-L",
             &format!("{start},+{count}"),
             commit,
@@ -459,4 +601,17 @@ fn blamed_lines(
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fix_subject;
+
+    #[test]
+    fn fix_subject_requires_a_word_boundary() {
+        assert!(fix_subject("fix: defect"));
+        assert!(fix_subject("Hotfix defect"));
+        assert!(!fix_subject("fixture"));
+        assert!(!fix_subject("fixup! previous change"));
+    }
 }
