@@ -769,8 +769,35 @@ impl<'a> GitTransport<'a> {
             provenant_os::git::RepositoryPath::Toplevel,
             Some(cancel),
         )
-        .map_err(|_| GitTransportError::InvalidOutput {
-            command: "repository root",
+        .map_err(|error| {
+            use provenant_os::git::DiscoveryError;
+            match error
+                .into_inner()
+                .and_then(|error| error.downcast::<DiscoveryError>().ok())
+                .map(|error| *error)
+            {
+                Some(DiscoveryError::Execution(error)) => GitTransportError::Execution(error),
+                Some(
+                    DiscoveryError::TimedOut
+                    | DiscoveryError::Cancelled
+                    | DiscoveryError::Incomplete,
+                ) => GitTransportError::IncompleteOutput {
+                    command: "repository root",
+                },
+                Some(DiscoveryError::Command(_)) => GitTransportError::GitCommand {
+                    command: "repository root",
+                },
+                Some(DiscoveryError::Canonicalize(source)) => {
+                    GitTransportError::Filesystem(FsError::Io {
+                        operation: "canonicalize",
+                        path: root.clone(),
+                        source,
+                    })
+                }
+                Some(DiscoveryError::Unavailable) | None => GitTransportError::InvalidOutput {
+                    command: "repository root",
+                },
+            }
         })?;
         if git_root.to_str().is_none() {
             return Err(GitTransportError::InvalidOutput {
@@ -1338,6 +1365,67 @@ mod tests {
 
     struct CaptureCommandExecutor {
         argv: std::sync::Mutex<Option<Vec<OsString>>>,
+    }
+
+    struct DiscoveryFailureExecutor(u8);
+    impl Executor for DiscoveryFailureExecutor {
+        fn execute(&self, _: ExecOptions<'_>) -> std::result::Result<ExecOutcome, ExecError> {
+            if self.0 == 0 {
+                return Err(ExecError::Io {
+                    operation: "spawn",
+                    source: std::io::ErrorKind::NotFound.into(),
+                });
+            }
+            Ok(ExecOutcome {
+                termination: Termination::Exit(1),
+                stdout: CapturedStream::default(),
+                stderr: CapturedStream::default(),
+                timed_out: self.0 == 1,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: self.0 == 2,
+                elapsed_micros: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn repository_root_preserves_discovery_failure_categories() {
+        let fixture = Fixture::new();
+        for mode in 0..4 {
+            let executor = DiscoveryFailureExecutor(mode);
+            let transport = GitTransport {
+                executor: &executor,
+                git_executable: "/git".into(),
+                ssh_executable: "/ssh".into(),
+                ssh_auth_sock: None,
+                max_bundle_bytes: MAX_BUNDLE_BYTES,
+            };
+            let error = transport
+                .ensure_repo_root(fixture.root.path(), &fixture.cancel)
+                .unwrap_err();
+            match mode {
+                0 => assert!(matches!(
+                    error,
+                    GitTransportError::Execution(ExecError::Io {
+                        operation: "spawn",
+                        ..
+                    })
+                )),
+                1 | 2 => assert!(matches!(
+                    error,
+                    GitTransportError::IncompleteOutput {
+                        command: "repository root"
+                    }
+                )),
+                _ => assert!(matches!(
+                    error,
+                    GitTransportError::GitCommand {
+                        command: "repository root"
+                    }
+                )),
+            }
+        }
     }
     impl Executor for CaptureCommandExecutor {
         fn execute(&self, options: ExecOptions<'_>) -> std::result::Result<ExecOutcome, ExecError> {

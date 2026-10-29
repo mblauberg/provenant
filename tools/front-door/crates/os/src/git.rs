@@ -1,5 +1,5 @@
 //! Host Git executable selection shared by every product owner.
-use crate::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+use crate::exec::{ExecError, ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use std::{
     ffi::{OsStr, OsString},
     fs,
@@ -14,6 +14,26 @@ use std::{
 pub enum RepositoryPath {
     Toplevel,
     CommonDir,
+    GitDir,
+}
+
+/// Cause of a failed Git path discovery, stored inside the returned I/O error.
+#[derive(Debug, thiserror::Error)]
+pub enum DiscoveryError {
+    #[error("Git executable unavailable")]
+    Unavailable,
+    #[error("{0}")]
+    Execution(#[source] ExecError),
+    #[error("Git path discovery timed out")]
+    TimedOut,
+    #[error("Git path discovery cancelled")]
+    Cancelled,
+    #[error("Git path discovery output incomplete")]
+    Incomplete,
+    #[error("{0}")]
+    Command(String),
+    #[error("{0}")]
+    Canonicalize(#[source] io::Error),
 }
 
 /// A checkout marker, including paths only when its metadata is well formed.
@@ -66,7 +86,7 @@ fn read_marker_line(path: &Path) -> io::Result<String> {
 
 /// Resolve and validate a repository path without inheriting Git redirects.
 pub fn repository_path(cwd: &Path, field: RepositoryPath) -> io::Result<PathBuf> {
-    let git = git_executable().ok_or_else(|| io::Error::other("Git executable unavailable"))?;
+    let git = git_executable().ok_or_else(|| io::Error::other(DiscoveryError::Unavailable))?;
     let executor = SystemExecutor::new(1).map_err(io::Error::other)?;
     repository_path_with(&executor, &git, cwd, field)
 }
@@ -94,6 +114,7 @@ pub fn repository_path_with_cancel(
     let flag = match field {
         RepositoryPath::Toplevel => "--show-toplevel",
         RepositoryPath::CommonDir => "--git-common-dir",
+        RepositoryPath::GitDir => "--absolute-git-dir",
     };
     let argv: Vec<OsString> = [
         git.as_os_str(),
@@ -123,17 +144,22 @@ pub fn repository_path_with_cancel(
     ]
     .map(|(k, v)| (k.into(), v.into()))
     .into();
-    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(2));
+    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(30));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
-    options.stderr = StreamPolicy::Discard;
+    options.stderr = StreamPolicy::Capture { limit: 4096 };
     options.cancel = cancel;
     options.stop_on_output_limit = true;
-    let result = executor.execute(options).map_err(io::Error::other)?;
-    if result.termination != Termination::Exit(0)
-        || result.timed_out
-        || result.cancelled
-        || result.overflow_stopped
+    let result = executor
+        .execute(options)
+        .map_err(|error| io::Error::other(DiscoveryError::Execution(error)))?;
+    if result.timed_out {
+        return Err(io::Error::other(DiscoveryError::TimedOut));
+    }
+    if result.cancelled {
+        return Err(io::Error::other(DiscoveryError::Cancelled));
+    }
+    if result.overflow_stopped
         || result.drain_truncated
         || result.stdout.truncated
         || result.stdout.read_failed
@@ -143,7 +169,19 @@ pub fn repository_path_with_cancel(
         || result.stdout.decoder_lost_frames != 0
         || result.stdout.filter_failed
     {
-        return Err(io::Error::other("Git path discovery failed"));
+        return Err(io::Error::other(DiscoveryError::Incomplete));
+    }
+    if result.termination != Termination::Exit(0) {
+        let stderr = String::from_utf8_lossy(&result.stderr.bytes)
+            .trim()
+            .to_owned();
+        return Err(io::Error::other(DiscoveryError::Command(
+            if stderr.is_empty() {
+                "Git path discovery failed".to_owned()
+            } else {
+                stderr
+            },
+        )));
     }
     parse_repository_path(&result.stdout.bytes)
 }
@@ -159,7 +197,7 @@ fn parse_repository_path(output: &[u8]) -> io::Result<PathBuf> {
     if !path.is_absolute() {
         return Err(io::Error::other("relative Git path"));
     }
-    fs::canonicalize(path)
+    fs::canonicalize(path).map_err(|error| io::Error::other(DiscoveryError::Canonicalize(error)))
 }
 
 const CANDIDATES: [&str; 6] = [
@@ -288,6 +326,49 @@ mod tests {
     }
 
     #[test]
+    fn repository_path_preserves_git_stderr_and_timeout() {
+        struct Failure(bool);
+        impl Executor for Failure {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(1),
+                    stdout: CapturedStream::default(),
+                    stderr: CapturedStream {
+                        bytes: b"fatal: no checkout\n".to_vec(),
+                        ..Default::default()
+                    },
+                    timed_out: self.0,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let error = repository_path_with(
+            &Failure(false),
+            Path::new("/git"),
+            Path::new("/"),
+            RepositoryPath::CommonDir,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "fatal: no checkout");
+        let error = repository_path_with(
+            &Failure(true),
+            Path::new("/git"),
+            Path::new("/"),
+            RepositoryPath::CommonDir,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error
+                .get_ref()
+                .and_then(|e| e.downcast_ref::<DiscoveryError>()),
+            Some(DiscoveryError::TimedOut)
+        ));
+    }
+
+    #[test]
     fn repository_path_identifies_linked_worktree() {
         let temp = tempfile::tempdir().expect("temp dir");
         let main = temp.path().join("main");
@@ -320,6 +401,78 @@ mod tests {
                 fs::canonicalize(&common).unwrap()
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn repository_path_ignores_poisoned_environment_for_linked_worktree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::process::Command;
+
+        if let Some(root) = std::env::var_os("PROVENANT_GIT_DISCOVERY_TEST_ROOT") {
+            let root = Path::new(&root);
+            assert_eq!(
+                repository_path(&root.join("linked"), RepositoryPath::CommonDir)?,
+                fs::canonicalize(root.join("main/.git"))?
+            );
+            return Ok(());
+        }
+
+        let temp = tempfile::tempdir()?;
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        let poison = temp.path().join("poison");
+        fs::create_dir(&main)?;
+        fs::create_dir(&poison)?;
+        for (dir, args) in [
+            (&main, vec!["init", "-q"]),
+            (&poison, vec!["init", "-q"]),
+            (
+                &main,
+                vec![
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "fixture",
+                ],
+            ),
+        ] {
+            let output = crate::fixture::git_command()
+                .current_dir(dir)
+                .args(args)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let output = crate::fixture::git_command()
+            .current_dir(&main)
+            .args(["worktree", "add", "-qb", "linked"])
+            .arg(&linked)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let status = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "git::tests::repository_path_ignores_poisoned_environment_for_linked_worktree",
+            ])
+            .env("PROVENANT_GIT_DISCOVERY_TEST_ROOT", temp.path())
+            .env("GIT_DIR", poison.join(".git"))
+            .env("GIT_WORK_TREE", &poison)
+            .status()?;
+        assert!(status.success());
+        Ok(())
     }
 
     #[test]

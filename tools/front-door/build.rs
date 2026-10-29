@@ -111,7 +111,10 @@ impl TrackedFiles {
         let top_level = provenant_os::git::repository_path(
             workspace,
             provenant_os::git::RepositoryPath::Toplevel,
-        )?;
+        )
+        .map_err(|error| {
+            io::Error::other(format!("source inventory requires a git checkout: {error}"))
+        })?;
         if top_level != repository {
             return Err(invalid("source workspace is outside its expected git checkout").into());
         }

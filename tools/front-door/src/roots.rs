@@ -77,7 +77,20 @@ pub fn selected_project(selected: Option<&Path>, check: bool) -> Result<PathBuf,
     Ok(path)
 }
 fn git_checkout(path: &Path) -> Result<PathBuf, RootError> {
-    repository_path(path, RepositoryPath::Toplevel).map_err(|_| RootError::Checkout)
+    repository_path(path, RepositoryPath::Toplevel).map_err(discovery_error)
+}
+
+fn discovery_error(error: io::Error) -> RootError {
+    match error
+        .into_inner()
+        .and_then(|error| error.downcast::<provenant_os::git::DiscoveryError>().ok())
+    {
+        Some(error) => match *error {
+            provenant_os::git::DiscoveryError::Canonicalize(error) => RootError::Io(error),
+            _ => RootError::Checkout,
+        },
+        None => RootError::Checkout,
+    }
 }
 
 fn session_project(selected: Option<&Path>) -> Result<PathBuf, RootError> {
@@ -88,9 +101,8 @@ fn session_project(selected: Option<&Path>) -> Result<PathBuf, RootError> {
     let selected =
         selected_project(Some(selected), true).map_err(|_| RootError::SessionProjectMissing)?;
     if let Some(cwd) = cwd
-        && repository_path(&cwd, RepositoryPath::CommonDir).map_err(|_| RootError::Checkout)?
-            != repository_path(&selected, RepositoryPath::CommonDir)
-                .map_err(|_| RootError::Checkout)?
+        && repository_path(&cwd, RepositoryPath::CommonDir).map_err(discovery_error)?
+            != repository_path(&selected, RepositoryPath::CommonDir).map_err(discovery_error)?
     {
         return Err(RootError::SessionProjectMismatch { cwd, selected });
     }
@@ -219,6 +231,17 @@ fn home() -> Result<PathBuf, RootError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn discovery_canonicalize_error_remains_io() {
+        let cause = provenant_os::git::DiscoveryError::Canonicalize(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        ));
+        let error = super::discovery_error(std::io::Error::other(cause));
+        assert!(
+            matches!(error, super::RootError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
+        );
+    }
+
     #[test]
     fn root_errors_have_stable_codes() {
         use crate::roots::RootError;

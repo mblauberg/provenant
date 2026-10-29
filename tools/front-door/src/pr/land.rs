@@ -138,24 +138,26 @@ fn discover_checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
         }
     }
     let common =
-        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)?;
+        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)
+            .map_err(|error| format!("cannot find the common Git directory: {error}"))?;
     let primary = &checkouts.first().ok_or("no primary checkout")?.path;
-    let valid = |candidate: &Path| -> Result<bool> {
-        if roots::selected_project(Some(candidate), true)
+    let valid =
+        |candidate: &Path| -> Result<bool> {
+            if roots::selected_project(Some(candidate), true)
+                .ok()
+                .as_deref()
+                != Some(candidate)
+            {
+                return Ok(false);
+            }
+            Ok(provenant_os::git::repository_path(
+                candidate,
+                provenant_os::git::RepositoryPath::GitDir,
+            )
             .ok()
             .as_deref()
-            != Some(candidate)
-        {
-            return Ok(false);
-        }
-        let Some(private) = git.full(candidate, &["rev-parse", "--absolute-git-dir"])? else {
-            return Ok(false);
+                == Some(&common))
         };
-        Ok(fs::canonicalize(private.trim_end_matches('\n'))
-            .ok()
-            .as_deref()
-            == Some(&common))
-    };
     if valid(primary)? {
         return Ok(checkouts);
     }
@@ -228,9 +230,10 @@ enum Use {
 /// missing, unmounted or unreadable still holds its branch there. A missing
 /// state file means not held; any other read error or an unparseable entry is
 /// an error, which refuses the deletion.
-fn holder_of(_git: &Git, project: &Path, branch: &str) -> Result<Option<(String, Use)>> {
+fn holder_of(project: &Path, branch: &str) -> Result<Option<(String, Use)>> {
     let common =
-        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)?;
+        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)
+            .map_err(|error| format!("cannot find the common Git directory: {error}"))?;
     for dir in administrative_dirs(&common)? {
         if let Some(how) = use_in(&dir, branch)? {
             return Ok(Some((checkout_path(&dir, &common), how)));
@@ -648,7 +651,7 @@ fn delete_branch(
     // is rebasing or is bisecting, but it deletes whatever the branch holds by
     // then. Keep that refusal here and make the deletion itself conditional on
     // the merged head.
-    let holder = match holder_of(git, project, branch) {
+    let holder = match holder_of(project, branch) {
         Ok(holder) => holder,
         Err(error) => {
             return Ok(Step::new(
