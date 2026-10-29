@@ -1161,7 +1161,6 @@ mod tests {
                 peer_seconds: 30,
                 graph_timeout_seconds: 14400,
                 store_busy_timeout_ms: 30_000,
-                bundle_bytes: 67108864,
             },
         };
         for (name, host) in [("self", local), ("fixture", remote)] {

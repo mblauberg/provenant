@@ -8,6 +8,7 @@ use provenant_fabric_store::{
 };
 use provenant_os::exec::{SystemExecutor, Termination};
 use std::{
+    ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},

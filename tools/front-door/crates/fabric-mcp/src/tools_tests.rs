@@ -126,7 +126,6 @@ fn limits() -> Limits {
         peer_seconds: 30,
         graph_timeout_seconds: 14_400,
         store_busy_timeout_ms: 30_000,
-        bundle_bytes: 67_108_864,
     }
 }
 

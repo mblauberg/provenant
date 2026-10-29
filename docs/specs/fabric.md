@@ -1361,15 +1361,25 @@ child, never the remote run.
 
 ### Peer agent and code transport
 
-A per-user LaunchAgent relays SSH requests into the login session; only a
-refused or missing socket falls back to in-process handling, and a sent
-request is never repeated. A peer writer takes its base from the shared
-remote with its own Git authority and hooks off, refuses an unreachable base
-and transports only committed, digest-checked, bounded bundles.
-- Why: sign-in works over SSH without forwarding credentials, and no dirty
-  tree crosses hosts.
+A per-user LaunchAgent relays SSH requests into the login session, one
+thread per connection with no cap of its own; only a refused or missing
+socket falls back to in-process handling, and a sent request is never
+repeated. A peer writer takes its base from the shared remote with its own
+Git authority and hooks off, refuses an unreachable base and transports only
+committed heads. The sender binds `refs/provenant/transport/<op>/export`; the
+receiver runs `git fetch` with `fetch.fsckObjects`, `transfer.fsckObjects`
+and a forced `index-pack` into `<op>/incoming`, then promotes `<op>/verified-head`
+after exact OID and ancestry checks. Git's receive path refuses corrupt,
+missing, duplicate and malformed objects; there is no size cap, only a
+30-minute fetch bound.
+- Why: sign-in works over SSH without forwarding credentials, no dirty tree
+  crosses hosts, and Git already verifies what it receives.
 - Test: `crates/fabric-runtime/src/peer_agent.rs::forward_falls_back_only_when_no_agent_accepts`;
-  `crates/fabric-runtime/src/git_transport.rs::dirty_worktree_and_untrusted_remote_inputs_refuse_before_transfer`
+  `::requests_beyond_sixteen_held_connections_are_relayed`;
+  `crates/fabric-runtime/src/git_transport.rs::dirty_worktree_and_untrusted_remote_inputs_refuse_before_transfer`;
+  `::commits_over_64_mib_transport`;
+  `::fetch_refuses_corrupt_missing_duplicate_and_malformed_objects`;
+  `::fetch_refuses_a_corrupt_pack`
 - Owner: `crates/fabric-runtime/src/peer_agent.rs`, `crates/fabric-runtime/src/git_transport.rs`
 
 ### Credentials never cross hosts

@@ -423,7 +423,7 @@ where
     Ok(Option::<std::path::PathBuf>::deserialize(deserializer)?
         .filter(|path| !path.as_os_str().is_empty()))
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     pub body_bytes: u64,
@@ -437,7 +437,6 @@ pub struct Limits {
     pub peer_seconds: u64,
     #[serde(default = "default_graph_timeout_seconds")]
     pub graph_timeout_seconds: u64,
-    pub bundle_bytes: u64,
     /// Milliseconds a store waits for a contended lock; read through
     /// `provenant_config::StoreSettings` when a command starts.
     #[serde(default = "default_store_busy_timeout_ms")]
@@ -448,6 +447,65 @@ fn default_graph_timeout_seconds() -> u64 {
 }
 fn default_store_busy_timeout_ms() -> u64 {
     30_000
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LimitsConfig {
+    body_bytes: u64,
+    input_frame_bytes: u64,
+    json_depth: u64,
+    page_rows: u64,
+    output_lines: u64,
+    output_bytes: u64,
+    result_bytes: u64,
+    lease_seconds: u64,
+    peer_seconds: u64,
+    #[serde(default = "default_graph_timeout_seconds")]
+    graph_timeout_seconds: u64,
+    #[serde(default = "default_store_busy_timeout_ms")]
+    store_busy_timeout_ms: u64,
+    #[serde(
+        rename = "bundle_bytes",
+        default,
+        deserialize_with = "ignore_bundle_bytes"
+    )]
+    _bundle_bytes: Option<()>,
+}
+
+const BUNDLE_BYTES_WARNING: &str = "warning: domains.fabric.limits.bundle_bytes is deprecated and ignored; Git transport no longer uses bundle files";
+
+#[allow(clippy::print_stderr)]
+fn ignore_bundle_bytes<'de, D>(deserializer: D) -> Result<Option<()>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| eprintln!("{BUNDLE_BYTES_WARNING}"));
+    Ok(Some(()))
+}
+
+impl<'de> Deserialize<'de> for Limits {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let limits = LimitsConfig::deserialize(deserializer)?;
+        Ok(Self {
+            body_bytes: limits.body_bytes,
+            input_frame_bytes: limits.input_frame_bytes,
+            json_depth: limits.json_depth,
+            page_rows: limits.page_rows,
+            output_lines: limits.output_lines,
+            output_bytes: limits.output_bytes,
+            result_bytes: limits.result_bytes,
+            lease_seconds: limits.lease_seconds,
+            peer_seconds: limits.peer_seconds,
+            graph_timeout_seconds: limits.graph_timeout_seconds,
+            store_busy_timeout_ms: limits.store_busy_timeout_ms,
+        })
+    }
 }
 
 impl DomainConfig for FabricConfig {
@@ -558,7 +616,6 @@ impl DomainConfig for FabricConfig {
             ("result_bytes", l.result_bytes, 1048576),
             ("lease_seconds", l.lease_seconds, 3600),
             ("peer_seconds", l.peer_seconds, 30),
-            ("bundle_bytes", l.bundle_bytes, 67108864),
         ] {
             if value == 0 || value > cap {
                 reject(format!("limits.{field}"));
@@ -882,10 +939,23 @@ mod tests {
                 lease_seconds: 3600,
                 peer_seconds: 30,
                 graph_timeout_seconds: 14400,
-                bundle_bytes: 67108864,
                 store_busy_timeout_ms: 30_000,
             },
         }
+    }
+
+    #[test]
+    fn retired_bundle_bytes_config_still_loads_and_is_omitted() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["limits"]["bundle_bytes"] = 67_108_864.into();
+        let parsed: FabricConfig = serde_json::from_value(value).unwrap();
+        assert!(
+            !serde_json::to_value(parsed).unwrap()["limits"]
+                .as_object()
+                .unwrap()
+                .contains_key("bundle_bytes")
+        );
+        assert!(BUNDLE_BYTES_WARNING.contains("deprecated and ignored"));
     }
 
     #[test]
