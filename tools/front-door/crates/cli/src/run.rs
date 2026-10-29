@@ -438,6 +438,7 @@ fn assess_model_result(
         && decoded.complete
         && decoded
             .result
+            .trim_end()
             .lines()
             .last()
             .is_some_and(|line| line.trim() == "Status: incomplete")
@@ -6621,6 +6622,14 @@ mod tests {
                 .ok_or("missing continuation")?;
         assert!(continuation.resume);
         assert_eq!(continuation.max_attempts, 3);
+        // Trailing blank lines do not hide the marker.
+        decoded.result = "More work remains.\nStatus: incomplete\n\n".into();
+        assert!(
+            assess_model_result(&terra, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .is_some()
+        );
+        decoded.result = "More work remains.\nStatus: incomplete".into();
         decoded.outcome = run::Outcome::Uncommitted;
         assert!(
             assess_model_result(&terra, task, &record, &decoded, 1)?
