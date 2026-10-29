@@ -496,6 +496,59 @@ pub fn validate_intent(policy: &ModelPolicy, intent: RouteIntent) -> Result<(), 
 mod tests {
     use super::*;
 
+    /// The peak window and multiplier in `bundled_policy` are hard-coded; the
+    /// price file states them in a comment. Keep the two in step.
+    #[test]
+    fn deepseek_peak_window_matches_the_price_file() -> Result<(), Box<dyn std::error::Error>> {
+        let prices = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../config/telemetry-prices.toml"),
+        )?;
+        let model = "opencode/opencode-go/deepseek-v4.1-flash";
+        let block = prices
+            .split("[[models]]")
+            .find(|block| block.contains(&format!("model = \"{model}\"")))
+            .ok_or("price entry missing")?;
+        let comment = block
+            .lines()
+            .find(|line| line.contains("peak hours"))
+            .ok_or("peak comment missing")?;
+        let numbers = |text: &str| -> Vec<i64> {
+            text.split(|c: char| !c.is_ascii_digit())
+                .filter_map(|part| part.parse().ok())
+                .collect()
+        };
+        let (window, rest) = comment
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .ok_or("peak window missing")?;
+        let hours = numbers(window.split("UTC").next().unwrap_or_default());
+        assert_eq!(hours.len(), 4, "{comment}");
+        assert!(window.contains("Monday to Friday"), "{comment}");
+        let multiplier = numbers(rest)
+            .first()
+            .copied()
+            .ok_or("multiplier missing")? as f64;
+        let model = ModelId::parse(model)?;
+        // 1970-01-05 is a Monday; sample every hour of a full week.
+        let monday = 4 * 86_400;
+        for hour in 0..7 * 24 {
+            let at = monday + hour * 3600;
+            let weekday = (hour / 24) < 5;
+            let hour_of_day = hour % 24;
+            let peak = weekday
+                && ((hours[0]..hours[1]).contains(&hour_of_day)
+                    || (hours[2]..hours[3]).contains(&hour_of_day));
+            let expected = if peak { multiplier } else { 1.0 };
+            assert_eq!(
+                bundled_policy(&model, at).cache.price_multiplier,
+                Some(expected),
+                "hour {hour}"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn model_account_layers_schedules_and_expiry() -> Result<(), Box<dyn std::error::Error>> {
         let policies: ModelPolicies = toml_edit::de::from_str(
