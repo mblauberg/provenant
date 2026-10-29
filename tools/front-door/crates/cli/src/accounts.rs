@@ -256,6 +256,7 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             priority: *priority,
             billing_anchor: billing_anchor.clone(),
             plans: Vec::new(),
+            directories: Vec::new(),
             limits: None,
             display_name: None,
             hidden: false,
@@ -288,6 +289,7 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
                 .or_else(|| previous.billing_anchor.clone());
             entry.limits = previous.limits.clone();
             entry.plans = previous.plans.clone();
+            entry.directories = previous.directories.clone();
             entry.display_name = previous.display_name.clone();
             entry.hidden = previous.hidden;
             entry.order = previous.order;
@@ -418,6 +420,13 @@ fn write_settings(root: &Directory, settings: &Settings) -> Result<(), String> {
         if let Some(value) = e.headline {
             row["headline"] = toml_edit::value(headline_name(value));
         }
+        if !e.directories.is_empty() {
+            let mut list = toml_edit::Array::new();
+            for d in &e.directories {
+                list.push(d.to_str().ok_or("account path encoding")?);
+            }
+            row["directories"] = toml_edit::value(list);
+        }
         if !e.plans.is_empty() {
             let mut plans = toml_edit::ArrayOfTables::new();
             for plan in &e.plans {
@@ -425,6 +434,9 @@ fn write_settings(root: &Directory, settings: &Settings) -> Result<(), String> {
                 table["name"] = toml_edit::value(&plan.name);
                 table["price"] = toml_edit::value(plan.price);
                 table["currency"] = toml_edit::value(&plan.currency);
+                if let Some(value) = plan.notional_usd {
+                    table["notional_usd"] = toml_edit::value(value);
+                }
                 table["effective_from"] = toml_edit::value(&plan.effective_from);
                 plans.push(table);
             }
@@ -552,6 +564,7 @@ mod tests {
             priority: None,
             billing_anchor: None,
             plans: Vec::new(),
+            directories: Vec::new(),
             limits: None,
             display_name: None,
             hidden: false,

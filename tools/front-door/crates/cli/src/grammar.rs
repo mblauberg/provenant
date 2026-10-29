@@ -1099,7 +1099,7 @@ fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
         .map_err(|_| "expected a date or RFC3339 timestamp with an offset")
 }
 /// A positive whole number of seconds ago, a date or an RFC3339 timestamp.
-fn since(value: &str) -> Result<jiff::Timestamp, String> {
+pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
     if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
         let seconds = value
             .parse::<i64>()

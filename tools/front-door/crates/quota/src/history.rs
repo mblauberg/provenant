@@ -160,12 +160,21 @@ pub fn encode_line(record: &HistoryRecord) -> Result<Vec<u8>, serde_json::Error>
 #[serde(deny_unknown_fields)]
 pub struct PlanPrice {
     pub name: String,
-    /// Price per month in `currency`.
+    /// Price per month in `currency`; 0 for a free plan. `price_usd` is accepted as a name.
+    #[serde(alias = "price_usd")]
     pub price: f64,
-    /// ISO 4217 code, for example USD or AUD.
+    /// ISO 4217 code; USD when omitted.
+    #[serde(default = "usd")]
     pub currency: String,
+    /// What a free or discounted plan would cost at list price, in USD.
+    #[serde(default)]
+    pub notional_usd: Option<f64>,
     /// First day the price applies, as YYYY-MM-DD.
     pub effective_from: String,
+}
+
+fn usd() -> String {
+    "USD".into()
 }
 
 impl PlanPrice {
@@ -179,6 +188,9 @@ impl PlanPrice {
             && self.price.is_finite()
             && self.price >= 0.0
             && self.price <= 1_000_000.0
+            && self
+                .notional_usd
+                .is_none_or(|n| n.is_finite() && (0.0..=1_000_000.0).contains(&n))
             && self.currency.len() == 3
             && self.currency.bytes().all(|b| b.is_ascii_uppercase())
             && self.date().is_some()
@@ -248,6 +260,7 @@ mod tests {
             name: name.into(),
             price,
             currency: "USD".into(),
+            notional_usd: None,
             effective_from: from.into(),
         }
     }
@@ -395,5 +408,16 @@ mod tests {
         bad.currency = "usd".into();
         assert!(!valid_plans(&[bad]));
         assert!(!valid_plans(&[plan("", 1.0, "2026-01-01")]));
+        let mut free = plan("student", 0.0, "2026-01-01");
+        free.notional_usd = Some(20.0);
+        assert!(valid_plans(&[free.clone()]));
+        free.notional_usd = Some(-1.0);
+        assert!(!valid_plans(&[free]));
+        let parsed: PlanPrice = serde_json::from_str(
+            r#"{"name":"s","price_usd":0,"notional_usd":20,"effective_from":"2026-01-01"}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.currency, "USD");
+        assert_eq!(parsed.notional_usd, Some(20.0));
     }
 }

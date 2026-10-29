@@ -2736,6 +2736,38 @@ bounds are null. Positional arguments have no long flag.
 }
 ```
 
+## `provenant quota history`
+
+| Argument | Contract |
+|---|---|
+| `--account` | `{"name": "account"}` |
+| `--since` | `{"name": "since"}` |
+| `--until` | `{"name": "until"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["1000"], "name": "limit"}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "account",
+        "since",
+        "until",
+        "limit"
+      ],
+      "multiple": true,
+      "name": "History",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant quota display`
 
 | Argument | Contract |

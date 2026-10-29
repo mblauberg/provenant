@@ -1076,6 +1076,7 @@ fn main() -> Result<()> {
                 priority: None,
                 billing_anchor: None,
                 plans: Vec::new(),
+                directories: Vec::new(),
                 limits: None,
                 display_name: None,
                 hidden: false,

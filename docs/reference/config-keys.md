@@ -18,6 +18,31 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 | `build_dir_grace_seconds` | 900 (15 minutes) | A profile directory whose newest file or directory modification is within this many seconds is never removed, even when its Cargo locks are free: test and run binaries execute after Cargo drops its locks, and Cargo may be opening its lock files. Zero removes the protection. It protects only recently written directories: a test or run binary that runs longer than the grace without writing under target/ is unprotected unless a Cargo lock is still held. (seconds, 0 or more). |
 | `build_dir_survey_interval_seconds` | 300 (5 minutes) | Settlement-triggered collection walks the lane caches at most this often, unless free space is below gc.free_floor or the last walk found the total within 10% of the cap. While free space stays below the floor, every settlement walks. Zero walks on every settlement. (seconds, 0 or more). |
 
+## Quota history and plan prices
+
+Set the cap in `[domains.quota]`; set prices per account as shown.
+
+| Key | Default | Effect |
+|---|---|---|
+| `history_max_bytes` | 4194304 (4 MiB) | Disk cap for each account's quota history under quota/history/. Readings go to a current file that rotates to one predecessor at half the cap, so the pair never exceeds it and the newest reading is always kept. (65536 to 1073741824 bytes). |
+
+### Account plan prices
+
+```json
+{
+  "effect": "Prices over time for the account. The entry with the latest effective_from on or before a reading applies to it, and quota history --json shows it as plan_price, with price and notional_usd. Dates must differ within an account; unknown keys, negative or non-finite prices and bad dates refuse the config. This is not the detected plan label, which comes from the provider or the account's plan option.",
+  "fields": {
+    "currency": "Three capital letters (ISO 4217). USD when omitted. No conversion is applied.",
+    "effective_from": "First day the price applies, YYYY-MM-DD (UTC).",
+    "name": "Plan label, for example max_5x. At most 64 characters.",
+    "notional_usd": "Optional list-price value in USD of a free or discounted plan, for example 20 for a student plan priced 0.",
+    "price": "Price per month in currency; 0 or more, 0 for a free plan. price_usd is accepted as a name."
+  },
+  "form": "array of tables, any number of entries",
+  "path": "domains.accounts.entries.<id>.plans"
+}
+```
+
 ## Provider updates
 
 ```json

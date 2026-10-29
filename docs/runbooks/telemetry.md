@@ -83,6 +83,52 @@ then shows quota. `provenant telemetry stats --usage` reports local invocation
 counts. Quota is admission advice; a reset or bookkeeping failure never grants
 permission to stop a healthy provider.
 
+### Quota history
+
+The snapshot file for each account is overwritten on every refresh. To keep
+the series, each refresh also appends one record to
+`quota/history/<account_key>.<adapter>.jsonl` when the reading differs from the
+last one. An identical reading appends nothing. A record holds the observed
+time, account key and label, provider, the plan the account reports, every
+window (pool, window seconds, used basis points, reset time), credit balance
+and reset credits. It marks a `reset` when a window's use falls or its reset
+time advances, and a `plan.change` when the plan label changes between two
+known values. `tier` is null until a provider response carries one. Records
+hold no credentials, provider payloads or prompt text. Nothing is backfilled,
+and no provider call is added: readings are what the existing refresh already
+fetches, so resolution is the refresh cadence.
+
+Appends run under `quota.lock`, so lines never interleave. The file rotates to
+`.jsonl.1` at half `domains.quota.history_max_bytes` (4 MiB by default, so the
+pair stays under the cap) and the newest record always lands in the current
+file. Readers skip torn lines.
+
+`provenant quota history [--account LABEL] [--since T] [--until T] [--limit N]
+[--json]` lists readings, oldest first, newest `--limit` kept. `--account`
+takes a label or key. Times are seconds ago, a date or an RFC3339 timestamp.
+`--json` returns `schema_version`, `count`, `matched`, `truncated` and
+`readings`; each reading adds `plan_price`, the account's price in force at
+that reading, or null.
+
+Set prices in `config.toml` as an array of tables per account, one entry per
+price change, so a rise or a plan switch keeps the old figures:
+
+```toml
+[[domains.accounts.entries.claude-work.plans]]
+name = "max_5x"
+price = 100.0
+currency = "USD"
+effective_from = "2026-01-01"
+```
+
+Prices are USD unless `currency` says otherwise (`price_usd` is accepted as
+the name of `price`), and nothing converts currencies. A free plan has
+`price = 0` and may carry `notional_usd`, the list price it replaces; history
+shows both. An account may also list extra `directories` signed into it; they
+are schema only until native ingest lands. The keys are listed in
+[config keys](../reference/config-keys.md). No value or mileage report reads
+this yet.
+
 ## Routing
 
 `provenant route list` shows the catalogue and pools. Select a route or exact

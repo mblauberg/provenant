@@ -7,6 +7,7 @@ pub mod console;
 pub mod domains;
 pub mod fabric;
 pub mod quota;
+mod quota_history;
 pub mod route;
 pub mod run;
 pub mod workflow;
