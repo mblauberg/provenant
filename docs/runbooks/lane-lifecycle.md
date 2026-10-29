@@ -18,10 +18,14 @@ lanes, newest first. `--json` returns full records for the same selection.
 Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
 
 New stdout/stderr captures and settled `result.md` files mask known credential
-shapes before storage. Result digests identify the stored bytes, and
-`redacted: true` means the filter was applied even when nothing matched.
-Unknown secret formats, earlier run files and provider-owned session state
-still need care when sharing. See [output redaction and identity](../specs/run.md#output-redaction-and-identity).
+shapes before storage. Settlement also masks them in the attempt's Codex and
+Claude session transcripts before provider state is retained or archived.
+Result digests identify the stored bytes, and `redacted: true` means the stored
+result is a filtered rendering or the fixed withheld placeholder. A redaction
+failure withholds the result and settles the lane failed instead of retrying
+forever. Unknown secret formats, earlier run files and provider history archived
+before this rule still need care when sharing. See
+[output redaction and identity](../specs/run.md#output-redaction-and-identity).
 
 A valid final handoff declaring `stopped_early` or `blocked` makes an otherwise
 successful lane settle as `review_required`. `run --wait` and `lanes` show the

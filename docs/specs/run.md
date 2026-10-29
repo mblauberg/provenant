@@ -913,27 +913,52 @@ refuses unsafe companion files beside the database, and caps (1 MiB record or pr
 
 ### Output redaction and identity
 
-The guardian applies independent streaming known-shape redactors to stdout
-and stderr before retaining bytes or writing captures to disk. Split credential
-markers remain buffered across chunks. A filter failure discards that stream's
-remaining output. Provider lifecycle frames are decoded before filtering.
-At settlement, the holder filters the decoded result again before sealing
-`result.md`, including credential markers revealed by JSON escapes. A result
-redaction failure refuses publication rather than storing the raw answer.
+Known credential shapes are filtered at three sites. First, the guardian
+applies independent streaming redactors to stdout and stderr before retaining
+bytes or writing captures to disk. Split credential markers remain buffered
+across chunks. A filter failure discards that stream's remaining output.
+Provider lifecycle frames are decoded before filtering.
+
+Second, at settlement the holder filters the decoded result again before
+sealing `result.md`, including credential markers revealed by JSON escapes. It
+also rewrites provider-owned session transcripts in the attempt's private
+provider state in place: Codex `sessions` and `archived_sessions` rollouts,
+Codex `history.jsonl` and `session_index.jsonl`, and Claude
+`claude-config/projects` sessions. Only `.jsonl` transcripts are rewritten;
+binary history databases, credentials, cache trees and links are untouched.
+Masking a shape keeps the surrounding transcript usable for resume. Earlier
+run files and provider history archived by an earlier settlement are not
+rewritten.
+
+Third, result-only orphan recovery preserves the sealed bytes and their digest
+instead of rewriting an answer it did not filter. It reports `redacted: false`
+when those bytes still contain a known credential shape or cannot be safely
+filtered, so such an orphan keeps its plaintext until retention prunes the
+attempt's evidence and is never presented as redacted.
+
+A result or session redaction failure at settlement does not return a
+validation error or block terminal publication: the attempt settles `failed`
+with the fixed result `[result withheld: redaction failed]` and reason
+`redaction failed; result withheld`, and cannot repeat the failure. A
+result-only orphan is the exception named above: recovery keeps its sealed
+bytes with `redacted: false` rather than substituting the placeholder.
 
 Result artifact `digest` and `bytes` identify the stored, redacted bytes;
 there is no raw result copy or raw-result digest. Newly sealed holder results set
-`redacted: true` to mean that redaction was applied, even when no credential
-matched. It is not a count of replacements or a guarantee against unknown
-secret formats. This does not rewrite earlier run files or provider-owned
-session state. Result-only orphan recovery preserves sealed bytes and their
-digest; it clears a proposed `redacted: true` if those bytes still contain a
-known credential shape or cannot be safely filtered.
+`redacted: true` to mean that the stored bytes are a filtered rendering or the
+fixed placeholder, even when no credential matched. It is not a count of
+replacements or a guarantee against unknown secret formats.
 - Test: `src/compose_tests.rs::guardian_capture_masks_split_credentials_before_retention`;
   `crates/run/src/dispatch_tests.rs::holder_seals_redacted_results_and_digests_the_stored_bytes`;
+  `::settlement_scrubs_provider_session_history`;
+  `::unredactable_result_settles_failed_with_a_placeholder`;
+  `::orphan_result_with_plaintext_settles_once_and_preserves_its_bytes`;
   `crates/run/src/tests.rs::result_orphan_redaction_flag_describes_the_preserved_bytes`;
+  `crates/confinement/src/redact.rs::tests::settlement_scrub_removes_tokens_from_session_text_and_keeps_binaries`;
+  `::session_scrub_skips_links_and_leaves_clean_transcripts_alone`;
   `tests/dispatch_provider.rs::printed_credentials_leave_no_plaintext_in_run_files`
-- Owner: `src/lib.rs`, `crates/run/src/holder.rs`, `crates/run/src/store.rs`
+- Owner: `src/lib.rs`, `crates/run/src/holder.rs`, `crates/run/src/store.rs`,
+  `crates/confinement/src/redact.rs`
 
 `output` scans the whole artifact for known shapes before paging, including
 older artifacts. Its offsets and digest refer to those filtered bytes. Prompt

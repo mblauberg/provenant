@@ -3017,6 +3017,177 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn settlement_scrubs_provider_session_history() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let attempt = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let codex = attempt.join("provider-state/candidate-0/sessions/2026/10/24");
+    std::fs::create_dir_all(&codex)?;
+    let rollout = codex.join("rollout-2026-10-24T00-00-00-thread.jsonl");
+    std::fs::write(
+        &rollout,
+        format!("{{\"type\":\"response_item\",\"payload\":{{\"content\":\"printed {token}\"}}}}\n"),
+    )?;
+    let claude = attempt.join("provider-state/candidate-0/claude-config/projects/key");
+    std::fs::create_dir_all(&claude)?;
+    let session = claude.join("session.jsonl");
+    std::fs::write(&session, format!("{{\"message\":\"{token}\"}}\n"))?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        answer: Some("answer".into()),
+        ..Fake::default()
+    };
+
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Succeeded,
+            ..
+        }
+    ));
+    for path in [&rollout, &session] {
+        let text = std::fs::read_to_string(path)?;
+        assert!(
+            !text.contains(token),
+            "session plaintext survived settlement in {path:?}"
+        );
+        assert!(text.contains("[REDACTED]"));
+    }
+    Ok(())
+}
+
+#[test]
+fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let answer = format!("http://{}", "a".repeat(provenant_os::exec::FRAME_LIMIT + 1));
+    let fake = Fake {
+        observed: Some(route()),
+        answer: Some(answer),
+        ..Fake::default()
+    };
+
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = &record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(*outcome, Outcome::Failed);
+    assert_eq!(reason.as_deref(), Some("redaction failed; result withheld"));
+    assert_eq!(
+        artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
+        Some(b"[result withheld: redaction failed]".as_slice())
+    );
+    assert!(record.result.ok_or("result")?.redacted);
+    // A repeat settlement returns the same terminal record instead of looping.
+    let repeat = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert_eq!(repeat.revision, record.revision);
+    Ok(())
+}
+
+#[test]
+fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    artifacts::seal(&dir, "result.md", token.as_bytes(), RESULT_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        // The recomputed rendering cannot be filtered; the sealed orphan is
+        // still preserved with an honest redaction flag rather than rewritten.
+        answer: Some(format!(
+            "http://{}",
+            "a".repeat(provenant_os::exec::FRAME_LIMIT + 1)
+        )),
+        ..Fake::default()
+    };
+
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Failed,
+            ..
+        }
+    ));
+    let result = record.result.as_ref().ok_or("result")?;
+    assert!(!result.redacted);
+    assert_eq!(
+        artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
+        Some(token.as_bytes())
+    );
+    // Orphan recovery reaches a terminal state once; a repeat is a no-op.
+    let repeat = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert_eq!(repeat.revision, record.revision);
+    Ok(())
+}
+
 const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Parser done; renderer and tests remain.\"}\n```";
 
 #[test]

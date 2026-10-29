@@ -3,7 +3,12 @@
 //! Exact literal prefixes and incomplete token markers stay buffered across
 //! chunks. The capture filter's EOF hook releases any unmatched tail.
 use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
+use provenant_os::fs::{Directory, FileKind};
 use std::collections::{BTreeMap, VecDeque};
+use std::ffi::OsStr;
+use std::io::{Read, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 const REDACTED: &[u8] = b"[REDACTED]";
@@ -469,6 +474,194 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
     Ok(safe)
 }
 
+const SESSION_CHUNK: usize = 32 * 1024;
+const SESSION_DEPTH: u8 = 8;
+const SESSION_ENTRIES: usize = 100_000;
+const SESSION_STAGING: &str = ".session-redact-";
+static SESSION_STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Post-process provider-owned session text under an attempt's private state.
+///
+/// Codex writes rollouts and history files and Claude writes project sessions
+/// there, so a credential a lane printed can survive in a transcript even when
+/// captures and the result are filtered. Only `.jsonl` transcripts in the known
+/// session layouts are rewritten in place; binary stores, credentials, cache
+/// trees and links are never touched. A file without a known shape is left as
+/// it is. Returns the number of rewritten files.
+pub fn scrub_session_history(root: &Path) -> Result<usize, FilterError> {
+    let state = match Directory::open_anchor(root) {
+        Ok(state) => state,
+        Err(error) if error.is_not_found() => return Ok(0),
+        Err(_) => return Err(FilterError),
+    };
+    let mut rewritten = 0;
+    scrub_layout(&state, &mut rewritten)?;
+    let mut entries = 0;
+    for candidate in state.entries().map_err(|_| FilterError)? {
+        let candidate = candidate.map_err(|_| FilterError)?;
+        let is_candidate = candidate.to_str().is_some_and(|name| {
+            name.strip_prefix("candidate-")
+                .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+        });
+        if !is_candidate {
+            continue;
+        }
+        entries += 1;
+        if entries > 64 {
+            return Err(FilterError);
+        }
+        let candidate = state
+            .open_verified_directory(&candidate)
+            .map_err(|_| FilterError)?;
+        scrub_layout(&candidate, &mut rewritten)?;
+    }
+    Ok(rewritten)
+}
+
+fn scrub_layout(dir: &Directory, rewritten: &mut usize) -> Result<(), FilterError> {
+    for name in ["sessions", "archived_sessions"] {
+        if let Some(sessions) = subdirectory(dir, name)? {
+            scrub_tree(&sessions, 0, rewritten)?;
+        }
+    }
+    for name in ["history.jsonl", "session_index.jsonl"] {
+        if let Some(file) = regular_file(dir, name)?
+            && scrub_file(dir, &file)?
+        {
+            *rewritten += 1;
+        }
+    }
+    if let Some(config) = subdirectory(dir, "claude-config")? {
+        if let Some(projects) = subdirectory(&config, "projects")? {
+            scrub_tree(&projects, 0, rewritten)?;
+        }
+        for name in ["history.jsonl", "session_index.jsonl"] {
+            if let Some(file) = regular_file(&config, name)?
+                && scrub_file(&config, &file)?
+            {
+                *rewritten += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scrub_tree(dir: &Directory, depth: u8, rewritten: &mut usize) -> Result<(), FilterError> {
+    if depth > SESSION_DEPTH {
+        return Err(FilterError);
+    }
+    let mut entries = 0;
+    for entry in dir.entries().map_err(|_| FilterError)? {
+        let entry = entry.map_err(|_| FilterError)?;
+        entries += 1;
+        if entries > SESSION_ENTRIES {
+            return Err(FilterError);
+        }
+        let metadata = dir.metadata_at(&entry, false).map_err(|_| FilterError)?;
+        match metadata.kind {
+            FileKind::Directory => {
+                let child = dir
+                    .open_verified_directory(&entry)
+                    .map_err(|_| FilterError)?;
+                scrub_tree(&child, depth + 1, rewritten)?;
+            }
+            FileKind::Regular if is_jsonl(&entry) && scrub_file(dir, &entry)? => {
+                *rewritten += 1;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn subdirectory(dir: &Directory, name: &str) -> Result<Option<Directory>, FilterError> {
+    match dir.metadata_at(OsStr::new(name), false) {
+        Ok(metadata) if metadata.kind == FileKind::Directory => dir
+            .open_verified_directory(OsStr::new(name))
+            .map(Some)
+            .map_err(|_| FilterError),
+        Ok(_) => Ok(None),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(_) => Err(FilterError),
+    }
+}
+
+fn regular_file(dir: &Directory, name: &str) -> Result<Option<std::ffi::OsString>, FilterError> {
+    match dir.metadata_at(OsStr::new(name), false) {
+        Ok(metadata) if metadata.kind == FileKind::Regular => Ok(Some(OsStr::new(name).into())),
+        Ok(_) => Ok(None),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(_) => Err(FilterError),
+    }
+}
+
+fn is_jsonl(name: &OsStr) -> bool {
+    name.to_str().is_some_and(|name| name.ends_with(".jsonl"))
+}
+
+/// Rewrite one transcript through the streaming filter, replacing the entry
+/// only when a shape matched. A file that changes while it is read fails
+/// closed; a link or hard link is refused rather than followed.
+fn scrub_file(dir: &Directory, name: &OsStr) -> Result<bool, FilterError> {
+    let before = dir.metadata_at(name, false).map_err(|_| FilterError)?;
+    if before.kind != FileKind::Regular || before.links != 1 {
+        return Err(FilterError);
+    }
+    let mut source = dir.open_read(name).map_err(|_| FilterError)?;
+    let opened = source.metadata().map_err(|_| FilterError)?;
+    if !before.unchanged(&opened) {
+        return Err(FilterError);
+    }
+    let staging = staging_name();
+    let staging = OsStr::new(&staging);
+    let mut target = dir.create_new(staging).map_err(|_| FilterError)?;
+    let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+    let mut buffer = [0_u8; SESSION_CHUNK];
+    let copied = (|| -> Result<(), FilterError> {
+        loop {
+            let read = source.read(&mut buffer).map_err(|_| FilterError)?;
+            if read == 0 {
+                break;
+            }
+            let filtered = redactor.filter(&buffer[..read])?;
+            target.write_all(&filtered).map_err(|_| FilterError)?;
+        }
+        let tail = redactor.finish()?;
+        target.write_all(&tail).map_err(|_| FilterError)?;
+        target.sync().map_err(|_| FilterError)?;
+        Ok(())
+    })();
+    if let Err(error) = copied {
+        let _ = dir.unlink(staging);
+        return Err(error);
+    }
+    let after = source.metadata().map_err(|_| FilterError)?;
+    if !opened.unchanged(&after) {
+        let _ = dir.unlink(staging);
+        return Err(FilterError);
+    }
+    drop(source);
+    if redactor.has_redaction() {
+        if dir.replace(staging, dir, name).is_err() {
+            let _ = dir.unlink(staging);
+            return Err(FilterError);
+        }
+        dir.sync().map_err(|_| FilterError)?;
+        Ok(true)
+    } else {
+        let _ = dir.unlink(staging);
+        Ok(false)
+    }
+}
+
+fn staging_name() -> String {
+    format!(
+        "{SESSION_STAGING}{}-{}",
+        std::process::id(),
+        SESSION_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// Redact delivery diagnostics, including every URL or scp-style remote
 /// username. Those fields can contain credentials even when no password is
 /// present. The common filter handles the other credential shapes first.
@@ -699,5 +892,64 @@ mod tests {
             Redactor::new([vec![b'x'; MAX_SECRET_LENGTH + 1]]).err(),
             Some(RedactorError::SecretTooLong)
         );
+    }
+
+    #[test]
+    fn settlement_scrub_removes_tokens_from_session_text_and_keeps_binaries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let codex = root.join("candidate-0/sessions/2026/10/24");
+        std::fs::create_dir_all(&codex)?;
+        let rollout = codex.join("rollout-2026-10-24T00-00-00-thread.jsonl");
+        std::fs::write(
+            &rollout,
+            format!(
+                "{{\"type\":\"response_item\",\"payload\":{{\"content\":\"printed {token} and kept\"}}}}\n"
+            ),
+        )?;
+        let claude = root.join("candidate-0/claude-config/projects/key");
+        std::fs::create_dir_all(&claude)?;
+        let session = claude.join("session.jsonl");
+        std::fs::write(
+            &session,
+            format!("{{\"message\":{{\"content\":\"{token}\"}},\"keep\":\"claude\"}}\n"),
+        )?;
+        let history = root.join("candidate-0/history.jsonl");
+        std::fs::write(&history, format!("{token}\n"))?;
+        let database = root.join("candidate-0/thread_history_1.sqlite");
+        std::fs::write(&database, token)?;
+
+        assert_eq!(scrub_session_history(root)?, 3);
+        for path in [&rollout, &session, &history] {
+            let text = std::fs::read_to_string(path)?;
+            assert!(!text.contains(token), "plaintext survived in {path:?}");
+            assert!(text.contains("[REDACTED]"));
+        }
+        assert!(std::fs::read_to_string(&rollout)?.contains("and kept"));
+        assert_eq!(std::fs::read(&database)?, token.as_bytes());
+        serde_json::from_str::<serde_json::Value>(std::fs::read_to_string(&rollout)?.trim())?;
+        Ok(())
+    }
+
+    #[test]
+    fn session_scrub_skips_links_and_leaves_clean_transcripts_alone()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let outside = root.join("outside.jsonl");
+        std::fs::write(&outside, token)?;
+        let sessions = root.join("candidate-0/sessions");
+        std::fs::create_dir_all(&sessions)?;
+        std::os::unix::fs::symlink(&outside, sessions.join("linked.jsonl"))?;
+        let clean = sessions.join("clean.jsonl");
+        std::fs::write(&clean, b"{\"content\":\"ordinary\"}\n")?;
+
+        assert_eq!(scrub_session_history(root)?, 0);
+        assert_eq!(std::fs::read(&outside)?, token.as_bytes());
+        assert_eq!(std::fs::read(&clean)?, b"{\"content\":\"ordinary\"}\n");
+        Ok(())
     }
 }
