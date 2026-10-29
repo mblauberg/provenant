@@ -27,12 +27,12 @@ fn reservation_listing_isolates_an_inaccessible_slot() -> TestResult {
 }
 
 #[test]
-fn admission_ignores_predecessor_evidence_but_shares_writer_exclusion() -> TestResult {
+fn admission_uses_flock_and_retains_predecessor_evidence() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");
     std::fs::create_dir(&path)?;
     let slot = Directory::open_anchor(&path)?;
-    for name in ["reservation.json", "ownership.json", "settlement.json"] {
+    for name in ["ownership.json", "settlement.json"] {
         std::fs::write(path.join(name), b"retired malformed registry record")?;
     }
     let first = acquire(&path)?;
@@ -91,6 +91,25 @@ fn admission_ignores_predecessor_evidence_but_shares_writer_exclusion() -> TestR
     assert!(matches!(admit(), Err(CustodyError::Busy)));
     recovery.withdraw_prepared()?;
     admit()?.withdraw_unlaunched()?;
+    Ok(())
+}
+
+#[test]
+fn reservation_listing_surfaces_a_legacy_slot_root_reservation() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("writer");
+    std::fs::create_dir(&path)?;
+    drop(acquire(&path)?);
+    std::fs::write(path.join("reservation.json"), b"legacy crash evidence")?;
+    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
+    assert_eq!(listing.reservations.len(), 1);
+    assert_eq!(listing.reservations[0].scope, scope());
+    assert_eq!(listing.issues.len(), 1);
+    assert_eq!(
+        listing.issues[0].reservation,
+        PathBuf::from("writer/reservation.json")
+    );
+    assert!(listing.issues[0].reason.contains("legacy"));
     Ok(())
 }
 

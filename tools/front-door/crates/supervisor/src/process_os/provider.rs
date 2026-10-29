@@ -1104,6 +1104,107 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn provider_descendant_keeps_writer_flock_after_parent_handles_close()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::custody::{CustodyError, Scope};
+        use provenant_core::{AttemptId, CancelToken, Clock, RunId, WaitBudget};
+        use provenant_os::{clock::SystemClock, fs::Directory};
+
+        let root = tempfile::tempdir()?;
+        let directory = Directory::open_anchor(root.path())?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let scope = Scope {
+            run: RunId::from_bytes([1; 16]),
+            attempt: AttemptId::from_bytes([2; 16]),
+            generation: 1,
+        };
+        let writer = crate::fixture::acquire_writer(
+            directory.try_clone()?,
+            scope,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?;
+        let lease = writer.lease.as_ref().ok_or("missing writer lease")?;
+        // SAFETY: the lease owns this live fd; F_GETFD only reads its flags.
+        let flags = unsafe { libc::fcntl(lease.handoff_file().as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        let argv: Vec<OsString> = ["/bin/sh", "-c", "/bin/sh -c 'printf R; read line'; :"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let env = [(OsString::from("PATH"), OsString::from("/bin:/usr/bin"))];
+        let boot = super::super::census::SystemProcessObserver::boot_identity()?;
+        let mut group = ProviderGroup::spawn(
+            provenant_os::sys::raw_exec::SpawnSpec {
+                argv: &argv,
+                env: Some(&env),
+                cwd: root.path(),
+                input: true,
+                secret_input: None,
+                inherited_lease: None,
+                process_group: false,
+                capture_stdout: true,
+                capture_stderr: false,
+            },
+            lease,
+            &boot,
+            0,
+        )?;
+        let mut ready = [0];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match group
+                .stdout
+                .as_mut()
+                .ok_or("missing stdout")?
+                .read(&mut ready)
+            {
+                Ok(1) => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                other => return Err(format!("descendant readiness: {other:?}").into()),
+            }
+            assert!(Instant::now() < deadline, "descendant never became ready");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(ready, [b'R']);
+        // Close the guardian's copy and kill the provider, leaving only its
+        // exec'd descendant holding the inherited open file description.
+        drop(writer);
+        let provider = group.child.as_mut().ok_or("missing provider")?;
+        provider.kill()?;
+        provider.wait()?;
+        let retry = Scope {
+            attempt: AttemptId::from_bytes([3; 16]),
+            ..scope
+        };
+        let admit = |budget| {
+            crate::fixture::acquire_writer(directory.try_clone()?, retry, budget, &cancel, &clock)
+        };
+        assert!(matches!(
+            admit(WaitBudget::nonblocking(clock.mono_now())),
+            Err(CustodyError::Busy)
+        ));
+        drop(group.stdin.take());
+        let mut tail = Vec::new();
+        let mut stdout = group.stdout.take().ok_or("missing stdout")?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match stdout.read_to_end(&mut tail) {
+                Ok(_) => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+            assert!(Instant::now() < deadline, "descendant did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        admit(WaitBudget::cli(clock.mono_now(), 5)?)?.withdraw_unlaunched()?;
+        Ok(())
+    }
+
+    #[test]
     fn orphan_term_resumes_a_stopped_process_before_terminating_it()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::process::ExitStatusExt;

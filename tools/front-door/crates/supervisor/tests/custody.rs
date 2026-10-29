@@ -2095,6 +2095,63 @@ fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
     ));
     Ok(())
 }
+fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -> Result<()> {
+    let descendant_socket = root.join("descendant.sock");
+    let provider_socket = root.join("provider.sock");
+    let descendant_listener = UnixListener::bind(&descendant_socket)?;
+    let provider_listener = UnixListener::bind(&provider_socket)?;
+    let (writer, _handle) = start(
+        root,
+        "inherited",
+        "writer-lock-provider",
+        &[
+            descendant_socket.into_os_string(),
+            provider_socket.into_os_string(),
+        ],
+        CapturePlan::default(),
+    )?;
+    let mut descendant_gate =
+        fixture::fixture_accept(&descendant_listener, Duration::from_secs(5))?;
+    byte(&mut descendant_gate, b'R')?;
+    let descendant = process_identity(read_pid_line(&mut descendant_gate)?)?;
+    let mut provider_gate = fixture::fixture_accept(&provider_listener, Duration::from_secs(5))?;
+    byte(&mut provider_gate, b'R')?;
+    let writer_path = root.join("inherited-writer");
+    let guardian = reservation_identity(&writer_path, "guardian")?;
+    let provider = reservation_identity(&writer_path, "provider")?;
+    drop(writer);
+    fixture::signal_recorded_process(&guardian, libc::SIGKILL)?;
+    wait_for_identity_absence(&guardian)?;
+    drop(provider_gate);
+    wait_for_identity_absence(&provider)?;
+    let clock = SystemClock::new();
+    let retry = Scope {
+        attempt: AttemptId::from_bytes([9; 16]),
+        ..scope()
+    };
+    let admit = || {
+        fixture::acquire_writer(
+            Directory::open_anchor(&writer_path)?,
+            retry,
+            WaitBudget::nonblocking(provenant_core::Clock::mono_now(&clock)),
+            &CancelToken::new(),
+            &clock,
+        )
+    };
+    assert!(matches!(admit(), Err(CustodyError::Busy)));
+    assert!(!root.join("inherited-attempt/process-exit.json").exists());
+    drop(descendant_gate);
+    wait_for_identity_absence(&descendant)?;
+    admit()?.withdraw_unlaunched()?;
+    assert!(
+        writer_path
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
+            .exists()
+    );
+    Ok(())
+}
+
 fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> Result<()> {
     let path = root.join("crash.sock");
     let listener = UnixListener::bind(&path)?;
@@ -2306,6 +2363,10 @@ const CASES: &[Case] = &[
     (
         "owner_death_keeps_guardian_and_writer_live",
         owner_death_keeps_guardian_and_writer_live,
+    ),
+    (
+        "retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive",
+        retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive,
     ),
     (
         "guardian_loss_never_invents_exit_or_releases_the_reservation",

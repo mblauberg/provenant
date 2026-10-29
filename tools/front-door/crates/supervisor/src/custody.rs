@@ -351,7 +351,8 @@ pub fn acquire_reader(
     )
 }
 /// The supplied directory is a stable exclusion slot, not a registry.
-/// Recovery evidence belongs to the requested attempt, never its predecessor.
+/// The flock is inherited by the provider and its descendants. Recovery evidence
+/// belongs to the requested attempt; predecessor reservations do not exclude writers.
 pub fn acquire_writer(
     directory: Directory,
     scope: Scope,
@@ -1507,7 +1508,7 @@ pub struct ReservationListing {
     pub reservations: Vec<WriterReservation>,
     pub issues: Vec<ReservationIssue>,
 }
-/// Malformed or inaccessible entries remain fenced, but cannot hide other
+/// Malformed or inaccessible entries are reported without hiding other
 /// reservations. Only supervisor interprets its private reservation format.
 pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationListing> {
     let mut listing = ReservationListing::default();
@@ -1526,9 +1527,16 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
                     return Err(CustodyError::InvalidRecord);
                 }
                 let attempt = attempt?;
+                if attempt == OsStr::new("reservation.json") {
+                    listing.issues.push(ReservationIssue {
+                        reservation: PathBuf::from(&name).join(&attempt),
+                        reason: "legacy slot-root writer reservation requires recovery".into(),
+                    });
+                    continue;
+                }
                 let path = PathBuf::from(&name).join(&attempt).join("reservation.json");
                 let entry = || -> Result<Option<WriterReservation>> {
-                    // Shared slots may retain retired registry files; only attempt directories hold evidence.
+                    // Other retired registry files do not hold recovery evidence.
                     if slot.metadata_at(&attempt, false)?.kind
                         != provenant_os::fs::FileKind::Directory
                     {

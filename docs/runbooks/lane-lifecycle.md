@@ -119,8 +119,8 @@ head retained by the delivered ref or creation base. Local branches remain
 until integration is proved. Cleanup uses the project's declared regenerable
 and keep paths. `worktree-settlement.json` beside `result.md` records a pruning
 intent before removal, then pruning or the retention reason. Failed and
-cancelled lanes retain their worktrees. Explicitly supplied and adopted
-worktrees retain their existing GC policy.
+cancelled lanes retain their worktrees. Explicitly supplied worktrees retain
+their existing GC policy.
 
 `provenant resume ATTEMPT --prompt-file followup.md` generates and prints an
 operation ID; supply `--operation-id ID` for a planned retry. It pins the prior
@@ -131,8 +131,8 @@ Targets accept unique hex prefixes of at least eight
 characters and `RUN/ATTEMPT`; an ambiguous prefix lists candidates. Resume
 starts fresh by default when continuation state is unavailable, preserving authority with
 original context and the previous result attached. Ownership must match the
-lane lineage for a previously lane-owned tree. Explicit unowned and adopted
-checkouts resume in place unless a lane owner now names another lineage.
+lane lineage for a previously lane-owned tree. Explicit checkouts resume in
+place unless a lane owner now names another lineage.
 Attempts recorded before #1855 have no launch evidence of running under an
 owned tree, so continuation resumes them in place (fail open).
 A missing or reassigned checkout uses a fresh owned worktree when fallback is

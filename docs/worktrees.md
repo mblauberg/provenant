@@ -338,14 +338,19 @@ settlement receipt and do not change the lane outcome or an adopted receipt.
 
 ## Writer custody recovery
 
-A guardian crash leaves per-attempt `reservation.json` evidence under
-`worktrees/<project>/<path-slot>/<attempt>/`, even when
-every process descriptor closes. A free kernel lock is not proof of provider
-exit. Run `provenant reconcile --id RUN --json`: `writer_reservations` names
-the exact reservation path and scoped run, attempt and generation. Reconcile
-also reports reservations left behind after a terminal commit. Keep the worktree
-reserved while custody is uncertain; do not remove the lock or reservation by
-hand, or rerun the same writer alongside it.
+The `writer.lock` flock is the writer exclusion policy. The guardian passes its
+held lock descriptor to the provider without close-on-exec, so descendants
+inherit it. If the guardian is killed, a retry remains busy while a descendant
+holds that descriptor. Admission can proceed once the last holder closes it;
+an earlier attempt's reservation does not reserve the worktree.
+
+A guardian crash leaves per-attempt `reservation.json` recovery evidence under
+`worktrees/<project>/<path-slot>/<attempt>/`. A free kernel lock does not prove
+that an attempt's result was imported. Run `provenant reconcile --id RUN --json`:
+`writer_reservations` names the exact reservation path and scoped run, attempt
+and generation, including reservations left after a terminal commit. Legacy
+slot-root reservations appear as issues requiring recovery. Do not remove the
+lock or recovery evidence by hand.
 
 After a reboot, reconcile can settle an attempt as lost and release its
 reservation when the recorded boot and directory bindings prove the previous
@@ -380,7 +385,8 @@ authority for that exact reservation:
 dirty-tree checks. They leave attempt recovery records intact for Run rather
 than interpreting a predecessor's reservation. Active host settlement retains
 the writer lock through object import and publication.
-When custody is lost without a durable exit or reboot proof, the fence cannot
-yet be cleared. Retain it and use a fresh registered worktree. A failed provider or an unfinished Git
+When custody is lost without a durable exit or reboot proof, the attempt's
+recovery evidence cannot yet be cleared. Use a fresh linked worktree if
+the writer lock remains busy. A failed provider or an unfinished Git
 operation with normally settled custody needs Git repair by the chair,
 rather than fence clearance.

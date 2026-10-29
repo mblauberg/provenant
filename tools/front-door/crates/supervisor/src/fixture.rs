@@ -849,6 +849,23 @@ pub fn dispatch() -> io::Result<bool> {
             ready.write_all(b"\n")?;
             wait_for_eof(&mut ready)?;
         }
+        "writer-lock-provider" => {
+            // Ordinary provider children inherit non-CLOEXEC descriptors. Do
+            // not use the utility runner here: it deliberately sanitises fds.
+            let mut descendant = ChildGuard::new(
+                Command::new(std::env::current_exe()?)
+                    .args([
+                        OsString::from("--fixture"),
+                        OsString::from("s2-setsid-descendant"),
+                        fixture_path(&args, 3)?.into_os_string(),
+                    ])
+                    .spawn()?,
+            );
+            let mut gate = std::os::unix::net::UnixStream::connect(fixture_path(&args, 4)?)?;
+            gate.write_all(b"R")?;
+            wait_for_eof(&mut gate)?;
+            descendant.detach();
+        }
         "s2-setsid-provider" | "s2-group-provider" => {
             let ready_socket = fixture_path(&args, 3)?.into_os_string();
             let gate_socket = fixture_path(&args, 4)?;

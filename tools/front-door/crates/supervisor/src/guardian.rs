@@ -49,6 +49,28 @@ fn wait_terminal_retry(delay: Duration) {
     let _ = waiting.recv_timeout(delay);
 }
 
+/// Clone failure must leave the driver's writer lease available for recovery.
+fn settlement_recovery(
+    writer: &mut Option<provenant_os::fs::LockGuard>,
+    directory: Directory,
+    lock_directory: provenant_os::fs::Result<Directory>,
+    reservation: &Reservation,
+) -> Result<Recovery> {
+    let lock_directory = lock_directory.map_err(|error| {
+        CustodyError::Io(io::Error::other(format!(
+            "cannot clone writer lock directory for settlement; run `provenant reconcile --id {}`: {error}",
+            reservation.scope.run
+        )))
+    })?;
+    Ok(Recovery {
+        directory,
+        lock_directory,
+        lease: Some(writer.take().ok_or(CustodyError::Fenced)?),
+        reservation: reservation.clone(),
+        guardian_quiescent: true,
+    })
+}
+
 /// Advisory identity snapshot only; confinement does not yet supply an executable pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1176,7 +1198,7 @@ impl Driver<'_> {
         };
         self.publish_until_durable(&record, &mut state)?;
         if cleanup_complete {
-            self.release(&record);
+            self.release(&record)?;
         }
         if !cleanup_complete {
             // The unresolved exit is durable. Keep the guardian (and the unreaped
@@ -1193,7 +1215,7 @@ impl Driver<'_> {
                     &mut warnings,
                     &mut omitted_warnings,
                 ) {
-                    self.republish_settled(record, cancelled);
+                    self.republish_settled(record, cancelled)?;
                     break;
                 }
                 match self.reactor.wait(&[], Duration::from_millis(100)) {
@@ -1207,7 +1229,7 @@ impl Driver<'_> {
                             &mut warnings,
                             &mut omitted_warnings,
                         ) {
-                            self.republish_settled(record, cancelled);
+                            self.republish_settled(record, cancelled)?;
                         }
                         break;
                     }
@@ -1230,11 +1252,11 @@ impl Driver<'_> {
     /// Replace the unresolved exit with the settled facts once cleanup proves
     /// the group gone. The reservation is made resolved first, so a crash in
     /// between leaves only the conservative unresolved exit visible.
-    fn republish_settled(&mut self, mut record: ProcessExit, cancelled: bool) {
+    fn republish_settled(&mut self, mut record: ProcessExit, cancelled: bool) -> Result<()> {
         self.reservation.unresolved_cleanup = false;
         if !self.persist_reservation() {
             self.reservation.unresolved_cleanup = true;
-            return;
+            return Ok(());
         }
         record.unresolved_cleanup = false;
         record.unresolved_pids = Vec::new();
@@ -1249,7 +1271,7 @@ impl Driver<'_> {
             record.stop_reason = Some(machine::StopReason::ExplicitCancellation);
         }
         let Ok(bytes) = record.bounded_bytes() else {
-            return;
+            return Ok(());
         };
         let published = self
             .attempt
@@ -1262,8 +1284,9 @@ impl Driver<'_> {
             .map_err(CustodyError::from)
             .and_then(|publication| publication.require_durable().map_err(Into::into));
         if published.is_ok() {
-            self.release(&record);
+            self.release(&record)?;
         }
+        Ok(())
     }
     fn spawn_provider(
         &self,
@@ -1323,18 +1346,17 @@ impl Driver<'_> {
         )?)?;
         let record = ProcessExit::never_spawned(self.reservation.scope, None, vec![warning.into()]);
         self.publish_until_durable(&record, &mut State::never_spawned())?;
-        self.release(&record);
-        Ok(())
+        self.release(&record)
     }
     /// Hand the durable exit to the holder while retaining writer.lock through
     /// import, publication and verified terminal settlement.
     /// Failures leave the durable fence available to a resumed supervisor.
-    fn release(&mut self, record: &ProcessExit) {
+    fn release(&mut self, record: &ProcessExit) -> Result<()> {
         let Some(holder) = self.holder else {
-            return;
+            return Ok(());
         };
         if record.unresolved_cleanup || self.writer.is_none() {
-            return;
+            return Ok(());
         }
         self.reservation.launch_state = LaunchState::Settling;
         if write_record(
@@ -1346,32 +1368,21 @@ impl Driver<'_> {
         .and_then(|publication| publication.require_durable().map_err(CustodyError::from))
         .is_err()
         {
-            return;
+            return Ok(());
         }
         let exit = record.durable_observation();
-        let Some(lease) = self.writer.take() else {
-            return;
-        };
         let Ok(directory) = self.writer_dir.try_clone() else {
-            self.writer = Some(lease);
-            return;
+            return Ok(());
         };
-        let mut recovery = crate::custody::Recovery {
+        let mut recovery = settlement_recovery(
+            &mut self.writer,
             directory,
-            lock_directory: match self.lock_dir.try_clone() {
-                Ok(directory) => directory,
-                Err(_) => {
-                    self.writer = Some(lease);
-                    return;
-                }
-            },
-            lease: Some(lease),
-            reservation: self.reservation.clone(),
-            guardian_quiescent: true,
-        };
+            self.lock_dir.try_clone(),
+            &self.reservation,
+        )?;
         if recovery.prepare_settlement().is_err() {
             self.writer = recovery.lease.take();
-            return;
+            return Ok(());
         }
         drop(self._custody.take());
         // Worktree exclusion spans settlement retries; attempt custody is free.
@@ -1402,6 +1413,7 @@ impl Driver<'_> {
         if settled {
             let _ = recovery.clear_settled_reservation();
         }
+        Ok(())
     }
     /// Retry without a time limit: custody survives ENOSPC and signals until
     /// the immutable exit is durable. process.json exposes publication_pending.
