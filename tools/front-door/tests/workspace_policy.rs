@@ -94,6 +94,8 @@ const LAYERS: &[(&str, &[&str])] = &[
             "providers",
             "quota",
             "telemetry",
+            // Preset selection rules and routine pool-effort diagnostics.
+            "routing",
             "run",
             "fabric-store",
             "fabric-runtime",

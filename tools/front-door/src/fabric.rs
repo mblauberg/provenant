@@ -918,6 +918,7 @@ pub(crate) fn tick_graphs(
                     factory: &factory,
                     integration_base: execution.integration_base,
                     integration_branch: execution.document.integration_branch.clone(),
+                    network: graph_network(&execution.document)?,
                     budget,
                     cancel: &cancel,
                     prices: None,
@@ -3060,6 +3061,9 @@ struct BoundGraphOwner<'a> {
     factory: &'a Factory,
     integration_base: Option<provenant_core::GitOid>,
     integration_branch: Option<String>,
+    /// The graph's explicit network reach for every node lane, such as
+    /// `run --network off` bound before automatic preset selection.
+    network: Option<provenant_cli::Switch>,
     budget: WaitBudget,
     cancel: &'a CancelToken,
     prices: Option<Result<provenant_telemetry::PriceTable, String>>,
@@ -3623,6 +3627,7 @@ fn advance_graphs_after_settlement(
                 factory: &factory,
                 integration_base: execution.integration_base,
                 integration_branch: execution.document.integration_branch.clone(),
+                network: graph_network(&execution.document)?,
                 budget,
                 cancel: &cancel,
                 prices: None,
@@ -4651,6 +4656,29 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 .is_some_and(|operation| {
                     operation.state != provenant_run::OperationState::Prepared
                 });
+            let excluded_families = self.writer_families(node.distinct_from_attempts)?;
+            // An exact route cannot be substituted, so required separation is
+            // decided here, before any worktree advance or submission. An
+            // accepted operation is observed as it was launched.
+            if !accepted
+                && let Some(model) = &route.model
+                && exact_route_refused(
+                    &exact_model(route.adapter.as_deref(), model),
+                    &excluded_families,
+                    node.require_distinct,
+                )
+            {
+                return Ok(AttemptObservation::Terminal {
+                    attempt_ref: None,
+                    outcome: AttemptOutcome::AdapterUnavailable,
+                    launched: false,
+                    result: None,
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: None,
+                });
+            }
             if !accepted && let (Some(path), Some(commit)) = (worktree, node.source_commit) {
                 let head = commit.parse().map_err(|_| FacadeError::InvalidInput)?;
                 provenant_confinement::worktrees::with_context(
@@ -4708,7 +4736,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             } else {
                 None
             };
-            let excluded_families = self.writer_families(node.distinct_from_attempts)?;
             let input = SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id,
@@ -4737,11 +4764,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             provenant_records::run::RequestedRoute::Model {
                                 extra: Default::default(),
                                 provider: adapter.clone(),
-                                model: if model.contains('/') {
-                                    model.clone()
-                                } else {
-                                    format!("{adapter}/{model}")
-                                },
+                                model: exact_model(Some(adapter), model),
                                 effort: route.effort.clone(),
                             }
                         }
@@ -4792,7 +4815,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         })
                         .collect(),
                     write_root: Vec::new(),
-                    network: None,
+                    network: self.network,
                     capability: Vec::new(),
                 },
                 self.factory.context.roots.state.as_path(),
@@ -4932,6 +4955,39 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 }
+/// A graph document's optional top-level `network` (`"on"` or `"off"`),
+/// applied to every node lane it launches.
+fn graph_network(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<Option<provenant_cli::Switch>, FacadeError> {
+    match document.extra.get("network") {
+        None => Ok(None),
+        Some(value) => match value.as_str() {
+            Some("on") => Ok(Some(provenant_cli::Switch::On)),
+            Some("off") => Ok(Some(provenant_cli::Switch::Off)),
+            _ => Err(FacadeError::InvalidInput),
+        },
+    }
+}
+
+/// A graph route's exact model in `ADAPTER/ID` form.
+fn exact_model(adapter: Option<&str>, model: &str) -> String {
+    match adapter {
+        Some(adapter) if !model.contains('/') => format!("{adapter}/{model}"),
+        _ => model.to_owned(),
+    }
+}
+
+/// Whether required family separation refuses an exact route before launch.
+/// As for routed reviews, a model whose family is unknown is treated as
+/// excluded once any family is.
+fn exact_route_refused(model: &str, excluded_families: &[String], require_distinct: bool) -> bool {
+    require_distinct
+        && !excluded_families.is_empty()
+        && provenant_cli::run::model_family(model)
+            .is_none_or(|family| excluded_families.contains(&family))
+}
+
 impl Factory {
     fn graph(
         &self,
@@ -5112,6 +5168,7 @@ impl Factory {
                 factory: self,
                 integration_base,
                 integration_branch: document.integration_branch.clone(),
+                network: graph_network(document)?,
                 budget,
                 cancel,
                 prices: None,
@@ -5197,6 +5254,7 @@ impl Factory {
                 factory: self,
                 integration_base: None,
                 integration_branch: None,
+                network: None,
                 budget,
                 cancel,
                 prices: None,
@@ -6928,6 +6986,18 @@ mod peer_tests {
         outcome: Outcome,
         call: &provenant_run::Request<'_>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        publish_routed(rig, store, record, head, outcome, "fixture/model", call)
+    }
+
+    fn publish_routed(
+        rig: &crate::worktree_tests::support::TestRig,
+        store: &RunStore,
+        record: &provenant_run::AttemptRecord,
+        head: provenant_core::GitOid,
+        outcome: Outcome,
+        model: &str,
+        call: &provenant_run::Request<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let attempt = rig
             .state
             .join("runs")
@@ -6990,8 +7060,8 @@ mod peer_tests {
             call.clock,
         )?);
         let route = provenant_run::RouteRecord {
-            provider: Some("fixture".into()),
-            model: Some("fixture/model".into()),
+            provider: model.split_once('/').map(|(adapter, _)| adapter.into()),
+            model: Some(model.into()),
             ..Default::default()
         };
         store.publish_terminal(
@@ -7562,6 +7632,7 @@ mod peer_tests {
                 factory: &factory,
                 integration_base: None,
                 integration_branch: None,
+                network: None,
                 budget,
                 cancel: &cancel,
                 prices: None,
@@ -7672,6 +7743,7 @@ mod peer_tests {
             factory: &factory,
             integration_base: None,
             integration_branch: None,
+            network: None,
             budget,
             cancel: &cancel,
             prices: None,
@@ -7751,6 +7823,154 @@ mod peer_tests {
                 .iter()
                 .any(|warning| warning == "result artifact is missing")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn exact_route_in_an_excluded_family_is_refused_before_launch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::exact_route_in_an_excluded_family_is_refused_before_launch",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        struct Seed(String);
+        impl AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String {
+                "fixture".into()
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending {
+                    attempt_ref: Some(self.0.clone()),
+                })
+            }
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadWait,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let call = provenant_run::Request {
+            clock: &factory.clock,
+            cancel: &cancel,
+            budget,
+        };
+        // The upstream attempt ran in the OpenAI family.
+        let upstream = provenant_run::Resume {
+            prior: fixture.settled.attempt_id,
+            expected_generation: 0,
+            operation_id: "graph-exact-upstream".parse()?,
+            run_id: RunId::from_bytes([53; 16]),
+            attempt_id: AttemptId::from_bytes([54; 16]),
+            prompt: "continue".into(),
+            created_at: factory.clock.wall_now()?,
+        };
+        fixture.store.resume_fresh(&upstream, "fixture", &call)?;
+        let record = fixture.store.record(upstream.attempt_id, &call)?;
+        let head = fixture
+            .store
+            .record(fixture.settled.attempt_id, &call)?
+            .head
+            .ok_or("head")?;
+        publish_routed(
+            &fixture.rig,
+            &fixture.store,
+            &record,
+            head,
+            Outcome::Succeeded,
+            "codex/gpt-6-luna",
+            &call,
+        )?;
+        let id = "exact-separation";
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":id,"nodes":[
+                {"id":"author","prompt":"work","access":"read_only",
+                    "route":{"adapter":"fixture","model":"fixture/model"}},
+                {"id":"verifier","prompt":"verify","access":"read_only","depends_on":["author"],
+                    "distinct_from":"dependencies","distinct_strength":"require",
+                    "route":{"adapter":"codex","model":"gpt-6.1-terra"}}
+            ]
+        }))?;
+        let mut journal = graph::FileJournal::open(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            directory: fixture.rig.project.clone(),
+            document: document.clone(),
+        })?;
+        graph::advance_with_budget(
+            &document,
+            &mut Seed(format!(
+                "{}/{}",
+                factory.context.identity.host, upstream.attempt_id
+            )),
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let mut owner = BoundGraphOwner {
+            factory: &factory,
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            budget,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let run = graph::advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        assert_eq!(run.checkpoint.nodes[0].state, graph::NodeState::Succeeded);
+        let verifier = &run.checkpoint.nodes[1];
+        assert_eq!(verifier.state, graph::NodeState::Failed, "{verifier:?}");
+        let attempt = &verifier.attempts[0];
+        assert!(!attempt.launched);
+        assert_eq!(attempt.attempt_ref, None, "the exact route was submitted");
+        assert_eq!(
+            attempt.outcome,
+            Some(graph::AttemptOutcome::AdapterUnavailable)
+        );
+        let separation = verifier.separation.as_ref().ok_or("separation")?;
+        assert_eq!(separation.strength, graph::FamilyStrength::Require);
+        assert_eq!(separation.excluded, ["openai"]);
+        assert_eq!(separation.outcome, graph::SeparationOutcome::Unavailable);
         Ok(())
     }
 
