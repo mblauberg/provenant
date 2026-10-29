@@ -658,6 +658,7 @@ impl OriginFixture {
         let writer = WriterRequest {
             project: self.project.clone(),
             worktree: self.project.clone(),
+            extra: Default::default(),
         };
         HostDeliveryContext::new(environment)
             .refresh_origin_with(&writer, &self.project.join(".git"))?;
