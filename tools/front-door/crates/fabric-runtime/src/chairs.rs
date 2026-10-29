@@ -37,6 +37,7 @@ impl ChairIndex {
         call: &Request<'_>,
     ) -> Result<(), Error> {
         let value = RunChair {
+            extra: Default::default(),
             request_digest: proposal.digest()?,
             chair: proposal.chair.clone(),
         };
@@ -68,6 +69,7 @@ impl ChairIndex {
             project,
             run,
             &RunChair {
+                extra: Default::default(),
                 request_digest: proposal.digest()?,
                 chair,
             },
@@ -87,6 +89,7 @@ mod tests {
 
     fn proposal() -> CanonicalRequest {
         CanonicalRequest {
+            extra: Default::default(),
             child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
@@ -117,6 +120,7 @@ mod tests {
         let project = ProjectId::from_bytes([1; 16]);
         let run = |n| RunId::from_bytes([n; 16]);
         let chair = Some(ChairBinding {
+            extra: Default::default(),
             host: HostId::from_bytes([2; 16]),
             actor: ActorId::from_bytes([3; 16]),
         });
@@ -149,6 +153,7 @@ mod tests {
         // transfer ownership or replace the host's sealed association.
         let mut forged = child.clone();
         forged.chair = Some(ChairBinding {
+            extra: Default::default(),
             host: HostId::from_bytes([8; 16]),
             actor: ActorId::from_bytes([9; 16]),
         });

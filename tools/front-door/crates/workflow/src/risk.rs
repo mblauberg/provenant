@@ -34,6 +34,7 @@ pub fn assess(
     let downgrade_approval = if tier < derived {
         let approval = approval.ok_or(RiskError::ApprovalRequired)?;
         Some(ApprovalRef {
+            extra: Default::default(),
             actor_id: approval.actor_id,
             evidence: approval.evidence.clone(),
         })
@@ -59,6 +60,7 @@ mod tests {
     use super::*;
     fn factors() -> RiskFactors {
         RiskFactors {
+            extra: Default::default(),
             blast_radius: BlastRadius::Local,
             reversibility: Reversibility::Easy,
             data_sensitivity: DataSensitivity::Public,
@@ -94,6 +96,7 @@ mod approval_tests {
     #[test]
     fn lowering_risk_requires_matching_current_user_authority() {
         let factors = RiskFactors {
+            extra: Default::default(),
             blast_radius: BlastRadius::Production,
             reversibility: Reversibility::Easy,
             data_sensitivity: DataSensitivity::Internal,
@@ -110,6 +113,7 @@ mod approval_tests {
         let approval = UserApproval {
             actor_id: ActorId::from_bytes([1; 16]),
             evidence: EvidenceRef {
+                extra: Default::default(),
                 path: PathWire::from_relative(
                     &RelativePath::parse("authority/approval.json").unwrap(),
                 )

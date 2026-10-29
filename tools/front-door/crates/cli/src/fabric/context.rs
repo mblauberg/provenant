@@ -317,7 +317,10 @@ impl Context {
             .map_err(|error| peer_failure(&peer.destination, &error))?
             .result
         {
-            PeerResult::Error { error } => {
+            PeerResult::Error {
+                data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
+                ..
+            } => {
                 // An uncertain launch must name this locally frozen request.
                 if let FacadeError::LaunchUnknown {
                     operation_id: returned,
@@ -415,6 +418,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::Cancelled => (Outcome::Error, ErrorKind::Cancelled),
         FacadeError::StateCorrupt => (Outcome::Error, ErrorKind::StateCorrupt),
         FacadeError::UpgradeRefused => (Outcome::Refused, ErrorKind::UpgradeRefused),
+        FacadeError::UpgradeRequired { .. } => (Outcome::Refused, ErrorKind::UpgradeRequired),
         FacadeError::Timeout => (Outcome::Error, ErrorKind::Timeout),
         FacadeError::StaleFence
         | FacadeError::ContinuationUnsupported

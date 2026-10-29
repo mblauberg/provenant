@@ -951,7 +951,9 @@ mod tests {
         store.mark_starting(&queued, &route, &[], &Default::default(), None, &call)?;
         store.withdraw(
             id,
-            crate::AttemptState::Starting,
+            crate::AttemptState::Starting {
+                extra: Default::default(),
+            },
             crate::Outcome::Cancelled,
             "cancelled",
             queued.queued_at,

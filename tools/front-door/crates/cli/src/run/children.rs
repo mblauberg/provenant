@@ -415,7 +415,7 @@ fn scan_queued(
             }
         };
         for record in pending {
-            let generation = if record.state == run::AttemptState::Queued {
+            let generation = if matches!(record.state, run::AttemptState::Queued { .. }) {
                 record.generation.checked_add(1)
             } else {
                 Some(record.generation)
@@ -566,6 +566,7 @@ mod tests {
         original.parent_attempt = None;
         original.lane_depth = Some(1);
         original.chair = Some(run::ChairBinding {
+            extra: Default::default(),
             host: provenant_core::HostId::from_bytes([78; 16]),
             actor: ActorId::from_bytes([79; 16]),
         });
@@ -1385,7 +1386,12 @@ mod tests {
         assert_eq!(scan.accepted, [(first_attempt, 1)].into());
         for id in [first_attempt, child.attempts[0].attempt_id] {
             let record = store.record(id, &call)?;
-            assert_eq!(record.state, run::AttemptState::Queued);
+            assert_eq!(
+                record.state,
+                run::AttemptState::Queued {
+                    extra: Default::default()
+                }
+            );
             assert_eq!(record.generation, 0);
         }
         assert_eq!(store.queued_runs(&call)?, vec![first, second]);
@@ -1520,7 +1526,9 @@ mod tests {
             ));
             assert_eq!(
                 store.record(child.attempts[0].attempt_id, &call)?.state,
-                run::AttemptState::Running
+                run::AttemptState::Running {
+                    extra: Default::default()
+                }
             );
         }
         // Admission permits 256 queued attempts in addition to active ones.
@@ -1614,7 +1622,9 @@ mod tests {
         }
         assert_eq!(
             store.record(running, &call)?.state,
-            run::AttemptState::Running
+            run::AttemptState::Running {
+                extra: Default::default()
+            }
         );
         assert!(store.queued_runs(&call)?.is_empty());
         Ok(())
@@ -1644,11 +1654,13 @@ mod tests {
             operation_id: OperationId::parse("deferred-child")?,
             created_at: clock.wall_now()?,
             request: run::CanonicalRequest {
+                extra: Default::default(),
                 child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    extra: Default::default(),
                     build_heavy: false,
                     title: None,
                     base: None,
@@ -1657,6 +1669,7 @@ mod tests {
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"child"),
                     route: run::RequestedRoute::Model {
+                        extra: Default::default(),
                         provider: "fixture".into(),
                         model: "fixture/model".into(),
                         effort: None,

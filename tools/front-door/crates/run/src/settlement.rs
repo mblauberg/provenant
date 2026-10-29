@@ -530,7 +530,7 @@ impl crate::RunStore {
         for attempt in &attempts {
             if matches!(
                 attempt.state,
-                crate::AttemptState::Queued | crate::AttemptState::Terminal { .. }
+                crate::AttemptState::Queued { .. } | crate::AttemptState::Terminal { .. }
             ) {
                 continue;
             }
@@ -630,7 +630,7 @@ impl crate::RunStore {
                 (
                     attempt.attempt_id,
                     match attempt.state {
-                        crate::AttemptState::Queued => crate::Reconciled::Queued,
+                        crate::AttemptState::Queued { .. } => crate::Reconciled::Queued,
                         crate::AttemptState::Terminal { .. } => crate::Reconciled::Finished,
                         _ => {
                             let phase = self

@@ -963,7 +963,9 @@ mod tests {
         fs::write(candidate.join("auth.json"), "credential")?;
         store.withdraw(
             input.attempts[0].attempt_id,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture",
             WallTime::from_micros(200)?,
@@ -1049,7 +1051,9 @@ mod tests {
         store
             .withdraw(
                 input.attempts[0].attempt_id,
-                AttemptState::Queued,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
                 Outcome::Cancelled,
                 "fixture",
                 WallTime::from_micros(200).map_err(|_| RunError::Validation("fixture time"))?,
@@ -1371,7 +1375,9 @@ mod tests {
         let first = input.attempts[0].attempt_id;
         store.withdraw(
             first,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "first finished",
             WallTime::from_micros(200)?,
@@ -1463,7 +1469,9 @@ mod tests {
         );
         store.withdraw(
             sibling_id,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture",
             WallTime::from_micros(200)?,
@@ -1982,6 +1990,7 @@ mod tests {
 
         let mut record = store.record(input.attempts[0].attempt_id, &call)?;
         record.state = AttemptState::Terminal {
+            extra: Default::default(),
             outcome: Outcome::Cancelled,
             exit_code: None,
             finished_at: WallTime::from_micros(200)?,
@@ -2122,7 +2131,9 @@ mod tests {
         );
         store.withdraw(
             resume.attempt_id,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture",
             WallTime::from_micros(400)?,

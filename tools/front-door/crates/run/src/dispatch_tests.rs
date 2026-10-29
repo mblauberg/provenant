@@ -24,6 +24,7 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
     let mut record = store.record(input.attempts[0].attempt_id, &call)?;
     record.generation = 1;
     record.state = AttemptState::Terminal {
+        extra: Default::default(),
         outcome: Outcome::Succeeded,
         exit_code: Some(0),
         finished_at: record.queued_at,
@@ -80,7 +81,9 @@ fn terminal_dependency_waits_for_custody_release() -> TestResult {
         !store.custody_released(&record, &call)?,
         "a free lock does not clear a retained writer fence"
     );
-    record.state = AttemptState::Running;
+    record.state = AttemptState::Running {
+        extra: Default::default(),
+    };
     assert!(!store.custody_released(&record, &call)?);
     Ok(())
 }
@@ -94,6 +97,7 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
     let mut input = input();
     let worktree = temp.path().join("lane");
     input.request.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
@@ -101,6 +105,7 @@ fn unreadable_reservation_in_the_writers_directory_holds_custody() -> TestResult
     let mut record = store.record(input.attempts[0].attempt_id, &call)?;
     record.generation = 1;
     record.state = AttemptState::Terminal {
+        extra: Default::default(),
         outcome: Outcome::Succeeded,
         exit_code: Some(0),
         finished_at: record.queued_at,
@@ -219,10 +224,12 @@ fn host_checks_child_metadata_against_its_parent_record() -> TestResult {
 fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
     let parent = AttemptId::from_bytes([9; 16]);
     let writer = |worktree: &str| WriterRequest {
+        extra: Default::default(),
         project: "/project".into(),
         worktree: worktree.into(),
     };
     let deliver = |branch: &str, open_pr| WriterDeliveryRequest {
+        extra: Default::default(),
         mode: Default::default(),
         remote: "origin".into(),
         branch: branch.into(),
@@ -264,6 +271,7 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
         (
             &writing,
             Some(WriterRequest {
+                extra: Default::default(),
                 project: "/other-project".into(),
                 worktree: "/other-project/.worktrees/child".into(),
             }),
@@ -332,6 +340,7 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
     }
     std::os::unix::fs::symlink(base.join("outside"), base.join("reads/alias"))?;
     let access = |network, reads: &[&str], writes: &[&str]| LaneAccess {
+        extra: Default::default(),
         network,
         read_roots: reads.iter().map(|path| base.join(path)).collect(),
         write_roots: writes.iter().map(|path| base.join(path)).collect(),
@@ -339,6 +348,7 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
     let task = |writer: bool, access: LaneAccess| {
         let mut task = input().request.tasks[0].clone();
         task.writer = writer.then(|| WriterRequest {
+            extra: Default::default(),
             project: "/project".into(),
             worktree: "/project/.worktrees/sibling".into(),
         });
@@ -472,6 +482,7 @@ fn host_refuses_child_with_extra_attempt_rows() -> TestResult {
             extra.prompt.path = artifacts::artifact_path(extra.attempt_id, "prompt.txt")?;
             if terminal {
                 extra.state = AttemptState::Terminal {
+                    extra: Default::default(),
                     outcome: Outcome::Rejected,
                     exit_code: None,
                     finished_at: WallTime::from_micros(150)?,
@@ -852,7 +863,9 @@ fn host_refuses_child_identity_swap_during_preparation() -> TestResult {
         );
         assert_eq!(
             store.record(swapped.attempt_id, &call)?.state,
-            AttemptState::Queued
+            AttemptState::Queued {
+                extra: Default::default()
+            }
         );
     }
     Ok(())
@@ -1001,6 +1014,7 @@ fn host_refuses_writer_child_after_request_rewrite() -> TestResult {
     // the remaining boundary against adding writer authority before launch.
     let mut swapped = (*validated).clone();
     swapped.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
         project: "/project".into(),
         worktree: "/project/.worktrees/child".into(),
     });
@@ -1460,6 +1474,7 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
             .into_iter()
             .map(|(source, path, scope)| {
                 Ok(WriteGrantRecord {
+                    extra: Default::default(),
                     source,
                     path: provenant_records::AbsolutePath::new(std::path::Path::new(path))?,
                     scope,
@@ -1651,6 +1666,7 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
     let forgeries: [fn(&mut AttemptRecord); 3] = [
         |record| {
             record.state = AttemptState::Terminal {
+                extra: Default::default(),
                 outcome: Outcome::Rejected,
                 exit_code: None,
                 finished_at: record.queued_at,
@@ -1661,7 +1677,11 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
                 artifacts::artifact_path(record.attempt_id, "result.md").expect("result path");
             record.result = Some(result);
         },
-        |record| record.state = AttemptState::Queued,
+        |record| {
+            record.state = AttemptState::Queued {
+                extra: Default::default(),
+            }
+        },
         |record| record.generation += 5,
     ];
     for forge in forgeries {
@@ -2073,7 +2093,12 @@ fn held_children_are_bounded_and_superseded_handles_are_dropped() -> TestResult 
         &call,
     )?;
     let record = store.record(id, &call)?;
-    assert_eq!(record.state, AttemptState::Queued);
+    assert_eq!(
+        record.state,
+        AttemptState::Queued {
+            extra: Default::default()
+        }
+    );
     assert_eq!(record.generation, 0);
     assert!(
         !store
@@ -2137,7 +2162,12 @@ fn deferred_child_launches_once_capacity_frees() -> TestResult {
         let started =
             store.start_child(run.run_id, &validated, &fake, &|_, _| unreachable!(), &call)?;
         assert!(matches!(started.as_slice(), [Started::Deferred(attempt)] if *attempt == id));
-        assert_eq!(store.record(id, &call)?.state, AttemptState::Queued);
+        assert_eq!(
+            store.record(id, &call)?.state,
+            AttemptState::Queued {
+                extra: Default::default()
+            }
+        );
         assert_eq!(store.record(id, &call)?.generation, 0);
         assert_eq!(store.queued_runs(&call)?, vec![run.run_id]);
     }
@@ -2218,7 +2248,12 @@ fn deferral_stops_the_scan_after_the_first_attempt() -> TestResult {
     assert_eq!(fake.prepared.get(), 0);
     for attempt in &run.attempts {
         let record = store.record(attempt.attempt_id, &call)?;
-        assert_eq!(record.state, AttemptState::Queued);
+        assert_eq!(
+            record.state,
+            AttemptState::Queued {
+                extra: Default::default()
+            }
+        );
         assert_eq!(record.generation, 0);
         assert!(
             !store
@@ -2393,7 +2428,12 @@ fn memory_pressure_defers_even_when_available_memory_is_high() -> TestResult {
         }
         let result = store.admit(id, &attempt, &Pressured(level), &clock, &cancel);
         if level == MemoryPressure::Normal {
-            assert_eq!(result?.state, AttemptState::Running);
+            assert_eq!(
+                result?.state,
+                AttemptState::Running {
+                    extra: Default::default()
+                }
+            );
         } else {
             assert!(
                 matches!(result, Err(RunError::MemoryPressure { level: actual }) if actual == format!("{level:?}"))
@@ -2553,7 +2593,12 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
             &cancel,
         );
         if admitted {
-            assert_eq!(result?.state, AttemptState::Running);
+            assert_eq!(
+                result?.state,
+                AttemptState::Running {
+                    extra: Default::default()
+                }
+            );
         } else {
             assert!(matches!(result, Err(RunError::GuardianIdentityUnavailable)));
         }
@@ -2586,7 +2631,9 @@ fn configured_build_limit_controls_host_leases() -> TestResult {
             store
                 .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
                 .state,
-            AttemptState::Running
+            AttemptState::Running {
+                extra: Default::default()
+            }
         );
     }
     let id = starting(&store, &third_run, &call)?;
@@ -2799,6 +2846,7 @@ fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
     let skipped = vec![SkippedRoute {
+        extra: Default::default(),
         route: "claude".into(),
         kind: SkipKind::AuthRequired,
         detail: "account work: sign in again".into(),
@@ -2846,7 +2894,12 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     let running = store
         .claim(first, &now, &call)?
         .ok_or("first not admitted")?;
-    assert_eq!(running.state, AttemptState::Running);
+    assert_eq!(
+        running.state,
+        AttemptState::Running {
+            extra: Default::default()
+        }
+    );
     assert_eq!(running.started_at, Some(now.wall_now()?));
     assert!(
         store.claim(second, &now, &call)?.is_none(),
@@ -2911,6 +2964,7 @@ fn lane(seed: u8, writer: bool) -> PreparedRun {
     let mut run = batch(seed, 1);
     if writer {
         run.request.tasks[0].writer = Some(WriterRequest {
+            extra: Default::default(),
             project: "/project".into(),
             worktree: format!("/project/.worktrees/lane-{seed}").into(),
         });
@@ -3287,7 +3341,9 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
         );
         assert_eq!(
             store.record(lane_id, &call)?.state,
-            AttemptState::Starting,
+            AttemptState::Starting {
+                extra: Default::default()
+            },
             "nothing started"
         );
         readable.set(true);
@@ -3617,7 +3673,9 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
     assert!(probe.started.get());
     assert_eq!(
         store.record(delayed_id, &call)?.state,
-        AttemptState::Starting
+        AttemptState::Starting {
+            extra: Default::default()
+        }
     );
     // The rival's start, at 1 s, is still the recorded one.
     let since_rival = clock.host_monotonic_micros()? / 1000 - 1_000;
@@ -3655,7 +3713,13 @@ fn memory_floor_refuses_both_lane_classes() -> TestResult {
                 "1% memory is under the 5% floor (writer: {writer})"
             );
         } else {
-            assert_eq!(admitted?.state, AttemptState::Running, "writer: {writer}");
+            assert_eq!(
+                admitted?.state,
+                AttemptState::Running {
+                    extra: Default::default()
+                },
+                "writer: {writer}"
+            );
         }
     }
     Ok(())
@@ -3968,7 +4032,12 @@ fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult
     let admitted = stores[1]
         .claim(waiting, &now, &call)?
         .ok_or("recovered lease not freed")?;
-    assert_eq!(admitted.state, AttemptState::Running);
+    assert_eq!(
+        admitted.state,
+        AttemptState::Running {
+            extra: Default::default()
+        }
+    );
     Ok(())
 }
 /// A run of `tasks` attempts at full concurrency, with IDs unique to `seed`.
@@ -4313,7 +4382,9 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
     symlink(&outside, withdrawn_tmp.join("outside-link"))?;
     store.withdraw(
         withdrawn,
-        AttemptState::Queued,
+        AttemptState::Queued {
+            extra: Default::default(),
+        },
         Outcome::Cancelled,
         "cancelled before start",
         WallTime::from_micros(150)?,
@@ -4360,6 +4431,7 @@ fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawa
         let store = RunStore::open(&context, &call)?;
         let mut run = input();
         run.request.tasks[0].writer = Some(WriterRequest {
+            extra: Default::default(),
             project: temp.path().join("checkout"),
             worktree: temp.path().join("checkout/.worktrees/lane"),
         });
@@ -4374,7 +4446,9 @@ fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawa
         if withdrawn {
             store.withdraw(
                 id,
-                AttemptState::Queued,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
                 Outcome::Cancelled,
                 "cancelled before start",
                 WallTime::from_micros(150)?,
@@ -4476,7 +4550,12 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
             .ok_or("cancel request missing")?,
     )?;
     assert_eq!(request["scope"], serde_json::to_value(scope)?);
-    assert_eq!(store.record(starting, &call)?.state, AttemptState::Starting);
+    assert_eq!(
+        store.record(starting, &call)?.state,
+        AttemptState::Starting {
+            extra: Default::default()
+        }
+    );
     assert!(
         dir.metadata_at(std::ffi::OsStr::new("reservation.json"), false)
             .is_ok()
@@ -4626,7 +4705,9 @@ fn resumed_starting_lane_has_private_directories_before_checkpoint() -> TestResu
     let reader = RunStore::open_read_only(&context, &call)?.ok_or(RunError::NotFound)?;
     assert_eq!(
         reader.record(resumed.attempt_id, &call)?.state,
-        AttemptState::Starting
+        AttemptState::Starting {
+            extra: Default::default()
+        }
     );
     let state = context.state_root.as_path();
     for path in [
@@ -4659,6 +4740,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut run = input();
     run.request.chair = Some(ChairBinding {
+        extra: Default::default(),
         host: provenant_core::HostId::from_bytes([30; 16]),
         actor: provenant_core::ActorId::from_bytes([31; 16]),
     });
@@ -4948,6 +5030,7 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut original = input();
     original.request.chair = Some(ChairBinding {
+        extra: Default::default(),
         host: provenant_core::HostId::from_bytes([32; 16]),
         actor: provenant_core::ActorId::from_bytes([33; 16]),
     });
@@ -5043,7 +5126,12 @@ fn cancel_requests_then_reconcile_settles_a_prepared_attempt_nobody_holds() -> T
             .ok_or("cancel request missing")?,
     )?;
     assert_eq!(request["scope"], serde_json::to_value(scope)?);
-    assert_eq!(store.record(orphan, &call)?.state, AttemptState::Starting);
+    assert_eq!(
+        store.record(orphan, &call)?.state,
+        AttemptState::Starting {
+            extra: Default::default()
+        }
+    );
     assert!(
         attempt
             .metadata_at(std::ffi::OsStr::new("reservation.json"), false)
@@ -5085,7 +5173,9 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
         }
         store.withdraw(
             terminal,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture",
             WallTime::from_micros(150)?,
@@ -5140,7 +5230,9 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
         let before = store
             .withdraw(
                 id,
-                AttemptState::Queued,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
                 Outcome::Cancelled,
                 "fixture",
                 WallTime::from_micros(150)?,
@@ -5288,7 +5380,9 @@ fn reconcile_preserves_protected_locks_outside_temporary() -> TestResult {
     std::fs::write(temporary.join("writer.lock"), "disposable payload")?;
     store.withdraw(
         id,
-        AttemptState::Queued,
+        AttemptState::Queued {
+            extra: Default::default(),
+        },
         Outcome::Cancelled,
         "fixture",
         WallTime::from_micros(150)?,
@@ -5342,7 +5436,9 @@ fn reconcile_reports_temporary_removal_failures_and_continues() -> TestResult {
         std::fs::write(temporary.join("payload.lock"), "discard")?;
         store.withdraw(
             new.attempt_id,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture",
             WallTime::from_micros(150)?,
@@ -5400,7 +5496,9 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
             )?;
             store.withdraw(
                 id,
-                AttemptState::Starting,
+                AttemptState::Starting {
+                    extra: Default::default(),
+                },
                 Outcome::Rejected,
                 "fixture",
                 WallTime::from_micros(150)?,
@@ -5482,7 +5580,9 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         };
         store.withdraw(
             id,
-            AttemptState::Starting,
+            AttemptState::Starting {
+                extra: Default::default(),
+            },
             Outcome::Rejected,
             "fixture",
             WallTime::from_micros(150)?,
@@ -5522,6 +5622,7 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let mut run = input();
     run.request.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
         project: temp.path().join("checkout"),
         worktree: temp.path().join("checkout/.worktrees/lane"),
     });
@@ -5555,7 +5656,9 @@ fn reconcile_leaves_temporary_data_behind_a_writer_reservation() -> TestResult {
     )?;
     store.withdraw(
         id,
-        AttemptState::Starting,
+        AttemptState::Starting {
+            extra: Default::default(),
+        },
         Outcome::Rejected,
         "fixture",
         WallTime::from_micros(150)?,
@@ -5616,7 +5719,9 @@ fn reconcile_temporary_removal_never_follows_symlinks() -> TestResult {
         std::fs::write(temporary.join("keep.lock"), "keep")?;
         store.withdraw(
             id,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture",
             WallTime::from_micros(150)?,
@@ -5666,7 +5771,9 @@ fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResu
         std::fs::write(temporary.join("keep.lock"), "keep")?;
         store.withdraw(
             id,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture",
             WallTime::from_micros(150)?,
@@ -5972,6 +6079,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     let worktree = temp.path().join("lane");
     std::fs::create_dir(&worktree)?;
     run.request.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
@@ -6203,6 +6311,7 @@ fn recover_rebooted_writer_inner(
     std::fs::create_dir(&worktree)?;
     std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
     run.request.tasks[0].writer = writer.then(|| WriterRequest {
+        extra: Default::default(),
         project: temp.path().to_path_buf(),
         worktree: worktree.clone(),
     });
@@ -6514,6 +6623,7 @@ fn reconcile_settles_a_writer_attempt_whose_worktree_was_removed() -> TestResult
     let store = RunStore::open(&context, &call)?;
     let mut run = input();
     run.request.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
         project: temp.path().join("checkout"),
         worktree: temp.path().join("removed-lane"),
     });
@@ -6661,6 +6771,7 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
     let observed = provenant_core::GitOid::Sha1([7; 20]);
     let write_grants = vec![
         WriteGrantRecord {
+            extra: Default::default(),
             source: WriteSource::WriteRoot,
             path: provenant_records::AbsolutePath::new(
                 &context.state_root.as_path().join("shared"),
@@ -6668,6 +6779,7 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
             scope: PathScope::Subtree,
         },
         WriteGrantRecord {
+            extra: Default::default(),
             source: WriteSource::StateWrite,
             path: provenant_records::AbsolutePath::new(
                 &context
@@ -6741,6 +6853,7 @@ fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> T
     store.create(&prepared, &call)?;
     let id = prepared.attempts[0].attempt_id;
     let grant = WriteGrantRecord {
+        extra: Default::default(),
         source: WriteSource::LaneCache,
         path: provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/cache"))?,
         scope: PathScope::Subtree,
@@ -6937,7 +7050,12 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
         let attempt = store.attempt_dir(run.run_id, id, false)?;
         let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
         if free == 100 {
-            assert_eq!(result?.state, AttemptState::Running);
+            assert_eq!(
+                result?.state,
+                AttemptState::Running {
+                    extra: Default::default()
+                }
+            );
         } else {
             let error = result.err().ok_or("admitted below floor")?;
             assert!(matches!(
@@ -6995,7 +7113,12 @@ fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
                 matches!(result, Err(RunError::DiskFloor { free: f, floor: p }) if f == free && p == floor)
             );
         } else {
-            assert_eq!(result?.state, AttemptState::Running);
+            assert_eq!(
+                result?.state,
+                AttemptState::Running {
+                    extra: Default::default()
+                }
+            );
         }
     }
     Ok(())
@@ -7041,7 +7164,9 @@ fn admission_rereads_gc_floor_after_submission_and_while_waiting() -> TestResult
     };
     assert_eq!(
         store.admit(id, &attempt, &disk, &clock, &cancel)?.state,
-        AttemptState::Running
+        AttemptState::Running {
+            extra: Default::default()
+        }
     );
     assert_eq!(
         disk.samples.get(),
@@ -7091,7 +7216,9 @@ fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
     };
     assert_eq!(
         store.admit(id, &attempt, &disk, &clock, &cancel)?.state,
-        AttemptState::Running
+        AttemptState::Running {
+            extra: Default::default()
+        }
     );
     assert_eq!(
         disk.samples.get(),
@@ -7190,7 +7317,9 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
     })?;
     store.withdraw(
         run.attempts[0].attempt_id,
-        AttemptState::Queued,
+        AttemptState::Queued {
+            extra: Default::default(),
+        },
         Outcome::Cancelled,
         "cancelled before launch",
         clock.wall_now()?,

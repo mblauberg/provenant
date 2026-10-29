@@ -366,6 +366,7 @@ fn expected_previous(
                 && e.selector == sel
                 && e.expected
                     == OwnedValue::Selector {
+                        extra: Default::default(),
                         value: current.clone(),
                     }
         })
@@ -411,10 +412,14 @@ pub(crate) fn capture(
                 });
         }
         plan.owned.push(OwnedEntry {
+            extra: Default::default(),
             path: wire,
             harness: Some(target.harness),
             selector: sel.into(),
-            expected: OwnedValue::Selector { value: want },
+            expected: OwnedValue::Selector {
+                extra: Default::default(),
+                value: want,
+            },
         });
         let inherited_hooks = !targets.remove_hooks
             && previous.is_some_and(|receipt| {
@@ -466,7 +471,11 @@ pub(crate) fn capture(
                                             )
                                             .is_ok_and(|selector| selector == entry.selector)
                                         },
-                                    ) && entry.expected == OwnedValue::Selector { value }
+                                    ) && entry.expected
+                                        == OwnedValue::Selector {
+                                            extra: Default::default(),
+                                            value,
+                                        }
                                 })
                         });
                     if !still_desired {
@@ -494,10 +503,14 @@ pub(crate) fn capture(
             changes.extend(removed_changes);
             for (selector, value) in owned {
                 plan.owned.push(OwnedEntry {
+                    extra: Default::default(),
                     path: AbsolutePath::new(hook)?,
                     harness: Some(target.harness),
                     selector,
-                    expected: OwnedValue::Selector { value },
+                    expected: OwnedValue::Selector {
+                        extra: Default::default(),
+                        value,
+                    },
                 });
             }
             if updated != old {
@@ -535,10 +548,14 @@ pub(crate) fn capture(
                             return Err(InstallError::Manifest("missing instruction asset"));
                         }
                         plan.owned.push(OwnedEntry {
+                            extra: Default::default(),
                             path: AbsolutePath::new(path)?,
                             harness: Some(target.harness),
                             selector: format!("array:{text}"),
-                            expected: OwnedValue::Selector { value: json!(text) },
+                            expected: OwnedValue::Selector {
+                                extra: Default::default(),
+                                value: json!(text),
+                            },
                         });
                     }
                 }
@@ -586,10 +603,13 @@ pub(crate) fn permitted_selector(
         return Ok(true);
     }
     Ok(target.harness == Harness::Opencode
-        && matches!(&entry.expected,OwnedValue::Selector{value:Json::String(value)} if entry.selector==format!("array:{value}")))
+        && matches!(&entry.expected,OwnedValue::Selector{value:Json::String(value), .. } if entry.selector==format!("array:{value}")))
 }
 pub(crate) fn entry_matches(value: &Value, entry: &OwnedEntry) -> Result<bool, InstallError> {
-    if let OwnedValue::Selector { value: expected } = &entry.expected {
+    if let OwnedValue::Selector {
+        value: expected, ..
+    } = &entry.expected
+    {
         let Value::File { bytes, .. } = value else {
             return Err(InstallError::ConfigFile(entry.path.to_path_buf()?));
         };
@@ -665,6 +685,7 @@ fn rewrite_instruction_array(
                     && entry.selector.starts_with("array:")
                     && entry.expected
                         == (OwnedValue::Selector {
+                            extra: Default::default(),
                             value: value.clone(),
                         })
             })

@@ -24,6 +24,7 @@ fn setup() -> (tempfile::TempDir, ReceiptStore, DeliveryReceipt) {
     let project = ProjectId::from_bytes([1; 16]);
     let delivery = DeliveryId::from_bytes([2; 16]);
     let factors = RiskFactors {
+        extra: Default::default(),
         blast_radius: BlastRadius::Local,
         reversibility: Reversibility::Easy,
         data_sensitivity: DataSensitivity::Public,
@@ -36,11 +37,13 @@ fn setup() -> (tempfile::TempDir, ReceiptStore, DeliveryReceipt) {
         project_id: project,
         delivery_id: delivery,
         subject: Subject::Pr {
+            extra: Default::default(),
             repository: RepoId::from_bytes([3; 16]),
             number: 1,
             head: GitOid::Sha1([4; 20]),
         },
         authors: vec![Author::User {
+            extra: Default::default(),
             actor_id: ActorId::from_bytes([5; 16]),
         }],
         risk: risk::assess(factors, RiskTier::Routine, &RiskPolicy::default(), None).unwrap(),
@@ -586,6 +589,7 @@ fn each_save_rechecks_current_risk_and_originating_downgrade_approval() {
     let approval = UserApproval {
         actor_id: ActorId::from_bytes([9; 16]),
         evidence: EvidenceRef {
+            extra: Default::default(),
             path: PathWire::from_relative(&RelativePath::parse("approval.md").unwrap()).unwrap(),
             digest: Digest::from_bytes([6; 32]),
         },

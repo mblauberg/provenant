@@ -1,4 +1,4 @@
-use serde::ser::SerializeStruct;
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -12,6 +12,7 @@ use thiserror::Error;
 pub struct PathWire {
     path: RelativePath,
     encoding: PathEncoding,
+    extra: crate::ExtraFields,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,8 +38,9 @@ pub enum PathWireError {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawPathWire {
+    #[serde(flatten)]
+    extra: crate::ExtraFields,
     encoding: String,
     path: String,
 }
@@ -66,7 +68,11 @@ impl TryFrom<RawPathWire> for PathWire {
             }
             _ => return Err(PathWireError::InvalidEncoding),
         };
-        Ok(Self { path, encoding })
+        Ok(Self {
+            path,
+            encoding,
+            extra: raw.extra,
+        })
     }
 }
 
@@ -85,6 +91,7 @@ impl PathWire {
             }
         };
         Ok(Self {
+            extra: Default::default(),
             path: path.clone(),
             encoding,
         })
@@ -140,9 +147,12 @@ impl Serialize for PathWire {
             }
         };
 
-        let mut state = serializer.serialize_struct("PathWire", 2)?;
-        state.serialize_field("encoding", encoding)?;
-        state.serialize_field("path", path.as_ref())?;
+        let mut state = serializer.serialize_map(Some(2 + self.extra.len()))?;
+        state.serialize_entry("encoding", encoding)?;
+        state.serialize_entry("path", path.as_ref())?;
+        for (key, value) in &self.extra {
+            state.serialize_entry(key, value)?;
+        }
         state.end()
     }
 }

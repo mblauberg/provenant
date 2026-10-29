@@ -155,6 +155,7 @@ fn typed_tool_calls_cannot_bypass_the_mcp_wait_cap() {
     let mut service = factory.open().unwrap();
     let input = ToolCall::Events(
         EventsInput::Read {
+            extra: Default::default(),
             after: None,
             limit: 1,
             wait_seconds: Some(crate::MAX_WAIT_SECONDS + 1),
@@ -1117,6 +1118,7 @@ impl F3Facade for FakeFacade {
             return Err(FacadeError::NotFound);
         };
         Ok(OutputResult::Artifact {
+            extra: Default::default(),
             target,
             artifact,
             digest: provenant_core::Digest::from_bytes([1; 32]),

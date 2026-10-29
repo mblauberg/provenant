@@ -217,6 +217,7 @@ pub struct TaskFence {
 impl TaskFence {
     fn proof(self) -> TaskProof {
         TaskProof {
+            extra: Default::default(),
             task: self.id,
             generation: self.fence.generation,
             token: self.fence.token.0,
@@ -321,10 +322,14 @@ pub struct Scope {
 impl Scope {
     fn value(self) -> Result<WorkScope, EdgeError> {
         if let Some(key) = self.issue {
-            return Ok(WorkScope::Issue { key });
+            return Ok(WorkScope::Issue {
+                extra: Default::default(),
+                key,
+            });
         }
         if let Some(path) = self.worktree {
             return Ok(WorkScope::Worktree {
+                extra: Default::default(),
                 path: context::canonical(&path)?,
             });
         }
@@ -333,7 +338,10 @@ impl Scope {
             .iter()
             .map(|path| context::canonical(path))
             .collect::<Result<_, _>>()?;
-        Ok(WorkScope::Paths { paths })
+        Ok(WorkScope::Paths {
+            extra: Default::default(),
+            paths,
+        })
     }
 }
 #[derive(Debug, Args)]
@@ -346,6 +354,7 @@ pub struct ClaimFence {
 impl ClaimFence {
     fn proof(self) -> ClaimProof {
         ClaimProof {
+            extra: Default::default(),
             id: self.id,
             generation: self.fence.generation,
             token: self.fence.token.0,
@@ -421,6 +430,7 @@ impl LandingFence {
             .and_then(|value| value.parse::<Token>().ok())
             .ok_or(LandingTokenError)?;
         Ok(LandingProof {
+            extra: Default::default(),
             reference: self.reference,
             id: self.id,
             generation: self.generation,
@@ -671,12 +681,19 @@ fn execute(
             };
             mutate(
                 Mutation::Mail(MailInput::Send {
+                    extra: Default::default(),
                     recipients,
                     kind,
                     body,
                     artifacts: vec![],
-                    reply_to: reply_to.map(|id| MessageRef::Local { id }),
-                    task: task.map(|id| TaskRef::Local { id }),
+                    reply_to: reply_to.map(|id| MessageRef::Local {
+                        extra: Default::default(),
+                        id,
+                    }),
+                    task: task.map(|id| TaskRef::Local {
+                        extra: Default::default(),
+                        id,
+                    }),
                 }),
                 operation,
             )?
@@ -685,6 +702,7 @@ fn execute(
             ctx.page(page.limit)?;
             json(service.mail(
                 MailInput::Read {
+                    extra: Default::default(),
                     after: page.after,
                     limit: page.limit,
                 },
@@ -692,9 +710,13 @@ fn execute(
                 &cancel,
             )?)?
         }
-        Fabric::Mail(Mail::MarkRead { through, operation }) => {
-            mutate(Mutation::Mail(MailInput::MarkRead { through }), operation)?
-        }
+        Fabric::Mail(Mail::MarkRead { through, operation }) => mutate(
+            Mutation::Mail(MailInput::MarkRead {
+                extra: Default::default(),
+                through,
+            }),
+            operation,
+        )?,
         Fabric::Task(Task::Create {
             objective,
             note,
@@ -702,7 +724,11 @@ fn execute(
         }) => {
             ctx.texts(&objective, note.as_deref())?;
             mutate(
-                Mutation::Task(TaskInput::Create { objective, note }),
+                Mutation::Task(TaskInput::Create {
+                    extra: Default::default(),
+                    objective,
+                    note,
+                }),
                 operation,
             )?
         }
@@ -714,6 +740,7 @@ fn execute(
             ctx.page(limit)?;
             json(service.task(
                 TaskInput::List {
+                    extra: Default::default(),
                     state: state.map(Into::into),
                     after,
                     limit,
@@ -728,6 +755,7 @@ fn execute(
             operation,
         }) => mutate(
             Mutation::Task(TaskInput::Claim {
+                extra: Default::default(),
                 id,
                 lease_seconds: ctx.lease(lease)?,
             }),
@@ -742,6 +770,7 @@ fn execute(
             ctx.texts(&objective, note.as_deref())?;
             mutate(
                 Mutation::Task(TaskInput::Update {
+                    extra: Default::default(),
                     proof: fence.proof(),
                     objective,
                     note,
@@ -755,6 +784,7 @@ fn execute(
             operation,
         }) => mutate(
             Mutation::Task(TaskInput::Finish {
+                extra: Default::default(),
                 proof: fence.proof(),
                 state: state.into(),
             }),
@@ -762,6 +792,7 @@ fn execute(
         )?,
         Fabric::Task(Task::Release { fence, operation }) => mutate(
             Mutation::Task(TaskInput::Release {
+                extra: Default::default(),
                 proof: fence.proof(),
             }),
             operation,
@@ -770,6 +801,7 @@ fn execute(
             ctx.page(page.limit)?;
             let result = service.events(
                 EventsInput::Read {
+                    extra: Default::default(),
                     after: page.after,
                     limit: page.limit,
                     wait_seconds: wait,
@@ -790,6 +822,7 @@ fn execute(
             ctx.text(&note)?;
             mutate(
                 Mutation::Events(EventsInput::Note {
+                    extra: Default::default(),
                     note,
                     dedup_key: None,
                 }),
@@ -802,6 +835,7 @@ fn execute(
             operation,
         }) => mutate(
             Mutation::Claim(ClaimInput::Acquire {
+                extra: Default::default(),
                 scope: scope.value()?,
                 lease_seconds: ctx.lease(lease)?,
             }),
@@ -813,6 +847,7 @@ fn execute(
             operation,
         }) => mutate(
             Mutation::Claim(ClaimInput::Renew {
+                extra: Default::default(),
                 proof: fence.proof(),
                 lease_seconds: ctx.lease(lease)?,
             }),
@@ -820,6 +855,7 @@ fn execute(
         )?,
         Fabric::Claim(Claim::Verify(fence)) => json(service.claim(
             ClaimInput::Verify {
+                extra: Default::default(),
                 proof: fence.proof(),
             },
             budget,
@@ -827,13 +863,22 @@ fn execute(
         )?)?,
         Fabric::Claim(Claim::Release { fence, operation }) => mutate(
             Mutation::Claim(ClaimInput::Release {
+                extra: Default::default(),
                 proof: fence.proof(),
             }),
             operation,
         )?,
         Fabric::Claim(Claim::List { after, limit }) => {
             ctx.page(limit)?;
-            json(service.claim(ClaimInput::List { after, limit }, budget, &cancel)?)?
+            json(service.claim(
+                ClaimInput::List {
+                    extra: Default::default(),
+                    after,
+                    limit,
+                },
+                budget,
+                &cancel,
+            )?)?
         }
         Fabric::Landing(Landing::Acquire {
             reference,
@@ -843,6 +888,7 @@ fn execute(
             operation,
         }) => mutate(
             Mutation::Landing(LandingInput::Acquire {
+                extra: Default::default(),
                 reference,
                 expected,
                 candidate,
@@ -856,6 +902,7 @@ fn execute(
             operation,
         }) => mutate(
             Mutation::Landing(LandingInput::Renew {
+                extra: Default::default(),
                 proof: fence.proof()?,
                 lease_seconds: ctx.lease(lease)?,
             }),
@@ -863,6 +910,7 @@ fn execute(
         )?,
         Fabric::Landing(Landing::Verify(fence)) => json(service.landing(
             LandingInput::Verify {
+                extra: Default::default(),
                 proof: fence.proof()?,
             },
             budget,
@@ -870,6 +918,7 @@ fn execute(
         )?)?,
         Fabric::Landing(Landing::Release { fence, operation }) => mutate(
             Mutation::Landing(LandingInput::Release {
+                extra: Default::default(),
                 proof: fence.proof()?,
             }),
             operation,
@@ -881,6 +930,7 @@ fn execute(
         }) => {
             let result = service.landing(
                 LandingInput::Wait {
+                    extra: Default::default(),
                     reference,
                     generation,
                     wait_seconds: wait,
@@ -985,6 +1035,7 @@ pub fn coordination_outcome(
         | FacadeError::Conflict
         | FacadeError::LaneCoordinationRefused
         | FacadeError::UpgradeRefused
+        | FacadeError::UpgradeRequired { .. }
         | FacadeError::PeerVersion
         | FacadeError::PeerProtocolMismatch { .. } => Outcome::Refused,
         FacadeError::Timeout => Outcome::Timeout,

@@ -87,7 +87,7 @@ pub enum ConfigError {
     Domain {
         location: Location,
         #[source]
-        source: SectionError,
+        source: Box<SectionError>,
         /// Safe numeric graph policy value, when available.
         rejected: Box<String>,
     },

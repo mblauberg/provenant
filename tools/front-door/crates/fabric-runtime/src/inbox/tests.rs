@@ -81,6 +81,7 @@ fn register(f: &Fixture, session: &str) {
     f.registrations.lock().unwrap().insert(
         session.into(),
         AnswerTarget {
+            extra: Default::default(),
             host: f.identity.host,
             project: f.identity.project,
             session: session.into(),
@@ -142,7 +143,7 @@ fn offer_until_ack_repeats_after_restart_stops_after_ack_and_preserves_overflow(
     assert_eq!(again.items[0].delivery.attempts, 2);
     assert_eq!(again.items[0].answer, first.items[0].answer);
     for saved in &pending {
-        let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+        let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
             panic!("item")
         };
         if item.answer.as_ref().unwrap().id != first.items[0].answer.id {
@@ -161,6 +162,7 @@ fn offer_until_ack_repeats_after_restart_stops_after_ack_and_preserves_overflow(
         };
         assert!(seen.insert(item.answer.id));
         f.call(InboxInput::Acknowledge {
+            extra: Default::default(),
             id: item.answer.request_id,
             answer_id: item.answer.id,
             session: "session-a".into(),
@@ -226,7 +228,7 @@ fn offer_until_ack_rejects_unregistered_and_wrong_targets_without_mutation() {
         "conflict"
     );
     f.identity = original;
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.delivery.unwrap().state, AnswerDeliveryState::Queued);
@@ -245,6 +247,7 @@ fn offer_until_ack_byte_budget_counts_serialised_envelope_and_leaves_answer_queu
     register(&f, "session-a");
     let created = receipt(f.call(ask(RequestKind::Question, "ask")).unwrap());
     f.call(InboxInput::Answer {
+        extra: Default::default(),
         id: created.request_id,
         action: AnswerAction::Reply,
         option_id: None,
@@ -257,7 +260,7 @@ fn offer_until_ack_byte_budget_counts_serialised_envelope_and_leaves_answer_queu
     let tiny = offer(&f, "session-a", 50, 128).unwrap();
     assert!(tiny.items.is_empty());
     assert!(tiny.truncated);
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.delivery.unwrap().state, AnswerDeliveryState::Queued);
@@ -281,6 +284,7 @@ fn oversized_answer_is_refused_and_small_budget_skips_large_answers() {
     register(&f, "session-a");
     let large = receipt(f.call(ask(RequestKind::Question, "large")).unwrap());
     let make_answer = |text: String, operation: &str| InboxInput::Answer {
+        extra: Default::default(),
         id: large.request_id,
         action: AnswerAction::Reply,
         option_id: None,
@@ -323,6 +327,7 @@ fn concurrent_offer_and_ack_never_resurrects_delivery() {
         let second = scope.spawn(|| {
             barrier.wait();
             f.call(InboxInput::Acknowledge {
+                extra: Default::default(),
                 id: created.request_id,
                 answer_id: saved.answer_id.unwrap(),
                 session: "session-a".into(),
@@ -363,7 +368,7 @@ fn offer_until_ack_rebind_never_transfers_old_answers() {
             .code(),
         "conflict"
     );
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.delivery.unwrap().state, AnswerDeliveryState::Queued);
@@ -418,8 +423,10 @@ fn delivery_capabilities_publish_only_tested_fabric_fallback_for_each_provider()
 }
 fn ask(kind: RequestKind, id: &str) -> InboxInput {
     InboxInput::Ask {
+        extra: Default::default(),
         session: "session-a".into(),
         request: Box::new(RequestDraft {
+            extra: Default::default(),
             work: None,
             deadline: None,
             supersedes: None,
@@ -428,6 +435,7 @@ fn ask(kind: RequestKind, id: &str) -> InboxInput {
             body: "Which repair should proceed?".into(),
             blocking: kind == RequestKind::Decision,
             options: vec![RequestOption {
+                extra: Default::default(),
                 id: "repair".into(),
                 label: "Repair".into(),
                 description: "Repair the failing check".into(),
@@ -446,6 +454,7 @@ fn receipt(result: InboxResult) -> InboxReceipt {
 }
 fn answer(id: HumanRequestId, operation: &str) -> InboxInput {
     InboxInput::Answer {
+        extra: Default::default(),
         id,
         action: AnswerAction::Choose,
         option_id: Some("repair".into()),
@@ -457,6 +466,7 @@ fn answer(id: HumanRequestId, operation: &str) -> InboxInput {
 }
 fn show(id: HumanRequestId) -> InboxInput {
     InboxInput::List {
+        extra: Default::default(),
         id: Some(id),
         session: None,
         state: InboxFilter::All,
@@ -483,7 +493,7 @@ fn inbox_request_and_answer_replay_survive_restart() {
         receipt(f.call(answer(created.request_id, "resolve")).unwrap()),
         resolved
     );
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.history.len(), 2);
@@ -533,6 +543,7 @@ fn inbox_all_kinds_preserve_text_and_reject_stale_or_invalid_answers() {
     ] {
         let created = receipt(f.call(ask(kind, &format!("create-{action:?}"))).unwrap());
         let mut input = InboxInput::Answer {
+            extra: Default::default(),
             id: created.request_id,
             action,
             option_id: None,
@@ -547,7 +558,7 @@ fn inbox_all_kinds_preserve_text_and_reject_stale_or_invalid_answers() {
             *operation_id = op(&format!("stale-{action:?}"));
         }
         assert_eq!(f.call(input).unwrap_err().code(), "conflict");
-        let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+        let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
             panic!("item")
         };
         assert_eq!(
@@ -586,6 +597,7 @@ fn inbox_acknowledgement_requires_the_exact_host_project_session_and_actor() {
     let created = receipt(f.call(ask(RequestKind::Decision, "create")).unwrap());
     let resolved = receipt(f.call(answer(created.request_id, "answer")).unwrap());
     let mut input = InboxInput::Acknowledge {
+        extra: Default::default(),
         id: created.request_id,
         answer_id: resolved.answer_id.unwrap(),
         session: "wrong-session".into(),
@@ -614,6 +626,7 @@ fn inbox_acknowledgement_requires_the_exact_host_project_session_and_actor() {
     // A new operation ID acknowledging the same consumed answer is harmless.
     let again = receipt(
         f.call(InboxInput::Acknowledge {
+            extra: Default::default(),
             id: created.request_id,
             answer_id: resolved.answer_id.unwrap(),
             session: "session-a".into(),
@@ -663,7 +676,7 @@ fn inbox_fabric_mail_is_correlated_and_read_cursor_does_not_acknowledge() {
             &request,
         )
         .unwrap();
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.delivery.unwrap().state, AnswerDeliveryState::Queued);
@@ -718,7 +731,7 @@ fn inbox_concurrent_answers_have_one_winner_and_one_mail() {
             .len(),
         1
     );
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.history.len(), 2);
@@ -730,6 +743,7 @@ fn inbox_close_preserves_the_answer_and_history_and_replays() {
     let created = receipt(f.call(ask(RequestKind::Decision, "create")).unwrap());
     let resolved = receipt(f.call(answer(created.request_id, "answer")).unwrap());
     let input = InboxInput::Close {
+        extra: Default::default(),
         id: created.request_id,
         state: RequestState::Superseded,
         reason: "Replaced by a new scoped request".into(),
@@ -739,7 +753,7 @@ fn inbox_close_preserves_the_answer_and_history_and_replays() {
     let closed = receipt(f.call(input.clone()).unwrap());
     assert_eq!(closed.state, RequestState::Superseded);
     assert_eq!(receipt(f.call(input).unwrap()), closed);
-    let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.history.len(), 3);
@@ -755,6 +769,7 @@ fn inbox_paging_binds_filters_snapshot_and_limits() {
             .unwrap();
     }
     let list = |session: Option<String>, cursor| InboxInput::List {
+        extra: Default::default(),
         id: None,
         session,
         state: InboxFilter::Open,
@@ -790,6 +805,7 @@ fn inbox_paging_binds_filters_snapshot_and_limits() {
         "cursor_expired"
     );
     let input = InboxInput::List {
+        extra: Default::default(),
         id: None,
         session: None,
         state: InboxFilter::All,
@@ -847,6 +863,7 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
     let f = Fixture::new();
     let mut input = ask(RequestKind::Question, "linked");
     let work = RequestWork {
+        extra: Default::default(),
         run_id: provenant_core::RunId::from_bytes([3; 16]),
         task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
         attempt_id: None,
@@ -888,7 +905,7 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
             continue;
         }
         let saved = receipt(result.unwrap());
-        let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+        let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
             panic!("item")
         };
         assert_eq!(saved.work_coverage, Some(coverage));
@@ -928,6 +945,7 @@ fn request_correlation_saves_exact_coverage_once_and_requires_host_lookup() {
 fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
     let f = Fixture::new();
     let work = RequestWork {
+        extra: Default::default(),
         run_id: provenant_core::RunId::from_bytes([3; 16]),
         task_id: Some(provenant_core::TaskId::from_bytes([4; 16])),
         attempt_id: None,
@@ -945,7 +963,7 @@ fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
             .unwrap(),
     );
     let check = |history_len| {
-        let InboxResult::Item { item } = f.call(show(created.request_id)).unwrap() else {
+        let InboxResult::Item { item, .. } = f.call(show(created.request_id)).unwrap() else {
             panic!("item")
         };
         assert_eq!(item.history.len(), history_len);
@@ -961,6 +979,7 @@ fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
     let answered = receipt(f.call(answer(created.request_id, "linked-answer")).unwrap());
     check(2);
     f.call(InboxInput::Close {
+        extra: Default::default(),
         id: created.request_id,
         state: RequestState::Superseded,
         reason: "Replaced by a new scoped request".into(),
@@ -970,6 +989,7 @@ fn request_correlation_v2_survives_answer_close_and_acknowledgement() {
     .unwrap();
     check(3);
     f.call(InboxInput::Acknowledge {
+        extra: Default::default(),
         id: created.request_id,
         answer_id: answered.answer_id.unwrap(),
         session: "session-a".into(),
@@ -1019,6 +1039,7 @@ fn request_correlation_lookup_never_holds_fabric_write_lock() {
     let mut input = ask(RequestKind::Question, "outside-transaction");
     if let InboxInput::Ask { request, .. } = &mut input {
         request.work = Some(RequestWork {
+            extra: Default::default(),
             run_id: provenant_core::RunId::from_bytes([3; 16]),
             task_id: None,
             attempt_id: None,
@@ -1053,7 +1074,7 @@ fn request_correlation_lookup_never_holds_fabric_write_lock() {
 fn request_correlation_legacy_records_keep_v1_wire_shape_and_answer() {
     let f = Fixture::new();
     let saved = receipt(f.call(ask(RequestKind::Decision, "legacy")).unwrap());
-    let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
         panic!("item")
     };
     let mut old = serde_json::to_value(&item.request).unwrap();
@@ -1065,7 +1086,7 @@ fn request_correlation_legacy_records_keep_v1_wire_shape_and_answer() {
         db.execute(&format!("UPDATE {table} SET record=?1"), [&bytes])
             .unwrap();
     }
-    let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(serde_json::to_value(&item.request).unwrap(), old);
@@ -1077,7 +1098,7 @@ fn request_correlation_legacy_records_keep_v1_wire_shape_and_answer() {
     };
     assert_eq!(items, vec![item.request]);
     f.call(answer(saved.request_id, "legacy-answer")).unwrap();
-    let InboxResult::Item { item } = f.call(show(saved.request_id)).unwrap() else {
+    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
         panic!("item")
     };
     assert_eq!(item.request.schema_version, 1);
@@ -1099,6 +1120,7 @@ fn request_correlation_repository_bound_counts_encoded_wire_bytes() {
         let mut input = ask(RequestKind::Question, "native-path");
         if let InboxInput::Ask { request, .. } = &mut input {
             request.work = Some(RequestWork {
+                extra: Default::default(),
                 run_id: provenant_core::RunId::from_bytes([3; 16]),
                 task_id: None,
                 attempt_id: None,
@@ -1126,7 +1148,7 @@ fn replacement(id: HumanRequestId, revision: u64, operation: &str) -> InboxInput
 }
 fn item(f: &Fixture, id: HumanRequestId) -> InboxItem {
     match f.call(show(id)).unwrap() {
-        InboxResult::Item { item } => *item,
+        InboxResult::Item { item, .. } => *item,
         _ => panic!("item"),
     }
 }
@@ -1139,6 +1161,7 @@ fn replacement_work_mismatch_leaves_original_open_and_unindexed_is_saved() {
     let mut input = replacement(old.request_id, 1, "replace-work");
     if let InboxInput::Ask { request, .. } = &mut input {
         request.work = Some(RequestWork {
+            extra: Default::default(),
             run_id: provenant_core::RunId::from_bytes([3; 16]),
             task_id: None,
             attempt_id: None,
@@ -1324,6 +1347,7 @@ fn request_correlation_deadline_expires_on_read_without_rewriting_answers_or_his
     for all in [false, true] {
         let result = f
             .call(InboxInput::List {
+                extra: Default::default(),
                 id: None,
                 session: None,
                 state: if all {
@@ -1377,6 +1401,7 @@ fn hook_offers_retry_idempotently_without_hiding_later_queued_answers() {
             .unwrap();
     }
     let target = AnswerTarget {
+        extra: Default::default(),
         host: f.identity.host,
         project: f.identity.project,
         actor: f.identity.inbox.actor,

@@ -81,6 +81,7 @@ impl Process for System {}
 
 fn identity() -> Result<VersionInfo, Box<dyn std::error::Error>> {
     Ok(VersionInfo {
+        extra: Default::default(),
         source_digest: provenant_records::SourceDigest::parse(env!("PROVENANT_SOURCE_DIGEST"))?,
         asset_digest: provenant_records::SourceDigest::parse(env!("PROVENANT_ASSET_DIGEST"))?,
         target: env!("PROVENANT_TARGET_TRIPLE").into(),
