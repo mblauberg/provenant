@@ -355,7 +355,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 6] = &[
         pacing_keys: None,
         launch: LaunchCapabilities {
             model: false,
-            default_network: NetworkAccess::Provider,
+            default_network: NetworkAccess::Open,
             effort: false,
             resume: false,
             steering: false,
@@ -413,7 +413,7 @@ mod launch_tests {
         let command = AdapterSpec::get("command").unwrap();
         assert!(!command.registered_account);
         assert_eq!(command.quota_probe, QuotaProbeKind::None);
-        assert_eq!(command.launch.default_network, NetworkAccess::Provider);
+        assert_eq!(command.launch.default_network, NetworkAccess::Open);
         assert!(command.check_launch(&LaunchRequest::default()).is_ok());
         for (request, field) in [
             (

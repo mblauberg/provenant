@@ -143,7 +143,7 @@ pub struct RouteRequest {
     /// Exact model in ADAPTER/ID form
     #[arg(long, conflicts_with = "route")]
     pub model: Option<Model>,
-    /// Named route
+    /// Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check
     #[arg(long)]
     pub route: Option<String>,
     /// Reasoning effort

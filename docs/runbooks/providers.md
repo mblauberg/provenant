@@ -55,14 +55,16 @@ The dispatch manifest and Fabric run wire route is
 adapter route leaves room for other named, model-less adapters. It carries no
 model, effort or account. Prompt text never supplies or changes argv. Bare
 executables resolve on the host's captured PATH; paths resolve from the lane's
-working directory. The applied route records `domains.fabric.commands.NAME`
-as its configuration source, with no model in the receipt.
+working directory. A single task needs no manifest:
+`provenant dispatch --route command/fmt-check --prompt-file P`. The applied
+route records `domains.fabric.commands.NAME` as its configuration source, with no model in the receipt.
 
 Commands use the ordinary supervisor, guardian, deadlines, descendant cleanup
 and operation replay. They run read-only with the shared Rust and Node toolchain
-grants and private build output. Network defaults to off: the recorded
-`provider` mode has no provider API endpoints for this adapter. Explicit local
-or open reach uses the existing access grants. All known credential stores,
+grants and private build output. Network is on by default, as for every
+lane. `--network off`, or `"network":"off"` on a manifest task (which overrides
+the flag for that task), runs the command with the recorded `provider` mode,
+which has no provider API endpoints for this adapter. All known credential stores,
 including both GitHub CLI config directories and keychains, stay denied in
 every network mode. Commands have no session, hooks, MCP configuration or
 quota probe.
