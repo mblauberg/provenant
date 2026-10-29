@@ -73,6 +73,7 @@ jobs:
           tool: cargo-nextest@0.9.149
       - name: Stress-run changed tests
         env:
+          PROVENANT_ROOT: ${{ github.workspace }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: scripts/run-stress-tests "$BASE_SHA" "$HEAD_SHA"
