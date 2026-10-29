@@ -8048,6 +8048,43 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
     store.queue_reconcile_with(run.run_id, &call, |_, _| {
         panic!("an already queued settlement must not spawn another worker");
     })?;
+    let marker: serde_json::Value = serde_json::from_slice(
+        &run_directory.read_stable(OsStr::new("settlement-queued.json"), RECORD_LIMIT)?,
+    )?;
+    let expiry: WallTime = serde_json::from_value(marker["expires"].clone())?;
+    let remaining = expiry.as_micros() - clock.wall_now()?.as_micros();
+    clock.wait_until(provenant_core::MonoTime::from_micros(
+        clock.mono_now().as_micros() + u64::try_from(remaining)?,
+    ))?;
+    let mut requeued = false;
+    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        requeued = true;
+        Ok(())
+    })?;
+    assert!(requeued, "expiry permits a fresh worker at the boundary");
+    // Invalid or obsolete markers must fail visibly instead of permitting a spawn.
+    for marker in [
+        serde_json::json!({"schema_version":1,"run":run.run_id,"expires_ms":0}),
+        serde_json::json!({"schema_version":3,"run":run.run_id,"expires":"1970-01-01T00:00:00.000000Z"}),
+        serde_json::json!({"schema_version":2,"run":RunId::from_bytes([99;16]),"expires":"1970-01-01T00:00:00.000000Z"}),
+        serde_json::json!({"schema_version":2,"run":run.run_id,"expires":"broken"}),
+    ] {
+        run_directory
+            .atomic_write(
+                OsStr::new("settlement-queued.json"),
+                ".settlement-test-",
+                &serde_json::to_vec(&marker)?,
+                provenant_os::fs::PublishMode::Replace,
+            )?
+            .require_durable()?;
+        assert!(
+            store
+                .queue_reconcile_with(run.run_id, &call, |_, _| {
+                    panic!("invalid queue marker must not spawn a worker");
+                })
+                .is_err()
+        );
+    }
     assert!(matches!(queued.as_slice(), [(found, Reconciled::Settling { .. })] if *found == id));
     assert!(
         attempt

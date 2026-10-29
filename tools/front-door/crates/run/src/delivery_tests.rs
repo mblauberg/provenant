@@ -175,12 +175,8 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         );
         // A cancelled import may have pinned its head without publishing the
         // writer-terminal record. Terminal cleanup must consult the journal.
-        let mut driver = crate::settlement::Guard::claim(
-            &attempt,
-            exit.scope,
-            &provenant_os::clock::SystemClock::new(),
-        )?
-        .ok_or("settlement owner")?;
+        let mut driver = crate::settlement::Guard::claim(&attempt, exit.scope, &clock)?
+            .ok_or("settlement owner")?;
         driver.set_head(launch.base)?;
         drop(driver);
         let stage = format!("refs/provenant/import/{}", launch.base);
@@ -2358,7 +2354,10 @@ impl PrepareFixture {
             launch.branch.as_str(),
             base,
         )?;
-        let clock = provenant_os::clock::SystemClock::new();
+        let clock = provenant_core::TestClock::new(
+            provenant_core::WallTime::from_micros(0)?,
+            provenant_core::MonoTime::from_micros(0),
+        );
         let mut recovery = provenant_supervisor::fixture::acquire_writer_with_binding(
             Directory::open_anchor(&state)?,
             scope,
@@ -2393,12 +2392,8 @@ impl PrepareFixture {
             )?;
         }
         recovery.prepare_settlement()?;
-        let mut settlement = crate::settlement::Guard::claim(
-            &attempt,
-            scope,
-            &provenant_os::clock::SystemClock::new(),
-        )?
-        .ok_or("settlement owner")?;
+        let mut settlement =
+            crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("settlement owner")?;
         if resume_after_publish {
             let source = crate::objects::bound_source(&attempt)?.ok_or("private Git source")?;
             let tip = crate::objects::private_tip(&source, launch.branch.as_str())?;
@@ -2421,9 +2416,11 @@ impl PrepareFixture {
             // Drop the process owner at the crash boundary before the phase
             // checkpoint. A fresh driver must safely replay publication.
             drop(settlement);
-            let after_backoff = u64::try_from(clock.wall_now()?.as_micros() / 1000)? + 120_000;
-            settlement = crate::settlement::Guard::claim_at(&attempt, scope, after_backoff)?
-                .ok_or("resumed owner")?;
+            clock.wait_until(provenant_core::MonoTime::from_micros(
+                clock.mono_now().as_micros() + 120_000_000,
+            ))?;
+            settlement =
+                crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("resumed owner")?;
         }
         let review = launch.terminal(
             &state,

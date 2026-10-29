@@ -543,7 +543,7 @@ impl ModelPolicies {
         &self,
         model: &ModelId,
         account: Option<&str>,
-        now: i64,
+        now: WallTime,
     ) -> EffectiveModelPolicy {
         let account = account.and_then(|account| match account.split_once('/') {
             Some((adapter, key)) if adapter == model.adapter() => Some(key),
@@ -592,10 +592,9 @@ impl ModelPolicies {
         sources: &mut Vec<String>,
         model: &ModelId,
         account: Option<&str>,
-        now: i64,
+        now: WallTime,
     ) {
         // Scope outranks array position. Later rules win within one scope.
-        let now = WallTime::from_unix_seconds(now);
         let mut matching: Vec<_> = self
             .rules
             .iter()
@@ -613,7 +612,7 @@ impl ModelPolicies {
                             a == key || a == format!("{}/{key}", model.adapter())
                         })
                     })
-                    && now.as_ref().is_ok_and(|now| rule.schedule.active(*now))
+                    && rule.schedule.active(now)
             })
             .collect();
         matching.sort_by_key(|(index, r)| {
@@ -824,7 +823,7 @@ impl ModelPolicy {
 
 // Invalid embedded data is a build defect, never a recoverable user configuration.
 #[allow(clippy::expect_used)]
-fn bundled_policy(model: &ModelId, now: i64) -> ModelPolicy {
+fn bundled_policy(model: &ModelId, now: WallTime) -> ModelPolicy {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Bundled {
@@ -893,7 +892,7 @@ mod tests {
             assert!(errors.iter().any(|e| e.field == "model_policy.rules.0"));
             assert_eq!(
                 policies
-                    .effective(&ModelId::parse("opencode/unknown-free")?, None, 0)
+                    .effective(&ModelId::parse("opencode/unknown-free")?, None, at(0))
                     .policy
                     .cache
                     .read_ratio,
@@ -917,7 +916,7 @@ mod tests {
             assert_eq!(
                 serde_json::to_value(
                     ModelPolicies::default()
-                        .effective(&case.model, None, case.at)
+                        .effective(&case.model, None, at(case.at))
                         .policy
                 )?,
                 serde_json::to_value(case.policy)?,
@@ -964,7 +963,11 @@ mod tests {
         "#,
         )?;
         let claude = policies
-            .effective(&ModelId::parse("claude/claude-opus-5-5")?, Some("work"), 0)
+            .effective(
+                &ModelId::parse("claude/claude-opus-5-5")?,
+                Some("work"),
+                at(0),
+            )
             .policy;
         assert_eq!(claude.compaction.window, Some(400000));
         assert_eq!(claude.cache.read_share_target, Some(0.8));
@@ -976,7 +979,7 @@ mod tests {
             ("other", 2, 2.0),
         ] {
             let policy = policies
-                .effective(&deepseek, Some(account), 4 * 86400 + hour * 3600)
+                .effective(&deepseek, Some(account), at(4 * 86400 + hour * 3600))
                 .policy;
             assert_eq!(policy.cache.price_multiplier, Some(expected));
             assert_eq!(
@@ -992,13 +995,17 @@ mod tests {
             .effective(
                 &ModelId::parse("codex/gpt-6.1-terra")?,
                 Some("codex/work"),
-                0,
+                at(0),
             )
             .policy;
         assert_eq!(terra.lane.stop_early_ok, Some(true));
         assert_eq!(terra.lane.max_continuations, Some(0));
         let free = policies
-            .effective(&ModelId::parse("opencode/unknown-free")?, Some("work"), 0)
+            .effective(
+                &ModelId::parse("opencode/unknown-free")?,
+                Some("work"),
+                at(0),
+            )
             .policy;
         assert_eq!(free.lane.read_only, Some(false));
         Ok(())
@@ -1022,7 +1029,7 @@ mod tests {
                     || (hours[2]..hours[3]).contains(&hour_of_day));
             let expected = if peak { multiplier } else { 1.0 };
             assert_eq!(
-                bundled_policy(&model, at).cache.price_multiplier,
+                bundled_policy(&model, self::at(at)).cache.price_multiplier,
                 Some(expected),
                 "hour {hour}"
             );
@@ -1064,7 +1071,7 @@ mod tests {
             (Some("other"), 3600, 200_000),
             (None, 3600, 200_000),
         ] {
-            let effective = policies.effective(&model, account, time);
+            let effective = policies.effective(&model, account, at(time));
             assert_eq!(effective.policy.compaction.window, Some(expected));
             assert_eq!(effective.policy.cache.ttl_seconds, Some(300));
             assert_eq!(effective.policy.lane.stop_early_ok, Some(false));
@@ -1123,7 +1130,8 @@ mod tests {
             policies.defaults.result.fallback_effort.as_deref(),
             Some("max")
         );
-        let effective = policies.effective(&ModelId::parse("codex/gpt-6-luna")?, Some("work"), 0);
+        let effective =
+            policies.effective(&ModelId::parse("codex/gpt-6-luna")?, Some("work"), at(0));
         assert_eq!(
             effective
                 .policy
@@ -1153,7 +1161,7 @@ mod tests {
         ))?;
         assert_eq!(
             canonical
-                .effective(&model, None, starts)
+                .effective(&model, None, at(starts))
                 .policy
                 .lane
                 .max_turns,
@@ -1186,7 +1194,11 @@ mod tests {
         };
         for time in [3 * 86_400 + 23 * 3600, 4 * 86_400 + 3600] {
             assert_eq!(
-                policies.effective(&model, None, time).policy.lane.max_turns,
+                policies
+                    .effective(&model, None, at(time))
+                    .policy
+                    .lane
+                    .max_turns,
                 Some(17)
             );
         }
@@ -1315,17 +1327,51 @@ mod tests {
         )?;
 
         assert_eq!(
-            policies.effective(&model, None, 99).policy.lane.max_turns,
+            policies
+                .effective(&model, None, at(99))
+                .policy
+                .lane
+                .max_turns,
             Some(17)
         );
         assert_eq!(
-            policies.effective(&model, None, 100).policy.lane.max_turns,
+            policies
+                .effective(&model, None, at(100))
+                .policy
+                .lane
+                .max_turns,
             None
         );
         assert_eq!(
-            policies.effective(&model, None, 101).policy.lane.max_turns,
+            policies
+                .effective(&model, None, at(101))
+                .policy
+                .lane
+                .max_turns,
             None
         );
+        use provenant_core::{Clock, DurationMicros, MonoTime, TestClock};
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            "[[rules]]\nmodel='codex/gpt-6.1-terra'\nschedule={starts='1970-01-01T00:00:00.250000Z',expires='1970-01-01T00:00:00.500000Z'}\n[rules.policy.lane]\nmax_turns=17\n", // timebomb: allow fixed injected clock fixture
+        )?;
+        let mut clock = TestClock::new(WallTime::from_micros(249_999)?, MonoTime::from_micros(0));
+        for (advance, expected) in [
+            (0, None),
+            (1, Some(17)),
+            (249_999, Some(17)),
+            (1, None),
+            (250_000, None),
+        ] {
+            clock.advance(DurationMicros::from_micros(advance))?;
+            assert_eq!(
+                policies
+                    .effective(&model, None, clock.wall_now()?)
+                    .policy
+                    .lane
+                    .max_turns,
+                expected
+            );
+        }
         Ok(())
     }
 
@@ -1333,7 +1379,9 @@ mod tests {
     fn compaction_economics_and_cache_share_preserve_unknowns()
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelId::parse("claude/claude-opus-5-5")?;
-        let policy = ModelPolicies::default().effective(&model, None, 0).policy;
+        let policy = ModelPolicies::default()
+            .effective(&model, None, at(0))
+            .policy;
         // (0.05*275000 + (5+1.25)*15000)/(0.05*(275000-15000)).
         assert_eq!(
             policy.break_even_turns(275_000, 15_000, 0),
@@ -1344,7 +1392,7 @@ mod tests {
             .effective(
                 &ModelId::parse("opencode/opencode-go/deepseek-v4.1-flash")?,
                 None,
-                0,
+                at(0),
             )
             .policy;
         let intent = RouteIntent {
@@ -1360,7 +1408,7 @@ mod tests {
         ] {
             assert_eq!(
                 ModelPolicies::default()
-                    .effective(&deepseek_model, None, time)
+                    .effective(&deepseek_model, None, at(time))
                     .policy
                     .cache_factor_basis_points(intent),
                 expected
@@ -1384,7 +1432,7 @@ mod tests {
     fn launch_controls_result_sections_and_overrides() -> Result<(), Box<dyn std::error::Error>> {
         let policies = ModelPolicies::default();
         let claude = policies
-            .effective(&ModelId::parse("claude/claude-sonnet-5-5")?, None, 0)
+            .effective(&ModelId::parse("claude/claude-sonnet-5-5")?, None, at(0))
             .policy;
         assert_eq!(
             claude.launch_env("claude"),
@@ -1392,7 +1440,7 @@ mod tests {
         );
         assert!(claude.launch_env("codex").is_empty());
         let gemini = policies
-            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, 0)
+            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, at(0))
             .policy;
         assert!(!gemini.result_valid(" \n"));
         assert!(!gemini.result_valid("the words ## Findings and ## Evidence"));
@@ -1415,7 +1463,7 @@ mod tests {
         });
         assert_eq!(
             disabled
-                .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, 100)
+                .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, at(100))
                 .policy
                 .result
                 .check,
@@ -1454,7 +1502,7 @@ mod tests {
         );
         assert!(
             drifted
-                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, 0)
+                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, at(0))
                 .policy
                 .result
                 .fallback

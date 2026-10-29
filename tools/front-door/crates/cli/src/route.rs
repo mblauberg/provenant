@@ -511,6 +511,21 @@ pub struct PacingReport {
     pub recorded: String,
     pub active_overrides: Vec<provenant_routing::PacingOverride>,
 }
+impl PacingReport {
+    fn human(&self, now: WallTime) -> String {
+        let mut lines = vec![
+            format!("recorded: {}", self.recorded),
+            format!("active overrides: {}", self.active_overrides.len()),
+        ];
+        lines.extend(
+            self.active_overrides
+                .iter()
+                .map(|row| OverrideRow::pacing(row, now).line()),
+        );
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
 fn policy_name(policy: PacingPolicy) -> &'static str {
     match policy {
         PacingPolicy::Pace => "pace",
@@ -1703,7 +1718,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                 let model_policy = context.config.model_policy.effective(
                     &model,
                     query.account.as_deref().or(route.account_key.as_deref()),
-                    context.now.as_timestamp().as_second(),
+                    context.now,
                 );
                 provenant_routing::validate_intent(&model_policy.policy, request.intent)?;
                 let compaction_break_even_turns = model_policy
@@ -1994,20 +2009,7 @@ pub fn run(
                 }
                 text
             }
-            Some(Data::Pacing(report)) => {
-                let mut lines = vec![
-                    format!("recorded: {}", report.recorded),
-                    format!("active overrides: {}", report.active_overrides.len()),
-                ];
-                lines.extend(
-                    report
-                        .active_overrides
-                        .iter()
-                        .zip(at)
-                        .map(|(row, now)| OverrideRow::pacing(row, now).line()),
-                );
-                format!("{}\n", lines.join("\n"))
-            }
+            Some(Data::Pacing(report)) => at.map(|now| report.human(now)).unwrap_or_default(),
             Some(Data::Overrides(report)) => {
                 let mut lines = Vec::new();
                 if let Some(row) = &report.recorded {
@@ -2126,6 +2128,25 @@ mod route_tests {
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
     use std::error::Error;
+
+    #[test]
+    fn pacing_report_prints_every_active_override() -> Result<(), Box<dyn Error>> {
+        use provenant_core::{Clock, MonoTime, TestClock, WallTime};
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let report = super::PacingReport {
+            recorded: "codex".into(),
+            active_overrides: serde_json::from_value(serde_json::json!([
+                {"provider":"codex", "policy":"pace"},
+                {"provider":"claude", "policy":"off"}
+            ]))?,
+        };
+        let text = report.human(clock.wall_now()?);
+        assert_eq!(text.lines().count(), 4);
+        assert!(text.contains("active overrides: 2"));
+        assert!(text.contains("pacing provider codex pace active"));
+        assert!(text.contains("pacing provider claude off active"));
+        Ok(())
+    }
 
     #[test]
     fn override_instants_and_windows_parse_relative_to_the_supplied_instant() {

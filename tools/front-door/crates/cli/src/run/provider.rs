@@ -564,7 +564,7 @@ fn prepare_candidates(
             .effective(
                 &provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?,
                 route.account_key.as_deref(),
-                clock.unix_seconds(),
+                clock.wall_now().map_err(|error| error.to_string())?,
             )
             .policy;
         if !model_policy.permits(request.intent) {
@@ -2924,7 +2924,14 @@ mod tests {
         )?;
         let mut task = input.request.tasks.remove(0);
         task.account = Some("agy-work".into());
-        let policy = config.model_policy.effective(&model, None, 0).policy;
+        let policy = config
+            .model_policy
+            .effective(
+                &model,
+                None,
+                provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
+            )
+            .policy;
         let fallback = super::nested_policy_fallback(&task, &route, &policy)?;
         assert!(
             matches!(fallback.route, run::RequestedRoute::Model { ref model, ref effort, .. } if model == "codex/gpt-6-luna" && effort.as_deref() == Some("high"))

@@ -1532,10 +1532,11 @@ mod tests {
                 .len()
                 == 1
         );
-        let effective =
-            config
-                .model_policy
-                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, 1);
+        let effective = config.model_policy.effective(
+            &ModelId::parse("codex/gpt-6-luna")?,
+            None,
+            provenant_core::WallTime::from_unix_seconds(1).expect("valid policy instant"),
+        );
         assert!(effective.policy.result.fallback.is_none());
 
         config.model_policy.defaults.result.fallback = Some(ModelId::parse("codex/gpt-6-luna")?);

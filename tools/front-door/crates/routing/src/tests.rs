@@ -1813,7 +1813,11 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             .domains
             .routing
             .model_policy
-            .effective(&model, None, 0)
+            .effective(
+                &model,
+                None,
+                provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
+            )
             .policy;
         assert_eq!(policy.lane.read_only, Some(true), "{text}");
         assert_ne!(policy.lane.max_continuations, Some(9), "{text}");

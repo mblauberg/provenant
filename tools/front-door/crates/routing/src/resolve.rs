@@ -1241,7 +1241,7 @@ fn candidate(
                 .effective(
                     model,
                     a.account_key.as_deref().or(context.policy_account_hint),
-                    context.now_seconds(),
+                    context.now,
                 )
                 .policy
                 .permits(intent);
@@ -1508,7 +1508,7 @@ fn resolve_inner(
                     .account_key
                     .as_deref()
                     .or(context.policy_account_hint),
-                context.now_seconds(),
+                context.now,
             )
             .policy,
         request.intent,
@@ -1674,7 +1674,7 @@ fn classify_pool(
                                 .account_key
                                 .as_deref()
                                 .or(context.policy_account_hint),
-                            context.now_seconds(),
+                            context.now,
                         )
                         .policy;
                     if !model_policy.permits(request.intent) {

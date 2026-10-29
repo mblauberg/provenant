@@ -126,19 +126,12 @@ pub(crate) struct Guard;
 impl Guard {
     /// A live native owner, including this process, excludes another driver.
     /// A crash leaves its progress and attempt count ready for the next claim.
-    pub(crate) fn claim(
+    pub(crate) fn claim<'a>(
         attempt: &Directory,
         scope: Scope,
-        clock: &dyn Clock,
-    ) -> Result<Option<Driver>> {
-        Self::claim_at(attempt, scope, now_ms(clock)?)
-    }
-
-    pub(crate) fn claim_at(
-        attempt: &Directory,
-        scope: Scope,
-        now_ms: u64,
-    ) -> Result<Option<Driver>> {
+        clock: &'a dyn Clock,
+    ) -> Result<Option<Driver<'a>>> {
+        let now_ms = now_ms(clock)?;
         let _lock = match attempt.try_lock(OsStr::new("settlement.lock"), LockMode::Exclusive) {
             Ok(lock) => lock,
             Err(FsError::LockTimeout { .. }) => return Ok(None),
@@ -175,12 +168,14 @@ impl Guard {
             owner,
             cancel: CancelToken::new(),
             import_started: false,
+            clock,
         }))
     }
 }
 
 /// A native process owns progress; this value holds no kernel lock.
-pub(crate) struct Driver {
+pub(crate) struct Driver<'a> {
+    clock: &'a dyn Clock,
     attempt: Directory,
     journal: Journal,
     owner: ProcessIdentity,
@@ -188,7 +183,7 @@ pub(crate) struct Driver {
     import_started: bool,
 }
 
-impl Driver {
+impl Driver<'_> {
     pub(crate) fn cancellation(&self) -> CancelToken {
         self.cancel.clone()
     }
@@ -263,7 +258,7 @@ impl Driver {
     }
 }
 
-impl Drop for Driver {
+impl Drop for Driver<'_> {
     fn drop(&mut self) {
         let Ok(_lock) = journal_lock(&self.attempt) else {
             return;
@@ -273,8 +268,7 @@ impl Drop for Driver {
         };
         if journal.owner.as_ref() == Some(&self.owner) {
             journal.owner = None;
-            // Drop has no caller to inject a clock, so it samples the system's.
-            if let Ok(now) = now_ms(&provenant_os::clock::SystemClock::new()) {
+            if let Ok(now) = now_ms(self.clock) {
                 journal.retry_after_ms = now.saturating_add(backoff_ms(journal.attempts));
             }
             let _ = write(&self.attempt, &journal);
@@ -323,7 +317,19 @@ pub(crate) fn with_cancellation<T>(
 mod tests {
     use super::*;
     use provenant_core::{AttemptId, RunId};
-    use provenant_os::clock::SystemClock;
+    use provenant_core::{DurationMicros, MonoTime, TestClock, WallTime};
+
+    fn clock() -> TestClock {
+        TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0))
+    }
+
+    fn advance_to(clock: &mut TestClock, millis: u64) -> TestResult {
+        let current = now_ms(clock)?;
+        clock.advance(DurationMicros::from_micros(
+            millis.saturating_sub(current) * 1000,
+        ))?;
+        Ok(())
+    }
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -374,19 +380,18 @@ mod tests {
 
     #[test]
     fn progress_and_pinned_commit_survive_a_new_driver() -> TestResult {
+        let mut clock = clock();
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
         let head = GitOid::parse(&"a".repeat(40))?;
         let base = GitOid::parse(&"b".repeat(40))?;
-        let mut first =
-            Guard::claim(&attempt, scope(), &SystemClock::new())?.expect("initial claim");
+        let mut first = Guard::claim(&attempt, scope(), &clock)?.expect("initial claim");
         first.set_head(head)?;
         first.set_base(base)?;
         first.advance(Phase::Record)?;
         drop(first);
-        let mut resumed =
-            Guard::claim_at(&attempt, scope(), read(&attempt, scope())?.retry_after_ms)?
-                .expect("resumed claim");
+        advance_to(&mut clock, read(&attempt, scope())?.retry_after_ms)?;
+        let mut resumed = Guard::claim(&attempt, scope(), &clock)?.expect("resumed claim");
         assert_eq!(resumed.phase(), Phase::Record);
         assert_eq!(resumed.head(), Some(head));
         assert_eq!(resumed.base(), Some(base));
@@ -404,46 +409,49 @@ mod tests {
 
     #[test]
     fn native_live_owner_excludes_another_driver_and_pid_reuse_resumes() -> TestResult {
+        let mut clock = clock();
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
-        let first = Guard::claim(&attempt, scope(), &SystemClock::new())?.expect("initial claim");
-        assert!(Guard::claim(&attempt, scope(), &SystemClock::new())?.is_none());
+        let first = Guard::claim(&attempt, scope(), &clock)?.expect("initial claim");
+        assert!(Guard::claim(&attempt, scope(), &clock)?.is_none());
         let mut crashed = read(&attempt, scope())?;
         let owner = crashed.owner.as_mut().expect("owner");
         owner.native_start = owner.native_start.wrapping_add(1);
         write(&attempt, &crashed)?;
         drop(first);
-        let resumed = Guard::claim_at(&attempt, scope(), crashed.retry_after_ms)?
-            .expect("stale native identity recovered");
+        advance_to(&mut clock, crashed.retry_after_ms)?;
+        let resumed =
+            Guard::claim(&attempt, scope(), &clock)?.expect("stale native identity recovered");
         assert_eq!(resumed.attempts(), 0);
         Ok(())
     }
 
     #[test]
     fn claims_before_import_do_not_consume_the_import_retry_budget() -> TestResult {
+        let clock = clock();
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
-        let driver = Guard::claim(&attempt, scope(), &SystemClock::new())?.expect("initial claim");
+        let driver = Guard::claim(&attempt, scope(), &clock)?.expect("initial claim");
         assert_eq!(driver.attempts(), 0, "claiming has not reached import");
         Ok(())
     }
 
     #[test]
     fn interrupted_settlement_has_one_durable_retry_cap() -> TestResult {
+        let mut clock = clock();
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
         for expected in 1..=LIMIT {
-            let now = read(&attempt, scope())?
-                .retry_after_ms
-                .max(now_ms(&SystemClock::new())?);
-            let mut driver = Guard::claim_at(&attempt, scope(), now)?.expect("claim within cap");
+            let now = read(&attempt, scope())?.retry_after_ms.max(now_ms(&clock)?);
+            advance_to(&mut clock, now)?;
+            let mut driver = Guard::claim(&attempt, scope(), &clock)?.expect("claim within cap");
             driver.begin_import()?;
             driver.begin_import()?;
             assert_eq!(driver.attempts(), expected);
             drop(driver);
         }
         assert!(matches!(
-            Guard::claim(&attempt, scope(), &SystemClock::new()),
+            Guard::claim(&attempt, scope(), &clock),
             Err(RunError::ObjectImportLimit(
                 "settlement exhausted three attempts; private Git retained for host recovery"
             ))
@@ -453,32 +461,49 @@ mod tests {
 
     #[test]
     fn retry_claims_wait_without_spending_import_attempts() -> TestResult {
+        let mut clock = clock();
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
         for expected in 1..=LIMIT {
-            let now = read(&attempt, scope())?
-                .retry_after_ms
-                .max(now_ms(&SystemClock::new())?);
-            let mut driver = Guard::claim_at(&attempt, scope(), now)?.expect("eligible claim");
+            let now = read(&attempt, scope())?.retry_after_ms.max(now_ms(&clock)?);
+            advance_to(&mut clock, now)?;
+            let mut driver = Guard::claim(&attempt, scope(), &clock)?.expect("eligible claim");
             driver.begin_import()?;
-            let dropped_at = now_ms(&SystemClock::new())?;
+            let dropped_at = now_ms(&clock)?;
             drop(driver);
             let journal = read(&attempt, scope())?;
             if expected < LIMIT {
-                assert!(Guard::claim_at(&attempt, scope(), journal.retry_after_ms - 1)?.is_none());
+                advance_to(&mut clock, journal.retry_after_ms - 1)?;
+                assert!(Guard::claim(&attempt, scope(), &clock)?.is_none());
                 assert_eq!(read(&attempt, scope())?.attempts, expected);
             }
-            assert!(journal.retry_after_ms >= dropped_at + backoff_ms(expected));
+            assert_eq!(journal.retry_after_ms, dropped_at + backoff_ms(expected));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_driver_uses_injected_clock_for_retry() -> TestResult {
+        let clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let driver = Guard::claim(&attempt, scope(), &clock)?.expect("claim");
+        clock.wait_until(MonoTime::from_micros(2_000_000))?;
+        drop(driver);
+        assert_eq!(read(&attempt, scope())?.retry_after_ms, 7_000);
+        assert!(Guard::claim(&attempt, scope(), &clock)?.is_none());
+        clock.wait_until(MonoTime::from_micros(7_000_000))?;
+        assert!(Guard::claim(&attempt, scope(), &clock)?.is_some());
         Ok(())
     }
 
     #[test]
     fn unknown_owner_expires_after_ten_minutes() -> TestResult {
         use provenant_supervisor::census::ObservationIssue;
+        let clock = clock();
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
-        let driver = Guard::claim(&attempt, scope(), &SystemClock::new())?.expect("claim");
+        let driver = Guard::claim(&attempt, scope(), &clock)?.expect("claim");
         let unknown = || ProcessObservation::Unknown(ObservationIssue::Malformed);
         assert!(observed_alive(
             &driver.owner,
@@ -497,9 +522,10 @@ mod tests {
 
     #[test]
     fn import_accounting_and_owner_release_survive_short_journal_contention() -> TestResult {
+        let clock = clock();
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
-        let mut driver = Guard::claim(&attempt, scope(), &SystemClock::new())?.expect("claim");
+        let mut driver = Guard::claim(&attempt, scope(), &clock)?.expect("claim");
         let held = attempt.try_lock(OsStr::new("settlement.lock"), LockMode::Exclusive)?;
         std::thread::scope(|threads| {
             threads.spawn(move || {
@@ -639,10 +665,10 @@ impl crate::RunStore {
                 Err(FsError::LockTimeout { .. }) => None,
                 Err(error) => return Err(error.into()),
             };
-        // A marker in an earlier format reads as expired, not as an error.
         let pending = read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
-            .and_then(|raw| crate::db::decode::<QueuedWorker>(&raw).ok())
-            .is_some_and(|request| request.run == run && wall < request.expires);
+            .map(|raw| QueuedWorker::decode(&raw, run))
+            .transpose()?
+            .is_some_and(|request| wall < request.expires);
         if needs_worker && spawn_lock.is_some() && worker_lock.is_some() && !pending {
             let checkout = std::env::current_dir()?;
             let home = std::env::var_os("HOME")
@@ -724,6 +750,24 @@ struct QueuedWorker {
     schema_version: u64,
     run: provenant_core::RunId,
     expires: provenant_core::WallTime,
+}
+
+impl QueuedWorker {
+    fn decode(raw: &[u8], run: provenant_core::RunId) -> Result<Self> {
+        let marker: Self = provenant_records::decode(
+            raw,
+            provenant_records::Limits {
+                max_bytes: RECORD_LIMIT,
+                ..Default::default()
+            },
+        )?;
+        if marker.schema_version != 2 || marker.run != run {
+            return Err(RunError::Validation(
+                "settlement queue marker run or version mismatch",
+            ));
+        }
+        Ok(marker)
+    }
 }
 
 /// The internal same-binary supervisor entry. It acquires journal ownership

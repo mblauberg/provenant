@@ -64,14 +64,21 @@ impl UtcMicros {
         }
         Ok(value)
     }
-    /// Any RFC 3339 spelling of a whole-microsecond instant, in any offset,
-    /// for hand-written configuration. [`Self::parse`] takes only the
+    /// Any RFC 3339 spelling of an instant, in any offset,
+    /// for hand-written configuration. Fractions truncate towards zero to microseconds.
+    /// [`Self::parse`] takes only the
     /// canonical spelling that [`Display`](std::fmt::Display) writes.
     pub fn parse_rfc3339(text: &str) -> Result<Self, TimeError> {
+        // RFC 3339 allows arbitrarily many fractional digits; jiff accepts nine.
+        let normalised = text.find('.').and_then(|dot| {
+            let digits = text[dot + 1..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            (digits > 9).then(|| format!("{}{}", &text[..dot + 10], &text[dot + 1 + digits..]))
+        });
+        let text = normalised.as_deref().unwrap_or(text);
         let timestamp: jiff::Timestamp = text.parse().map_err(|_| TimeError::WallSpelling)?;
-        if timestamp.subsec_nanosecond() % 1000 != 0 {
-            return Err(TimeError::WallRange);
-        }
         Self::from_micros(timestamp.as_microsecond())
     }
     pub fn checked_add(self, duration: DurationMicros) -> Result<Self, TimeError> {
@@ -94,9 +101,7 @@ pub mod rfc3339 {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<WallTime, D::Error> {
         let text = String::deserialize(deserializer)?;
         WallTime::parse_rfc3339(&text).map_err(|_| {
-            D::Error::custom(format_args!(
-                "expected an RFC 3339 timestamp of whole microseconds, not {text:?}"
-            ))
+            D::Error::custom(format_args!("expected an RFC 3339 timestamp, not {text:?}"))
         })
     }
 
@@ -500,10 +505,12 @@ mod tests {
             "2026-11-01T00:00:00Z",
             "2026-11-01T00:00:00.000000Z",
             "2026-11-01T10:00:00+10:00",
+            "2026-11-01T00:00:00.000000001Z",
+            "2026-11-01T00:00:00.00000000123456789Z",
         ] {
             assert_eq!(UtcMicros::parse_rfc3339(input).unwrap(), canonical);
         }
-        for input in ["2026-11-01T00:00:00.000000001Z", "2026-11-01", "1793491200"] {
+        for input in ["2026-11-01", "1793491200"] {
             assert!(UtcMicros::parse_rfc3339(input).is_err(), "{input}");
         }
         #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -524,6 +531,9 @@ mod tests {
         );
         let read: Configured = serde_json::from_str(r#"{"at":"2026-11-01T00:00:00Z"}"#).unwrap();
         assert_eq!(read.expires, None);
+        let fractional: Configured = serde_json::from_str(r#"{"at":"2026-11-01T00:00:00.123456789Z","expires":"2026-11-01T10:00:00.000000001+10:00"}"#).unwrap();
+        assert_eq!(fractional.at.as_micros(), canonical.as_micros() + 123_456);
+        assert_eq!(fractional.expires, Some(canonical));
         let written = Configured {
             at: canonical,
             expires: Some(canonical),
