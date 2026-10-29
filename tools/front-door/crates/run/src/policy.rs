@@ -10,6 +10,11 @@ use provenant_records::{AttemptFile, CanonicalV1};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
+/// Attempts one run may reach through policy successors, its first included.
+/// It bounds a chain that configuration sets, so a corrupt sealed record cannot
+/// queue successors without end; routing's settlement retry limit stays below it.
+pub const POLICY_ATTEMPT_CEILING: u64 = 33;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyRetry {
@@ -100,7 +105,7 @@ impl RunStore {
         if self.request(current.run_id, call)?.parent_attempt.is_some() {
             return Ok(current);
         }
-        for _ in 0..9 {
+        for _ in 0..POLICY_ATTEMPT_CEILING {
             let next: Option<String> = call.retry(|| {
                 Ok(self
                     .db
@@ -157,15 +162,10 @@ impl RunStore {
             .ok_or(RunError::Validation("policy retry task missing"))?;
         if retry.schema_version != 1
             || !retry_within_authority(retry, task, record)
-            || retry.max_attempts > 9
+            || retry.max_attempts > POLICY_ATTEMPT_CEILING
             || retry.max_attempts < 2
             || retry.instruction.is_empty()
             || retry.instruction.len() > 4096
-            || retry.not_before_unix_seconds.is_some_and(|not_before| {
-                call.clock.wall_now().map_or(true, |now| {
-                    not_before > now.as_micros().div_euclid(1_000_000).saturating_add(3_600)
-                })
-            })
         {
             return Err(RunError::Validation("policy retry bounds"));
         }
@@ -194,7 +194,7 @@ impl RunStore {
         old: &AttemptRecord,
         terminal: &AttemptRecord,
         call: &Request<'_>,
-    ) -> Result<Option<AttemptRecord>> {
+    ) -> Result<Option<(AttemptRecord, u64)>> {
         let directory = self.attempt_dir(old.run_id, old.attempt_id, false)?;
         if matches!(
             terminal.state,
@@ -221,7 +221,9 @@ impl RunStore {
             return Ok(None);
         };
         let retry: PolicyRetry = decode(&raw)?;
-        if self.policy_attempt_number(old, call)? >= retry.max_attempts || retry.max_attempts > 9 {
+        if self.policy_attempt_number(old, call)? >= retry.max_attempts
+            || retry.max_attempts > POLICY_ATTEMPT_CEILING
+        {
             return Err(RunError::Validation("policy retry attempt limit"));
         }
         let request = self.request(old.run_id, call)?;
@@ -262,6 +264,17 @@ impl RunStore {
         let AttemptState::Terminal { finished_at, .. } = terminal.state else {
             return Err(RunError::Nonterminal);
         };
+        // The successor's admission window opens when its sealed wait ends,
+        // so a long backoff cannot spend the window before launch.
+        let wait_seconds = retry
+            .not_before_unix_seconds
+            .and_then(|not_before| {
+                u64::try_from(
+                    not_before.saturating_sub(finished_at.as_micros().div_euclid(1_000_000)),
+                )
+                .ok()
+            })
+            .unwrap_or(0);
         let mut next = old.clone();
         next.attempt_id = id;
         next.attempt_number = old
@@ -322,13 +335,14 @@ impl RunStore {
         crate::reader::validate_attempt(&next)?;
         let directory = self.attempt_dir(old.run_id, id, true)?;
         seal(&directory, "prompt.txt", prompt.as_bytes(), RECORD_LIMIT)?;
-        Ok(Some(next))
+        Ok(Some((next, wait_seconds)))
     }
 
     pub(crate) fn insert_policy_successor(
         &self,
         tx: &rusqlite::Connection,
         next: &AttemptRecord,
+        wait_seconds: u64,
         request: &CanonicalRequest,
         disk_floor_bytes: u64,
     ) -> Result<()> {
@@ -360,7 +374,7 @@ impl RunStore {
             },
             request.concurrency,
             crate::admission::Allowance {
-                queue_seconds: 0,
+                queue_seconds: wait_seconds,
                 runtime_seconds: task.provider_timeout_seconds,
             },
             disk_floor_bytes,
@@ -450,6 +464,66 @@ mod tests {
     }
 
     #[test]
+    fn a_policy_retry_chain_continues_each_attempt_in_one_run()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let store = RunStore::open(&context(temp.path())?, &call(&clock, &cancel))?;
+        let input = input();
+        store.create(&input, &call(&clock, &cancel))?;
+        let retry = PolicyRetry {
+            schema_version: 1,
+            route: store
+                .record(input.attempts[0].attempt_id, &call(&clock, &cancel))?
+                .requested_route,
+            resume: false,
+            max_attempts: 3,
+            instruction: "Complete the original task.".into(),
+            not_before_unix_seconds: None,
+        };
+        let mut publication = publication();
+        publication.outcome = Outcome::Failed;
+        let mut id = input.attempts[0].attempt_id;
+        // Each settled attempt seals a retry and queues its successor; the
+        // second successor must not collide with the first in the same run.
+        for number in 2..=3 {
+            let at = i64::try_from(number)? * 100;
+            publication.started_at = Some(provenant_core::WallTime::from_micros(at + 50)?);
+            publication.finished_at = provenant_core::WallTime::from_micros(at + 90)?;
+            let mut observation = exit();
+            observation.scope.attempt = id;
+            let mut sealed = crate::tests::input();
+            sealed.attempts[0].attempt_id = id;
+            seal_observation(&store, &sealed, &observation)?;
+            let old = store.record(id, &call(&clock, &cancel))?;
+            assert!(store.stage_policy_retry(&old, &retry, &call(&clock, &cancel))?);
+            store
+                .db
+                .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
+            store.publish_terminal(
+                id,
+                old.revision,
+                &publication,
+                &observation,
+                &call(&clock, &cancel),
+            )?;
+            let queued = store.pending_attempts(input.run_id, &call(&clock, &cancel))?;
+            assert_eq!(queued.len(), 1);
+            assert_eq!(queued[0].attempt_number, number);
+            assert_eq!(queued[0].retry_of, Some(id));
+            id = queued[0].attempt_id;
+        }
+        assert_eq!(
+            store
+                .policy_tail(input.attempts[0].attempt_id, &call(&clock, &cancel))?
+                .attempt_id,
+            id
+        );
+        Ok(())
+    }
+
+    #[test]
     fn writer_retry_keeps_its_granted_route_and_child_stores_never_retry()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -502,17 +576,6 @@ mod tests {
         });
         assert!(super::retry_within_authority(&elsewhere, task, &applied));
         assert!(!super::retry_within_authority(&elsewhere, task, &old));
-        // A launch time more than an hour out is refused.
-        let late = PolicyRetry {
-            not_before_unix_seconds: Some(
-                provenant_core::Clock::wall_now(&clock)?.as_micros() / 1_000_000 + 7_200,
-            ),
-            ..retry.clone()
-        };
-        assert!(matches!(
-            store.stage_policy_retry(&old, &late, &call),
-            Err(RunError::Validation("policy retry bounds"))
-        ));
         assert!(store.stage_policy_retry(&old, &retry, &call)?);
         assert!(read_sealed(&directory, AttemptFile::PolicyRetry.name(), RECORD_LIMIT)?.is_some());
         Ok(())

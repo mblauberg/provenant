@@ -376,7 +376,11 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         OpenOptions::new()
             .append(true)
             .open(rig.state.join("config.toml"))?,
-        "\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low', efforts = ['low'] }}]\n[domains.routing.review.shapes.fixture]\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'"
+        // The capacity reviewers below settle without settlement retries:
+        // two reviewers of three attempts each, under host startup spacing,
+        // outlast the rig's ten-second watchdog. Retry chains are covered by
+        // `capacity_settlement_resumes_the_same_session` and the run store.
+        "\n[domains.routing]\nsettlement_retries = 0\n[domains.routing.pools]\nreview-fixture = [{{ model = 'codex/gpt-6-luna', effort = 'low', efforts = ['low'] }}]\n[domains.routing.review.shapes.fixture]\nreviewers = [{{ pool = 'review-fixture', count = 2, lenses = ['correctness', 'tests'], distinct_families = true }}]\n[domains.routing.review.select.by_paths]\n'.github/workflows/**' = 'fixture'"
     )?;
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)

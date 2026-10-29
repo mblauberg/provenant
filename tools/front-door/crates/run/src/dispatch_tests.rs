@@ -7557,3 +7557,54 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn a_policy_retry_launches_for_no_launcher_before_its_sealed_time() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (mut clock, cancel) = (clock(), CancelToken::new());
+    let store = RunStore::open(&context(temp.path())?, &call(&clock, &cancel))?;
+    let run = input();
+    store.create(&run, &call(&clock, &cancel))?;
+    super::tests::seal_observation(&store, &run, &exit())?;
+    let id = run.attempts[0].attempt_id;
+    let old = store.record(id, &call(&clock, &cancel))?;
+    let retry = crate::PolicyRetry {
+        schema_version: 1,
+        route: old.requested_route.clone(),
+        resume: false,
+        max_attempts: 2,
+        instruction: "Complete the original task.".into(),
+        not_before_unix_seconds: Some(60),
+    };
+    assert!(store.stage_policy_retry(&old, &retry, &call(&clock, &cancel))?);
+    store
+        .db
+        .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
+    let mut publication = super::tests::publication();
+    publication.outcome = Outcome::Failed;
+    store.publish_terminal(id, 1, &publication, &exit(), &call(&clock, &cancel))?;
+    let next = store.pending_attempts(run.run_id, &call(&clock, &cancel))?[0].attempt_id;
+    let fake = Fake {
+        refuse: true,
+        ..Fake::default()
+    };
+    // Any launcher, such as reconciliation, finds it deferred until then.
+    let started = store.start(
+        run.run_id,
+        &fake,
+        &|_, _| unreachable!(),
+        &call(&clock, &cancel),
+    )?;
+    assert!(matches!(started.as_slice(), [Started::Deferred(attempt)] if *attempt == next));
+    assert_eq!(fake.prepared.get(), 0);
+    clock.advance(provenant_core::DurationMicros::from_seconds(60)?)?;
+    let later = Request {
+        clock: &clock,
+        budget: provenant_core::WaitBudget::cli(clock.mono_now(), 10)?,
+        cancel: &cancel,
+    };
+    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;
+    assert!(matches!(started.as_slice(), [Started::Refused { attempt, .. }] if *attempt == next));
+    assert_eq!(fake.prepared.get(), 1);
+    Ok(())
+}

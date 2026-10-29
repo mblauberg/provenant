@@ -274,31 +274,22 @@ impl run::Providers for Registry<'_> {
         if assessment.refusal.is_some() || assessment.retry.is_some() {
             return Ok(assessment);
         }
-        // Another registered account that serves this model and is not known
-        // to be spent: no live refusal for the model and no exhausted reading.
-        let served = model.model();
-        let spent = |adapter: &str, key: &str| {
-            quota.iter().any(|record| {
-                record.account.adapter == adapter
-                    && record.account.account_key == key
-                    && (record.snapshot.as_ref().is_some_and(|snapshot| {
-                        snapshot.status == provenant_quota::QuotaStatus::Exhausted
-                    }) || record.refusals.iter().any(|refusal| {
-                        refusal.model == served
-                            && refusal
-                                .expires_unix_seconds()
-                                .is_ok_and(|expires| expires > now)
-                    }))
-            })
-        };
+        let model_pool = provenant_routing::Catalogue::bundled()
+            .ok()
+            .and_then(|catalogue| catalogue.quota_pool(&model).map(str::to_owned));
         let other_account = |adapter: &str, key: &str| {
-            accounts.entries.values().any(|entry| {
-                entry.adapter == adapter
-                    && entry.key != key
-                    && provenant_records::AdapterSpec::get(adapter)
-                        .is_none_or(|spec| spec.account_serves_model(&entry.key, served))
-                    && !spent(adapter, &entry.key)
-            })
+            unspent_alternative(
+                accounts
+                    .entries
+                    .values()
+                    .filter(|entry| entry.adapter == adapter)
+                    .map(|entry| entry.key.as_str()),
+                &quota,
+                key,
+                &model,
+                model_pool.as_deref(),
+                now,
+            )
         };
         Ok(assess_settlement_retry(
             &routing,
@@ -518,6 +509,39 @@ fn capacity_reason(reason: &str) -> bool {
 /// retried within `domains.routing.settlement_retries`: a capacity stop resumes
 /// its session after a growing backoff, or redraws when it has none, and a
 /// quota stop redraws at once, where admission skips the spent account.
+/// Whether another registered account for `model`'s adapter, other than
+/// `spent_key`, serves the model and is not known to be spent: no live provider
+/// refusal for the model, and no reading that routing's rule calls spent.
+fn unspent_alternative<'k>(
+    keys: impl IntoIterator<Item = &'k str>,
+    quota: &[provenant_quota::AccountRecord],
+    spent_key: &str,
+    model: &ModelId,
+    model_pool: Option<&str>,
+    now: i64,
+) -> bool {
+    let adapter = model.adapter();
+    let spent = |key: &str| {
+        quota.iter().any(|record| {
+            record.account.adapter == adapter
+                && record.account.account_key == key
+                && (record.snapshot.as_ref().is_some_and(|snapshot| {
+                    provenant_routing::quota_reading_spent(snapshot, model, model_pool, now)
+                }) || record.refusals.iter().any(|refusal| {
+                    refusal.model == model.model()
+                        && refusal
+                            .expires_unix_seconds()
+                            .is_ok_and(|expires| expires > now)
+                }))
+        })
+    };
+    keys.into_iter().any(|key| {
+        key != spent_key
+            && provenant_records::AdapterSpec::get(adapter)
+                .is_none_or(|spec| spec.account_serves_model(key, model.model()))
+            && !spent(key)
+    })
+}
 fn assess_settlement_retry(
     config: &provenant_routing::RoutingConfig,
     other_account: impl Fn(&str, &str) -> bool,
@@ -593,7 +617,9 @@ fn assess_settlement_retry(
                 .try_into()
                 .unwrap_or_default(),
         );
-        base.saturating_add(draw % (base / 4 + 1)).min(600)
+        base.saturating_add(draw % (base / 4 + 1))
+            .min(config.capacity_retry_max_seconds)
+            .min(config.retry_delay_ceiling_seconds)
     } else {
         0
     };
@@ -3298,8 +3324,9 @@ pub fn launch_policy_successor(
     }
     // A capacity retry waits until its recorded time here, in the settled
     // attempt's guardian, and gives up the wait once the successor is no
-    // longer queued. The time is sealed with the retry, so a later sweep can
-    // launch the successor if this guardian dies.
+    // longer queued. The time is sealed with the retry and every launcher
+    // defers the successor until then, so a later sweep can launch it if this
+    // guardian dies.
     use provenant_core::Clock;
     let backoff = store
         .record(context.attempt_id, &call)
@@ -3309,9 +3336,7 @@ pub fn launch_policy_successor(
         .zip(clock.wall_now().ok())
         .map_or(0, |(not_before, now)| {
             let now = now.as_micros().div_euclid(1_000_000);
-            u64::try_from(not_before.saturating_sub(now))
-                .unwrap_or(0)
-                .min(3_600)
+            u64::try_from(not_before.saturating_sub(now)).unwrap_or(0)
         });
     if backoff > 0 {
         before_wait();
@@ -7003,6 +7028,90 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn an_alternate_account_is_spent_only_by_routing_rule_or_a_live_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_quota::{
+            AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().canonicalize()?.join("state");
+        std::fs::create_dir_all(&state)?;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        let model = ModelId::parse("codex/gpt-6-luna")?;
+        let now = 1_800_000_000;
+        let scope = |key: &str| AccountScope {
+            adapter: "codex".into(),
+            account_key: key.into(),
+            label: key.into(),
+        };
+        let exhausted = |key: &str, resets: i64| {
+            let mut record = AccountRecord::empty(scope(key));
+            record.snapshot = Some(QuotaSnapshot {
+                schema_version: 1,
+                account: scope(key),
+                revision: 0,
+                status: QuotaStatus::Exhausted,
+                observed_unix_seconds: now - 7_200,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![QuotaWindow {
+                    pool: "seven_day".into(),
+                    window_seconds: Some(604_800),
+                    used_basis_points: 10_000,
+                    resets_unix_seconds: Some(resets),
+                }],
+                details: None,
+            });
+            record
+        };
+        let keys = ["work", "other"];
+        let alternative =
+            |quota: &[AccountRecord]| unspent_alternative(keys, quota, "work", &model, None, now);
+        // Unknown is not spent.
+        assert!(alternative(&[]));
+        // An exhausted reading binds until its full windows reset, as routing has it.
+        assert!(!alternative(&[exhausted("other", now + 3_600)]));
+        assert!(alternative(&[exhausted("other", now - 60)]));
+        // A live refusal recorded by a settlement, read back from the cache.
+        crate::quota::persist_provider_refusal(
+            &state,
+            &run::RouteRecord {
+                provider: Some("codex".into()),
+                model: Some("codex/gpt-6-luna".into()),
+                account_key: Some("other".into()),
+                account_label: Some("other".into()),
+                ..Default::default()
+            },
+            None,
+            now - 60,
+            None,
+        )?;
+        let cache = crate::quota::read_cache_at(&state)?;
+        assert!(!alternative(&cache));
+        // It holds only that model, and only for its hour.
+        let other = ModelId::parse("codex/gpt-6.1-sol")?;
+        assert!(unspent_alternative(keys, &cache, "work", &other, None, now));
+        assert!(unspent_alternative(
+            keys,
+            &cache,
+            "work",
+            &model,
+            None,
+            now + 3_600
+        ));
+        // The spent account itself never counts.
+        assert!(!unspent_alternative(
+            ["work"],
+            &[],
+            "work",
+            &model,
+            None,
+            now
+        ));
+        Ok(())
+    }
+    #[test]
     fn capacity_and_quota_settlements_retry_within_their_bounds()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -7167,6 +7276,31 @@ mod tests {
                 .retry
                 .is_none()
         );
+        // The limit, base, cap and ceiling are all configuration.
+        let tuned = provenant_routing::RoutingConfig {
+            settlement_retries: 5,
+            capacity_retry_seconds: 400,
+            capacity_retry_max_seconds: 900,
+            retry_delay_ceiling_seconds: 7_200,
+            ..Default::default()
+        };
+        let capped =
+            assess_settlement_retry(&tuned, |_, _| false, &task, &record, &capacity, 4, NOW)
+                .retry
+                .ok_or("tuned retry")?;
+        assert_eq!(capped.max_attempts, 6);
+        assert_eq!(wait(&capped), Some(900));
+        let ceiling = provenant_routing::RoutingConfig {
+            retry_delay_ceiling_seconds: 45,
+            ..tuned
+        };
+        let ceiled =
+            assess_settlement_retry(&ceiling, |_, _| false, &task, &record, &capacity, 1, NOW)
+                .retry
+                .ok_or("ceiled retry")?;
+        assert_eq!(wait(&ceiled), Some(45));
+        // Every configurable retry limit fits the run store's chain bound.
+        assert!(u64::from(provenant_routing::MAX_SETTLEMENT_RETRIES) < run::POLICY_ATTEMPT_CEILING);
         Ok(())
     }
     #[test]

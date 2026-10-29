@@ -1060,22 +1060,32 @@ fn latest_reading<'q>(
         })
         .max_by_key(|q| (q.snapshot.observed_unix_seconds, q.snapshot.revision))
 }
-/// The one rule for a spent account, whatever its pacing policy: an exhausted
-/// snapshot whose full windows have not all reset, or a grouped pool serving
-/// this model at its limit.
 fn reading_exhausted(
     snapshot: &provenant_quota::QuotaSnapshot,
     model: &ModelId,
     context: &RoutingContext<'_>,
 ) -> bool {
+    quota_reading_spent(
+        snapshot,
+        model,
+        context.catalogue.quota_pool(model),
+        context.now_seconds(),
+    )
+}
+/// The one rule for a spent account, whatever its pacing policy: an exhausted
+/// snapshot whose full windows serving `model` have not all reset, or a
+/// grouped pool serving it at its limit. `model_pool` is the catalogue's quota
+/// pool for the model. Freshness is the caller's concern.
+pub fn quota_reading_spent(
+    snapshot: &provenant_quota::QuotaSnapshot,
+    model: &ModelId,
+    model_pool: Option<&str>,
+    now_seconds: i64,
+) -> bool {
     match snapshot.status {
-        QuotaStatus::Exhausted => !exhaustion_lapsed(
-            snapshot,
-            context.now_seconds(),
-            context.catalogue.quota_pool(model),
-        ),
+        QuotaStatus::Exhausted => !exhaustion_lapsed(snapshot, now_seconds, model_pool),
         QuotaStatus::Available | QuotaStatus::CreditOnly => {
-            model_pool_exhausted(snapshot, model, context)
+            model_pool_exhausted(snapshot, model, model_pool, now_seconds)
         }
         _ => false,
     }
@@ -1086,14 +1096,13 @@ fn reading_exhausted(
 fn model_pool_exhausted(
     snapshot: &provenant_quota::QuotaSnapshot,
     model: &ModelId,
-    context: &RoutingContext<'_>,
+    pool: Option<&str>,
+    now: i64,
 ) -> bool {
     if !provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.grouped_quota_pools)
     {
         return false;
     }
-    let pool = context.catalogue.quota_pool(model);
-    let now = context.now_seconds();
     snapshot
         .windows
         .iter()

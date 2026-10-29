@@ -765,7 +765,7 @@ impl RunStore {
         self.write(call, |tx| {
             let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, bytes(next)?, id.to_string(), sql_int(old.revision)?])?;
             if changed != 1 { return Err(RunError::Conflict); }
-            if let Some(successor) = &successor { self.insert_policy_successor(tx, successor, &request, disk_floor_bytes)?; }
+            if let Some((successor, wait_seconds)) = &successor { self.insert_policy_successor(tx, successor, *wait_seconds, &request, disk_floor_bytes)?; }
             tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
             insert_event(tx, next)?;
             let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE run=?1 AND terminal=0)", [old.run_id.to_string()], |r| r.get(0))?;

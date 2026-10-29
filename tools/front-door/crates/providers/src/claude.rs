@@ -833,10 +833,11 @@ struct CacheCreation {
     #[serde(default)]
     ephemeral_1h_input_tokens: Option<u64>,
 }
-/// A rate limit holds the account only when Claude says so: its text names a
-/// usage, session or weekly limit, or when the limit resets. Any other 429 is
-/// a transient per-minute limit, retried like capacity rather than recorded
-/// as a refusal that would hold the account for an hour.
+/// A rate limit holds the account only when its text names a plan allowance:
+/// a usage, session, five-hour, daily, weekly or monthly limit. A reset alone
+/// is not enough, since a per-minute limit also names one. Any other 429 is
+/// transient, retried like capacity rather than recorded as a refusal that
+/// would hold the account for an hour.
 fn rate_limited(text: Option<String>, fallback: &str) -> E {
     let usage = text.as_deref().is_some_and(|text| {
         let text = text.to_ascii_lowercase();
@@ -846,7 +847,7 @@ fn rate_limited(text: Option<String>, fallback: &str) -> E {
             "weekly limit",
             "hour limit",
             "daily limit",
-            "reset",
+            "monthly limit",
         ]
         .iter()
         .any(|marker| text.contains(marker))
@@ -1028,6 +1029,9 @@ mod overload_tests {
         for raw in [
             &br#"{"type":"assistant","session_id":"s","error":"rate_limit","is_api_error_message":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Rate limited: too many requests, please slow down"}]}}"#[..],
             br#"{"type":"result","session_id":"s","subtype":"success","is_error":true,"api_error_status":429,"result":""}"#,
+            // A short window names a reset too; that alone is not an allowance.
+            br#"{"type":"assistant","session_id":"s","error":"rate_limit","is_api_error_message":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Rate limit exceeded; resets in 60 seconds"}]}}"#,
+            br#"{"type":"result","session_id":"s","subtype":"success","is_error":true,"api_error_status":429,"result":"Rate limit exceeded; resets in 60 seconds"}"#,
         ] {
             let events = decode(raw).unwrap();
             assert!(

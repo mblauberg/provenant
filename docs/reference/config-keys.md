@@ -171,17 +171,43 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Longer cooldowns reduce repeated capacity errors but keep affected models out of automatic draws for longer."` |
 | `type` | `"int"` |
 
+## `domains.routing.capacity_retry_max_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `600` |
+| `effect` | `"Cap one capacity retry's wait, jitter included, at this many seconds."` |
+| `max` | `604800` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A higher cap lets later retries back off further from a provider that stays at capacity, at the cost of a longer stall."` |
+| `type` | `"int"` |
+
 ## `domains.routing.capacity_retry_seconds`
 
 | Field | Value |
 |---|---|
 | `default` | `30` |
-| `effect` | `"Wait this long before a capacity retry, multiplied by the retry's number, plus up to a quarter of jitter, capped at 600 seconds. Quota retries do not wait."` |
-| `max` | `600` |
+| `effect` | `"Wait this long before a capacity retry, multiplied by the retry's number, plus up to a quarter of jitter, then capped by domains.routing.capacity_retry_max_seconds and domains.routing.retry_delay_ceiling_seconds. Quota retries do not wait."` |
+| `max` | `604800` |
 | `min` | `0` |
 | `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"A longer wait gives the provider time to recover but delays the lane."` |
+| `type` | `"int"` |
+
+## `domains.routing.retry_delay_ceiling_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `3600` |
+| `effect` | `"Ceiling on the wait any settlement retry seals before its successor may launch. The successor's admission window opens when the wait ends."` |
+| `max` | `604800` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A higher ceiling allows long waits for a recovering provider but holds a queued successor for longer."` |
 | `type` | `"int"` |
 
 ## `domains.routing.settlement_retries`
@@ -190,7 +216,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 |---|---|
 | `default` | `2` |
 | `effect` | `"Retry a lane that settled for provider capacity or a spent account up to this many times. A capacity stop resumes its session where the adapter supports resume, or redraws the route when it has none. A quota stop retries the applied model at once when another unpinned, unspent account serves it, and admission skips the spent account. Zero disables these retries."` |
-| `max` | `8` |
+| `max` | `32` |
 | `min` | `0` |
 | `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
 | `status` | `"wired"` |
