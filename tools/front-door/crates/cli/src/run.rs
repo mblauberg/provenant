@@ -2969,6 +2969,21 @@ pub fn state_and_reason(state: &run::AttemptState) -> (String, Option<String>) {
     };
     (state_name(state), reason)
 }
+fn delivery_state_text(state: &provenant_records::run::WriterDeliveryState) -> String {
+    use provenant_records::run::WriterDeliveryState;
+    match state {
+        WriterDeliveryState::Delivered { pull_request, .. } => format!(
+            "Delivered {{ pull_request: {:?} }}",
+            pull_request
+                .as_deref()
+                .map(|value| plain_text(value, usize::MAX))
+        ),
+        WriterDeliveryState::NoNewCommits { .. } => "NoNewCommits".into(),
+        WriterDeliveryState::NotAttempted { .. } => "NotAttempted".into(),
+        WriterDeliveryState::Failed { stage, .. } => format!("Failed {{ stage: {stage:?} }}"),
+    }
+}
+
 fn render_lanes(
     lanes: &[run::AttemptRecord],
     waits: &[run::LaneWait],
@@ -3083,10 +3098,10 @@ fn render_lanes(
             }
             if let Some(delivery) = &lane.delivery {
                 human.push_str(&format!(
-                    "  delivery {}:{} {:?} head={}\n",
+                    "  delivery {}:{} {} head={}\n",
                     plain_text(&delivery.remote, usize::MAX),
                     plain_text(&delivery.branch, usize::MAX),
-                    delivery.state,
+                    delivery_state_text(&delivery.state),
                     delivery
                         .head
                         .map(|h| h.to_string())
@@ -6881,6 +6896,35 @@ mod tests {
     }
 
     #[test]
+    fn delivery_state_text_retains_known_details_without_extensions() {
+        for (wire, expected) in [
+            (json!({"state":"not_attempted"}), "NotAttempted"),
+            (json!({"state":"no_new_commits"}), "NoNewCommits"),
+            (
+                json!({"state":"failed","stage":"push"}),
+                "Failed { stage: Push }",
+            ),
+            (
+                json!({"state":"delivered","pull_request":null}),
+                "Delivered { pull_request: None }",
+            ),
+            (
+                json!({"state":"delivered","pull_request":"https://example.invalid/pr/1"}),
+                "Delivered { pull_request: Some(\"https://example.invalid/pr/1\") }",
+            ),
+            (
+                json!({"state":"delivered","pull_request":"pr\u{001b}\n1"}),
+                "Delivered { pull_request: Some(\"pr1\") }",
+            ),
+        ] {
+            let mut wire = wire;
+            wire["future_note"] = json!("future-secret");
+            let state = serde_json::from_value(wire).unwrap();
+            assert_eq!(delivery_state_text(&state), expected);
+        }
+    }
+
+    #[test]
     fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::error::Error>> {
         let reason = "\x1b[31mreason\x1b[0m";
         let account = "\x1b]0;account\x07";
@@ -6917,7 +6961,7 @@ mod tests {
                 "redacted": false
             },
             "skipped_routes": [{"route":"fixture/\x1b[33mfallback","kind":"unavailable","detail":detail}],
-            "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted"}}
+            "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted","future_note":"future-secret"}}
         }))?;
         let (data, human) = render_lanes_without_cooldowns(
             std::slice::from_ref(&lane),
@@ -6968,6 +7012,11 @@ mod tests {
         );
         assert_eq!(data["lanes"][0]["delivery"]["remote"], json!(remote));
         assert_eq!(data["lanes"][0]["delivery"]["branch"], json!(branch));
+        assert_eq!(
+            data["lanes"][0]["delivery"]["state"]["future_note"],
+            "future-secret"
+        );
+        assert!(!human.contains("future-secret"));
         lane.state = run::AttemptState::Terminal {
             extra: Default::default(),
             outcome: run::Outcome::ModelUnavailable,

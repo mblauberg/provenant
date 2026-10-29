@@ -264,6 +264,30 @@ pub enum CoordinationResult {
         extra: provenant_records::ExtraFields,
     },
 }
+impl CoordinationResult {
+    /// Stored mutation results have no domain tag; use the frozen request
+    /// rather than guessing between compatible, extensible result objects.
+    pub fn from_stored(
+        input: &Mutation,
+        result: serde_json::Value,
+    ) -> Result<Self, serde_json::Error> {
+        macro_rules! decode {
+            ($variant:ident) => {
+                serde_json::from_value(result).map(|result| Self::$variant {
+                    result,
+                    extra: Default::default(),
+                })
+            };
+        }
+        match input {
+            Mutation::Mail(_) => decode!(Mail),
+            Mutation::Task(_) => decode!(Task),
+            Mutation::Events(_) => decode!(Events),
+            Mutation::Claim(_) => decode!(Claim),
+            Mutation::Landing(_) => decode!(Landing),
+        }
+    }
+}
 impl From<MutationResult> for CoordinationResult {
     fn from(value: MutationResult) -> Self {
         match value {

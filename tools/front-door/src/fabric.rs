@@ -1312,16 +1312,20 @@ pub fn peer(
                 };
                 let store =
                     provenant_fabric_store::Store::open(&context.roots.state, &store_request)?;
-                match store.coordination_receipt::<MutationResult>(
+                match store.coordination_receipt_with_input::<Mutation, serde_json::Value>(
                     context.identity.project,
                     request.actor()?,
                     operation_id,
                     &store_request,
                 )? {
-                    Some(value) => PeerResult::Coordination {
-                        data: value.into(),
-                        extra: Default::default(),
-                    },
+                    Some((input, value)) => peer_result(
+                        CoordinationResult::from_stored(&input, value)
+                            .map_err(|_| FacadeError::StateCorrupt),
+                        |data| PeerResult::Coordination {
+                            data,
+                            extra: Default::default(),
+                        },
+                    ),
                     None => PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),

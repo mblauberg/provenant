@@ -1141,54 +1141,37 @@ impl LocalCoordination<'_> {
             None
         };
         let frozen = input.clone();
-        self.store
-            .coordination_operation(
-                self.project,
-                self.actor,
-                id,
-                &frozen,
-                &request,
-                || match input {
-                    Mutation::Mail(value) => match value {
-                        MailInput::Read { .. } => {
-                            Err(CoordinationError::InvalidInput("read is an observation"))
-                        }
-                        value => self.mail(value, budget, cancel).map(MutationResult::Mail),
-                    },
-                    Mutation::Task(value) => match value {
-                        TaskInput::List { .. } => {
-                            Err(CoordinationError::InvalidInput("list is an observation"))
-                        }
-                        value => self.task(value, budget, cancel).map(MutationResult::Task),
-                    },
-                    Mutation::Events(value) => match value {
-                        EventsInput::Read { .. } => {
-                            Err(CoordinationError::InvalidInput("read is an observation"))
-                        }
-                        value => self
-                            .events(value, budget, cancel)
-                            .map(MutationResult::Events),
-                    },
-                    Mutation::Claim(value) => match value {
-                        ClaimInput::Verify { .. } | ClaimInput::List { .. } => {
-                            Err(CoordinationError::InvalidInput("read is an observation"))
-                        }
-                        value => self.claim(value, budget, cancel).map(MutationResult::Claim),
-                    },
-                    Mutation::Landing(value) => {
-                        value.validate_input(WaitTransport::Cli)?;
-                        match (&value, guard.as_ref()) {
-                            (LandingInput::Verify { .. } | LandingInput::Wait { .. }, _) => {
-                                Err(CoordinationError::InvalidInput("read is an observation"))
-                            }
-                            (_, Some(guard)) => self
-                                .landing_locked(value, guard, &request)
-                                .map(MutationResult::Landing),
-                            _ => Err(CoordinationError::InvalidInput("landing lock required")),
-                        }
-                    }
-                },
-            )
+        // The frozen input identifies the result domain. Untagged result shapes
+        // overlap, so replay must decode the domain's concrete result type.
+        macro_rules! record {
+            ($variant:ident, $action:expr) => {
+                self.store
+                    .coordination_operation(self.project, self.actor, id, &frozen, &request, || {
+                        $action
+                    })
+                    .map(MutationResult::$variant)
+            };
+        }
+        match input {
+            Mutation::Mail(MailInput::Read { .. })
+            | Mutation::Task(TaskInput::List { .. })
+            | Mutation::Events(EventsInput::Read { .. })
+            | Mutation::Claim(ClaimInput::Verify { .. } | ClaimInput::List { .. })
+            | Mutation::Landing(LandingInput::Verify { .. } | LandingInput::Wait { .. }) => {
+                Err(CoordinationError::InvalidInput("read is an observation"))
+            }
+            Mutation::Mail(value) => record!(Mail, self.mail(value, budget, cancel)),
+            Mutation::Task(value) => record!(Task, self.task(value, budget, cancel)),
+            Mutation::Events(value) => record!(Events, self.events(value, budget, cancel)),
+            Mutation::Claim(value) => record!(Claim, self.claim(value, budget, cancel)),
+            Mutation::Landing(value) => {
+                value.validate_input(WaitTransport::Cli)?;
+                let guard = guard
+                    .as_ref()
+                    .ok_or(CoordinationError::InvalidInput("landing lock required"))?;
+                record!(Landing, self.landing_locked(value, guard, &request))
+            }
+        }
     }
 }
 
@@ -1211,7 +1194,8 @@ pub enum Mutation {
     Landing(LandingInput),
 }
 // Untagged wrappers add no object layer; their inner result retains extensions.
-#[derive(Debug, Serialize, Deserialize)]
+// Decode through the frozen input domain because result shapes overlap.
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum MutationResult {
     Mail(MailResult),
@@ -1479,6 +1463,78 @@ mod tests {
             self.wall.set(self.wall.get() + duration.as_micros() as i64);
             self.mono.set(self.mono.get() + duration.as_micros());
         }
+    }
+
+    #[test]
+    fn landing_replay_keeps_its_domain_and_result_extensions() {
+        let fixture = Fixture::new();
+        let service = fixture.service();
+        let cancel = CancelToken::new();
+        let acquire_id = provenant_core::OperationId::parse("acquire").unwrap();
+        let MutationResult::Landing(LandingResult::Acquired { proof, .. }) = service
+            .mutate(
+                Mutation::Landing(LandingInput::Acquire {
+                    extra: Default::default(),
+                    reference: "refs/heads/main".into(),
+                    expected: GitOid::parse(&"1".repeat(40)).unwrap(),
+                    candidate: GitOid::parse(&"2".repeat(40)).unwrap(),
+                    lease_seconds: 60,
+                }),
+                &acquire_id,
+                fixture.budget(),
+                &cancel,
+            )
+            .unwrap()
+        else {
+            panic!("landing acquisition");
+        };
+        let release = Mutation::Landing(LandingInput::Release {
+            extra: Default::default(),
+            proof,
+        });
+        let release_id = provenant_core::OperationId::parse("release").unwrap();
+        let first = service
+            .mutate(release.clone(), &release_id, fixture.budget(), &cancel)
+            .unwrap();
+        assert!(matches!(
+            first,
+            MutationResult::Landing(LandingResult::Released { .. })
+        ));
+        let database =
+            rusqlite::Connection::open(fixture.root.as_path().join("fabric/fabric.sqlite3"))
+                .unwrap();
+        database.execute(
+            "UPDATE coordination_operations SET result=CAST(json_set(CAST(result AS TEXT),'$.future',json_object('revision',2)) AS BLOB) WHERE id=?1",
+            [release_id.to_string()],
+        ).unwrap();
+        let MutationResult::Landing(LandingResult::Released {
+            reference, extra, ..
+        }) = service
+            .mutate(release, &release_id, fixture.budget(), &cancel)
+            .unwrap()
+        else {
+            panic!("replay must retain the landing domain");
+        };
+        assert_eq!(reference, "refs/heads/main");
+        assert_eq!(extra["future"], serde_json::json!({"revision":2}));
+        let (input, result) = service
+            .store
+            .coordination_receipt_with_input::<Mutation, serde_json::Value>(
+                fixture.project,
+                fixture.actor,
+                &release_id,
+                &service.request(fixture.budget(), &cancel),
+            )
+            .unwrap()
+            .unwrap();
+        let crate::hosts::CoordinationResult::Landing {
+            result: LandingResult::Released { extra, .. },
+            ..
+        } = crate::hosts::CoordinationResult::from_stored(&input, result).unwrap()
+        else {
+            panic!("recovered receipt must retain the landing domain");
+        };
+        assert_eq!(extra["future"], serde_json::json!({"revision": 2}));
     }
 
     #[test]
