@@ -19,6 +19,7 @@ const DIRECT: &[&str] = &[
     "sha2",
     "thiserror",
     "toml_edit",
+    "unicode-normalization",
 ];
 
 // docs/specs/rust-workspace.md#crate-layering, without the provenant- prefix.
