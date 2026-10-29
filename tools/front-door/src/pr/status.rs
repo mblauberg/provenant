@@ -119,25 +119,56 @@ pub(crate) fn observe_ci(
         names,
         || required_checks(project, target),
         || counts(project, target),
+        || mergeable(project, target),
     )
+}
+
+/// `gh pr view` mergeable state: `MERGEABLE`, `CONFLICTING` or `UNKNOWN`.
+fn mergeable(project: &Path, target: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Merge {
+        mergeable: String,
+    }
+    let output = execute(
+        project,
+        &["gh", "pr", "view", target, "--json", "mergeable"],
+        false,
+    )
+    .ok()?;
+    serde_json::from_slice::<Merge>(&output.stdout.bytes)
+        .ok()
+        .map(|merge| merge.mergeable)
 }
 
 fn observe_ci_with(
     names: &[String],
     resolve: impl FnOnce() -> Option<Vec<String>>,
     read_checks: impl FnOnce() -> Option<Vec<Check>>,
+    read_mergeable: impl FnOnce() -> Option<String>,
 ) -> provenant_fabric_runtime::graph::CiObservation {
+    use provenant_fabric_runtime::graph::CiState;
     let required = if names.is_empty() {
         resolve().map(|names| ("branch-required", names))
     } else {
         Some(("configured", names.to_vec()))
     };
-    summarise_ci(
+    let mut observation = summarise_ci(
         read_checks(),
         required
             .as_ref()
             .map(|(policy, names)| (*policy, names.as_slice())),
-    )
+    );
+    // A conflicting pull request never starts CI, so say so rather than
+    // report its checks as missing.
+    if !matches!(observation.state, CiState::Passed | CiState::Failed)
+        && read_mergeable().as_deref() == Some("CONFLICTING")
+    {
+        observation.state = CiState::Conflict;
+        observation
+            .summary
+            .push_str(" next: rebase the branch onto its base and push");
+    }
+    observation
 }
 
 // Both classic protection and rulesets may apply. Only trust the resolved
@@ -351,7 +382,9 @@ fn summarise_ci(
         .count();
     let pending = selected.iter().filter(|c| c.bucket == "pending").count();
     let total = selected.len();
-    let state = if total == 0
+    let state = if checks.is_empty() {
+        CiState::NotScheduled
+    } else if total == 0
         || missing > 0
         || passed + skipped + failed + pending != total
         || (required.is_some() && skipped > 0)
@@ -367,11 +400,16 @@ fn summarise_ci(
         CiState::Passed
     };
     let selection = required.map_or_else(String::new, |(_, names)| format!(" names={names:?}"));
+    let next = if state == CiState::NotScheduled {
+        " next: check the workflow triggers or push an empty commit to start CI"
+    } else {
+        ""
+    };
     CiObservation {
         extra: Default::default(),
         state,
         summary: format!(
-            "policy={policy}{selection} checks={passed}/{total} fail={failed} pending={pending} skipped={skipped} missing={missing}"
+            "policy={policy}{selection} checks={passed}/{total} fail={failed} pending={pending} skipped={skipped} missing={missing}{next}"
         ),
     }
 }
@@ -802,14 +840,31 @@ mod tests {
                         bucket: bucket.into(),
                     }])
                 },
+                || None,
             );
             assert_eq!(observation.state, expected);
             assert!(observation.summary.contains("policy=all-reported"));
         }
-        assert_eq!(
-            observe_ci_with(&[], || None, || Some(vec![])).state,
-            CiState::Unavailable
+        let empty = observe_ci_with(&[], || None, || Some(vec![]), || None);
+        assert_eq!(empty.state, CiState::NotScheduled);
+        assert!(empty.summary.contains("next:"));
+        let conflict =
+            observe_ci_with(&[], || None, || Some(vec![]), || Some("CONFLICTING".into()));
+        assert_eq!(conflict.state, CiState::Conflict);
+        assert!(conflict.summary.contains("next: rebase"));
+        // A failed head stays failed even when the base also conflicts.
+        let failed = observe_ci_with(
+            &[],
+            || None,
+            || {
+                Some(vec![Check {
+                    name: "build".into(),
+                    bucket: "fail".into(),
+                }])
+            },
+            || Some("CONFLICTING".into()),
         );
+        assert_eq!(failed.state, CiState::Failed);
     }
 
     #[test]

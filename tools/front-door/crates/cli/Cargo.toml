@@ -33,6 +33,7 @@ toml_edit = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+provenant-fabric-runtime = { workspace = true, features = ["retained-seed"] }
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
 

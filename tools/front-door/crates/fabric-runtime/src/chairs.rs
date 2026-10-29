@@ -54,6 +54,55 @@ impl ChairIndex {
         proposal: &CanonicalRequest,
         call: &Request<'_>,
     ) -> Result<(), Error> {
+        self.admit(project, run, proposal, call)?;
+        self.bind(project, parent, run, proposal, call)
+    }
+
+    /// Seed an association as if sealed before derived run IDs existed.
+    #[cfg(any(test, feature = "retained-seed"))]
+    pub fn inherit_retained(
+        &self,
+        project: ProjectId,
+        parent: (RunId, Digest),
+        run: RunId,
+        proposal: &CanonicalRequest,
+        call: &Request<'_>,
+    ) -> Result<(), Error> {
+        self.bind(project, parent, run, proposal, call)
+    }
+
+    fn admit(
+        &self,
+        project: ProjectId,
+        run: RunId,
+        proposal: &CanonicalRequest,
+        call: &Request<'_>,
+    ) -> Result<(), Error> {
+        // A new association needs a host-derived run ID; an unversioned request
+        // may only replay a retained host seal for the same digest.
+        if proposal.child_attempt_id_version.is_none() {
+            let digest = proposal.digest()?;
+            match self.read(project, run, call)? {
+                Some(value) if value.request_digest == digest => {}
+                Some(_) => return Err(Error::Conflict),
+                None => {
+                    return Err(Error::Invalid(
+                        "new chair associations require host-derived child run IDs",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn bind(
+        &self,
+        project: ProjectId,
+        parent: (RunId, Digest),
+        run: RunId,
+        proposal: &CanonicalRequest,
+        call: &Request<'_>,
+    ) -> Result<(), Error> {
         let original = self.read(project, parent.0, call)?;
         if original
             .as_ref()
@@ -90,7 +139,7 @@ mod tests {
     fn proposal() -> CanonicalRequest {
         CanonicalRequest {
             extra: Default::default(),
-            child_attempt_id_version: None,
+            child_attempt_id_version: Some(1),
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
@@ -202,6 +251,36 @@ mod tests {
         assert!(index.read(project, run(9), &call)?.is_none());
         index.inherit(project, (run(9), parent.digest()?), run(6), &child, &call)?;
         assert!(index.read(project, run(6), &call)?.unwrap().chair.is_none());
+
+        // An unversioned proposal cannot bind a lane-chosen run ID, but may
+        // replay a retained host seal.
+        let mut legacy = child.clone();
+        legacy.child_attempt_id_version = None;
+        assert!(matches!(
+            index.inherit(project, (run(1), parent.digest()?), run(11), &legacy, &call),
+            Err(Error::Invalid(_))
+        ));
+        assert!(index.read(project, run(11), &call)?.is_none());
+        index.submit(project, run(12), &legacy, &call)?;
+        index.inherit(project, (run(9), parent.digest()?), run(12), &legacy, &call)?;
+
+        // Chair dimension: inherit while the parent has no row, then the parent
+        // gains chair A. The identical re-inherit conflicts and X stays unbound.
+        index.inherit(project, (run(13), child.digest()?), run(14), &child, &call)?;
+        let mut owned = child.clone();
+        owned.chair = chair.clone();
+        index.submit(project, run(13), &owned, &call)?;
+        assert!(matches!(
+            index.inherit(project, (run(13), owned.digest()?), run(14), &child, &call),
+            Err(Error::Conflict)
+        ));
+        assert!(
+            index
+                .read(project, run(14), &call)?
+                .unwrap()
+                .chair
+                .is_none()
+        );
         assert!(matches!(
             index.inherit(project, (run(9), parent.digest()?), run(7), &forged, &call),
             Err(Error::Conflict)

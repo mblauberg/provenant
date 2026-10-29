@@ -308,7 +308,11 @@ reported in `data.steps` with `cleanup_pending: true` and reason
 `cleanup_pending`. The merge still exits 0. Inspect `land 148 --full`, fix the
 reported cause and rerun: an already-merged PR skips CI and merge and retries
 only safe cleanup. CI failures use `CI_PENDING`, `CI_FAILED`,
-`CI_UNAVAILABLE`, `CI_POLICY_UNAVAILABLE`, `CI_TIMEOUT` or `HEAD_MOVED`.
+`CI_UNAVAILABLE`, `CI_POLICY_UNAVAILABLE`, `CI_TIMEOUT`, `CI_CONFLICT`,
+`CI_NOT_SCHEDULED` or `HEAD_MOVED`. `CI_CONFLICT` means the PR conflicts with its
+base, so CI never starts: rebase and push. `CI_NOT_SCHEDULED` means the wait
+ended with no check registered for the head. Required checks on the exact head
+stay mandatory.
 
 | Step | Does | Refuses when |
 |---|---|---|

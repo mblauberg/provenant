@@ -1450,6 +1450,34 @@ fn quota_human(report: &QuotaReport) -> String {
     human.push_str(&format!("Report: {}\n", report.report_path));
     human
 }
+/// Per-pool state for an account with more than one pool, for example
+/// `gemini exhausted, claude 40%`. A pool is exhausted when any of its windows is.
+fn pool_states(snapshot: &provenant_quota::QuotaSnapshot) -> Option<String> {
+    let mut pools: Vec<(&str, u64)> = Vec::new();
+    for window in &snapshot.windows {
+        let pool = window
+            .pool
+            .split_once('.')
+            .map_or(window.pool.as_str(), |(p, _)| p);
+        match pools.iter_mut().find(|(name, _)| *name == pool) {
+            Some((_, used)) => *used = (*used).max(window.used_basis_points),
+            None => pools.push((pool, window.used_basis_points)),
+        }
+    }
+    (pools.len() > 1).then(|| {
+        pools
+            .iter()
+            .map(|(pool, used)| {
+                if *used >= 10_000 {
+                    format!("{} exhausted", pool.escape_debug())
+                } else {
+                    format!("{} {}%", pool.escape_debug(), used / 100)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
 /// Counts by state, then the accounts that need attention, then the command
 /// that shows the rest.
 fn quota_summary(report: &QuotaReport) -> crate::Summary {
@@ -1484,11 +1512,17 @@ fn quota_summary(report: &QuotaReport) -> crate::Summary {
             .iter()
             .filter(|row| state(row) != "current")
             .map(|row| {
+                let pools = row
+                    .snapshot
+                    .as_ref()
+                    .and_then(pool_states)
+                    .map_or_else(String::new, |pools| format!(" ({pools})"));
                 format!(
-                    "{} [{}]: {}",
+                    "{} [{}]: {}{}",
                     row.account.label,
                     row.account.adapter,
-                    state(row)
+                    state(row),
+                    pools
                 )
             }),
     );
@@ -1593,6 +1627,32 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_reports_per_pool_state_when_only_one_pool_is_spent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = |windows: serde_json::Value| -> Result<_, serde_json::Error> {
+            serde_json::from_value::<provenant_quota::QuotaSnapshot>(serde_json::json!({
+                "schema_version": 1,
+                "account": {"adapter": "agy", "account_key": "k", "label": "agy"},
+                "revision": 1, "status": "available", "observed_unix_seconds": 1,
+                "source_ref": "t", "authority_ref": null, "windows": windows,
+            }))
+        };
+        let window = |pool: &str, used: u64| serde_json::json!({"pool": pool, "used_basis_points": used, "resets_unix_seconds": null});
+        let mixed = snapshot(serde_json::json!([
+            window("gemini.weekly", 10_000),
+            window("gemini.5h", 500),
+            window("claude.weekly", 4_000),
+        ]))?;
+        assert_eq!(
+            pool_states(&mixed).as_deref(),
+            Some("gemini exhausted, claude 40%")
+        );
+        let single = snapshot(serde_json::json!([window("weekly", 10_000)]))?;
+        assert_eq!(pool_states(&single), None);
+        Ok(())
+    }
 
     #[test]
     fn credential_change_on_panel_or_wake_retries_once_without_reading_contents()

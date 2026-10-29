@@ -634,7 +634,7 @@ mod tests {
         // Retained legacy host rows remain readable and replayable. A different
         // request cannot shadow that row or repair it to another digest.
         with_chair_index(&roots, &call, |index, c| {
-            index.inherit(
+            index.inherit_retained(
                 session.context.project_id,
                 (parent, digest),
                 child.run_id,
@@ -996,7 +996,7 @@ mod tests {
             let canonical = session.store.request(source.run_id, &call)?;
             let digest = parent_digest(&roots, session.context.project_id, parent, &call)?;
             with_chair_index(&roots, &call, |index, c| {
-                index.inherit(
+                index.inherit_retained(
                     session.context.project_id,
                     (parent, digest),
                     source.run_id,
@@ -1188,7 +1188,7 @@ mod tests {
         // A retained legacy source association is trusted host state. The lane
         // can still forge a continuation operation in its own store.
         with_chair_index(&roots, &call, |index, c| {
-            index.inherit(
+            index.inherit_retained(
                 session.context.project_id,
                 (parent, digest),
                 child.run_id,
@@ -1254,7 +1254,7 @@ mod tests {
         // A retained legacy destination seal replays without trusting the
         // lane-local source again. Old records remain readable as well.
         with_chair_index(&roots, &call, |index, c| {
-            index.inherit(
+            index.inherit_retained(
                 session.context.project_id,
                 (parent, digest),
                 child.run_id,
