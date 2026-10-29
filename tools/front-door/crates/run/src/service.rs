@@ -99,13 +99,6 @@ impl<'a> Service<'a> {
                     "a nested dispatch cannot set network, capability, read-root or write-root access",
                 ));
             }
-            if let RequestedRoute::Adapter { provider, .. } = &task.route
-                && let Some(spec) = provenant_records::AdapterSpec::get(provider)
-            {
-                task.access
-                    .network
-                    .get_or_insert(spec.launch.default_network);
-            }
             if task.deliver.is_some() && task.worktree.is_none() {
                 return Err(input_error(
                     ErrorKind::Invalid,

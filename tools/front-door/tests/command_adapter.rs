@@ -97,12 +97,13 @@ fn configure_commands(rig: &TestRig, commands: Value) -> Result {
 /// How a test names the command lane: a manifest task or `--route command/NAME`.
 #[derive(Clone, Copy)]
 enum Via {
-    Manifest,
+    /// A manifest, with an optional `--network` flag beside it.
+    Manifest(Option<&'static str>),
     Route,
 }
 
 fn dispatch(rig: &TestRig, name: &str, timeout: u64) -> Result<Value> {
-    dispatch_with(rig, name, timeout, Via::Manifest, None)
+    dispatch_with(rig, name, timeout, Via::Manifest(None), None)
 }
 
 fn dispatch_with(
@@ -116,7 +117,7 @@ fn dispatch_with(
     let timeout = timeout.to_string();
     let mut args = vec!["dispatch".to_owned()];
     match via {
-        Via::Manifest => {
+        Via::Manifest(flag) => {
             let manifest = rig.root.join(format!("{name}.json"));
             let mut task = json!({
                 "prompt":prompt,
@@ -133,6 +134,9 @@ fn dispatch_with(
                 "--manifest".into(),
                 manifest.to_str().ok_or("manifest")?.into(),
             ]);
+            if let Some(flag) = flag {
+                args.extend(["--network".into(), flag.into()]);
+            }
         }
         Via::Route => {
             let file = rig.root.join(format!("{name}.prompt"));
@@ -494,14 +498,34 @@ fn command_network_is_per_task_through_manifest_and_single_task_route() -> Resul
     let port = listener.local_addr()?.port().to_string();
     let reach = json!({"argv":["/usr/bin/nc","-z","-w","2","127.0.0.1",port]});
     let rig = rig(json!({
-        "m-default": reach, "m-on": reach, "m-off": reach,
+        "mf-off": reach, "mf-on": reach, "m-default": reach, "m-on": reach, "m-off": reach,
         "r-default": reach, "r-on": reach, "r-off": reach
     }))?;
     let cleanup = rig.process_cleanup();
     for (name, via, network, state, reported) in [
-        ("m-default", Via::Manifest, None, "succeeded", "open"),
-        ("m-on", Via::Manifest, Some("on"), "succeeded", "open"),
-        ("m-off", Via::Manifest, Some("off"), "failed", "provider"),
+        ("m-default", Via::Manifest(None), None, "succeeded", "open"),
+        ("m-on", Via::Manifest(None), Some("on"), "succeeded", "open"),
+        (
+            "m-off",
+            Via::Manifest(None),
+            Some("off"),
+            "failed",
+            "provider",
+        ),
+        (
+            "mf-off",
+            Via::Manifest(Some("off")),
+            None,
+            "failed",
+            "provider",
+        ),
+        (
+            "mf-on",
+            Via::Manifest(Some("off")),
+            Some("on"),
+            "succeeded",
+            "open",
+        ),
         ("r-default", Via::Route, None, "succeeded", "open"),
         ("r-on", Via::Route, Some("on"), "succeeded", "open"),
         ("r-off", Via::Route, Some("off"), "failed", "provider"),
