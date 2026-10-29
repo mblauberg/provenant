@@ -461,6 +461,7 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
     let expected = run(&git_dir, &["rev-parse", "HEAD"])?;
     run(&git_dir, &["update-ref", "-d", "refs/remotes/origin/main"])?;
     let writer = WriterRequest {
+        extra: Default::default(),
         project: project.clone(),
         worktree: project.clone(),
     };
@@ -473,6 +474,52 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
         ])
     };
     host().refresh_origin_with(&writer, &git_dir)?;
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
+        expected
+    );
+    // Packed refs let the fixture advertise both spellings even on a
+    // case-insensitive host. The new commit makes an accidental fetch visible.
+    run(
+        &git_dir,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "newer",
+        ],
+    )?;
+    let newer = run(&git_dir, &["rev-parse", "HEAD"])?;
+    run(&remote, &["update-ref", "-d", "refs/heads/main"])?;
+    std::fs::write(
+        remote.join("packed-refs"),
+        format!(
+            "# pack-refs with: sorted\n{newer} refs/heads/Main\n{newer} refs/heads/feat+x\n{newer} refs/heads/main\n{newer} refs/heads/other\n"
+        ),
+    )?;
+    run(&remote, &["symbolic-ref", "HEAD", "refs/heads/other"])?;
+    host().refresh_origin_with(&writer, &git_dir)?;
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
+        expected
+    );
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/other"])?,
+        newer
+    );
+    assert_eq!(
+        run(&git_dir, &["rev-parse", "refs/remotes/origin/feat+x"])?,
+        newer
+    );
+    run(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
+    let Err(error) = host().refresh_origin_with(&writer, &git_dir) else {
+        return Err("colliding default must fail".into());
+    };
+    assert!(error.to_string().contains("default branch"));
     assert_eq!(
         run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
         expected
@@ -491,6 +538,479 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
         run(&git_dir, &["rev-parse", "refs/remotes/origin/main"])?,
         expected
     );
+    Ok(())
+}
+
+/// A project with a bare `origin` whose branches the test writes as packed
+/// refs, so a case-insensitive host can still hold both spellings.
+struct OriginFixture {
+    _temp: tempfile::TempDir,
+    root: std::path::PathBuf,
+    project: std::path::PathBuf,
+    home: std::path::PathBuf,
+    remote: std::path::PathBuf,
+    git: std::path::PathBuf,
+}
+
+impl OriginFixture {
+    #[allow(clippy::disallowed_methods)]
+    fn run_in(
+        &self,
+        directory: &Path,
+        args: &[&str],
+    ) -> std::result::Result<String, Box<dyn std::error::Error>> {
+        let output = std::process::Command::new(&self.git)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &self.home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_DIR", directory)
+            .env("GIT_WORK_TREE", &self.project)
+            .current_dir(&self.project)
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    }
+
+    fn local(&self, args: &[&str]) -> std::result::Result<String, Box<dyn std::error::Error>> {
+        self.run_in(&self.project.join(".git"), args)
+    }
+
+    fn new() -> std::result::Result<Self, Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let fixture = Self {
+            project: root.join("project"),
+            home: root.join("home"),
+            remote: root.join("remote.git"),
+            git: provenant_os::git::git_executable().ok_or("git unavailable")?,
+            root,
+            _temp: temp,
+        };
+        std::fs::create_dir(&fixture.project)?;
+        std::fs::create_dir(&fixture.home)?;
+        fixture.local(&["init", "-q"])?;
+        fixture.commit("initial")?;
+        fixture.run_in(&fixture.remote, &["init", "-q"])?;
+        fixture.run_in(&fixture.remote, &["config", "--local", "core.bare", "true"])?;
+        let remote = fixture.remote.to_str().ok_or("remote path")?;
+        fixture.local(&["remote", "add", "origin", remote])?;
+        fixture.local(&["push", "-q", "origin", "HEAD:refs/heads/main"])?;
+        fixture.local(&["fetch", "-q", "origin"])?;
+        fixture.local(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ])?;
+        Ok(fixture)
+    }
+
+    fn commit(&self, message: &str) -> std::result::Result<String, Box<dyn std::error::Error>> {
+        self.local(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            message,
+        ])?;
+        self.local(&["rev-parse", "HEAD"])
+    }
+
+    /// Advertise exactly these branches, with `default` as the remote HEAD.
+    fn advertise(
+        &self,
+        branches: &[(&str, &str)],
+        default: &str,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let _ = self.run_in(&self.remote, &["update-ref", "-d", "refs/heads/main"]);
+        // The header promises byte order, which Git relies on for lookups.
+        let mut branches = branches.to_vec();
+        branches.sort_by_key(|(name, _)| name.as_bytes().to_vec());
+        let mut packed = String::from("# pack-refs with: sorted\n");
+        for (name, oid) in branches {
+            packed.push_str(&format!("{oid} refs/heads/{name}\n"));
+        }
+        std::fs::write(self.remote.join("packed-refs"), packed)?;
+        self.run_in(
+            &self.remote,
+            &["symbolic-ref", "HEAD", &format!("refs/heads/{default}")],
+        )?;
+        Ok(())
+    }
+
+    fn refresh(&self, git: Option<&Path>) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut environment: Vec<(OsString, OsString)> = vec![
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("HOME".into(), self.home.as_os_str().to_owned()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+        ];
+        if let Some(git) = git {
+            environment.push(("PROVENANT_GIT".into(), git.as_os_str().to_owned()));
+        }
+        let writer = WriterRequest {
+            project: self.project.clone(),
+            worktree: self.project.clone(),
+            extra: Default::default(),
+        };
+        HostDeliveryContext::new(environment)
+            .refresh_origin_with(&writer, &self.project.join(".git"))?;
+        Ok(())
+    }
+}
+
+#[test]
+fn origin_refresh_never_writes_through_head_or_a_tracking_symref()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = OriginFixture::new()?;
+    let kept = fixture.local(&["rev-parse", "refs/remotes/origin/main"])?;
+    let newer = fixture.commit("newer")?;
+    // A local tracking symref other than HEAD, as `git remote set-head` or a
+    // user's alias would leave behind.
+    fixture.local(&[
+        "symbolic-ref",
+        "refs/remotes/origin/alias",
+        "refs/remotes/origin/main",
+    ])?;
+    // Folding HEAD: `head` aliases origin/HEAD on a case-insensitive host,
+    // where writing it would move origin/main through the symref, and so does
+    // `Head/x` (a path below it). Each is advertised alone so that collisions
+    // among the advertised names cannot hide the reserved name.
+    for aliasing in ["head", "Head/x"] {
+        fixture.advertise(
+            &[
+                ("main", &kept),
+                (aliasing, &newer),
+                ("alias", &newer),
+                ("other", &newer),
+            ],
+            "main",
+        )?;
+        fixture.refresh(None)?;
+        assert_eq!(
+            fixture.local(&["rev-parse", "refs/remotes/origin/main"])?,
+            kept,
+            "{aliasing}"
+        );
+        assert_eq!(
+            fixture.local(&["rev-parse", "refs/remotes/origin/other"])?,
+            newer
+        );
+        for symref in ["HEAD", "alias"] {
+            assert_eq!(
+                fixture.local(&["symbolic-ref", &format!("refs/remotes/origin/{symref}")])?,
+                "refs/remotes/origin/main",
+                "{aliasing}: {symref} must stay a symref to main"
+            );
+        }
+        let reference = format!("refs/remotes/origin/{aliasing}");
+        let exists = fixture.local(&["rev-parse", "--verify", "--quiet", &reference]);
+        // On a case-insensitive host `head` names HEAD, which resolves to main.
+        assert!(
+            exists.as_ref().is_err() || exists.as_ref().is_ok_and(|oid| *oid == kept),
+            "{aliasing}: {exists:?}"
+        );
+        fixture.local(&["update-ref", "-d", "refs/remotes/origin/other"])?;
+    }
+
+    // HEAD stays reserved even where no origin/HEAD symref exists yet: a later
+    // `git remote set-head origin -a` must be able to create it.
+    fixture.local(&["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"])?;
+    fixture.advertise(
+        &[("main", &kept), ("head", &newer), ("other", &newer)],
+        "main",
+    )?;
+    fixture.refresh(None)?;
+    assert!(
+        fixture
+            .local(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/head"
+            ])
+            .is_err(),
+        "a branch named head must not be fetched"
+    );
+    assert!(
+        !fixture
+            .project
+            .join(".git/refs/remotes/origin/head")
+            .exists()
+    );
+    assert_eq!(
+        fixture.local(&["rev-parse", "refs/remotes/origin/other"])?,
+        newer
+    );
+    fixture.local(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+    ])?;
+
+    // The advertised default itself aliasing HEAD cannot be refreshed.
+    fixture.advertise(&[("main", &kept), ("head", &newer)], "head")?;
+    let error = fixture
+        .refresh(None)
+        .err()
+        .ok_or("default `head` must fail")?;
+    assert!(error.to_string().contains("default branch"), "{error}");
+    assert_eq!(
+        fixture.local(&["rev-parse", "refs/remotes/origin/main"])?,
+        kept
+    );
+    Ok(())
+}
+
+#[test]
+fn origin_refresh_refuses_names_that_differ_only_in_unicode_normalisation()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = OriginFixture::new()?;
+    let kept = fixture.local(&["rev-parse", "refs/remotes/origin/main"])?;
+    let newer = fixture.commit("newer")?;
+    let (nfc, nfd) = ("caf\u{e9}", "cafe\u{301}");
+    let assert_untouched = |tracking: &str| -> std::result::Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(fixture.local(&["rev-parse", tracking])?, kept, "{tracking}");
+        // Behind the symref: Git may have stored either spelling of the name.
+        assert_eq!(
+            fixture.local(&["rev-parse", "refs/remotes/origin/HEAD"])?,
+            kept
+        );
+        Ok(())
+    };
+
+    // An NFD default, with `origin/HEAD` pointing at its tracking ref, and an
+    // NFC sibling at another commit. With precomposed Unicode both would land
+    // on one tracking ref, writing the sibling's commit behind `origin/HEAD`.
+    let default_ref = format!("refs/remotes/origin/{nfd}");
+    fixture.local(&["update-ref", &default_ref, &kept])?;
+    fixture.local(&["symbolic-ref", "refs/remotes/origin/HEAD", &default_ref])?;
+    fixture.advertise(&[(nfd, &kept), (nfc, &newer), ("other", &newer)], nfd)?;
+    let error = fixture
+        .refresh(None)
+        .err()
+        .ok_or("NFD default with an NFC sibling must be refused")?
+        .to_string();
+    assert!(error.contains("Unicode NFC"), "{error}");
+    for spelling in ["caf\\u{e9}", "cafe\\u{301}"] {
+        assert!(error.contains(spelling), "{spelling} missing: {error}");
+    }
+    assert_untouched(&default_ref)?;
+    // The refusal comes before any fetch, so unrelated branches stay put too.
+    assert!(
+        fixture
+            .local(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/other"
+            ])
+            .is_err()
+    );
+
+    // The same pair, with the NFC spelling as the default and a case change.
+    fixture.advertise(&[(nfd, &kept), ("Caf\u{c9}", &newer)], nfd)?;
+    assert!(fixture.refresh(None).is_err());
+    assert_untouched(&default_ref)?;
+
+    // Two siblings that alias each other are refused as well, even where the
+    // default is unaffected.
+    fixture.advertise(&[("main", &kept), (nfd, &newer), (nfc, &newer)], "main")?;
+    assert!(fixture.refresh(None).is_err());
+
+    // A tracking ref already on disk under the other spelling is a destination
+    // the advertised name would write through. Packed refs keep the stored
+    // spelling on any filesystem.
+    // Delete the loose ref first: deleting a ref also drops it from packed refs.
+    fixture.local(&["update-ref", "-d", &default_ref])?;
+    let local_packed = fixture.project.join(".git/packed-refs");
+    std::fs::write(
+        &local_packed,
+        format!("# pack-refs with: sorted\n{kept} refs/remotes/origin/{nfd}\n"),
+    )?;
+    fixture.advertise(&[("main", &kept), (nfc, &newer)], "main")?;
+    let error = fixture
+        .refresh(None)
+        .err()
+        .ok_or("an existing NFD tracking ref must refuse an NFC branch")?
+        .to_string();
+    assert!(error.contains("cafe\\u{301}"), "{error}");
+    std::fs::remove_file(&local_packed)?;
+
+    // Plain spellings, and names that differ only by case, still refresh.
+    fixture.advertise(&[("main", &kept), (nfc, &newer), ("other", &newer)], "main")?;
+    fixture.refresh(None)?;
+    assert_eq!(
+        fixture.local(&["rev-parse", &format!("refs/remotes/origin/{nfc}")])?,
+        newer
+    );
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn origin_refresh_routes_advertisement_and_fetch_through_one_hardened_transport()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = OriginFixture::new()?;
+    let newer = fixture.commit("newer")?;
+    fixture.advertise(&[("main", &newer), ("other", &newer)], "main")?;
+    // A recording stand-in for Git, outside the project.
+    let bin = fixture.root.join("bin");
+    std::fs::create_dir(&bin)?;
+    let log = fixture.root.join("calls.log");
+    let wrapper = bin.join("git-recorder");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            fixture.git.display()
+        ),
+    )?;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
+    fixture.refresh(Some(&wrapper))?;
+    let calls = std::fs::read_to_string(&log)?;
+    for subcommand in ["ls-remote", "fetch"] {
+        let call = calls
+            .lines()
+            .find(|line| line.contains(&format!(" {subcommand} ")))
+            .ok_or_else(|| format!("no {subcommand} call in {calls}"))?;
+        for setting in [
+            "core.hooksPath=/dev/null",
+            "core.fsmonitor=false",
+            "protocol.allow=never",
+            "protocol.ssh.allow=always",
+            "protocol.https.allow=always",
+            "protocol.http.allow=always",
+            "protocol.file.allow=always",
+        ] {
+            assert!(
+                call.contains(setting),
+                "{subcommand} lacks {setting}: {call}"
+            );
+        }
+    }
+    // Fetches precompose Unicode so NFC and NFD spellings of a branch name
+    // land on one tracking ref (which collision detection then sees) without
+    // a normalisation dependency here.
+    let fetch = calls
+        .lines()
+        .find(|line| line.contains(" fetch "))
+        .ok_or("no fetch call")?;
+    assert!(fetch.contains("core.precomposeunicode=true"), "{fetch}");
+
+    // A lane-writable program is refused before any advertisement or fetch.
+    let lane_area = fixture.project.join(".worktrees/lane-1");
+    std::fs::create_dir_all(&lane_area)?;
+    let lane_helper = lane_area.join("ssh");
+    std::fs::write(&lane_helper, "#!/bin/sh\nexit 1\n")?;
+    std::fs::set_permissions(&lane_helper, std::fs::Permissions::from_mode(0o755))?;
+    fixture.local(&[
+        "config",
+        "core.sshCommand",
+        lane_helper.to_str().ok_or("path")?,
+    ])?;
+    std::fs::write(&log, "")?;
+    // `validate_transport_helpers` already refuses core.sshCommand for
+    // delivery; the transport check is what covers the other programs.
+    fixture.local(&["config", "--unset", "core.sshCommand"])?;
+    fixture.local(&[
+        "config",
+        "remote.origin.uploadpack",
+        lane_helper.to_str().ok_or("path")?,
+    ])?;
+    let error = fixture
+        .refresh(Some(&wrapper))
+        .err()
+        .ok_or("lane helper must fail")?;
+    assert!(
+        error.to_string().contains("where lanes can write"),
+        "{error}"
+    );
+    let calls = std::fs::read_to_string(&log)?;
+    assert!(
+        !calls
+            .lines()
+            .any(|line| line.contains(" ls-remote ") || line.contains(" fetch ")),
+        "no network command may run: {calls}"
+    );
+    Ok(())
+}
+
+#[test]
+fn origin_refresh_refuses_includes_that_name_a_lane_area_before_they_exist()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = OriginFixture::new()?;
+    let newer = fixture.commit("newer")?;
+    fixture.advertise(&[("main", &newer), ("other", &newer)], "main")?;
+    let lane_file = fixture.project.join(".worktrees/lane-1/not-yet.cfg");
+    let lane_file = lane_file.to_str().ok_or("path")?;
+    let shared = fixture.root.join("shared.cfg");
+    // Git reads none of these targets today: the file is missing, or the
+    // `includeIf` condition is false. A lane could create the file, or make
+    // the condition true, before Git rereads the configuration for the fetch.
+    for (key, value) in [
+        ("include.path", lane_file),
+        ("include.path", "../.worktrees/lane-1/not-yet.cfg"),
+        ("includeIf.onbranch:never-checked-out.path", lane_file),
+        (
+            "includeIf.gitdir:/nowhere/.path",
+            "../.worktrees/lane-1/not-yet.cfg",
+        ),
+        ("includeIf.hasconfig:remote.*.url:never://*.path", lane_file),
+    ] {
+        fixture.local(&["config", key, value])?;
+        let error = fixture
+            .refresh(None)
+            .err()
+            .ok_or_else(|| format!("{key}={value} must be refused"))?;
+        assert!(
+            error.to_string().contains("where lanes can write"),
+            "{key}={value}: {error}"
+        );
+        fixture.local(&["config", "--unset", key])?;
+    }
+    // The same through a file outside the lane areas, which Git does read.
+    std::fs::write(&shared, format!("[include]\n\tpath = {lane_file}\n"))?;
+    fixture.local(&["config", "include.path", shared.to_str().ok_or("path")?])?;
+    assert!(fixture.refresh(None).is_err());
+    std::fs::write(&shared, "[user]\n\tname = Someone\n")?;
+    fixture.refresh(None)?;
+    Ok(())
+}
+
+#[test]
+fn fetch_destinations_that_are_symrefs_are_refused()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    let worktree = &fixture.writer.worktree;
+    fixture.git(&["push", "-q", "origin", "HEAD:refs/heads/lane-base"])?;
+    fixture.git(&["fetch", "-q", "origin"])?;
+    fixture.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/lane-base",
+    ])?;
+    // The real ref and an absent one are fine; the symref is not, because a
+    // fetch into it would move lane-base instead.
+    for (reference, allowed) in [
+        ("refs/remotes/origin/lane-base", true),
+        ("refs/remotes/origin/absent", true),
+        ("refs/remotes/origin/HEAD", false),
+    ] {
+        let result =
+            host.refuse_symref_destination(worktree, reference, crate::WriterDeliveryStage::Fetch);
+        assert_eq!(result.is_ok(), allowed, "{reference}: {result:?}");
+    }
     Ok(())
 }
 
@@ -807,6 +1327,7 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
             .ok_or("destination")?;
     let first = fixture.prepare()?;
     let second_writer = WriterRequest {
+        extra: Default::default(),
         project: fixture.writer.project.clone(),
         worktree: fixture.root.join("second-lane"),
     };
@@ -1514,12 +2035,14 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         &attempt,
         &format!("delivery-{key}.json"),
         &db::bytes(&WriterDeliveryReceipt {
+            extra: Default::default(),
             schema_version: 1,
             remote: fixture.request.remote.clone(),
             branch: fixture.request.branch.clone(),
             head: Some(head),
             review_acceptance: None,
             state: WriterDeliveryState::Failed {
+                extra: Default::default(),
                 stage: WriterDeliveryStage::Interrupted,
             },
         })?,
@@ -1585,10 +2108,12 @@ impl PrepareFixture {
                 ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
             ],
             writer: WriterRequest {
+                extra: Default::default(),
                 project,
                 worktree: root.join("lane"),
             },
             request: WriterDeliveryRequest {
+                extra: Default::default(),
                 mode: Default::default(),
                 remote: "origin".into(),
                 branch: "published/lane".into(),
@@ -2210,6 +2735,8 @@ fn prepare_failures_name_step_and_bound_git_stderr()
         fixture
             .environment
             .push(("GH_TOKEN".into(), "private-token".into()));
+        // The remote must advertise a branch, or there is nothing to fetch.
+        fixture.git(&["push", "-q", "origin", "HEAD:refs/heads/seed"])?;
         let reason = fixture.prepare().expect_err("git must fail").to_string();
         assert!(reason.contains("Prepare"), "{reason}");
         assert!(reason.contains(step), "{reason}");
@@ -2344,10 +2871,12 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         ],
     )?;
     let writer = WriterRequest {
+        extra: Default::default(),
         project,
         worktree: lane.clone(),
     };
     let request = WriterDeliveryRequest {
+        extra: Default::default(),
         mode: Default::default(),
         remote: "origin".into(),
         branch: "published/lane".into(),
@@ -2408,7 +2937,10 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     assert_eq!(receipt.head, Some(head));
     assert!(matches!(
         receipt.state,
-        WriterDeliveryState::Delivered { pull_request: None }
+        WriterDeliveryState::Delivered {
+            pull_request: None,
+            ..
+        }
     ));
     assert_eq!(
         git(&lane, &["rev-parse", "refs/remotes/origin/published/lane"])?,
@@ -2451,6 +2983,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         ],
     )?;
     let idle_writer = WriterRequest {
+        extra: Default::default(),
         project: writer.project.clone(),
         worktree: idle_lane.clone(),
     };
@@ -2475,7 +3008,12 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         &idle_attempt,
         "fixture receipt",
     )?;
-    assert_eq!(idle_receipt.state, WriterDeliveryState::NoNewCommits);
+    assert_eq!(
+        idle_receipt.state,
+        WriterDeliveryState::NoNewCommits {
+            extra: Default::default()
+        }
+    );
     assert_eq!(idle_receipt.head, Some(GitOid::parse(&initial)?));
     assert!(git(&lane, &["ls-remote", "origin", "refs/heads/published/idle"])?.is_empty());
     // An interrupted delivery is recorded during terminal recovery, with no push.
@@ -2494,6 +3032,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     let pending = WriterDeliveryReceipt {
         branch: "interrupted".into(),
         state: WriterDeliveryState::Failed {
+            extra: Default::default(),
             stage: WriterDeliveryStage::Interrupted,
         },
         ..receipt

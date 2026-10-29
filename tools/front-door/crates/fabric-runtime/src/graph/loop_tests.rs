@@ -14,7 +14,6 @@ fn advance(
         owner,
         journal,
         &limits,
-        &limits,
         &Default::default(),
     )
 }
@@ -50,7 +49,6 @@ fn extension(
         document,
         owner,
         journal,
-        &Default::default(),
         &Default::default(),
         &Default::default(),
         values,
@@ -196,7 +194,6 @@ fn loop_admission_counts_every_round_before_any_launch() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
     )
     .unwrap();
@@ -276,13 +273,13 @@ fn loop_body_failure_blocks_later_rounds_and_dependants() {
 fn loop_on_fail_and_inactive_paths_reuse_gate_routing() {
     for fail in [false, true] {
         let mut document = fixture("extend");
-        let mut gate = gate_node(GateCondition::Verdict {
+        let mut gate = gate_node(GateCondition::Verdict {extra: Default::default(),
             expected: "VERDICT: PASS".into(),
             threshold: VerdictThreshold::All,
         });
         gate.id = "initial".into();
         gate.depends_on = vec!["initial-review".into()];
-        gate.inputs = vec![GraphInput {
+        gate.inputs = vec![GraphInput {extra: Default::default(),
             node: "initial-review".into(),
             outputs: vec![OutputKind::Verdict],
         }];
@@ -332,7 +329,6 @@ fn loop_rejects_decisions_before_exhaustion_and_conflicting_terminal_decisions()
                 &mut journal,
                 &Default::default(),
                 &Default::default(),
-                &Default::default(),
                 &[value.into()]
             )
             .is_err()
@@ -350,7 +346,6 @@ fn loop_rejects_decisions_before_exhaustion_and_conflicting_terminal_decisions()
             &document,
             &mut reviews(&[]),
             &mut journal,
-            &Default::default(),
             &Default::default(),
             &Default::default(),
             &["loop.revise.decision=accept".into()]
@@ -411,7 +406,6 @@ fn loop_replays_every_checkpoint_boundary_including_extensions() {
         &mut Owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
     )
     .unwrap();
@@ -419,7 +413,6 @@ fn loop_replays_every_checkpoint_boundary_including_extensions() {
         &document,
         &mut Owner,
         &mut journal,
-        &limits,
         &limits,
         &Default::default(),
         &["loop.revise.rounds=2".into()],
@@ -434,7 +427,6 @@ fn loop_replays_every_checkpoint_boundary_including_extensions() {
             &mut Owner,
             &mut replay,
             &limits,
-            &limits,
             &Default::default(),
         )
         .unwrap();
@@ -443,7 +435,6 @@ fn loop_replays_every_checkpoint_boundary_including_extensions() {
                 &document,
                 &mut Owner,
                 &mut replay,
-                &limits,
                 &limits,
                 &Default::default(),
                 &["loop.revise.rounds=2".into()],
@@ -524,7 +515,6 @@ fn loop_inbox_extension_keeps_original_actor_and_applies_once() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
     )
     .unwrap();
@@ -540,7 +530,6 @@ fn loop_inbox_extension_keeps_original_actor_and_applies_once() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
         &[],
     )
@@ -555,7 +544,6 @@ fn loop_inbox_extension_keeps_original_actor_and_applies_once() {
         &document,
         &mut owner,
         &mut journal,
-        &limits,
         &limits,
         &Default::default(),
     )
@@ -588,7 +576,6 @@ fn loop_budget_counts_prior_round_attempts() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &budget,
     )
     .unwrap();
@@ -605,7 +592,6 @@ fn loop_budget_counts_prior_round_attempts() {
         &document,
         &mut owner,
         &mut journal,
-        &limits,
         &limits,
         &budget,
         &["budget.per_graph.tokens=10".into()],
@@ -632,7 +618,6 @@ fn loop_outside_dependencies_do_not_multiply_fan_out() {
         &document,
         &mut owner,
         &mut journal,
-        &limits,
         &limits,
         &Default::default(),
     )
@@ -720,7 +705,6 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
             &mut owner,
             &mut journal,
             &limits,
-            &limits,
             &Default::default(),
         )
         .unwrap();
@@ -732,7 +716,6 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
             &document,
             &mut owner,
             &mut journal,
-            &limits,
             &limits,
             &Default::default(),
         )
@@ -778,7 +761,6 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
                 &mut owner,
                 &mut journal,
                 &limits,
-                &limits,
                 &Default::default()
             )
             .unwrap()
@@ -789,7 +771,6 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
             &document,
             &mut owner,
             &mut journal,
-            &limits,
             &limits,
             &Default::default(),
             &["loop.revise.decision=accept".into()],
@@ -833,7 +814,7 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
         let mut journal =
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
-            .bind(GraphExecution {
+            .bind(GraphExecution {extra: Default::default(),
                 integration_base: None,
                 directory: base.clone(),
                 document: document.clone(),
@@ -843,7 +824,6 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
             &document,
             &mut owner,
             &mut journal,
-            &limits,
             &limits,
             &Default::default(),
         )
@@ -879,7 +859,6 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
         &document,
         &mut owner,
         &mut journal,
-        &limits,
         &limits,
         &Default::default(),
     )
@@ -933,7 +912,6 @@ fn loop_default_host_allows_one_to_two_round_extension() {
         &mut reviews(&["VERDICT: FAIL"]),
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
     )
     .unwrap();
@@ -956,7 +934,6 @@ fn loop_default_host_rejects_third_round_before_saving_and_can_accept() {
         &document,
         &mut reviews(&["VERDICT: FAIL", "VERDICT: FAIL"]),
         &mut journal,
-        &limits,
         &limits,
         &Default::default(),
     )
@@ -1010,7 +987,6 @@ fn loop_inbox_extension_respects_default_ceiling_and_closes_rejected_ask() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
     )
     .unwrap();
@@ -1029,7 +1005,6 @@ fn loop_inbox_extension_respects_default_ceiling_and_closes_rejected_ask() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
         &["loop.revise.decision=stop".into()],
     )
@@ -1038,10 +1013,10 @@ fn loop_inbox_extension_respects_default_ceiling_and_closes_rejected_ask() {
 }
 
 #[test]
-fn loop_extension_checks_effective_limit_extensions_before_committing() {
+fn loop_extension_uses_updated_host_limits_before_committing() {
     let document = fixture("exhaust");
     let limits = crate::config::GraphLimits::default();
-    let ceiling = crate::config::GraphLimits {
+    let raised = crate::config::GraphLimits {
         expansion_depth: 6,
         ..limits.clone()
     };
@@ -1051,7 +1026,6 @@ fn loop_extension_checks_effective_limit_extensions_before_committing() {
         &mut reviews(&["VERDICT: FAIL", "VERDICT: FAIL"]),
         &mut journal,
         &limits,
-        &ceiling,
         &Default::default(),
     )
     .unwrap();
@@ -1059,13 +1033,9 @@ fn loop_extension_checks_effective_limit_extensions_before_committing() {
         &document,
         &mut reviews(&["VERDICT: PASS"]),
         &mut journal,
-        &limits,
-        &ceiling,
+        &raised,
         &Default::default(),
-        &[
-            "loop.revise.rounds=3".into(),
-            "limits.expansion_depth=6".into(),
-        ],
+        &["loop.revise.rounds=3".into()],
     )
     .unwrap();
     assert!(completed.checkpoint.successful());
@@ -1082,7 +1052,6 @@ fn loop_extension_default_cap_and_total_round_bound_are_enforced() {
                 &document,
                 &mut reviews(&[]),
                 &mut journal,
-                &Default::default(),
                 &Default::default(),
                 &Default::default(),
                 &[format!("loop.revise.rounds={target}")]
@@ -1134,7 +1103,6 @@ fn loop_inbox_failure_pauses_without_stopping_later_attempt_observation() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
     )
     .unwrap();
@@ -1146,7 +1114,6 @@ fn loop_inbox_failure_pauses_without_stopping_later_attempt_observation() {
         &document,
         &mut owner,
         &mut journal,
-        &limits,
         &limits,
         &Default::default(),
     )
@@ -1174,7 +1141,6 @@ fn loop_inbox_failure_pauses_without_stopping_later_attempt_observation() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
         &["loop.revise.decision=accept".into()],
     )
@@ -1194,7 +1160,6 @@ fn loop_simultaneous_exhaustion_keeps_both_reasons_and_resolves_individually() {
         &document,
         &mut reviews(&["VERDICT: FAIL", "VERDICT: FAIL"]),
         &mut journal,
-        &limits,
         &limits,
         &Default::default(),
     )
@@ -1313,7 +1278,6 @@ fn loop_cancel_and_manual_decisions_close_unanswered_asks() {
             &mut owner,
             &mut journal,
             &limits,
-            &limits,
             &Default::default(),
         )
         .unwrap();
@@ -1324,12 +1288,11 @@ fn loop_cancel_and_manual_decisions_close_unanswered_asks() {
                 &mut owner,
                 &mut journal,
                 &limits,
-                &limits,
                 &Default::default(),
             )
             .unwrap();
             assert_eq!(cancelled.status, GraphStatus::Cancelled);
-            let resumed = resume_with_budget(&document, &mut owner, &mut journal, &limits, &limits, &Default::default(), &[]).unwrap();
+            let resumed = resume_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default(), &[]).unwrap();
             assert!(resumed.checkpoint.pause_reason.as_ref().unwrap().contains("ask closed; use graph resume"));
         } else {
             let extension = if action == "extend" {
@@ -1345,7 +1308,6 @@ fn loop_cancel_and_manual_decisions_close_unanswered_asks() {
                 &document,
                 &mut owner,
                 &mut journal,
-                &limits,
                 &limits,
                 &Default::default(),
                 &[extension],
@@ -1377,7 +1339,6 @@ fn loop_inbox_large_extension_cannot_bypass_host_node_limit() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
     )
     .unwrap();
@@ -1395,7 +1356,6 @@ fn loop_inbox_large_extension_cannot_bypass_host_node_limit() {
         &document,
         &mut owner,
         &mut journal,
-        &limits,
         &limits,
         &Default::default(),
         &["loop.revise.decision=accept".into()],
@@ -1472,7 +1432,7 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
         let mut journal =
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
-            .bind(GraphExecution {
+            .bind(GraphExecution {extra: Default::default(),
                 integration_base: None,
                 directory: base.clone(),
                 document: document.clone(),
@@ -1482,7 +1442,6 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
             &document,
             &mut owner,
             &mut journal,
-            &limits,
             &limits,
             &Default::default(),
         )
@@ -1504,7 +1463,6 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
             &document,
             &mut owner,
             &mut journal,
-            &limits,
             &limits,
             &Default::default(),
         )
@@ -1534,7 +1492,6 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
                 &document,
                 &mut owner,
                 &mut journal,
-                &limits,
                 &limits,
                 &Default::default()
             )
@@ -1571,7 +1528,6 @@ fn loop_inbox_recovery_clears_stale_unavailable_pause_durably() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
     )
     .unwrap();
@@ -1580,7 +1536,6 @@ fn loop_inbox_recovery_clears_stale_unavailable_pause_durably() {
         &document,
         &mut owner,
         &mut journal,
-        &limits,
         &limits,
         &Default::default(),
     )
@@ -1624,7 +1579,6 @@ fn loop_terminal_decisions_work_after_host_limits_fall() {
             &document,
             &mut owner,
             &mut journal,
-            &limits,
             &limits,
             &Default::default(),
             &[format!("loop.revise.decision={decision}")],
@@ -1716,7 +1670,6 @@ fn loop_close_success_does_not_hide_another_pending_close_failure() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
     )
     .unwrap()
@@ -1728,7 +1681,7 @@ fn loop_close_success_does_not_hide_another_pending_close_failure() {
         .unwrap();
     wrapper.loop_asks.insert(
         0,
-        LoopAsk {
+        LoopAsk {extra: Default::default(),
             rounds: 1,
             session: "chair-session".into(),
             resolved: true,
@@ -1768,7 +1721,6 @@ fn loop_decision_recovery_resets_pause_even_after_prior_ask_cleanup() {
         &mut owner,
         &mut journal,
         &limits,
-        &limits,
         &Default::default(),
     )
     .unwrap()
@@ -1781,7 +1733,7 @@ fn loop_decision_recovery_resets_pause_even_after_prior_ask_cleanup() {
         .loop_asks
         .insert(
             0,
-            LoopAsk {
+            LoopAsk {extra: Default::default(),
                 rounds: 1,
                 session: "chair-session".into(),
                 resolved: true,
@@ -1794,7 +1746,6 @@ fn loop_decision_recovery_resets_pause_even_after_prior_ask_cleanup() {
         &document,
         &mut owner,
         &mut journal,
-        &limits,
         &limits,
         &Default::default(),
     )

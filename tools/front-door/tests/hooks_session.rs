@@ -99,11 +99,13 @@ fn create_lane(rig: &TestRig) -> Result<String> {
             run_id,
             operation_id: OperationId::parse("hook-lane")?,
             request: run::CanonicalRequest {
+                extra: Default::default(),
                 child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    extra: Default::default(),
                     build_heavy: false,
                     title: None,
                     base: None,
@@ -113,6 +115,7 @@ fn create_lane(rig: &TestRig) -> Result<String> {
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"existing lane"),
                     route: run::RequestedRoute::Named {
+                        extra: Default::default(),
                         name: "utility".into(),
                         effort: None,
                     },
@@ -509,6 +512,19 @@ fn worktree_remove_distinguishes_missing_paths_from_other_errors() -> Result {
     let stderr = String::from_utf8(output.stderr.bytes)?;
     assert!(stderr.contains("NotADirectory"), "{stderr}");
     assert!(!stderr.contains("private-name"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn worktree_hook_refuses_a_colliding_branch() -> Result {
+    let rig = TestRig::new()?;
+    commit_file(&rig)?;
+    git(&rig, &["branch", "claude/Bright-fox"])?;
+    let output = run_hook(&rig, "worktree-create", &worktree_input(&rig, "bright-fox"))?;
+    assert_eq!(code(&output), 2);
+    let stderr = String::from_utf8(output.stderr.bytes)?;
+    assert!(stderr.contains("collides"), "{stderr}");
+    assert!(!rig.project.join(".worktrees/claude-bright-fox").exists());
     Ok(())
 }
 

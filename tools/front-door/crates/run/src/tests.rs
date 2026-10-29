@@ -99,11 +99,13 @@ pub(super) fn input() -> PreparedRun {
         operation_id: OperationId::parse("run-test").unwrap(),
         created_at: WallTime::from_micros(100).unwrap(),
         request: CanonicalRequest {
+            extra: Default::default(),
             child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                extra: Default::default(),
                 build_heavy: false,
                 title: None,
                 base: None,
@@ -114,6 +116,7 @@ pub(super) fn input() -> PreparedRun {
                 task_id: task,
                 prompt_digest: CanonicalV1::file_digest(b"exact prompt"),
                 route: RequestedRoute::Model {
+                    extra: Default::default(),
                     provider: "fixture".into(),
                     model: "fixture/model".into(),
                     effort: Some("high".into()),
@@ -286,10 +289,12 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
     input.request.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
     input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+        extra: Default::default(),
         mode: Default::default(),
         remote: "origin".into(),
         branch: "published/lane".into(),
@@ -355,10 +360,12 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     let store = RunStore::open(&context, &call)?;
     let mut input = input();
     input.request.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
         project: temp.path().to_path_buf(),
         worktree: temp.path().join("lane"),
     });
     input.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+        extra: Default::default(),
         mode: Default::default(),
         remote: "origin".into(),
         branch: "published/lane".into(),
@@ -369,7 +376,12 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     let id = input.attempts[0].attempt_id;
     let record = store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
     let receipt = record.delivery.ok_or("delivery state missing")?;
-    assert_eq!(receipt.state, WriterDeliveryState::NotAttempted);
+    assert_eq!(
+        receipt.state,
+        WriterDeliveryState::NotAttempted {
+            extra: Default::default()
+        }
+    );
     assert_eq!((receipt.remote.as_str(), receipt.head), ("origin", None));
     Ok(())
 }
@@ -582,7 +594,9 @@ fn missing_output_is_not_found_only_after_terminal() -> TestResult {
     }
     store.withdraw(
         id,
-        AttemptState::Queued,
+        AttemptState::Queued {
+            extra: Default::default(),
+        },
         Outcome::Rejected,
         "fixture rejection",
         WallTime::from_micros(200)?,
@@ -884,6 +898,7 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     assert_eq!(events[1].revision, record.revision);
     // The edge supplied no host, so only that field stays unknown.
     let trace = provenant_records::Trace {
+        extra: Default::default(),
         host: None,
         project: Some(context.project_id),
         run: Some(run.run_id),
@@ -1150,7 +1165,9 @@ fn publication_crash_worker() -> TestResult {
     if crash.starts_with("withdraw-") {
         store.withdraw(
             input.attempts[0].attempt_id,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "cancelled before the crash",
             WallTime::from_micros(150)?,
@@ -1267,7 +1284,9 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
             let record = store
                 .withdraw(
                     id,
-                    AttemptState::Queued,
+                    AttemptState::Queued {
+                        extra: Default::default(),
+                    },
                     Outcome::Cancelled,
                     "retried",
                     WallTime::from_micros(900)?,

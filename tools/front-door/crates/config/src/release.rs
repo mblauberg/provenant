@@ -244,6 +244,7 @@ pub fn package_release(
         };
         let mode = source_mode(&relative, mode)?;
         release_files.push(ReleaseFile {
+            extra: Default::default(),
             path: path_wire(&relative)?,
             digest: CanonicalV1::file_digest(&bytes),
             bytes: bytes.len() as u64,
@@ -258,6 +259,7 @@ pub fn package_release(
         ));
     }
     let manifest = ReleaseManifest {
+        extra: Default::default(),
         schema_version: 1,
         source_digest: expected.source_digest,
         asset_digest,

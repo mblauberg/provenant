@@ -131,6 +131,7 @@ mod tests {
     fn packaging_refuses_a_binary_with_an_older_source_digest()
     -> Result<(), Box<dyn std::error::Error>> {
         let old = VersionInfo {
+            extra: Default::default(),
             source_digest: SourceDigest::parse(&format!("sha256:{}", "0".repeat(64)))?,
             asset_digest: SourceDigest::parse(&format!("sha256:{}", "1".repeat(64)))?,
             target: "test-target".into(),

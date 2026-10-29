@@ -44,7 +44,7 @@ pub struct Resume {
 const DEADLINE_GRACE_SECONDS: u64 = 120;
 
 fn past_runtime_deadline(record: &AttemptRecord, call: &Request<'_>) -> bool {
-    let (AttemptState::Running, Some(deadline), Ok(now)) = (
+    let (AttemptState::Running { .. }, Some(deadline), Ok(now)) = (
         &record.state,
         record.runtime_deadline,
         call.clock.wall_now(),
@@ -283,7 +283,9 @@ mod reboot_tests {
         record.runtime_deadline = None;
         assert!(!overdue(&clock, &record), "no recorded deadline, no stop");
         record.runtime_deadline = Some(deadline);
-        record.state = AttemptState::Starting;
+        record.state = AttemptState::Starting {
+            extra: Default::default(),
+        };
         assert!(!overdue(&clock, &record));
         Ok(())
     }
@@ -342,7 +344,12 @@ mod reboot_tests {
         )?, Some(Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { error } })
             if error.contains("reboot proof unavailable") && error.contains(cause)));
         assert_eq!(std::fs::read(&reservation).ok(), before);
-        assert_eq!(store.record(id, &call)?.state, AttemptState::Running);
+        assert_eq!(
+            store.record(id, &call)?.state,
+            AttemptState::Running {
+                extra: Default::default()
+            }
+        );
         Ok(())
     }
 }
@@ -448,6 +455,7 @@ mod lineage_tests {
             };
             let store = RunStore::open(&execution, &call)?;
             let writer = WriterRequest {
+                extra: Default::default(),
                 project: project.clone(),
                 worktree: info.path.clone(),
             };
@@ -462,7 +470,9 @@ mod lineage_tests {
             std::fs::write(info.path.join("pending.txt"), "keep these edits")?;
             store.withdraw(
                 prior,
-                AttemptState::Queued,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
                 Outcome::Cancelled,
                 "fixture",
                 clock.wall_now()?,
@@ -561,6 +571,7 @@ mod lineage_tests {
         let cancel = provenant_core::CancelToken::new();
         let mut original = crate::tests::input();
         original.request.tasks[0].deliver = Some(WriterDeliveryRequest {
+            extra: Default::default(),
             mode: DeliveryMode::Pr,
             remote: "origin".into(),
             branch: "old-lane".into(),
@@ -601,13 +612,16 @@ mod lineage_tests {
         };
         let store = RunStore::open(&execution, &call)?;
         original.request.tasks[0].writer = Some(WriterRequest {
+            extra: Default::default(),
             project: project.clone(),
             worktree: info.path.clone(),
         });
         store.create(&original, &call)?;
         store.withdraw(
             prior,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture",
             clock.wall_now()?,
@@ -665,7 +679,9 @@ mod lineage_tests {
         store.resume_fresh(&first, "fixture", &call)?;
         store.withdraw(
             first.attempt_id,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture",
             clock.wall_now()?,
@@ -769,6 +785,7 @@ mod lineage_tests {
                 Ok(replacement)
             })?;
         let writer = WriterRequest {
+            extra: Default::default(),
             project: project.clone(),
             worktree: replacement.path,
         };
@@ -813,7 +830,7 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
-        if record.state == AttemptState::Queued {
+        if matches!(record.state, AttemptState::Queued { .. }) {
             return Ok(None);
         }
         if Self::needs_lost_settlement(record)
@@ -1187,7 +1204,7 @@ impl RunStore {
                 if matches!(record.state, AttemptState::Terminal { .. }) {
                     continue;
                 }
-                let still_queued = record.state == AttemptState::Queued
+                let still_queued = matches!(record.state, AttemptState::Queued { .. })
                     && record.generation.checked_add(1) == Some(generation);
                 if record.generation != generation && !still_queued {
                     errors.push("accepted child generation changed".into());
@@ -1242,14 +1259,16 @@ impl RunStore {
             let record = self.record(id, call)?;
             match record.state {
                 AttemptState::Terminal { .. } => return Ok(CancelReceipt::AlreadyTerminal),
-                AttemptState::Queued => {
+                AttemptState::Queued { .. } => {
                     let now = call
                         .clock
                         .wall_now()
                         .map_err(|_| RunError::Validation("wall clock"))?;
                     match self.withdraw(
                         id,
-                        AttemptState::Queued,
+                        AttemptState::Queued {
+                            extra: Default::default(),
+                        },
                         Outcome::Cancelled,
                         reason,
                         now,
@@ -1472,6 +1491,7 @@ impl RunStore {
             run_id: input.run_id,
             operation_id: input.operation_id.clone(),
             request: CanonicalRequest {
+                extra: Default::default(),
                 child_attempt_id_version: previous
                     .as_ref()
                     .map_or(request.parent_attempt.map(|_| 1), |request| {
@@ -1481,6 +1501,7 @@ impl RunStore {
                 fresh_continuation: fresh.map(str::to_owned),
                 schema_version: 1,
                 tasks: vec![TaskRequest {
+                    extra: Default::default(),
                     build_heavy: task.build_heavy,
                     title: None,
                     base: task.base.clone(),
@@ -1747,7 +1768,7 @@ impl RunStore {
             .is_some_and(|request| {
                 request.get("scope") == serde_json::to_value(scope).ok().as_ref()
             });
-        if record.state != AttemptState::Starting {
+        if !matches!(record.state, AttemptState::Starting { .. }) {
             return Ok(Reconciled::uncertain(UncertainReason::NoLaunchSummary));
         }
         if let Some(fence) = self
@@ -1762,7 +1783,9 @@ impl RunStore {
                     .map_err(|_| RunError::Validation("wall clock"))?;
                 self.withdraw(
                     id,
-                    AttemptState::Starting,
+                    AttemptState::Starting {
+                        extra: Default::default(),
+                    },
                     if cancelled {
                         Outcome::Cancelled
                     } else {
@@ -1816,7 +1839,9 @@ impl RunStore {
             .map_err(|_| RunError::Validation("wall clock"))?;
         let done = self.withdraw(
             id,
-            AttemptState::Starting,
+            AttemptState::Starting {
+                extra: Default::default(),
+            },
             if cancelled {
                 Outcome::Cancelled
             } else {
@@ -2002,7 +2027,7 @@ impl RunStore {
     ) -> Result<Reconciled> {
         let id = record.attempt_id;
         let scope = Self::scope(record);
-        if record.state == AttemptState::Queued {
+        if matches!(record.state, AttemptState::Queued { .. }) {
             return Ok(Reconciled::Queued);
         }
         if let Some(state) = self.settle_rebooted(record, call, observer)? {

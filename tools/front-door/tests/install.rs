@@ -31,6 +31,7 @@ fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
     let mut installer_bytes = vec![0];
     installer_bytes.extend(&installer);
     let version = VersionInfo {
+        extra: Default::default(),
         source_digest: source_digest(&[SourceInput {
             name: "fixture.rs",
             bytes: identity,
@@ -110,6 +111,7 @@ fn inspect_installed(rig: &TestRig, stage: &Path) -> Result<provenant_config::In
     let release = Release::read(stage, env!("PROVENANT_TARGET_TRIPLE"))?;
     let manifest = release.manifest();
     let smoke = FixtureSmoke(VersionInfo {
+        extra: Default::default(),
         source_digest: manifest.source_digest,
         asset_digest: manifest.asset_digest,
         target: manifest.target.clone(),

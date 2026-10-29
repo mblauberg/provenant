@@ -204,6 +204,7 @@ impl RunStore {
             }
         }
         let run = RunRecord {
+            extra: Default::default(),
             schema_version: 1,
             run_id: input.run_id,
             project_id: context.project_id,
@@ -221,6 +222,7 @@ impl RunStore {
             closure: Closure::Open,
         };
         let operation = OperationRecord {
+            extra: Default::default(),
             schema_version: 1,
             project_id: context.project_id,
             actor_id: context.actor_id,
@@ -278,15 +280,15 @@ impl RunStore {
             };
             for (index, task) in input.request.tasks.iter().enumerate() {
                 let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
-                let attempt = AttemptRecord {
+                let attempt = AttemptRecord {extra: Default::default(),
                     title: task.title.clone(),
                     continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
                     profile: task.profile.clone(),
                     schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
-                    queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued, usage: UsageRecord::default(),
-                    prompt: ArtifactRecord { path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
-                    trace: provenant_records::Trace {
+                    queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
+                    prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
+                    trace: provenant_records::Trace {extra: Default::default(),
                         host: self.host,
                         project: Some(run.project_id),
                         run: Some(run.run_id),
@@ -422,7 +424,10 @@ impl RunStore {
             return Ok(None);
         }
         if old.state != expected
-            || !matches!(old.state, AttemptState::Queued | AttemptState::Starting)
+            || !matches!(
+                old.state,
+                AttemptState::Queued { .. } | AttemptState::Starting { .. }
+            )
         {
             return Err(RunError::Conflict);
         }
@@ -444,6 +449,7 @@ impl RunStore {
                         exit_code: None,
                         finished_at,
                         reason,
+                        ..
                     } if saved.attempt_id == id
                         && saved.run_id == old.run_id
                         && saved.generation == old.generation
@@ -563,6 +569,7 @@ impl RunStore {
             .clone_from(&publication.partial_signals);
         next.session = publication.session.clone();
         next.result = Some(ArtifactRecord {
+            extra: Default::default(),
             path: artifact_path(id, AttemptFile::Result.name())?,
             digest: CanonicalV1::file_digest(publication.result.as_bytes()),
             bytes: publication.result.len() as u64,
@@ -570,6 +577,7 @@ impl RunStore {
             redacted: publication.redacted,
         });
         next.state = AttemptState::Terminal {
+            extra: Default::default(),
             outcome: publication.outcome,
             exit_code: outcome_exit,
             finished_at: publication.finished_at,
@@ -604,12 +612,15 @@ impl RunStore {
                 // Requested delivery that never ran must not read as success
                 // with no trace.
                 next.delivery = Some(WriterDeliveryReceipt {
+                    extra: Default::default(),
                     schema_version: 1,
                     remote: deliver.remote,
                     branch: deliver.branch,
                     head: None,
                     review_acceptance: None,
-                    state: WriterDeliveryState::NotAttempted,
+                    state: WriterDeliveryState::NotAttempted {
+                        extra: Default::default(),
+                    },
                 });
             }
         }
@@ -699,6 +710,7 @@ impl RunStore {
         let mut next = old.clone();
         next.revision = old.revision.checked_add(1).ok_or(RunError::Conflict)?;
         next.state = AttemptState::Terminal {
+            extra: Default::default(),
             outcome: Outcome::Lost,
             exit_code: None,
             finished_at: call
@@ -858,6 +870,7 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
 }
 pub(crate) fn insert_event(db: &rusqlite::Connection, attempt: &AttemptRecord) -> Result<()> {
     let mut event = RunEvent {
+        extra: Default::default(),
         schema_version: 1,
         sequence: 0,
         project_id: attempt.project_id,
@@ -930,6 +943,7 @@ fn sealed_exit(
     file.sync()?;
     dir.sync()?;
     Ok(ArtifactRecord {
+        extra: Default::default(),
         path: artifact_path(exit.scope.attempt, AttemptFile::ProcessExit.name())?,
         digest: CanonicalV1::file_digest(&raw),
         bytes: raw.len() as u64,

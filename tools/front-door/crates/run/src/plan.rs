@@ -129,7 +129,7 @@ mod tests {
         let mut options = ExecOptions::new(&argv, &base, Duration::from_secs(10));
         options.env = Some(&env);
         assert_eq!(executor.execute(options)?.termination, Termination::Exit(0));
-        let runtime = UtilityRuntime::new(std::fs::canonicalize(git)?, &home)?;
+        let runtime = UtilityRuntime::new(git, &home)?;
         let repo = runtime.open_read_repo(
             &executor,
             &repo_path,

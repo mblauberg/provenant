@@ -889,7 +889,9 @@ mod tests {
         ));
         assert_eq!(
             store.record(prepared.attempts[0].attempt_id, &call)?.state,
-            AttemptState::Queued
+            AttemptState::Queued {
+                extra: Default::default()
+            }
         );
         drop(lock);
         cancel.cancel();
@@ -907,7 +909,9 @@ mod tests {
         assert!(matches!(result, Err(RunError::Cancelled)));
         assert_eq!(
             store.record(prepared.attempts[0].attempt_id, &call)?.state,
-            AttemptState::Queued
+            AttemptState::Queued {
+                extra: Default::default()
+            }
         );
         index.0.execute_batch("CREATE TRIGGER reject_membership BEFORE INSERT ON membership BEGIN SELECT RAISE(ABORT,'fixture seal failure'); END;")?;
         let result = store.start(
@@ -919,7 +923,9 @@ mod tests {
         assert!(matches!(result, Err(RunError::Sqlite(_))));
         assert_eq!(
             store.record(prepared.attempts[0].attempt_id, &call)?.state,
-            AttemptState::Queued
+            AttemptState::Queued {
+                extra: Default::default()
+            }
         );
         index.0.execute_batch("DROP TRIGGER reject_membership;")?;
         let before = store.record(prepared.attempts[0].attempt_id, &call)?;
@@ -948,7 +954,9 @@ mod tests {
         assert!(matches!(second, Err(RunError::Conflict)));
         assert_eq!(
             store.record(before.attempt_id, &call)?.state,
-            AttemptState::Queued
+            AttemptState::Queued {
+                extra: Default::default()
+            }
         );
         let claimed = store.mark_starting(
             &before,
@@ -958,7 +966,12 @@ mod tests {
             head,
             &call,
         )?;
-        assert_eq!(claimed.state, AttemptState::Starting);
+        assert_eq!(
+            claimed.state,
+            AttemptState::Starting {
+                extra: Default::default()
+            }
+        );
         Ok(())
     }
     #[test]

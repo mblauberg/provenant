@@ -727,11 +727,20 @@ fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> O
         }
     }
     if let Some(object) = value.as_object() {
-        let props = schema["properties"].as_object()?;
+        let props = schema["properties"].as_object();
         for (key, value) in object {
             let next = format!("{path}.{key}");
-            let Some(field) = props.get(key) else {
-                return Some(next);
+            let Some(field) = props.and_then(|properties| properties.get(key)) else {
+                if schema["additionalProperties"] == false {
+                    return Some(next);
+                }
+                if let Some(additional) = schema.get("additionalProperties")
+                    && additional.is_object()
+                    && let Some(path) = structural_path(root, additional, value, &next)
+                {
+                    return Some(path);
+                }
+                continue;
             };
             if let Some(path) = structural_path(root, field, value, &next) {
                 return Some(path);
@@ -743,7 +752,7 @@ fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> O
         {
             return Some(format!("{path}.path"));
         }
-        for key in schema["required"].as_array()? {
+        for key in schema["required"].as_array().into_iter().flatten() {
             let key = key.as_str()?;
             if !object.contains_key(key) {
                 return Some(format!("{path}.{key}"));

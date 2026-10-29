@@ -242,7 +242,9 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
     fs::write(candidate.join("sessions/session.jsonl"), "transcript")?;
     store.withdraw(
         attempt,
-        provenant_run::AttemptState::Queued,
+        provenant_run::AttemptState::Queued {
+            extra: Default::default(),
+        },
         provenant_run::Outcome::Cancelled,
         "fixture",
         WallTime::from_micros(200)?,

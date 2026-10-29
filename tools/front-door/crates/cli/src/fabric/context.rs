@@ -103,7 +103,10 @@ impl Context {
         private_dir(roots.state.as_path(), &utility_home)?;
         let lane = in_lane();
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
-        let runtime = provenant_confinement::UtilityRuntime::new(canonical(&git)?, &utility_home)?;
+        let runtime = provenant_confinement::UtilityRuntime::new(&git, &utility_home)?
+            .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+                roots.state.as_path(),
+            ));
         let executor = SystemExecutor::new(1)?;
         let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
@@ -314,7 +317,10 @@ impl Context {
             .map_err(|error| peer_failure(&peer.destination, &error))?
             .result
         {
-            PeerResult::Error { error } => {
+            PeerResult::Error {
+                data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
+                ..
+            } => {
                 // An uncertain launch must name this locally frozen request.
                 if let FacadeError::LaunchUnknown {
                     operation_id: returned,
@@ -412,6 +418,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::Cancelled => (Outcome::Error, ErrorKind::Cancelled),
         FacadeError::StateCorrupt => (Outcome::Error, ErrorKind::StateCorrupt),
         FacadeError::UpgradeRefused => (Outcome::Refused, ErrorKind::UpgradeRefused),
+        FacadeError::UpgradeRequired { .. } => (Outcome::Refused, ErrorKind::UpgradeRequired),
         FacadeError::Timeout => (Outcome::Error, ErrorKind::Timeout),
         FacadeError::StaleFence
         | FacadeError::ContinuationUnsupported

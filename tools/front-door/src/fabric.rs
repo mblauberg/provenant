@@ -331,14 +331,21 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
         match remote.peer(
             &self.factory.clock,
             target,
-            PeerAction::Inbox { input },
+            PeerAction::Inbox {
+                extra: Default::default(),
+                input,
+            },
             budget,
             cancel,
         ) {
-            Ok(PeerResult::Inbox(InboxReply::Ok { result })) => Ok(*result),
-            Ok(PeerResult::Inbox(InboxReply::Error { code, message })) => {
-                Err(error(&code, message))
-            }
+            Ok(PeerResult::Inbox {
+                data: InboxReply::Ok { result, .. },
+                ..
+            }) => Ok(*result),
+            Ok(PeerResult::Inbox {
+                data: InboxReply::Error { code, message, .. },
+                ..
+            }) => Err(error(&code, message)),
             Ok(_) => Err(error(
                 "unsupported_owner",
                 "peer does not support inbox operations".into(),
@@ -519,6 +526,7 @@ impl F3Facade for BoundFacade<'_> {
             allow_remote: true,
             actor: None,
             chair: Some(provenant_run::ChairBinding {
+                extra: Default::default(),
                 host: self.factory.context.identity.inbox.host,
                 actor: self.factory.context.identity.inbox.actor,
             }),
@@ -567,7 +575,7 @@ impl F3Facade for BoundFacade<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Vec<HostHealth>, FacadeError> {
-        let HostsInput::Hosts { after, limit } = input;
+        let HostsInput::Hosts { after, limit, .. } = input;
         let ctx = &self.factory.context;
         let mut candidates: std::collections::BTreeMap<
             provenant_core::HostId,
@@ -638,7 +646,9 @@ impl F3Facade for BoundFacade<'_> {
                     ctx.identity.host,
                     ctx.identity.inbox.agent.clone(),
                     project,
-                    PeerAction::Health,
+                    PeerAction::Health {
+                        extra: Default::default(),
+                    },
                 );
                 let transport = SshTransport {
                     executor: &self.factory.executor,
@@ -656,7 +666,7 @@ impl F3Facade for BoundFacade<'_> {
                     std::time::Duration::from_micros(cap),
                 ) {
                     Ok(PeerResponse {
-                        result: PeerResult::Health(value),
+                        result: PeerResult::Health { data: value, .. },
                         ..
                     }) => {
                         health.protocol = Some(PROTOCOL);
@@ -828,6 +838,7 @@ pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObser
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         Ok(BoundFacade { factory: &factory }.hosts(
             HostsInput::Hosts {
+                extra: Default::default(),
                 after: None,
                 limit: 100,
             },
@@ -862,7 +873,7 @@ fn peer_read_only(action: &PeerAction) -> bool {
     use provenant_fabric_runtime::inbox::InboxInput;
     match action {
         PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. } => true,
-        PeerAction::Inbox { input } => !matches!(
+        PeerAction::Inbox { input, .. } => !matches!(
             input,
             InboxInput::Answer {
                 operation_id: Some(_),
@@ -914,12 +925,17 @@ pub fn peer(
                     provenant_fabric_runtime::peer_agent::Forward::Busy => {
                         let request = decode_request(&bytes)?;
                         let mut busy = serde_json::to_vec(&PeerResponse {
+                            extra: Default::default(),
                             version: 1,
                             protocol: request.protocol,
                             host: request.target_host,
                             project: request.project.key,
                             result: PeerResult::Error {
-                                error: FacadeError::Busy,
+                                data: provenant_fabric_runtime::hosts::PeerResultError {
+                                    extra: Default::default(),
+                                    error: FacadeError::Busy,
+                                },
+                                extra: Default::default(),
                             },
                         })?;
                         busy.push(b'\n');
@@ -997,19 +1013,23 @@ pub fn peer(
             chair: None,
         };
         let result = match &request.action {
-            PeerAction::Inbox { input } => {
+            PeerAction::Inbox { input, .. } => {
                 use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
                 if matches!(
                     input,
                     InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
                 ) {
-                    PeerResult::Inbox(InboxReply::Error {
-                        code: "owner_local_only".into(),
-                        message: format!(
-                            "inbox owner {}: run this operation on the owner host or from the owning chair session",
-                            context.identity.host
-                        ),
-                    })
+                    PeerResult::Inbox {
+                        data: InboxReply::Error {
+                            extra: Default::default(),
+                            code: "owner_local_only".into(),
+                            message: format!(
+                                "inbox owner {}: run this operation on the owner host or from the owning chair session",
+                                context.identity.host
+                            ),
+                        },
+                        extra: Default::default(),
+                    }
                 } else {
                     let result = if matches!(input, InboxInput::Ask { .. })
                         || (input.is_mutation() && input.operation_id().is_none())
@@ -1039,21 +1059,27 @@ pub fn peer(
                             },
                         )
                     };
-                    PeerResult::Inbox(match result {
-                        Ok(result) => InboxReply::Ok {
-                            result: Box::new(result),
+                    PeerResult::Inbox {
+                        data: match result {
+                            Ok(result) => InboxReply::Ok {
+                                extra: Default::default(),
+                                result: Box::new(result),
+                            },
+                            Err(error) => InboxReply::Error {
+                                extra: Default::default(),
+                                code: error.code().into(),
+                                message: error.to_string(),
+                            },
                         },
-                        Err(error) => InboxReply::Error {
-                            code: error.code().into(),
-                            message: error.to_string(),
-                        },
-                    })
+                        extra: Default::default(),
+                    }
                 }
             }
             PeerAction::ConsoleBoard {
                 all,
                 limit,
                 selected,
+                ..
             } => {
                 let command = provenant_cli::console::Console::Board {
                     all: *all,
@@ -1063,7 +1089,11 @@ pub fn peer(
                 };
                 if *limit > context.config.limits.page_rows {
                     PeerResult::Error {
-                        error: FacadeError::InvalidInput,
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::InvalidInput,
+                        },
+                        extra: Default::default(),
                     }
                 } else {
                     match provenant_cli::console::read(
@@ -1071,9 +1101,16 @@ pub fn peer(
                         selected.then_some(context.identity.project),
                         &command,
                     ) {
-                        Ok(value) => PeerResult::Console(value),
+                        Ok(value) => PeerResult::Console {
+                            data: value,
+                            extra: Default::default(),
+                        },
                         Err(_) => PeerResult::Error {
-                            error: FacadeError::StateCorrupt,
+                            data: provenant_fabric_runtime::hosts::PeerResultError {
+                                extra: Default::default(),
+                                error: FacadeError::StateCorrupt,
+                            },
+                            extra: Default::default(),
                         },
                     }
                 }
@@ -1083,6 +1120,7 @@ pub fn peer(
                 max_nodes,
                 detail,
                 selected,
+                ..
             } => {
                 let command = provenant_cli::console::Console::Tree {
                     max_depth: *max_depth,
@@ -1092,7 +1130,11 @@ pub fn peer(
                 };
                 if *max_nodes > context.config.limits.page_rows {
                     PeerResult::Error {
-                        error: FacadeError::InvalidInput,
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::InvalidInput,
+                        },
+                        extra: Default::default(),
                     }
                 } else {
                     match provenant_cli::console::read(
@@ -1100,60 +1142,98 @@ pub fn peer(
                         selected.then_some(context.identity.project),
                         &command,
                     ) {
-                        Ok(value) => PeerResult::Console(value),
+                        Ok(value) => PeerResult::Console {
+                            data: value,
+                            extra: Default::default(),
+                        },
                         Err(_) => PeerResult::Error {
-                            error: FacadeError::StateCorrupt,
+                            data: provenant_fabric_runtime::hosts::PeerResultError {
+                                extra: Default::default(),
+                                error: FacadeError::StateCorrupt,
+                            },
+                            extra: Default::default(),
                         },
                     }
                 }
             }
-            PeerAction::RunStatuses { targets } => {
+            PeerAction::RunStatuses { targets, .. } => {
                 if !(1..=100).contains(&targets.len()) {
                     PeerResult::Error {
-                        error: FacadeError::InvalidInput,
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::InvalidInput,
+                        },
+                        extra: Default::default(),
                     }
                 } else {
-                    peer_result(
-                        owner.snapshots_local(targets, budget, &cancel),
-                        PeerResult::RunStatuses,
-                    )
+                    peer_result(owner.snapshots_local(targets, budget, &cancel), |data| {
+                        PeerResult::RunStatuses {
+                            data,
+                            extra: Default::default(),
+                        }
+                    })
                 }
             }
-            PeerAction::Run { input } => {
+            PeerAction::Run { input, .. } => {
                 peer_result(owner.run(input.clone(), budget, &cancel), |value| {
-                    PeerResult::Run(Box::new(value))
+                    PeerResult::Run {
+                        data: Box::new(value),
+                        extra: Default::default(),
+                    }
                 })
             }
-            PeerAction::Submit { input } => peer_result(
-                owner.submit(input.clone(), budget, &cancel),
-                PeerResult::Submitted,
-            ),
-            PeerAction::Output { input } => peer_result(
-                owner.output(input.clone(), budget, &cancel),
-                PeerResult::Output,
-            ),
-            PeerAction::RunEvents { after, limit } => peer_result(
-                owner.events(*after, *limit, budget, &cancel),
-                PeerResult::RunEvents,
-            ),
-            PeerAction::Lanes { all, limit } => peer_result(
-                owner.lanes_local(*all, *limit, budget, &cancel),
-                PeerResult::RunStatuses,
-            ),
-            PeerAction::LaneWaits { targets } => {
+            PeerAction::Submit { input, .. } => {
+                peer_result(owner.submit(input.clone(), budget, &cancel), |data| {
+                    PeerResult::Submitted {
+                        data,
+                        extra: Default::default(),
+                    }
+                })
+            }
+            PeerAction::Output { input, .. } => {
+                peer_result(owner.output(input.clone(), budget, &cancel), |data| {
+                    PeerResult::Output {
+                        data,
+                        extra: Default::default(),
+                    }
+                })
+            }
+            PeerAction::RunEvents { after, limit, .. } => {
+                peer_result(owner.events(*after, *limit, budget, &cancel), |data| {
+                    PeerResult::RunEvents {
+                        data,
+                        extra: Default::default(),
+                    }
+                })
+            }
+            PeerAction::Lanes { all, limit, .. } => {
+                peer_result(owner.lanes_local(*all, *limit, budget, &cancel), |data| {
+                    PeerResult::RunStatuses {
+                        data,
+                        extra: Default::default(),
+                    }
+                })
+            }
+            PeerAction::LaneWaits { targets, .. } => {
                 if !(1..=100).contains(&targets.len()) {
                     PeerResult::Error {
-                        error: FacadeError::InvalidInput,
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::InvalidInput,
+                        },
+                        extra: Default::default(),
                     }
                 } else {
-                    peer_result(
-                        owner.waits_local(targets, budget, &cancel),
-                        PeerResult::LaneWaits,
-                    )
+                    peer_result(owner.waits_local(targets, budget, &cancel), |data| {
+                        PeerResult::LaneWaits {
+                            data,
+                            extra: Default::default(),
+                        }
+                    })
                 }
             }
-            PeerAction::SessionHandoff { input, .. } => {
-                PeerResult::SessionHandoff(crate::handoff::receive(
+            PeerAction::SessionHandoff { input, .. } => PeerResult::SessionHandoff {
+                data: crate::handoff::receive(
                     &crate::handoff::Target {
                         context,
                         home: &home,
@@ -1165,17 +1245,23 @@ pub fn peer(
                     },
                     input,
                     &provenant_fabric_runtime::handoff::session::Terminal,
-                ))
-            }
-            PeerAction::Health => PeerResult::Health(provenant_fabric_runtime::hosts::PeerHealth {
-                host: context.identity.host,
-                available: true,
-                execution: Some(owner.capabilities().submit),
-            }),
+                ),
+                extra: Default::default(),
+            },
+            PeerAction::Health { .. } => PeerResult::Health {
+                data: provenant_fabric_runtime::hosts::PeerHealth {
+                    extra: Default::default(),
+                    host: context.identity.host,
+                    available: true,
+                    execution: Some(owner.capabilities().submit),
+                },
+                extra: Default::default(),
+            },
             PeerAction::LandingPush {
                 proof,
                 operation_id,
                 reconcile,
+                ..
             } => {
                 if context
                     .config
@@ -1184,7 +1270,11 @@ pub fn peer(
                     .is_some_and(|h| *h != context.identity.host)
                 {
                     PeerResult::Error {
-                        error: FacadeError::HomeUnavailable,
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::HomeUnavailable,
+                        },
+                        extra: Default::default(),
                     }
                 } else {
                     let executor = SystemExecutor::new(1)?;
@@ -1199,14 +1289,21 @@ pub fn peer(
                         &clock,
                         &cancel,
                     ) {
-                        Ok(value) => PeerResult::Push(value),
+                        Ok(value) => PeerResult::Push {
+                            data: value,
+                            extra: Default::default(),
+                        },
                         Err(error) => PeerResult::Error {
-                            error: landing_error(error.as_ref()),
+                            data: provenant_fabric_runtime::hosts::PeerResultError {
+                                extra: Default::default(),
+                                error: landing_error(error.as_ref()),
+                            },
+                            extra: Default::default(),
                         },
                     }
                 }
             }
-            PeerAction::Receipt { operation_id } => {
+            PeerAction::Receipt { operation_id, .. } => {
                 let store_request = provenant_fabric_store::Request {
                     clock: &clock,
                     budget,
@@ -1215,23 +1312,35 @@ pub fn peer(
                 };
                 let store =
                     provenant_fabric_store::Store::open(&context.roots.state, &store_request)?;
-                match store.coordination_receipt::<MutationResult>(
+                match store.coordination_receipt_with_input::<Mutation, serde_json::Value>(
                     context.identity.project,
                     request.actor()?,
                     operation_id,
                     &store_request,
                 )? {
-                    Some(value) => PeerResult::Coordination(value.into()),
-                    None => PeerResult::Error {
-                        error: FacadeError::LaunchUnknown {
-                            operation_id: operation_id.clone(),
+                    Some((input, value)) => peer_result(
+                        CoordinationResult::from_stored(&input, value)
+                            .map_err(|_| FacadeError::StateCorrupt),
+                        |data| PeerResult::Coordination {
+                            data,
+                            extra: Default::default(),
                         },
+                    ),
+                    None => PeerResult::Error {
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::LaunchUnknown {
+                                operation_id: operation_id.clone(),
+                            },
+                        },
+                        extra: Default::default(),
                     },
                 }
             }
             PeerAction::Coordination {
                 input,
                 operation_id,
+                ..
             } => {
                 // A peer never recursively forwards or elects another home.
                 if context
@@ -1241,15 +1350,24 @@ pub fn peer(
                     .is_some_and(|h| *h != context.identity.host)
                 {
                     PeerResult::Error {
-                        error: FacadeError::HomeUnavailable,
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::HomeUnavailable,
+                        },
+                        extra: Default::default(),
                     }
                 } else {
-                    let coverage =
-                        if matches!(input, CoordinationInput::Events(EventsInput::Read { .. })) {
-                            peer_factory.pull_events_from(false, budget, &cancel)
-                        } else {
-                            Ok(EventCoverage::default())
-                        };
+                    let coverage = if matches!(
+                        input,
+                        CoordinationInput::Events {
+                            input: EventsInput::Read { .. },
+                            extra: _
+                        }
+                    ) {
+                        peer_factory.pull_events_from(false, budget, &cancel)
+                    } else {
+                        Ok(EventCoverage::default())
+                    };
                     match coverage {
                         Ok(coverage) => {
                             let service = CoordinationService::open(
@@ -1263,28 +1381,46 @@ pub fn peer(
                             )?;
                             match input.execute(&service, operation_id.clone(), budget, &cancel) {
                                 Ok(mut value) => {
-                                    if let CoordinationResult::Events(EventsResult::Read {
-                                        unknown_hosts,
-                                        run_events_pending,
+                                    if let CoordinationResult::Events {
+                                        result:
+                                            EventsResult::Read {
+                                                unknown_hosts,
+                                                run_events_pending,
+                                                ..
+                                            },
                                         ..
-                                    }) = &mut value
+                                    } = &mut value
                                     {
                                         unknown_hosts.extend(coverage.unknown_hosts);
                                         *run_events_pending |= coverage.more_events;
                                     }
-                                    PeerResult::Coordination(value)
+                                    PeerResult::Coordination {
+                                        data: value,
+                                        extra: Default::default(),
+                                    }
                                 }
                                 Err(error) => PeerResult::Error {
-                                    error: FacadeError::from(&error),
+                                    data: provenant_fabric_runtime::hosts::PeerResultError {
+                                        extra: Default::default(),
+                                        error: FacadeError::from(&error),
+                                    },
+                                    extra: Default::default(),
                                 },
                             }
                         }
-                        Err(error) => PeerResult::Error { error },
+                        Err(error) => PeerResult::Error {
+                            data: provenant_fabric_runtime::hosts::PeerResultError {
+                                extra: Default::default(),
+                                error,
+                            },
+                            extra: Default::default(),
+                        },
                     }
                 }
             }
         };
         let response = PeerResponse {
+            extra: Default::default(),
             version: 1,
             protocol: request.protocol,
             host: context.identity.host,
@@ -1363,6 +1499,7 @@ fn landing_local(
     let store = provenant_fabric_store::Store::open(&context.roots.state, &request)?;
     let guard = store.lock_landing(context.identity.project, &proof.reference, &request)?;
     let fence = provenant_fabric_store::ClaimFence {
+        extra: Default::default(),
         id: proof.id,
         actor,
         generation: proof.generation,
@@ -1439,6 +1576,7 @@ pub fn landing(
                     ctx.identity.inbox.agent.clone(),
                     ProjectLocator::new(&ctx.identity, &factory.home)?,
                     PeerAction::LandingPush {
+                        extra: Default::default(),
                         proof,
                         operation_id: operation.operation_id,
                         reconcile,
@@ -1453,8 +1591,11 @@ pub fn landing(
                     seconds: ctx.config.limits.peer_seconds,
                 };
                 return match transport.exchange(peer, &request, budget, &cancel)?.result {
-                    PeerResult::Push(value) if value.id == recovery_id => Ok(value),
-                    PeerResult::Error { error } => {
+                    PeerResult::Push { data: value, .. } if value.id == recovery_id => Ok(value),
+                    PeerResult::Error {
+                        data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
+                        ..
+                    } => {
                         if let FacadeError::LaunchUnknown { operation_id } = &error
                             && operation_id != &recovery_id
                         {
@@ -1674,7 +1815,13 @@ fn peer_result<T>(
 ) -> PeerResult {
     match result {
         Ok(value) => wrap(value),
-        Err(error) => PeerResult::Error { error },
+        Err(error) => PeerResult::Error {
+            data: provenant_fabric_runtime::hosts::PeerResultError {
+                extra: Default::default(),
+                error,
+            },
+            extra: Default::default(),
+        },
     }
 }
 /// How many leading events fit in a JSON array of at most `max_bytes`.
@@ -1820,12 +1967,14 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(run_error)?;
         Ok(SubmissionReceipt {
+            extra: Default::default(),
             worktree: None,
             operation_id,
             targets: page
                 .lanes
                 .iter()
                 .map(|lane| AttemptTarget {
+                    extra: Default::default(),
                     attempt: lane.attempt_id,
                     host: Some(self.factory.context.identity.host),
                 })
@@ -1866,13 +2015,17 @@ impl BinaryRunOwner<'_> {
             return match self.peer(
                 host,
                 PeerAction::Run {
-                    input: RunInput::Status { target },
+                    extra: Default::default(),
+                    input: RunInput::Status {
+                        extra: Default::default(),
+                        target,
+                    },
                 },
                 budget,
                 cancel,
             )? {
-                PeerResult::Run(value) => match *value {
-                    RunResult::Status { attempt } if attempt.attempt_id == attempt_id => {
+                PeerResult::Run { data: value, .. } => match *value {
+                    RunResult::Status { attempt, .. } if attempt.attempt_id == attempt_id => {
                         Ok(attempt)
                     }
                     _ => Err(FacadeError::StateCorrupt),
@@ -2013,6 +2166,7 @@ impl BinaryRunOwner<'_> {
             concurrency,
             knobs,
             host,
+            ..
         } = input;
         // Explicit placement forwards the whole batch; the peer confines it.
         if let Some(host) = host.filter(|h| *h != self.factory.context.identity.host) {
@@ -2027,14 +2181,23 @@ impl BinaryRunOwner<'_> {
                 return Err(FacadeError::OwnerUnavailable);
             }
             let input = SubmitInput::Submit {
+                extra: Default::default(),
                 operation_id: operation_id.clone(),
                 tasks,
                 concurrency,
                 knobs,
                 host: None,
             };
-            return match self.peer(host, PeerAction::Submit { input }, budget, cancel)? {
-                PeerResult::Submitted(receipt)
+            return match self.peer(
+                host,
+                PeerAction::Submit {
+                    extra: Default::default(),
+                    input,
+                },
+                budget,
+                cancel,
+            )? {
+                PeerResult::Submitted { data: receipt, .. }
                     if receipt.operation_id == operation_id
                         && receipt.worktree.is_none()
                         && !receipt.targets.is_empty()
@@ -2196,6 +2359,7 @@ impl BinaryRunOwner<'_> {
             _ => FacadeError::io("create peer worktree"),
         })?;
         Ok(provenant_fabric_runtime::runs::PeerWorktree {
+            extra: Default::default(),
             path: info
                 .path
                 .to_str()
@@ -2216,13 +2380,14 @@ impl BinaryRunOwner<'_> {
         if let Some(answer) = self.remote(
             &target,
             PeerAction::Output {
+                extra: Default::default(),
                 input: input.clone(),
             },
             budget,
             cancel,
         )? {
             return match answer {
-                PeerResult::Output(value) => Ok(value),
+                PeerResult::Output { data: value, .. } => Ok(value),
                 _ => Err(FacadeError::StateCorrupt),
             };
         }
@@ -2263,6 +2428,7 @@ impl BinaryRunOwner<'_> {
                         return Err(FacadeError::OutputTooLarge);
                     }
                     return Ok(OutputResult::Chunk {
+                        extra: Default::default(),
                         target,
                         part,
                         state,
@@ -2293,6 +2459,7 @@ impl BinaryRunOwner<'_> {
                     .map_err(run_error)?;
                 provenant_cli::run::align_utf8_tail(&mut chunk);
                 Ok(OutputResult::Chunk {
+                    extra: Default::default(),
                     target,
                     part,
                     state,
@@ -2337,6 +2504,7 @@ impl BinaryRunOwner<'_> {
                     bytes.extend_from_slice(&chunk.bytes);
                     if chunk.eof {
                         return Ok(OutputResult::Artifact {
+                            extra: Default::default(),
                             target,
                             artifact,
                             digest: digest(&chunk),
@@ -2354,13 +2522,15 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
     ) -> Result<RunResult, FacadeError> {
         match input {
-            RunInput::Status { target } => Ok(RunResult::Status {
+            RunInput::Status { target, .. } => Ok(RunResult::Status {
+                extra: Default::default(),
                 attempt: self.snapshot(target, budget, cancel)?,
             }),
             RunInput::Wait {
                 targets,
                 condition,
                 wait_seconds,
+                ..
             } => {
                 let requested = WaitBudget::new(
                     self.factory.clock.mono_now(),
@@ -2413,6 +2583,7 @@ impl BinaryRunOwner<'_> {
                     if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0 {
                         if let Some(attempts) = last_attempts {
                             return Ok(RunResult::Wait {
+                                extra: Default::default(),
                                 condition,
                                 attempts,
                                 satisfied: false,
@@ -2442,7 +2613,10 @@ impl BinaryRunOwner<'_> {
                             .collect::<Vec<_>>();
                         let result = match self.peer(
                             *host,
-                            PeerAction::RunStatuses { targets: requested },
+                            PeerAction::RunStatuses {
+                                extra: Default::default(),
+                                targets: requested,
+                            },
                             budget,
                             cancel,
                         ) {
@@ -2455,6 +2629,7 @@ impl BinaryRunOwner<'_> {
                                         == 0;
                                 return match last_attempts {
                                     Some(attempts) if expired => Ok(RunResult::Wait {
+                                        extra: Default::default(),
                                         condition,
                                         attempts,
                                         satisfied: false,
@@ -2464,7 +2639,7 @@ impl BinaryRunOwner<'_> {
                                 };
                             }
                         };
-                        let PeerResult::RunStatuses(records) = result else {
+                        let PeerResult::RunStatuses { data: records, .. } = result else {
                             return Err(FacadeError::StateCorrupt);
                         };
                         if records.len() != batch.len() {
@@ -2489,6 +2664,7 @@ impl BinaryRunOwner<'_> {
                         budget.remaining(self.factory.clock.mono_now()).as_micros() == 0;
                     if satisfied || timed_out {
                         return Ok(RunResult::Wait {
+                            extra: Default::default(),
                             condition,
                             attempts,
                             satisfied,
@@ -2510,6 +2686,7 @@ impl BinaryRunOwner<'_> {
             RunInput::Cancel {
                 ref target,
                 ref operation_id,
+                ..
             } => {
                 if self.factory.context.in_lane
                     && target
@@ -2521,14 +2698,15 @@ impl BinaryRunOwner<'_> {
                 if let Some(answer) = self.remote(
                     target,
                     PeerAction::Run {
+                        extra: Default::default(),
                         input: input.clone(),
                     },
                     budget,
                     cancel,
                 )? {
                     return match answer {
-                        PeerResult::Run(value)
-                            if matches!(&*value, RunResult::Cancel { attempt }
+                        PeerResult::Run { data: value, .. }
+                            if matches!(&*value, RunResult::Cancel { attempt, .. }
                                 if attempt.attempt_id == target.attempt) =>
                         {
                             Ok(*value)
@@ -2553,6 +2731,7 @@ impl BinaryRunOwner<'_> {
                     });
                 }
                 Ok(RunResult::Cancel {
+                    extra: Default::default(),
                     attempt: service.status(target.attempt, &call).map_err(run_error)?,
                 })
             }
@@ -2562,6 +2741,7 @@ impl BinaryRunOwner<'_> {
                 ref prompt,
                 expected_generation,
                 no_fallback,
+                ..
             } => {
                 if self.factory.context.in_lane {
                     if target
@@ -2575,14 +2755,15 @@ impl BinaryRunOwner<'_> {
                 if let Some(answer) = self.remote(
                     target,
                     PeerAction::Run {
+                        extra: Default::default(),
                         input: input.clone(),
                     },
                     budget,
                     cancel,
                 )? {
                     return match answer {
-                        PeerResult::Run(value)
-                            if matches!(&*value, RunResult::Resume { attempt }
+                        PeerResult::Run { data: value, .. }
+                            if matches!(&*value, RunResult::Resume { attempt, .. }
                                 if attempt.operation_id == *operation_id) =>
                         {
                             Ok(*value)
@@ -2611,13 +2792,14 @@ impl BinaryRunOwner<'_> {
                     self.receipt(&session, operation_id.clone(), &run, &started, &call)?;
                 let attempt = receipt.targets.first().ok_or(FacadeError::StateCorrupt)?;
                 Ok(RunResult::Resume {
+                    extra: Default::default(),
                     attempt: session
                         .service()
                         .status(attempt.attempt, &call)
                         .map_err(run_error)?,
                 })
             }
-            RunInput::List { after, limit } => {
+            RunInput::List { after, limit, .. } => {
                 if !(1..=100).contains(&limit) {
                     return Err(FacadeError::InvalidInput);
                 }
@@ -2657,6 +2839,7 @@ impl BinaryRunOwner<'_> {
                 let truncated = page.next.is_some();
                 let next_after = if truncated {
                     page.lanes.last().map(|lane| AttemptTarget {
+                        extra: Default::default(),
                         attempt: lane.attempt_id,
                         host: Some(host),
                     })
@@ -2664,7 +2847,9 @@ impl BinaryRunOwner<'_> {
                     None
                 };
                 Ok(RunResult::List {
+                    extra: Default::default(),
                     page: AttemptPage {
+                        extra: Default::default(),
                         items: page.lanes.into_iter().map(Into::into).collect(),
                         next_after,
                         truncated,
@@ -2707,6 +2892,7 @@ impl BinaryRunOwner<'_> {
         items.truncate(usize::from(limit));
         let cursor = items.last().map_or(after, |event| event.sequence);
         Ok(RunEventsPage {
+            extra: Default::default(),
             items,
             cursor,
             truncated,
@@ -2788,7 +2974,7 @@ fn graph_loop_inbox_ask(
         provenant_core::hex(operation.as_bytes())
     ))
     .map_err(|_| FacadeError::StateCorrupt)?;
-    let request = RequestDraft {
+    let request = RequestDraft {extra: Default::default(),
         supersedes: None,
         deadline: None,
         work: None,
@@ -2805,7 +2991,7 @@ fn graph_loop_inbox_ask(
             ("accept", "Accept as is", "Accept the current outputs and continue the graph."),
         ]
         .into_iter()
-        .map(|(id, label, description)| RequestOption {
+        .map(|(id, label, description)| RequestOption {extra: Default::default(),
             id: id.into(),
             label: label.into(),
             description: description.into(),
@@ -2815,6 +3001,7 @@ fn graph_loop_inbox_ask(
         proceeding_with: None,
     };
     Ok(InboxInput::Ask {
+        extra: Default::default(),
         session: scope.session.into(),
         request: Box::new(request),
         operation_id: Some(operation_id),
@@ -2841,9 +3028,10 @@ fn graph_loop_inbox_decision(
     else {
         return Err(FacadeError::StateCorrupt);
     };
-    let InboxResult::Item { item } = service
+    let InboxResult::Item { item, .. } = service
         .execute(
             InboxInput::List {
+                extra: Default::default(),
                 id: Some(receipt.request_id),
                 session: None,
                 state: InboxFilter::All,
@@ -2873,6 +3061,7 @@ fn graph_loop_inbox_decision(
     service
         .execute(
             InboxInput::Acknowledge {
+                extra: Default::default(),
                 id: receipt.request_id,
                 answer_id: answer.id,
                 session: scope.session.into(),
@@ -2967,6 +3156,7 @@ fn graph_loop_inbox_close(
         } = service
             .execute(
                 InboxInput::List {
+                    extra: Default::default(),
                     id: None,
                     session: Some(scope.session.into()),
                     state: InboxFilter::All,
@@ -2993,6 +3183,7 @@ fn graph_loop_inbox_close(
             service
                 .execute(
                     InboxInput::Close {
+                        extra: Default::default(),
                         id: item.id,
                         state: RequestState::Superseded,
                         reason: "Graph loop decision resolved or cancelled".into(),
@@ -3057,6 +3248,7 @@ fn graph_attempt_usage(
     let cost_micro_usd =
         cost.and_then(|cost| cost.known_lower_bound.map(|money| money.microdollars));
     provenant_fabric_runtime::graph::AttemptUsage {
+        extra: Default::default(),
         tokens,
         cost_micro_usd,
         wall_time_seconds: record.provider_ms.map(|ms| ms.saturating_add(999) / 1000),
@@ -3066,9 +3258,35 @@ fn graph_attempt_usage(
     }
 }
 
+fn decode_graph_document(
+    bytes: &[u8],
+) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
+    provenant_records::decode_v1(bytes, provenant_records::Limits::default()).map_err(|error| {
+        match error {
+            provenant_records::DecodeError::UnsupportedVersion { found, .. } if found > 1 => {
+                FacadeError::UpgradeRequired {
+                    reader_release: env!("CARGO_PKG_VERSION").into(),
+                    writer_release: "unknown".into(),
+                    record: "graph document schema".into(),
+                    version: found,
+                }
+            }
+            _ => FacadeError::InvalidInput,
+        }
+    })
+}
+
 fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> FacadeError {
     use provenant_fabric_runtime::graph::JournalError;
     match error {
+        JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
+            found, ..
+        }) if found > 1 => FacadeError::UpgradeRequired {
+            reader_release: env!("CARGO_PKG_VERSION").into(),
+            writer_release: "unknown".into(),
+            record: "graph checkpoint schema".into(),
+            version: found,
+        },
         JournalError::TooLarge => FacadeError::DispatchRefused {
             reason: "graph checkpoint exceeds its byte limit".into(),
         },
@@ -3168,19 +3386,11 @@ fn advance_graphs_after_settlement(
                 prices: None,
             };
             let graph_config = &factory.context.config.graph;
-            let limits = execution
-                .document
-                .limits
-                .as_ref()
-                .cloned()
-                .unwrap_or_default()
-                .resolve(graph_config)?;
             advance_with_budget(
                 &execution.document,
                 &mut owner,
                 &mut journal,
-                &limits,
-                &graph_config.limit_ceiling,
+                &graph_config.limits,
                 &graph_config.budget,
             )?;
             Ok(())
@@ -3822,6 +4032,7 @@ fn settle_attempt(
 impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
     fn host_stamp(&self) -> Option<provenant_fabric_runtime::graph::CiHostStamp> {
         Some(provenant_fabric_runtime::graph::CiHostStamp {
+            extra: Default::default(),
             boot_identity: self.factory.clock.boot_identity().ok()?,
             host_monotonic_micros: self.factory.clock.host_monotonic_micros().ok()?,
         })
@@ -3940,6 +4151,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .split_once('/')
             .ok_or(FacadeError::StateCorrupt)?;
         let target = AttemptTarget {
+            extra: Default::default(),
             host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
             attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
         };
@@ -3982,6 +4194,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             // actor-scoped, so resubmitting under another actor would launch again.
             let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
             let target = AttemptTarget {
+                extra: Default::default(),
                 host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
                 attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
             };
@@ -4015,8 +4228,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             };
             let operation_id = graph_operation("graph-attempt-operation", key)?;
             let input = SubmitInput::Submit {
+                extra: Default::default(),
                 operation_id,
                 tasks: vec![SubmittedTask {
+                    extra: Default::default(),
                     build_heavy: false,
                     base: None,
                     head: None,
@@ -4030,6 +4245,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             let adapter =
                                 route.adapter.as_ref().ok_or(FacadeError::InvalidInput)?;
                             provenant_records::run::RequestedRoute::Model {
+                                extra: Default::default(),
                                 provider: adapter.clone(),
                                 model: if model.contains('/') {
                                     model.clone()
@@ -4040,6 +4256,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             }
                         }
                         None => provenant_records::run::RequestedRoute::Named {
+                            extra: Default::default(),
                             name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
                             effort: route.effort.clone(),
                         },
@@ -4124,7 +4341,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                     matches!(
                                     delivery.state,
                                     provenant_records::run::WriterDeliveryState::Failed { .. }
-                                        | provenant_records::run::WriterDeliveryState::NotAttempted
+                                        | provenant_records::run::WriterDeliveryState::NotAttempted { .. }
                                 )
                                 }) =>
                             {
@@ -4183,13 +4400,13 @@ impl Factory {
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         use provenant_fabric_runtime::coordination::input::ValidateInput;
-        use provenant_fabric_runtime::graph::{FileJournal, GraphDocument, GraphJournal};
+        use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
         input
             .validate_input(provenant_core::WaitTransport::Cli)
             .map_err(|_| FacadeError::InvalidInput)?;
         let resume = matches!(&input, GraphInput::Resume { .. });
         let document = match &input {
-            GraphInput::Run { document } | GraphInput::Resume { document, .. } => {
+            GraphInput::Run { document, .. } | GraphInput::Resume { document, .. } => {
                 let scratch = provenant_confinement::worktrees::with_context(
                     &self.context.roots,
                     &self.home,
@@ -4226,11 +4443,7 @@ impl Factory {
                 let bytes = provenant_os::fs::FileHandle::open_source(&path)
                     .and_then(|mut file| file.read_bounded(8_388_608))
                     .map_err(|_| FacadeError::io("access graph journal"))?;
-                let document: GraphDocument = provenant_records::decode_v1(
-                    bytes.as_slice(),
-                    provenant_records::Limits::default(),
-                )
-                .map_err(|_| FacadeError::InvalidInput)?;
+                let document = decode_graph_document(&bytes)?;
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
                         &self.cwd, branch,
@@ -4281,7 +4494,7 @@ impl Factory {
             _ => None,
         };
         let id = match &input {
-            GraphInput::Status { id } | GraphInput::Cancel { id } => id.as_str(),
+            GraphInput::Status { id, .. } | GraphInput::Cancel { id, .. } => id.as_str(),
             _ => document
                 .as_ref()
                 .ok_or(FacadeError::InvalidInput)?
@@ -4335,6 +4548,7 @@ impl Factory {
             };
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
+                    extra: Default::default(),
                     integration_base,
                     directory: self.cwd.clone(),
                     document: document.clone(),
@@ -4353,13 +4567,6 @@ impl Factory {
                 prices: None,
             };
             let graph_config = &self.context.config.graph;
-            let limits = document
-                .limits
-                .as_ref()
-                .cloned()
-                .unwrap_or_default()
-                .resolve(graph_config)
-                .map_err(|reason| FacadeError::DispatchRefused { reason })?;
             let run = if resume {
                 let extensions = match &input {
                     GraphInput::Resume { extend, .. } => extend.as_slice(),
@@ -4369,8 +4576,7 @@ impl Factory {
                     document,
                     &mut owner,
                     &mut journal,
-                    &limits,
-                    &graph_config.limit_ceiling,
+                    &graph_config.limits,
                     &graph_config.budget,
                     extensions,
                 )
@@ -4379,8 +4585,7 @@ impl Factory {
                     document,
                     &mut owner,
                     &mut journal,
-                    &limits,
-                    &graph_config.limit_ceiling,
+                    &graph_config.limits,
                     &graph_config.budget,
                 )
             };
@@ -4511,6 +4716,7 @@ impl Factory {
                 let (host, attempt_id) =
                     reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
                 vec![AttemptTarget {
+                    extra: Default::default(),
                     host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
                     attempt: attempt_id.parse().map_err(|_| FacadeError::StateCorrupt)?,
                 }]
@@ -4526,6 +4732,7 @@ impl Factory {
                         .map_err(run_error)?
                         .into_iter()
                         .map(|record| AttemptTarget {
+                            extra: Default::default(),
                             host: Some(self.context.identity.host),
                             attempt: record.attempt_id,
                         })
@@ -4537,6 +4744,7 @@ impl Factory {
         for target in targets {
             owner.run(
                 RunInput::Cancel {
+                    extra: Default::default(),
                     target,
                     operation_id: operation_id.clone(),
                 },
@@ -4635,12 +4843,34 @@ pub fn graph(
 ) -> u8 {
     use provenant_cli::fabric::Graph;
     let (command, input) = match input {
-        Graph::Run { document } => ("fabric graph run", GraphInput::Run { document }),
-        Graph::Status { id } => ("fabric graph status", GraphInput::Status { id }),
-        Graph::Cancel { id } => ("fabric graph cancel", GraphInput::Cancel { id }),
+        Graph::Run { document } => (
+            "fabric graph run",
+            GraphInput::Run {
+                extra: Default::default(),
+                document,
+            },
+        ),
+        Graph::Status { id } => (
+            "fabric graph status",
+            GraphInput::Status {
+                extra: Default::default(),
+                id,
+            },
+        ),
+        Graph::Cancel { id } => (
+            "fabric graph cancel",
+            GraphInput::Cancel {
+                extra: Default::default(),
+                id,
+            },
+        ),
         Graph::Resume { document, extend } => (
             "fabric graph resume",
-            GraphInput::Resume { document, extend },
+            GraphInput::Resume {
+                extra: Default::default(),
+                document,
+                extend,
+            },
         ),
     };
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
@@ -4760,12 +4990,16 @@ impl Factory {
                 owner
                     .peer(
                         host,
-                        PeerAction::RunEvents { after, limit: 64 },
+                        PeerAction::RunEvents {
+                            extra: Default::default(),
+                            after,
+                            limit: 64,
+                        },
                         budget,
                         cancel,
                     )
                     .and_then(|result| match result {
-                        PeerResult::RunEvents(page) => Ok(page),
+                        PeerResult::RunEvents { data: page, .. } => Ok(page),
                         _ => Err(FacadeError::StateCorrupt),
                     })
             };
@@ -4826,6 +5060,7 @@ pub fn events(
             } else {
                 match service.events(
                     EventsInput::Read {
+                        extra: Default::default(),
                         after: page.after,
                         limit: page.limit,
                         wait_seconds: None,
@@ -4849,6 +5084,7 @@ pub fn events(
                 unknown_hosts,
                 run_events_pending,
                 timed_out: owner_timeout,
+                ..
             } = result
             else {
                 return Err(FacadeError::StateCorrupt.into());
@@ -4859,6 +5095,7 @@ pub fn events(
             if !records.items.is_empty() || wait.is_none() || timed_out {
                 return Ok((
                     EventsResult::Read {
+                        extra: Default::default(),
                         page: records,
                         cursor,
                         timed_out,
@@ -4980,7 +5217,7 @@ mod graph_loop_inbox_tests {
                 return Err("missing ask receipt".into());
             };
             service.execute(
-                InboxInput::Answer {
+                InboxInput::Answer {extra: Default::default(),
                     id: receipt.request_id,
                     action: if option.is_some() {
                         AnswerAction::Choose
@@ -5002,8 +5239,8 @@ mod graph_loop_inbox_tests {
                     Some(expected.clone())
                 );
             }
-            let InboxResult::Item { item } = service.execute(
-                InboxInput::List {
+            let InboxResult::Item { item, .. } = service.execute(
+                InboxInput::List {extra: Default::default(),
                     id: Some(receipt.request_id),
                     session: None,
                     state: InboxFilter::All,
@@ -5029,7 +5266,7 @@ mod graph_loop_inbox_tests {
             }
             if index == 0 {
                 service.execute(
-                    InboxInput::Close {
+                    InboxInput::Close {extra: Default::default(),
                         id: receipt.request_id,
                         state: RequestState::Superseded,
                         reason: "Replace the decision".into(),
@@ -5051,6 +5288,7 @@ mod graph_loop_inbox_tests {
         }
         let InboxResult::Listed { items, .. } = service.execute(
             InboxInput::List {
+                extra: Default::default(),
                 id: None,
                 session: Some("chair-session".into()),
                 state: InboxFilter::All,
@@ -5088,6 +5326,7 @@ mod graph_loop_inbox_tests {
             "extend by two",
         ] {
             let answer = HumanAnswer {
+                extra: Default::default(),
                 schema_version: 1,
                 id: provenant_core::HumanAnswerId::from_bytes([1; 16]),
                 request_id: provenant_core::HumanRequestId::from_bytes([2; 16]),
@@ -5315,6 +5554,44 @@ mod result_tests {
             )
         );
         assert!(reason.contains("No such file") || reason.contains("not found"));
+    }
+
+    #[test]
+    fn newer_graph_schemas_report_upgrade_required() {
+        let document_error =
+            super::decode_graph_document(br#"{"schema_version":2,"future_shape":true}"#)
+                .unwrap_err();
+        let decode_error = provenant_records::decode_v1::<serde_json::Value, _>(
+            br#"{"schema_version":2,"future_shape":true}"#.as_slice(),
+            provenant_records::Limits::default(),
+        )
+        .unwrap_err();
+        let checkpoint_error = super::graph_journal_error(
+            provenant_fabric_runtime::graph::JournalError::Decode(decode_error),
+        );
+        for (error, record_kind) in [
+            (document_error, "graph document schema"),
+            (checkpoint_error, "graph checkpoint schema"),
+        ] {
+            assert_eq!(error.code(), "upgrade_required");
+            let super::FacadeError::UpgradeRequired {
+                reader_release,
+                writer_release,
+                record,
+                version,
+            } = error
+            else {
+                unreachable!()
+            };
+            assert_eq!(reader_release, env!("CARGO_PKG_VERSION"));
+            assert_eq!(writer_release, "unknown");
+            assert_eq!(record, record_kind);
+            assert_eq!(version, 2);
+        }
+        assert_eq!(
+            super::decode_graph_document(br#"{"schema_version":0}"#).unwrap_err(),
+            super::FacadeError::InvalidInput
+        );
     }
 
     #[test]
@@ -5583,6 +5860,7 @@ mod peer_tests {
                         head: None,
                         profile: Default::default(),
                         route: provenant_run::RequestedRoute::Model {
+                            extra: Default::default(),
                             provider: "fixture".into(),
                             model: "fixture/model".into(),
                             effort: None,
@@ -5632,7 +5910,9 @@ mod peer_tests {
             )?;
             store.withdraw(
                 prior,
-                AttemptState::Queued,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
                 Outcome::Cancelled,
                 "fixture",
                 clock.wall_now()?,
@@ -5708,6 +5988,7 @@ mod peer_tests {
         };
         let first = owner.run(
             RunInput::List {
+                extra: Default::default(),
                 after: None,
                 limit: 1,
             },
@@ -5723,20 +6004,21 @@ mod peer_tests {
                 && row.get("trace").is_none(),
             "expected newest compact row, got {row}"
         );
-        let RunResult::List { page } = first else {
+        let RunResult::List { page, .. } = first else {
             return Err("list result".into());
         };
         assert!(page.truncated);
         let cursor = page.next_after.ok_or("next cursor")?;
         let second = owner.run(
             RunInput::List {
+                extra: Default::default(),
                 after: Some(cursor),
                 limit: 1,
             },
             budget,
             &cancel,
         )?;
-        let RunResult::List { page } = second else {
+        let RunResult::List { page, .. } = second else {
             return Err("list result".into());
         };
         assert!(!page.truncated);
@@ -5748,7 +6030,9 @@ mod peer_tests {
         assert!(second["state"]["finished_at"].is_string());
         let status = owner.run(
             RunInput::Status {
+                extra: Default::default(),
                 target: AttemptTarget {
+                    extra: Default::default(),
                     attempt: fixture.settled.attempt_id,
                     host: None,
                 },
@@ -5756,10 +6040,11 @@ mod peer_tests {
             budget,
             &cancel,
         )?;
-        let RunResult::Status { mut attempt } = status else {
+        let RunResult::Status { mut attempt, .. } = status else {
             return Err("status result".into());
         };
         let status = serde_json::to_value(RunResult::Status {
+            extra: Default::default(),
             attempt: attempt.clone(),
         })?;
         assert!(status["attempt"].get("usage").is_some());
@@ -5872,6 +6157,7 @@ mod peer_tests {
                 &clock,
             )?;
             journal.bind(GraphExecution {
+                extra: Default::default(),
                 integration_base: None,
                 directory: fixture.rig.project.clone(),
                 document: document.clone(),
@@ -5884,7 +6170,6 @@ mod peer_tests {
                 &document,
                 &mut seed,
                 &mut journal,
-                &Default::default(),
                 &Default::default(),
                 &Default::default(),
             )?;
@@ -6029,6 +6314,7 @@ mod peer_tests {
                 &factory.clock,
             )?;
             journal.bind(graph::GraphExecution {
+                extra: Default::default(),
                 integration_base: None,
                 directory: fixture.rig.project.clone(),
                 document: document.clone(),
@@ -6043,7 +6329,6 @@ mod peer_tests {
                 &mut journal,
                 &Default::default(),
                 &Default::default(),
-                &Default::default(),
             )?;
             let mut owner = BoundGraphOwner {
                 factory: &factory,
@@ -6056,7 +6341,6 @@ mod peer_tests {
                 &document,
                 &mut owner,
                 &mut journal,
-                &Default::default(),
                 &Default::default(),
                 &Default::default(),
             )?;
@@ -6138,6 +6422,7 @@ mod peer_tests {
             &factory.clock,
         )?;
         journal.bind(graph::GraphExecution {
+            extra: Default::default(),
             integration_base: None,
             directory: fixture.rig.project.clone(),
             document: document.clone(),
@@ -6152,7 +6437,6 @@ mod peer_tests {
             &mut journal,
             &Default::default(),
             &Default::default(),
-            &Default::default(),
         )?;
         let mut owner = BoundGraphOwner {
             factory: &factory,
@@ -6165,7 +6449,6 @@ mod peer_tests {
             &document,
             &mut owner,
             &mut journal,
-            &Default::default(),
             &Default::default(),
             &Default::default(),
         )?;
@@ -6197,6 +6480,7 @@ mod peer_tests {
             &factory.clock,
         )?;
         journal.bind(graph::GraphExecution {
+            extra: Default::default(),
             integration_base: None,
             directory: fixture.rig.project.clone(),
             document: missing_document.clone(),
@@ -6211,13 +6495,11 @@ mod peer_tests {
             &mut journal,
             &Default::default(),
             &Default::default(),
-            &Default::default(),
         )?;
         let run = graph::advance_with_budget(
             &missing_document,
             &mut owner,
             &mut journal,
-            &Default::default(),
             &Default::default(),
             &Default::default(),
         )?;
@@ -6300,7 +6582,10 @@ mod peer_tests {
             }))?,
         )?;
         let result = factory.graph(
-            GraphInput::Run { document },
+            GraphInput::Run {
+                extra: Default::default(),
+                document,
+            },
             WaitBudget::cli(factory.clock.mono_now(), 30)?,
             &cancel,
         );
@@ -6360,6 +6645,7 @@ mod peer_tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let run = factory.graph(
             GraphInput::Run {
+                extra: Default::default(),
                 document: document.clone(),
             },
             budget,
@@ -6389,9 +6675,11 @@ mod peer_tests {
         }
         for input in [
             GraphInput::Run {
+                extra: Default::default(),
                 document: document.clone(),
             },
             GraphInput::Resume {
+                extra: Default::default(),
                 document,
                 extend: vec![],
             },
@@ -6448,6 +6736,7 @@ mod peer_tests {
         // first graph checkpoint must already contain its integration base.
         let run = factory.graph(
             GraphInput::Run {
+                extra: Default::default(),
                 document: document.clone(),
             },
             budget,
@@ -6528,6 +6817,7 @@ mod peer_tests {
         }
         let replay = factory.graph(
             GraphInput::Resume {
+                extra: Default::default(),
                 document,
                 extend: vec![],
             },
@@ -6607,12 +6897,15 @@ mod peer_tests {
             std::fs::write(path.join("artifact"), "cached")?;
         }
         let delivery = provenant_run::WriterDeliveryReceipt {
+            extra: Default::default(),
             schema_version: 1,
             remote: "origin".into(),
             branch: "resumed-lane".into(),
             head: None,
             review_acceptance: None,
-            state: provenant_run::WriterDeliveryState::NotAttempted,
+            state: provenant_run::WriterDeliveryState::NotAttempted {
+                extra: Default::default(),
+            },
         };
         let collection = crate::worktrees::collection_lock(&fixture.roots)?;
         settle_owned_worktree(
@@ -6918,12 +7211,16 @@ mod peer_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_run::{AttemptState, Outcome, WriterDeliveryReceipt, WriterDeliveryState};
         let delivered = WriterDeliveryReceipt {
+            extra: Default::default(),
             schema_version: 1,
             remote: "origin".into(),
             branch: "lane".into(),
             head: None,
             review_acceptance: None,
-            state: WriterDeliveryState::Delivered { pull_request: None },
+            state: WriterDeliveryState::Delivered {
+                extra: Default::default(),
+                pull_request: None,
+            },
         };
         for outcome in [
             Outcome::Failed,
@@ -6933,6 +7230,7 @@ mod peer_tests {
             Outcome::Rejected,
         ] {
             let state = AttemptState::Terminal {
+                extra: Default::default(),
                 outcome,
                 exit_code: Some(1),
                 finished_at: provenant_core::WallTime::from_micros(0)?,
@@ -6942,6 +7240,7 @@ mod peer_tests {
             assert!(super::settlement_retention_reason(&state, true, Some(&delivered)).is_some());
         }
         let succeeded = AttemptState::Terminal {
+            extra: Default::default(),
             outcome: Outcome::Succeeded,
             exit_code: Some(0),
             finished_at: provenant_core::WallTime::from_micros(0)?,
@@ -6951,7 +7250,9 @@ mod peer_tests {
         assert!(super::settlement_retention_reason(&succeeded, true, Some(&delivered)).is_none());
         assert!(super::settlement_retention_reason(&succeeded, true, None).is_some());
         let failed_delivery = WriterDeliveryReceipt {
-            state: WriterDeliveryState::NotAttempted,
+            state: WriterDeliveryState::NotAttempted {
+                extra: Default::default(),
+            },
             ..delivered
         };
         assert!(
@@ -7033,6 +7334,7 @@ mod peer_tests {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
         let request = provenant_run::WriterRequest {
+            extra: Default::default(),
             project: root.clone(),
             worktree: root.join("writer"),
         };
@@ -7094,11 +7396,19 @@ mod peer_tests {
         ] {
             let expected = error.clone();
             let response = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
-                error: super::FacadeError::io("test"),
+                data: provenant_fabric_runtime::hosts::PeerResultError {
+                    extra: Default::default(),
+                    error: super::FacadeError::io("test"),
+                },
+                extra: Default::default(),
             });
             let response: super::PeerResult =
                 serde_json::from_slice(&serde_json::to_vec(&response)?)?;
-            let super::PeerResult::Error { error } = response else {
+            let super::PeerResult::Error {
+                data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
+                ..
+            } = response
+            else {
                 return Err("expected error".into());
             };
             let (status, kind) = provenant_cli::fabric::facade_outcome(&error);
@@ -7148,9 +7458,17 @@ mod peer_tests {
             operation_id: provenant_core::OperationId::parse("stop")?,
         };
         let reply = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
-            error: super::FacadeError::io("test"),
+            data: provenant_fabric_runtime::hosts::PeerResultError {
+                extra: Default::default(),
+                error: super::FacadeError::io("test"),
+            },
+            extra: Default::default(),
         });
-        let super::PeerResult::Error { error } = reply else {
+        let super::PeerResult::Error {
+            data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
+            ..
+        } = reply
+        else {
             return Err("expected error".into());
         };
         assert!(

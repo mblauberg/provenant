@@ -15,15 +15,17 @@ pub const OUTPUT_LIMIT: u64 = 65536;
 
 /// Explicit submitting chair identity, separate from a worker provider session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ChairBinding {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub host: HostId,
     pub actor: ActorId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CanonicalRequest {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     /// Host-verifiable child run and attempt IDs. Absent on legacy, unindexed runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_attempt_id_version: Option<u64>,
@@ -52,8 +54,9 @@ impl CanonicalRequest {
 }
 /// Effective dispatch policy, sealed with the request and copied to each attempt.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HarnessProfile {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub name: String,
     pub knobs: std::collections::BTreeMap<String, serde_json::Value>,
     pub overrides: Vec<String>,
@@ -81,8 +84,9 @@ impl HarnessProfile {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TaskRequest {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     /// Select the build-heavy scheduling priority for this task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub build_heavy: bool,
@@ -136,8 +140,9 @@ pub enum NetworkAccess {
 /// Access a dispatch adds to its mode's defaults, sealed in the authority
 /// digest. Paths are canonical directories checked at the submission edge.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LaneAccess {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     /// Explicit network reach; absent defaults to open network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkAccess>,
@@ -158,15 +163,17 @@ impl LaneAccess {
 
 /// Canonical repository and linked worktree selected at the submission edge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WriterRequest {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub project: std::path::PathBuf,
     pub worktree: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WriterDeliveryRequest {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     /// Push is the legacy behaviour; integration never checks out either head.
     #[serde(default, skip_serializing_if = "DeliveryMode::is_push")]
     pub mode: DeliveryMode,
@@ -253,34 +260,46 @@ pub enum WriterDeliveryStage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum WriterDeliveryState {
     Delivered {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         pull_request: Option<String>,
     },
     /// Delivery was requested but the lane head equals the head at launch, so
     /// nothing was pushed. The lane is not failed; the chair sees no commit.
-    NoNewCommits,
+    NoNewCommits {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
+    },
     /// Delivery was requested but no host delivery ran for this attempt (for
     /// example a recovered terminal), so nothing was pushed and the chair must
     /// deliver the head by hand.
-    NotAttempted,
+    NotAttempted {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
+    },
     /// The writer succeeded, but host delivery needs chair pickup. No retry.
     Failed {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         stage: WriterDeliveryStage,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WriterReviewAcceptance {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub actor: ActorId,
     pub protected_paths: Vec<PathWire>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WriterDeliveryReceipt {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub schema_version: u64,
     pub remote: String,
     pub branch: String,
@@ -290,19 +309,25 @@ pub struct WriterDeliveryReceipt {
     pub state: WriterDeliveryState,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RequestedRoute {
     Model {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         provider: String,
         model: String,
         effort: Option<String>,
     },
     Named {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         name: String,
         effort: Option<String>,
     },
     /// Pool selection with families already used by this review group.
     Review {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         name: String,
         effort: Option<String>,
         excluded_families: Vec<String>,
@@ -316,6 +341,7 @@ impl RequestedRoute {
                 provider,
                 model,
                 effort,
+                ..
             } => crate::RouteFact {
                 provider: Some(provider),
                 model: Some(model),
@@ -332,8 +358,9 @@ impl RequestedRoute {
     }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RouteRecord {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -356,8 +383,9 @@ impl From<RouteRecord> for crate::RouteFact {
     }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct UsageRecord {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub uncached_input: Option<u64>,
     pub cache_read: Option<u64>,
     pub cache_write: Option<u64>,
@@ -389,8 +417,9 @@ pub enum Closure {
     Closed,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RunRecord {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub schema_version: u64,
     pub run_id: RunId,
     pub project_id: ProjectId,
@@ -426,8 +455,9 @@ pub enum OperationKind {
     Cancel,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OperationRecord {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub schema_version: u64,
     pub project_id: ProjectId,
     pub actor_id: ActorId,
@@ -479,15 +509,28 @@ impl From<Outcome> for crate::AttemptOutcome {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum AttemptState {
-    Queued,
-    Starting,
-    Running,
+    Queued {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
+    },
+    Starting {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
+    },
+    Running {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
+    },
     Settling {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         publication_pending: bool,
     },
     Terminal {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         outcome: Outcome,
         exit_code: Option<i64>,
         finished_at: WallTime,
@@ -511,16 +554,18 @@ pub enum SkipKind {
     Refused,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SkippedRoute {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     /// `adapter/model`, or the adapter alone for an account-level skip.
     pub route: String,
     pub kind: SkipKind,
     pub detail: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ArtifactRecord {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub path: PathWire,
     pub digest: FileDigest,
     pub bytes: u64,
@@ -528,8 +573,9 @@ pub struct ArtifactRecord {
     pub redacted: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WriteGrantRecord {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub source: WriteSource,
     pub path: crate::AbsolutePath,
     pub scope: PathScope,
@@ -556,8 +602,9 @@ pub enum WriteSource {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AttemptRecord {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     /// Human-supplied task title, when provided at submission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -690,15 +737,17 @@ impl LaneClass {
 /// What a lane that has not started is waiting for, shown by `lanes` and carried
 /// over the peer channel so a peer's lanes read like local ones.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LaneWait {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub attempt_id: AttemptId,
     pub lane_class: LaneClass,
     pub waiting_for: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AdmissionTicket {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub schema_version: u64,
     pub operation_id: OperationId,
     pub attempt_id: AttemptId,
@@ -725,8 +774,9 @@ pub struct AdmissionTicket {
     pub runtime_seconds: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RunEvent {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub schema_version: u64,
     pub sequence: u64,
     pub project_id: ProjectId,
@@ -758,11 +808,13 @@ mod tests {
     fn request_with_a_removed_task_class_retains_its_sealed_digest()
     -> Result<(), Box<dyn std::error::Error>> {
         let request = CanonicalRequest {
+            extra: Default::default(),
             child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                extra: Default::default(),
                 build_heavy: false,
                 title: None,
                 profile: HarnessProfile {
@@ -775,6 +827,7 @@ mod tests {
                 head: None,
                 base_ref: None,
                 route: RequestedRoute::Named {
+                    extra: Default::default(),
                     name: "senior".into(),
                     effort: None,
                 },

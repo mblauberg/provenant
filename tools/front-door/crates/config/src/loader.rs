@@ -32,7 +32,7 @@ impl Issue {
         match self.source {
             Some(source) => ConfigError::Domain {
                 location: self.location,
-                source,
+                source: Box::new(source),
                 rejected: Box::new(self.rejected),
             },
             None => ConfigError::Schema {

@@ -130,6 +130,7 @@ impl RunStore {
             |r| r.get(0),
         )?;
         let ticket = AdmissionTicket {
+            extra: Default::default(),
             schema_version: 1,
             operation_id: attempt.operation_id.clone(),
             attempt_id: attempt.attempt_id,
@@ -179,15 +180,17 @@ impl RunStore {
         lanes
             .iter()
             .filter(|lane| {
-                matches!(lane.state, AttemptState::Queued | AttemptState::Starting)
-                    || lane.state == AttemptState::Running
+                matches!(
+                    lane.state,
+                    AttemptState::Queued { .. } | AttemptState::Starting { .. }
+                ) || matches!(lane.state, AttemptState::Running { .. })
             })
             .filter_map(|lane| {
                 let ticket = call.retry(|| self.ticket(&self.db, lane.attempt_id)).ok()?;
                 let class = ticket.lane_class;
-                let waiting_for = if lane.state == AttemptState::Running {
+                let waiting_for = if matches!(lane.state, AttemptState::Running { .. }) {
                     self.disk_pause_wait(lane)?
-                } else if lane.state == AttemptState::Queued {
+                } else if matches!(lane.state, AttemptState::Queued { .. }) {
                     "launch: not yet handed to a guardian".to_owned()
                 } else {
                     let active: i64 = self
@@ -240,6 +243,7 @@ impl RunStore {
                     }
                 };
                 Some(LaneWait {
+                    extra: Default::default(),
                     attempt_id: lane.attempt_id,
                     lane_class: class,
                     waiting_for,
@@ -297,7 +301,7 @@ impl RunStore {
     ) -> Result<()> {
         self.write(call, |tx| {
             let old = self.record(id, call)?;
-            if old.state != AttemptState::Queued {
+            if !matches!(old.state, AttemptState::Queued { .. }) {
                 return Err(RunError::Conflict);
             }
             let mut next = old.clone();
@@ -352,7 +356,7 @@ impl RunStore {
         }
         let next = self.write(call, |tx| {
             let old = self.record(id, call)?;
-            if old.state != AttemptState::Queued
+            if !matches!(old.state, AttemptState::Queued { .. })
                 || old.run_id != expected.run_id
                 || old.task_id != expected.task_id
             {
@@ -362,7 +366,9 @@ impl RunStore {
             let mut next = old.clone();
             next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
             next.generation = next.generation.checked_add(1).ok_or(RunError::Conflict)?;
-            next.state = AttemptState::Starting;
+            next.state = AttemptState::Starting {
+                extra: Default::default(),
+            };
             next.read_only_writable = writable.to_vec();
             next.write_grants = write_grants.grants.clone();
             next.git_grants_digest = write_grants.git_grants_digest;
@@ -566,7 +572,7 @@ impl RunStore {
         // Avoid the ledger and store write locks when this run is already full.
         // The transaction below repeats the count to decide the claim.
         if let (Ok(record), Ok(ticket)) = (self.record(id, call), self.ticket(&self.db, id))
-            && record.state == AttemptState::Starting
+            && matches!(record.state, AttemptState::Starting { .. })
             && let Ok(active) = self.db.query_row(
                 "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1",
                 [record.run_id.to_string()],
@@ -579,7 +585,7 @@ impl RunStore {
         let ledger = crate::ledger::open(&self.writer_registry, call)?;
         self.write(call, |tx| {
             let old = self.record(id, call)?;
-            if old.state != AttemptState::Starting {
+            if !matches!(old.state, AttemptState::Starting { .. }) {
                 return Err(RunError::Refused);
             }
             let mut ticket = self.ticket(tx, id)?;
@@ -614,7 +620,9 @@ impl RunStore {
             )?;
             let mut next = old.clone();
             next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
-            next.state = AttemptState::Running;
+            next.state = AttemptState::Running {
+                extra: Default::default(),
+            };
             next.started_at = Some(now);
             // The guardian enforces the same allowance on the wall clock; the
             // record lets `lanes` and `reconcile` see it without the guardian.

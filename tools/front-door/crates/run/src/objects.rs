@@ -709,7 +709,6 @@ pub(crate) fn bind(attempt: &Directory, scratch: &Path) -> Result<()> {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ObjectBinding {
     schema_version: u64,
     candidate: String,

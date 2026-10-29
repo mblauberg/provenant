@@ -1046,6 +1046,7 @@ fn every_recording_decodes_its_terminal_and_process_evidence() -> Result<(), Pro
 
 pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
     ResolvedRoute {
+        extra: Default::default(),
         adapter: adapter.into(),
         model: model.into(),
         effort: None,
@@ -1056,9 +1057,11 @@ pub(super) fn route(adapter: &str, model: &str) -> ResolvedRoute {
         exclusions: Vec::new(),
         eligibility: provenant_records::RouteEligibility::Eligible,
         readiness: provenant_records::RouteReadiness::Unavailable {
+            extra: Default::default(),
             reason: provenant_records::RouteExclusionReason::Disabled,
         },
         confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
             evidence_ref: "fixture-policy".into(),
         },
         pool_selection: None,

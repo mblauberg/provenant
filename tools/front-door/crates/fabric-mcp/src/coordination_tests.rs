@@ -264,6 +264,7 @@ fn lane_graph_status_reaches_the_owner() -> Result<(), Box<dyn Error>> {
         );
     }
     let result = ToolCall::Graph(GraphInput::Status {
+        extra: Default::default(),
         id: "g-test".into(),
     })
     .execute(&mut service, &CancelToken::new());
