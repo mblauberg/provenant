@@ -1759,6 +1759,7 @@ impl PrepareFixture {
             branch: provenant_confinement::repo::GitRefName::new("refs/heads/lane")?,
             base,
             custody: None,
+            review_exempt: Default::default(),
         };
         let scope = provenant_supervisor::custody::Scope {
             generation: 1,

@@ -513,12 +513,20 @@ Success needs a supervisor-observed exit 0, a matching provider identity and
 a complete, validated, non-empty result; capture bytes are never completion
 evidence. A dead owner is not a failed provider. A completed writer whose
 protected changes need review ends `review_required`, and one with only
-uncommitted edits ends `uncommitted`; neither delivers. Run reads no provider
+uncommitted edits ends `uncommitted`; neither delivers. Paths in the project's
+`[domains.run] review_exempt` list (release-note fragments, specs, lock files
+and `.tracker-input` by default) never count toward either, and Git metadata,
+hooks and provider control roots can never be listed. Run reads no provider
 transcript except Codex's post-exit identity projection.
 - Why: a crash, truncation or impostor must never read as success.
 - Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
-  `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`
-- Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`
+  `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
+  `crates/confinement/src/quarantine.rs::exempt_instruction_tree_paths_settle_without_review`;
+  `::hard_controls_stay_under_review_even_when_listed`;
+  `::a_staged_rename_of_exempt_paths_does_not_force_review`;
+  `::ordinary_project_paths_never_need_review`;
+  `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
+- Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`, `crates/confinement/src/review_exempt.rs`
 
 ## Host inputs fail before launch
 

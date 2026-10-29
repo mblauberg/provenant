@@ -103,7 +103,8 @@ provenant lane deliver ATTEMPT --deliver pr
 This refuses a dirty checkout, a changed head or live custody. Repeating a
 successful delivery returns its receipt, including after checkout cleanup.
 When a writer settles as `review_required`, the chair can review its protected
-changes and then deliver the reviewed head with:
+changes and then deliver the reviewed head with (paths the project lists in
+[`review_exempt`](configuration.md#writer-review-exempt-paths) never cause this):
 
 ```sh
 provenant lane deliver --accept-review ATTEMPT

@@ -1,5 +1,6 @@
 //! Pinned, bounded Git evidence obtained only through confinement's closed utility API.
 use crate::repo::{RepoPath, VerifiedRepo};
+use crate::review_exempt::ReviewExempt;
 use crate::status::{StatusError, StatusKind, parse_index_entries, parse_porcelain_v2_z};
 use crate::utility::{GitRead, UtilityBudget, UtilityError, UtilityRuntime, run_utility};
 use provenant_core::CancelToken;
@@ -259,8 +260,13 @@ impl<'a> Git<'a> {
     }
 
     /// Changed and untracked paths when HEAD is still `base`; empty once the
-    /// writer committed. Ignored paths and `.review-snapshots/` never count.
-    pub fn uncommitted_since(&self, base: GitOid) -> Result<Vec<Vec<u8>>, GitEvidenceError> {
+    /// writer committed. Ignored paths, `.review-snapshots/` and the project's
+    /// review-exempt paths never count.
+    pub fn uncommitted_since(
+        &self,
+        base: GitOid,
+        exempt: &ReviewExempt,
+    ) -> Result<Vec<Vec<u8>>, GitEvidenceError> {
         if self.head()? != base {
             return Ok(Vec::new());
         }
@@ -271,7 +277,7 @@ impl<'a> Git<'a> {
             .into_iter()
             .filter(|record| record.kind != StatusKind::Ignored)
             .map(|record| record.path)
-            .filter(|path| !path.starts_with(b".review-snapshots/"))
+            .filter(|path| !path.starts_with(b".review-snapshots/") && !exempt.covers(path))
             .collect())
     }
 
@@ -587,6 +593,7 @@ fn digest_diff_parts(commit: &[u8], index: &[u8], worktree: &[u8]) -> FileDigest
 #[cfg(test)]
 mod tests {
     use super::{Git, digest_diff_parts};
+    use crate::review_exempt::ReviewExempt;
     use crate::test_support::Fixture;
     use provenant_core::CancelToken;
     use provenant_records::CanonicalV1;
@@ -605,7 +612,10 @@ mod tests {
             fixture.budget()?,
             &token,
         );
-        assert!(git.uncommitted_since(base)?.is_empty());
+        assert!(
+            git.uncommitted_since(base, &ReviewExempt::none())?
+                .is_empty()
+        );
         fs::write(fixture.root.join(".gitignore"), "ignored.log\n")?;
         fs::write(fixture.root.join("ignored.log"), "noise")?;
         fs::write(fixture.root.join("edit.txt"), "work")?;
@@ -613,7 +623,7 @@ mod tests {
         fs::write(fixture.root.join("new/file.rs"), "work")?;
         fs::create_dir(fixture.root.join(".review-snapshots"))?;
         fs::write(fixture.root.join(".review-snapshots/1.md"), "issue")?;
-        let mut dirty = git.uncommitted_since(base)?;
+        let mut dirty = git.uncommitted_since(base, &ReviewExempt::none())?;
         dirty.sort();
         assert_eq!(
             dirty,
@@ -626,7 +636,41 @@ mod tests {
         // A commit moves HEAD past the base: the lane delivered something.
         fixture.run(&["add", "--", "edit.txt"])?;
         fixture.run(&["commit", "-m", "work"])?;
-        assert!(git.uncommitted_since(base)?.is_empty());
+        assert!(
+            git.uncommitted_since(base, &ReviewExempt::none())?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exempt_paths_left_uncommitted_do_not_count() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let base = fixture.head()?;
+        let token = CancelToken::new();
+        let git = Git::new(
+            &fixture.executor,
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &token,
+        );
+        fs::write(fixture.root.join("Cargo.lock"), "lock")?;
+        fs::write(fixture.root.join(".tracker-input"), "input")?;
+        fs::create_dir_all(fixture.root.join("docs/specs"))?;
+        fs::write(fixture.root.join("docs/specs/a.md"), "spec")?;
+        fs::write(fixture.root.join("src.rs"), "code")?;
+        fs::write(fixture.root.join(".gitattributes"), "* text\n")?;
+        let listed = ReviewExempt::new(&[
+            "Cargo.lock",
+            ".tracker-input",
+            "docs/specs/",
+            ".gitattributes",
+        ]);
+        let mut dirty = git.uncommitted_since(base, &listed)?;
+        dirty.sort();
+        // Source stays uncommitted work, and a hard control cannot be listed.
+        assert_eq!(dirty, [b".gitattributes".to_vec(), b"src.rs".to_vec()]);
         Ok(())
     }
 

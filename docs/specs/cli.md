@@ -288,7 +288,9 @@ rejects conflicting task settings rather than silently choosing a source.
 `status` lists active lanes and the twenty most recent settled lanes. An optional
 run, qualified task or attempt target uses the shared ID resolver and includes
 older terminal records. `--all` includes full records and supports pagination;
-`lanes --all --id ID` is also valid.
+`lanes --all --id ID` is also valid. The output ends with the project's
+`review-exempt paths:` line (`review_exempt` in `--json`), the paths a writer
+may change without ending `review_required`.
 - Test: `tests/parser.rs::core_run_reports_generated_operation_and_status_is_newest_first`
 - Owner: `crates/cli/src/run.rs`
 
