@@ -13,8 +13,8 @@ diagnostics to stderr.
 | `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Enforces the guard, then optionally offers human answers |
 | `SessionStart` (`startup`, `resume`, `clear`) | `hook claude session-start` | Reports the checkpoint status, then the state digest |
 | `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction |
-| `PreCompact` | `hook claude pre-compact` | Saves the current state into the checkpoint |
-| `Stop` | `hook claude stop` | Refreshes an existing checkpoint's state if it is 10 minutes quiet |
+| `PreCompact` | `hook claude pre-compact` | Writes derived state to `autosave.md`, preserving the chair checkpoint |
+| `Stop` | `hook claude stop` | Refreshes `autosave.md` if an existing session is 10 minutes quiet |
 | `WorktreeCreate` | `hook claude worktree-create` | Runs `provenant worktree create claude/<name>` |
 | `WorktreeRemove` | `hook claude worktree-remove` | Runs `provenant worktree remove <name>` |
 

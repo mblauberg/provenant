@@ -1,7 +1,0 @@
-schema_version: 1
-target_skill: orchestrate
-cases:
-  - {id: lifecycle-orchestrate-positive, relation: positive, prompt: "Orchestrate this bounded coordination run with one chair, dynamically formed workstreams, recursive settlement, and a generation-bound live handoff if the chair must change.", tags: [lifecycle-alignment, direct], expected: {primary_skill: orchestrate, companion_skills: []}}
-  - {id: lifecycle-orchestrate-negative, relation: negative, prompt: "Implement this approved tightly coupled one-file fix with no useful parallel decomposition.", tags: [lifecycle-alignment, boundary], expected: {primary_skill: implement, companion_skills: []}}
-  - {id: lifecycle-orchestrate-adjacent, relation: adjacent, prompt: "Implement the approved migration with non-overlapping parallel writers in isolated repository worktrees.", tags: [lifecycle-alignment, composition], expected: {primary_skill: implement, companion_skills: [orchestrate]}}
-  - {id: lifecycle-orchestrate-portability, relation: portability, prompt: "With Console, Herdr and GitHub unavailable, orchestrate native workers from project artifacts and return namespaced evidence to one chair.", tags: [lifecycle-alignment, portable], adapters: {console: absent, herdr: absent, github: absent}, expected: {primary_skill: orchestrate, companion_skills: []}}
