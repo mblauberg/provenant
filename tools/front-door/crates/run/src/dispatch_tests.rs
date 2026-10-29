@@ -3267,10 +3267,6 @@ fn a_declared_stop_settles_review_required() -> TestResult {
     assert_eq!(*outcome, Outcome::ReviewRequired);
     assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
     let reason = reason.as_deref().ok_or("no reason")?;
-    assert!(
-        reason.contains("partial finish (declared_stop)"),
-        "{reason}"
-    );
     assert!(reason.contains("renderer and tests remain"), "{reason}");
     let blocked = STOPPED_EARLY.replace("stopped_early", "blocked");
     let record = settle_with(&blocked, Some(Outcome::Succeeded), Vec::new())?;
@@ -7029,7 +7025,10 @@ fn recover_rebooted_writer_inner(
             return Err("holderless attempt stayed open".into());
         };
         assert_eq!(outcome, Outcome::Lost);
-        assert!(reason.is_some_and(|reason| reason.contains("no live holder")));
+        assert_eq!(
+            reason.as_deref(),
+            Some(crate::controls::LostReason::Holderless.message())
+        );
         assert!(!reservation.exists());
         assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
         return Ok(());

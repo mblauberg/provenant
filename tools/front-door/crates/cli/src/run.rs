@@ -3570,29 +3570,80 @@ fn with_chair_index<T>(
 
 /// New lane-local associations need the same namespace proof as WorkIndex.
 /// A legacy row can be replayed, but a lane cannot create or repair one.
+#[derive(Debug)]
+enum ChairRunError {
+    Unauthorised(Fail),
+    Other(Fail),
+}
+impl From<ChairRunError> for Fail {
+    fn from(error: ChairRunError) -> Self {
+        match error {
+            ChairRunError::Unauthorised(error) | ChairRunError::Other(error) => error,
+        }
+    }
+}
 fn check_chair_run_id(
     session: &Session,
     roots: &Roots,
     run: RunId,
     request: &run::CanonicalRequest,
     call: &run::Request<'_>,
-) -> Result<(), Fail> {
+) -> Result<(), ChairRunError> {
     session
         .store
-        .check_child_run_id(run, request, &session.store.run(run, call)?.operation_id)?;
+        .check_child_run_id(
+            run,
+            request,
+            &session
+                .store
+                .run(run, call)
+                .map_err(Fail::from)
+                .map_err(ChairRunError::Other)?
+                .operation_id,
+        )
+        .map_err(Fail::from)
+        .map_err(ChairRunError::Other)?;
     if request.child_attempt_id_version.is_none() {
-        let digest = request.digest().map_err(run::RunError::from)?;
+        let digest = request
+            .digest()
+            .map_err(run::RunError::from)
+            .map_err(Fail::from)
+            .map_err(ChairRunError::Other)?;
+        let mut identity_refused = false;
         with_chair_index(roots, call, |index, c| {
             match index.read(session.context.project_id, run, c)? {
                 Some(value) if value.request_digest == digest => Ok(()),
                 Some(_) => Err(provenant_fabric_runtime::chairs::Error::Conflict),
-                None => Err(provenant_fabric_runtime::chairs::Error::Invalid(
-                    "new chair associations require host-derived child run IDs",
-                )),
+                None => {
+                    identity_refused = true;
+                    Err(provenant_fabric_runtime::chairs::Error::Invalid(
+                        "new chair associations require host-derived child run IDs",
+                    ))
+                }
+            }
+        })
+        .map_err(|failure| {
+            if identity_refused {
+                ChairRunError::Unauthorised(failure)
+            } else {
+                ChairRunError::Other(failure)
             }
         })?;
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct ChairSourceError;
+
+fn check_chair_source(
+    store: &run::RunStore,
+    request: &run::CanonicalRequest,
+    parent: &run::AttemptRecord,
+) -> Result<(), ChairSourceError> {
+    store
+        .check_child_attempt_id(request, parent)
+        .map_err(|_| ChairSourceError)
 }
 
 fn seal_launch_task(
@@ -3784,14 +3835,11 @@ fn launch_on_host(
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
                 })?;
                 if lane_local {
-                    session
-                        .store
-                        .check_child_attempt_id(&original, &parent)
-                        .map_err(|_| {
-                            provenant_fabric_runtime::chairs::Error::Invalid(
-                                "continuation source identity does not match host-derived IDs",
-                            )
-                        })?;
+                    check_chair_source(&session.store, &original, &parent).map_err(|_| {
+                        provenant_fabric_runtime::chairs::Error::Invalid(
+                            "continuation source identity does not match host-derived IDs",
+                        )
+                    })?;
                     if index
                         .read(session.context.project_id, parent.run_id, index_call)?
                         .is_none()
@@ -4517,6 +4565,7 @@ fn select_since(
         },
         since,
     )
+    .map_err(Fail::from)
 }
 /// The candidate lanes for a wait or watch, read afresh on each call. With
 /// `seen`, an unnamed selection holds the unsettled lanes and those settled
@@ -5665,20 +5714,31 @@ fn tail_start(bytes: &[u8], lines: u64) -> usize {
 /// run's submitter lives in its parent's store), which appears as a hop that
 /// knows only its attempt ID. A parent that repeats is a corrupt store and
 /// fails.
+#[derive(Debug, thiserror::Error)]
+enum TraceError {
+    #[error("trace parents loop back to attempt {0}")]
+    Loop(AttemptId),
+    #[error(transparent)]
+    Run(#[from] run::RunError),
+}
+impl From<TraceError> for Fail {
+    fn from(error: TraceError) -> Self {
+        match error {
+            TraceError::Loop(_) => Fail::new(Status::Error, ErrorKind::Io, error.to_string()),
+            TraceError::Run(error) => error.into(),
+        }
+    }
+}
 fn trace_chain(
     store: &run::RunStore,
     record: run::AttemptRecord,
     call: &run::Request<'_>,
-) -> Result<Vec<provenant_records::Trace>, Fail> {
+) -> Result<Vec<provenant_records::Trace>, TraceError> {
     let mut seen = std::collections::HashSet::from([record.attempt_id]);
     let mut chain = vec![record.trace];
     while let Some(parent) = chain.last().and_then(|t| t.parent) {
         if !seen.insert(parent) {
-            return Err(Fail::new(
-                Status::Error,
-                ErrorKind::Io,
-                format!("trace parents loop back to attempt {parent}"),
-            ));
+            return Err(TraceError::Loop(parent));
         }
         match run::Service::new(store).status(parent, call) {
             Ok(record) => chain.push(record.trace),
@@ -10272,7 +10332,7 @@ mod tests {
         store.create(&first, &call)?;
         store.create(&second, &call)?;
         let leaf = store.record(second.attempts[0].attempt_id, &call)?;
-        let chain = trace_chain(&store, leaf, &call).map_err(|f| f.message)?;
+        let chain = trace_chain(&store, leaf, &call)?;
         let attempts: Vec<_> = chain.iter().map(|t| t.attempt).collect();
         assert_eq!(
             attempts,
@@ -10424,7 +10484,7 @@ mod tests {
             ids.push(parent);
         }
         let leaf = store.record(parent, &call)?;
-        let chain = trace_chain(&store, leaf, &call).map_err(|f| f.message)?;
+        let chain = trace_chain(&store, leaf, &call)?;
         let attempts: Vec<_> = chain.iter().filter_map(|t| t.attempt).collect();
         ids.reverse();
         ids.push(missing);
@@ -10445,11 +10505,12 @@ mod tests {
         store.create(&first, &call)?;
         store.create(&second, &call)?;
         let leaf = store.record(second.attempts[0].attempt_id, &call)?;
-        let Err(fail) = trace_chain(&store, leaf, &call) else {
+        let Err(error) = trace_chain(&store, leaf, &call) else {
             return Err("a looping chain must fail".into());
         };
-        assert_eq!(fail.kind.code(), "IO");
-        assert!(fail.message.contains("loop back"), "{}", fail.message);
+        assert!(
+            matches!(error, TraceError::Loop(attempt) if attempt == second.attempts[0].attempt_id)
+        );
         Ok(())
     }
 

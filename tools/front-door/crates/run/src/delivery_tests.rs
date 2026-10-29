@@ -93,9 +93,12 @@ fn reconcile_settles_exhausted_writer_import_after_durable_exit()
         &provenant_supervisor::census::SystemProcessObserver,
     )?;
     assert_eq!(found, vec![(id, Reconciled::Finished)]);
-    assert!(
-        matches!(store.record(id, &call)?.state, AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. } if reason.contains("exhausted three attempts"))
-    );
+    let refusal =
+        crate::holder::object_import_refused(&attempt, scope)?.ok_or("refusal evidence")?;
+    assert!(matches!(
+        store.record(id, &call)?.state,
+        AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. } if reason == refusal
+    ));
     assert!(!reservation.exists());
     Ok(())
 }
@@ -2872,8 +2875,18 @@ fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
             "credential.helper",
             &format!("!{} auth git-credential", helper.display()),
         ])?;
-        let reason = fixture.prepare().expect_err("unsafe helper").to_string();
-        assert!(reason.contains("Prepare (credential helper)"), "{reason}");
+        let error = fixture.prepare().expect_err("unsafe helper");
+        assert!(
+            matches!(
+                error,
+                RunError::DeliveryPrepare {
+                    step: "credential helper",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        let reason = error.to_string();
         assert!(reason.contains(detail), "{reason}");
         assert!(!reason.contains("receipt"), "{reason}");
     }

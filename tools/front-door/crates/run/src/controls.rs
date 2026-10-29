@@ -169,6 +169,29 @@ pub enum RebootProofCause {
     Filesystem,
     Other,
 }
+
+/// Causes of an attempt lost during custody recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LostReason {
+    Holderless,
+    RemovedWorktree,
+    StaleReservation,
+}
+impl LostReason {
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::Holderless => {
+                "no live holder: the guardian and provider ended before the attempt settled"
+            }
+            Self::RemovedWorktree => {
+                "machine rebooted before settlement and the writer worktree was removed"
+            }
+            Self::StaleReservation => {
+                "writer reservation was gone or stale and the recorded process tree predates this boot"
+            }
+        }
+    }
+}
 impl RebootProofCause {
     fn from_error(error: &RunError) -> Self {
         if matches!(error, RunError::Filesystem(_)) {
@@ -1127,7 +1150,7 @@ impl RunStore {
                 .and_then(|task| task.writer.as_ref())
                 .is_some_and(crate::writer::worktree_removed);
             if missing_worktree {
-                self.commit_lost(proof.scope(), Self::removed_worktree_lost_reason(), call)?;
+                self.commit_lost(proof.scope(), LostReason::RemovedWorktree.message(), call)?;
             } else {
                 self.commit_reboot_lost(&proof, call)?;
             }
@@ -1158,10 +1181,6 @@ impl RunStore {
                     ..
                 }
             ) && record.exit_evidence.is_none())
-    }
-
-    fn removed_worktree_lost_reason() -> &'static str {
-        "machine rebooted before settlement and the writer worktree was removed"
     }
 
     /// Writer exclusion for an attempt, taken without waiting: failure means a
@@ -1259,11 +1278,7 @@ impl RunStore {
         {
             return Ok(None);
         }
-        self.commit_lost(
-            scope,
-            "no live holder: the guardian and provider ended before the attempt settled",
-            call,
-        )?;
+        self.commit_lost(scope, LostReason::Holderless.message(), call)?;
         recovery
             .release_lost()
             .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
@@ -1361,9 +1376,9 @@ impl RunStore {
         self.commit_lost(
             Self::scope(record),
             if missing_worktree {
-                Self::removed_worktree_lost_reason()
+                LostReason::RemovedWorktree.message()
             } else {
-                "writer reservation was gone or stale and the recorded process tree predates this boot"
+                LostReason::StaleReservation.message()
             },
             call,
         )?;
