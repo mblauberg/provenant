@@ -1777,9 +1777,11 @@ fn loop_reply_rejects_zero_unknown_fields_and_unstructured_text() {
         "{\"decision\":\"accept\",\"rounds\":2}",
         "extend by two",
     ] {
-        assert!(LoopDecision::parse(None, Some(text)).is_err(), "accepted {text}");
+        let error = LoopDecision::parse(None, Some(text)).unwrap_err();
+        assert_eq!(error.code(), "invalid_loop_decision", "{text}");
+        assert_eq!(error.to_string(), asks::LOOP_ANSWER_HELP);
     }
-    assert!(LoopDecision::parse(Some("stop"), Some("{}")).is_err());
+    assert_eq!(LoopDecision::parse(Some("stop"), Some("{}")).unwrap_err().code(), "invalid_loop_decision");
     assert_eq!(
         LoopDecision::parse(None, Some("{\"decision\":\"extend\",\"rounds\":2}")),
         Ok(LoopDecision::Extend { rounds: 2 })

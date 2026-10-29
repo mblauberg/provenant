@@ -51,9 +51,20 @@ enum LoopReply {
     Accept {},
 }
 
+/// An answer that cannot select a loop decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{}", asks::LOOP_ANSWER_HELP)]
+pub struct InvalidLoopDecision;
+
+impl InvalidLoopDecision {
+    pub fn code(&self) -> &'static str {
+        "invalid_loop_decision"
+    }
+}
+
 impl LoopDecision {
     /// Read a loop ask's answer: an option, or a JSON reply to extend by K rounds.
-    pub fn parse(option: Option<&str>, text: Option<&str>) -> Result<Self, String> {
+    pub fn parse(option: Option<&str>, text: Option<&str>) -> Result<Self, InvalidLoopDecision> {
         match (option, text) {
             (Some("stop"), None) => Ok(Self::Stop),
             (Some("extend"), None) => Ok(Self::Extend { rounds: 1 }),
@@ -62,9 +73,9 @@ impl LoopDecision {
                 Ok(LoopReply::Stop {}) => Ok(Self::Stop),
                 Ok(LoopReply::Extend { rounds }) if rounds > 0 => Ok(Self::Extend { rounds }),
                 Ok(LoopReply::Accept {}) => Ok(Self::Accept),
-                _ => Err(asks::LOOP_ANSWER_HELP.into()),
+                _ => Err(InvalidLoopDecision),
             },
-            _ => Err(asks::LOOP_ANSWER_HELP.into()),
+            _ => Err(InvalidLoopDecision),
         }
     }
 }
@@ -826,16 +837,16 @@ fn apply<R: Error + 'static, J: GraphJournal>(
 ) -> Result<Option<String>, GraphError<R, J::Error>> {
     let extension = match &answer.rejected {
         Some(reason) => Err(reason.clone()),
-        None => LoopDecision::parse(answer.option.as_deref(), answer.text.as_deref()).and_then(
-            |decision| match decision {
+        None => LoopDecision::parse(answer.option.as_deref(), answer.text.as_deref())
+            .map_err(|error| error.to_string())
+            .and_then(|decision| match decision {
                 LoopDecision::Stop => Ok(format!("loop.{node}.decision=stop")),
                 LoopDecision::Accept => Ok(format!("loop.{node}.decision=accept")),
                 LoopDecision::Extend { rounds: extra } => rounds
                     .checked_add(extra)
                     .map(|total| format!("loop.{node}.rounds={total}"))
                     .ok_or_else(|| "loop extension cannot overflow".to_owned()),
-            },
-        ),
+            }),
     };
     match extension {
         Ok(extension) => Ok(Some(extension)),
