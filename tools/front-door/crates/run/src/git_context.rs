@@ -989,7 +989,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
         assert_eq!(metadata["log_truncated"], false);
         assert_eq!(metadata["diff_truncated"], false);
-        assert_eq!(executor.0.lock().map_err(|_| "calls poisoned")?.len(), 8);
+        assert_eq!(executor.0.lock().map_err(|_| "calls poisoned")?.len(), 9);
         Ok(())
     }
 
