@@ -1624,6 +1624,7 @@ impl StageBuilder<'_> {
                     }
                 }
                 if let Some(extra) = object.get("depends_on") {
+                    let extra = interpolate(extra, &self.parameters, self.prompt, index as usize)?;
                     let extra = extra.as_array().ok_or("depends_on must be an array")?;
                     let existing = node["depends_on"]
                         .as_array_mut()

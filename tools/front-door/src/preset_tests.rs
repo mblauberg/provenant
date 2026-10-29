@@ -1463,3 +1463,21 @@ fn nested_diagnostics_qualify_only_the_path_and_keep_real_origins() {
         "{error}"
     );
 }
+
+#[test]
+fn composite_dependencies_and_inputs_take_parameters() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "after",
+            "stages = [{ id = 'scope' }, { id = 'run', preset = 'single', depends_on = ['${upstream}'], inputs = [{ node = '${upstream}', outputs = ['result'] }] }]\n[parameters]\nupstream = 'scope'\n",
+        )
+        .unwrap();
+    let result = expand(&layers, "after", "brief", &[]).unwrap();
+    let run = &result.document["nodes"][1];
+    assert_eq!(run["depends_on"], json!(["scope"]));
+    assert_eq!(run["inputs"][0]["node"], "scope");
+    let _: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(result.document).unwrap();
+}
