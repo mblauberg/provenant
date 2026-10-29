@@ -721,7 +721,7 @@ mod go_allowance_tests {
             );
         }
         for (id, expected) in [
-            ("opencode/opencode-go/claude-haiku-5-5", "$15"),
+            ("opencode/opencode-go/minimax-m3.1-flash", "$20"),
             ("opencode/opencode-go/unlisted", "unknown"),
         ] {
             let model = ModelId::parse(id)?;

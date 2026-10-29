@@ -47,6 +47,20 @@ Flash joins the junior pool at weight 2 and GLM-5.3 Flash at weight 1; both join
 the senior pool at weight 1. These are provisional weights pending local trial
 evidence.
 
+## Catalogue refresh, 29 October 2026
+
+The [Go pricing table](https://opencode.ai/v2/docs/console/go/), accessed on
+29 October 2026, lists newer releases in two families. The catalogue now carries
+MiniMax M3.1 Flash ($20 monthly limit on the $10 plan) in place of MiniMax M3,
+and Qwen3.8 Flash ($30) in place of Qwen3.7 Plus. Qwen3.8 Flash is preferred to
+Qwen3.8 Max ($15) because it draws the allowance at half the rate. Both
+replacements sit below the default $60 floor, so they are refused until the
+operator lowers `domains.routing.opencode_go.min_monthly_allowance_usd`.
+
+Kimi K2.7 Code, MiMo V2.5 and Muse Spark 1.2 Contributor were removed as
+superseded. Claude Haiku 5.5 was removed because the Claude adapter already
+serves it from the Claude subscription, at a fraction of the Go allowance cost.
+
 ## Provider controls
 
 The [OpenCode Go documentation](https://opencode.ai/docs/go/) lists these
