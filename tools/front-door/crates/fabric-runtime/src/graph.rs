@@ -30,6 +30,7 @@ mod land;
 #[path = "graph/land_tests.rs"]
 mod land_tests;
 mod loops;
+mod pattern_plan;
 mod plans;
 pub use asks::{
     AnswerSource, AskAnswer, AskKind, AskOption, AskReply, AskScope, DecideSpec, NodeAsk,
@@ -38,7 +39,10 @@ pub use asks::{
 pub use composites::CompositeSpec;
 pub use land::{LandAuthority, LandObservation, LandRecord, LandRequest, LandSpec};
 pub use loops::{LegacyLoopAsk, LoopDecision, LoopRound, LoopSpec, legacy_loop_asks};
-pub use plans::{Expansion, PlanSpec, RemainingBudgets};
+pub use plans::{
+    Expansion, PatternInstantiation, PatternParameter, PatternParameterKind, PatternSpec, PlanSpec,
+    RemainingBudgets,
+};
 
 const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
 /// Every JSON member costs at least two bytes, so the byte limit binds first.

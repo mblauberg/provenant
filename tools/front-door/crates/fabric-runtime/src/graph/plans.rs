@@ -1,5 +1,6 @@
 //! Dynamic plans and honest-stop continuations share the scheduler and journal.
 use super::*;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanSpec {
@@ -7,6 +8,76 @@ pub struct PlanSpec {
     pub extra: provenant_records::ExtraFields,
     pub kinds: Vec<NodeKind>,
     pub max_nodes: usize,
+    /// Patterns this plan node allows a fragment to instantiate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<PatternSpec>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternSpec {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, PatternParameter>,
+    /// Kept as JSON until parameter interpolation, because a typed field such as
+    /// `write_scope` may be a single `${scope}` placeholder for a list value.
+    pub nodes: Vec<serde_json::Value>,
+    pub exports: Vec<GraphInput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternParameter {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    #[serde(rename = "type")]
+    pub kind: PatternParameterKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<serde_json::Value>,
+    #[serde(default, rename = "enum", skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternParameterKind {
+    String,
+    Integer,
+    Number,
+    Boolean,
+    List,
+    Table,
+}
+
+impl PatternParameterKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::List => "list",
+            Self::Table => "table",
+        }
+    }
+}
+
+/// One pattern instantiation retained with the expansion that produced it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternInstantiation {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub id: String,
+    pub name: String,
+    pub parameters: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<String>,
 }
 
 /// Only validated, normalised additions enter the checkpoint. The original
@@ -18,6 +89,8 @@ pub struct Expansion {
     pub source: String,
     pub continuation: bool,
     pub nodes: Vec<GraphNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<PatternInstantiation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,14 +105,47 @@ pub struct RemainingBudgets {
 #[derive(Deserialize)]
 struct Fragment {
     schema_version: u64,
+    #[serde(default)]
     nodes: Vec<GraphNode>,
+    #[serde(default)]
+    patterns: Vec<pattern_plan::PatternInstance>,
+}
+
+fn pattern_summary(spec: &PlanSpec) -> String {
+    spec.patterns
+        .iter()
+        .map(|pattern| {
+            let parameters = pattern
+                .parameters
+                .iter()
+                .map(|(name, parameter)| {
+                    let kind = parameter.kind.name();
+                    match &parameter.doc {
+                        Some(doc) => format!("{name}:{kind} ({doc})"),
+                        None => format!("{name}:{kind}"),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if parameters.is_empty() {
+                pattern.name.clone()
+            } else {
+                format!("{} ({parameters})", pattern.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub(super) fn prompt(node: &GraphNode) -> String {
     let mut prompt = node.prompt.clone();
     if let Some(spec) = &node.plan {
         let kinds = serde_json::to_string(&spec.kinds).unwrap_or_default();
-        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs. Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", spec.max_nodes));
+        if spec.patterns.is_empty() {
+            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs. Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", spec.max_nodes));
+        } else {
+            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...],\"patterns\":[...]}}. Emit 1..{} nodes or pattern instances, using only {kinds}. Allowed patterns: {}. Instantiate them in a `patterns` array with id, pattern, parameters, depends_on and inputs; pattern parameters are validated against their schemas and pattern nodes are fixed. Do not emit other presets or review shapes. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs. Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes.", spec.max_nodes, pattern_summary(spec)));
+        }
     }
     prompt
 }
@@ -64,6 +170,13 @@ pub(super) fn validate_spec(node: &GraphNode) -> Result<(), &'static str> {
             return Err(
                 "invalid plan configuration; fragments support task, plan, synthesise and gate",
             );
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for pattern in &spec.patterns {
+            if !names.insert(&pattern.name) {
+                return Err("plan pattern names must be unique");
+            }
+            pattern_plan::validate(pattern)?;
         }
     }
     Ok(())
@@ -231,25 +344,14 @@ pub(super) fn writers_conflict(left: &PlannedNode, right: &PlannedNode) -> bool 
         && (left.worktree == right.worktree || overlaps(&left.write_scope, &right.write_scope))
 }
 
-fn fragment(
+fn prepare(
+    child: &mut GraphNode,
     node: &PlannedNode,
+    spec: &PlanSpec,
     document: &GraphDocument,
-    checkpoint: &GraphCheckpoint,
-    json: &str,
-) -> Result<Expansion, String> {
-    let spec = node.plan.as_ref().ok_or("missing plan configuration")?;
-    let mut fragment: Fragment =
-        serde_json::from_str(json).map_err(|e| format!("invalid fragment: {e}"))?;
-    if fragment.schema_version != 1
-        || fragment.nodes.is_empty()
-        || fragment.nodes.len() > spec.max_nodes
-    {
-        return Err(format!(
-            "fragment requires 1..{} nodes and schema_version 1",
-            spec.max_nodes
-        ));
-    }
-    for child in &mut fragment.nodes {
+    trusted: bool,
+) -> Result<(), String> {
+    if !trusted {
         // A planner may narrow but never widen the access its own node holds.
         if let Some(role) = &child.role
             && node.role.as_ref() != Some(role)
@@ -283,78 +385,146 @@ fn fragment(
                 child.kind.unwrap_or(NodeKind::Task)
             ));
         }
-        // Gate evidence lives in its condition and a decision in its question.
-        // Writer nodes carry explicit scope; all agents carry acceptance prose.
-        if !matches!(child.kind, Some(NodeKind::Gate | NodeKind::Decide)) {
-            if child.prompt.trim().is_empty()
-                || child.acceptance_checks.is_empty()
-                || child.acceptance_checks.iter().any(|s| s.trim().is_empty())
-                || child.access == AccessMode::WorktreeWrite && child.write_scope.is_empty()
-                || child.write_scope.iter().any(|s| !valid_scope(s))
-            {
-                return Err("fragment agent requires goal or brief and acceptance_checks; writers also require relative literal write_scope".into());
-            }
-            child.prompt.push_str("\n\n");
-            if !child.write_scope.is_empty() {
-                child
-                    .prompt
-                    .push_str(&format!("Write scope: {}\n", child.write_scope.join(", ")));
-            }
-            child.prompt.push_str(&format!(
-                "Acceptance checks:\n{}",
-                child.acceptance_checks.join("\n")
-            ));
-            if child.route.is_none() && child.routes.is_none() {
-                child.route = Some(GraphRoute {
-                    extra: Default::default(),
-                    alias: Some("senior".into()),
-                    adapter: None,
-                    name: None,
-                    model: None,
-                    effort: None,
-                    account: None,
-                });
-            }
-        }
-        // The destination is chair authority: a planner never names one.
-        if matches!(
-            child.delivery,
-            Some(provenant_records::run::DeliveryMode::Integrate(_))
-        ) && document.integration_branch.is_none()
+    }
+    // Gate evidence lives in its condition and a decision in its question.
+    // Writer nodes carry explicit scope; all agents carry acceptance prose.
+    if !matches!(
+        child.kind,
+        Some(NodeKind::Gate | NodeKind::Decide | NodeKind::Composite)
+    ) {
+        if child.prompt.trim().is_empty()
+            || child.acceptance_checks.is_empty()
+            || child.acceptance_checks.iter().any(|s| s.trim().is_empty())
+            || child.access == AccessMode::WorktreeWrite && child.write_scope.is_empty()
+            || child.write_scope.iter().any(|s| !valid_scope(s))
         {
-            return Err(format!(
-                "fragment node {} sets integrate delivery, but the graph names no integration_branch",
-                child.id
-            ));
+            return Err("fragment agent requires goal or brief and acceptance_checks; writers also require relative literal write_scope".into());
         }
-        if child.access == AccessMode::WorktreeWrite {
-            if child.delivery.as_ref().is_some_and(|mode| {
-                !matches!(
-                    mode,
-                    provenant_records::run::DeliveryMode::None
-                        | provenant_records::run::DeliveryMode::Integrate(_)
-                )
-            }) {
-                return Err("fragment writers use integrate delivery, never individual PRs".into());
-            }
-            if let Some(target) = &document.integration_branch {
-                child.delivery = Some(provenant_records::run::DeliveryMode::Integrate(
-                    target.clone(),
-                ));
-            }
+        child.prompt.push_str("\n\n");
+        if !child.write_scope.is_empty() {
+            child
+                .prompt
+                .push_str(&format!("Write scope: {}\n", child.write_scope.join(", ")));
+        }
+        child.prompt.push_str(&format!(
+            "Acceptance checks:\n{}",
+            child.acceptance_checks.join("\n")
+        ));
+        if child.route.is_none() && child.routes.is_none() {
+            child.route = Some(GraphRoute {
+                extra: Default::default(),
+                alias: Some("senior".into()),
+                adapter: None,
+                name: None,
+                model: None,
+                effort: None,
+                account: None,
+            });
         }
     }
+    // The destination is chair authority: a planner never names one.
+    if matches!(
+        child.delivery,
+        Some(provenant_records::run::DeliveryMode::Integrate(_))
+    ) && document.integration_branch.is_none()
+    {
+        return Err(format!(
+            "fragment node {} sets integrate delivery, but the graph names no integration_branch",
+            child.id
+        ));
+    }
+    if child.access == AccessMode::WorktreeWrite {
+        if child.delivery.as_ref().is_some_and(|mode| {
+            !matches!(
+                mode,
+                provenant_records::run::DeliveryMode::None
+                    | provenant_records::run::DeliveryMode::Integrate(_)
+            )
+        }) {
+            return Err("fragment writers use integrate delivery, never individual PRs".into());
+        }
+        if let Some(target) = &document.integration_branch {
+            child.delivery = Some(provenant_records::run::DeliveryMode::Integrate(
+                target.clone(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn fragment(
+    node: &PlannedNode,
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+    json: &str,
+) -> Result<Expansion, String> {
+    let spec = node.plan.as_ref().ok_or("missing plan configuration")?;
+    let mut fragment: Fragment =
+        serde_json::from_str(json).map_err(|e| format!("invalid fragment: {e}"))?;
+    if fragment.schema_version != 1
+        || (fragment.nodes.is_empty() && fragment.patterns.is_empty())
+        || fragment.nodes.len() > spec.max_nodes
+    {
+        return Err(format!(
+            "fragment requires 1..{} nodes and schema_version 1",
+            spec.max_nodes
+        ));
+    }
+    for child in &mut fragment.nodes {
+        prepare(child, node, spec, document, false)?;
+    }
+    let mut instantiations = Vec::new();
+    let mut wrappers = Vec::new();
+    for instance in &fragment.patterns {
+        let pattern = spec
+            .patterns
+            .iter()
+            .find(|pattern| pattern.name == instance.pattern)
+            .ok_or_else(|| {
+                format!(
+                    "pattern {} is not in this plan's allow-list",
+                    instance.pattern
+                )
+            })?;
+        let (mut wrapper, instantiation) = pattern_plan::instantiate(pattern, instance)?;
+        if let Some(composite) = &mut wrapper.composite {
+            for child in &mut composite.nodes {
+                prepare(child, node, spec, document, true)?;
+            }
+        }
+        wrappers.push(wrapper);
+        instantiations.push(instantiation);
+    }
+    let fragment_nodes = fragment.nodes.len() + wrappers.len();
+    if fragment_nodes > spec.max_nodes {
+        return Err(format!(
+            "fragment requires 1..{} nodes and schema_version 1",
+            spec.max_nodes
+        ));
+    }
+    let mut local_nodes = fragment.nodes;
+    local_nodes.extend(wrappers);
     let local = GraphDocument {
         context: document.context.clone(),
         extra: Default::default(),
         schema_version: 1,
         graph_id: "fragment".into(),
-        nodes: fragment.nodes,
+        nodes: local_nodes,
         limits: None,
         delivery: None,
         decision_session: document.decision_session.clone(),
         integration_branch: document.integration_branch.clone(),
     };
+    // Pattern wrappers are ordinary static composites. Expand them before the
+    // fragment is measured or validated so the host limits see every child.
+    let local = composites::expand(&local, &generous())?;
+    if local.nodes.len() > spec.max_nodes {
+        return Err(format!(
+            "fragment expands to {} nodes; plan allows at most {}",
+            local.nodes.len(),
+            spec.max_nodes
+        ));
+    }
     let (plan, _) = validate_flat_plan(&local, &generous()).map_err(str::to_owned)?;
     let mut nodes: Vec<GraphNode> = plan
         .nodes
@@ -403,6 +573,17 @@ fn fragment(
         if child.depends_on.is_empty() {
             child.depends_on.push(node.id.clone());
         }
+        child.after_expansion = child.after_expansion.iter().map(|name| id(name)).collect();
+        child.composite_members = child
+            .composite_members
+            .iter()
+            .map(|name| id(name))
+            .collect();
+        if let Some(composite) = &mut child.composite {
+            for export in &mut composite.exports {
+                export.node = id(&export.node);
+            }
+        }
         for input in &mut child.inputs {
             input.node = id(&input.node);
         }
@@ -412,12 +593,23 @@ fn fragment(
         child.on_fail = child.on_fail.as_deref().map(id);
         child.round = None;
     }
+    for instantiation in &mut instantiations {
+        let instance = id(&instantiation.id);
+        instantiation.nodes = nodes
+            .iter()
+            .filter(|child| child.id.starts_with(&format!("{instance}--")))
+            .map(|child| child.id.clone())
+            .collect();
+        instantiation.nodes.sort();
+        instantiation.id = instance;
+    }
     coordinate(&mut nodes, document, checkpoint)?;
     Ok(Expansion {
         extra: Default::default(),
         source: node.id.clone(),
         continuation: false,
         nodes,
+        patterns: instantiations,
     })
 }
 
@@ -542,6 +734,7 @@ fn continuation(
         source: node.id.clone(),
         continuation: true,
         nodes: vec![child],
+        patterns: Vec::new(),
     })
 }
 
