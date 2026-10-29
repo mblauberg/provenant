@@ -52,6 +52,16 @@ impl AdapterSpec {
             (account == free_account) == model.starts_with(prefix)
         })
     }
+    /// Whether a quota window governs a model drawing on `model_pool`. Only
+    /// adapters with grouped quota pools separate windows by their `group.`
+    /// prefix. Ungrouped windows, an unset model pool and other adapters keep
+    /// every window, which is the conservative reading.
+    pub fn window_serves_pool(&self, window: &str, model_pool: Option<&str>) -> bool {
+        match (self.grouped_quota_pools, model_pool, window.split_once('.')) {
+            (true, Some(pool), Some((group, _))) => group == pool,
+            _ => true,
+        }
+    }
     pub fn get(name: &str) -> Option<&'static Self> {
         ADAPTER_SPECS.iter().find(|spec| spec.name == name)
     }

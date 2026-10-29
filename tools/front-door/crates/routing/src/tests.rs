@@ -1300,6 +1300,7 @@ fn every_alternative_validates_its_own_effort() -> Result<(), Box<dyn std::error
         family: None,
         trains_on_prompts: None,
         monthly_allowance_usd: None,
+        quota_pool: None,
     });
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
@@ -1570,6 +1571,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
         evidence_ref: "test".into(),
         trains_on_prompts: None,
         monthly_allowance_usd: None,
+        quota_pool: None,
     });
     assert_eq!(
         FamilyFact::from_verified(
@@ -2270,6 +2272,7 @@ fn account_override_selects_a_pool_member_and_keeps_other_provider_fallbacks()
             family: None,
             trains_on_prompts: None,
             monthly_allowance_usd: None,
+            quota_pool: None,
         });
     }
     catalogue.pools.insert(
@@ -2627,7 +2630,7 @@ fn selected_windows_cover_pro_cursor_agy_and_free_profiles()
             "billing_cycle",
         ),
         (
-            "agy/gemini-3.8-flash",
+            "agy/claude-sonnet-4-6",
             "agy-host",
             serde_json::json!({"policy":"pace", "windows":["seven_day"]}),
             vec![
@@ -3412,5 +3415,104 @@ fn cooling_ready_candidate_beats_unavailable_candidate() -> Result<(), Box<dyn s
         selected.pool_selection.unwrap().reason.as_deref(),
         Some("cooling ready candidate selected over unavailable candidate")
     );
+    Ok(())
+}
+
+#[test]
+fn agy_models_are_paced_and_reserved_by_their_own_quota_pool_only()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::QuotaWindow;
+    let window = |pool: &str, used| QuotaWindow {
+        pool: pool.into(),
+        window_seconds: Some(604_800),
+        used_basis_points: used,
+        resets_unix_seconds: Some(604_900),
+    };
+    for (model, gemini, claude, factor, detail) in [
+        (
+            "agy/claude-sonnet-4-6",
+            10_000,
+            0,
+            10_000,
+            "quota_pool=claude",
+        ),
+        (
+            "agy/claude-opus-4-6-thinking",
+            10_000,
+            0,
+            10_000,
+            "quota_pool=claude",
+        ),
+        ("agy/claude-sonnet-4-6", 0, 9_900, 2_500, "claude.weekly"),
+        (
+            "agy/gemini-3.8-flash",
+            0,
+            10_000,
+            10_000,
+            "quota_pool=gemini",
+        ),
+        ("agy/gemini-3.8-flash", 10_000, 0, 2_500, "gemini.weekly"),
+    ] {
+        let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+            "pacing":{"accounts":{"agy-host":{"policy":"pace", "windows":["seven_day"]}}},
+            "pacing_reserve":{"agy":{"seven_day_percent":5}}
+        }))?;
+        let route = profile_preview(
+            config,
+            model,
+            "agy-host",
+            vec![
+                window("gemini.weekly", gemini),
+                window("claude.weekly", claude),
+            ],
+            vec![],
+        )?;
+        let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
+        let text = candidate.pacing_detail.as_deref().ok_or("detail")?;
+        assert_eq!(candidate.factor_basis_points, factor, "{model} {text}");
+        assert!(text.contains(detail), "{model} {text}");
+        let own_spent = if model.contains("claude") {
+            claude
+        } else {
+            gemini
+        } >= 9_500;
+        assert_eq!(
+            text.contains("reserve exclusion"),
+            own_spent,
+            "{model} {text}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn quota_pool_is_validated_and_limited_to_grouped_adapters()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bundled = Catalogue::bundled()?;
+    assert_eq!(
+        bundled.quota_pool(&ModelId::parse("agy/claude-sonnet-4-6")?),
+        Some("claude")
+    );
+    assert_eq!(
+        bundled.quota_pool(&ModelId::parse("agy/gemini-3.8-flash")?),
+        Some("gemini")
+    );
+    for (model, pool, valid) in [
+        ("agy/claude-sonnet-4-6", Some("claude"), true),
+        ("agy/claude-sonnet-4-6", None, true),
+        ("agy/claude-sonnet-4-6", Some(""), false),
+        ("agy/claude-sonnet-4-6", Some("bad pool"), false),
+        ("codex/gpt-6-luna", Some("gemini"), false),
+    ] {
+        let mut catalogue = Catalogue::bundled()?;
+        let id = ModelId::parse(model)?;
+        let row = catalogue
+            .models
+            .iter_mut()
+            .find(|row| row.model == id)
+            .ok_or(model)?;
+        row.quota_pool = pool.map(Into::into);
+        assert_eq!(catalogue.validate().is_ok(), valid, "{model} {pool:?}");
+    }
     Ok(())
 }

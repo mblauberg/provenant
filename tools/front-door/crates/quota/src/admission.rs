@@ -947,4 +947,75 @@ mod refusal_scope_tests {
             );
         }
     }
+    #[test]
+    fn grouped_pool_exhaustion_blocks_only_models_in_that_pool() {
+        let route = |model: &str| ResolvedRoute {
+            extra: Default::default(),
+            adapter: "agy".into(),
+            model: model.into(),
+            effort: None,
+            catalogue_revision: "fixture".into(),
+            account_key: Some("work".into()),
+            host: "host".into(),
+            alternatives: Default::default(),
+            exclusions: vec![],
+            eligibility: provenant_records::RouteEligibility::Eligible,
+            readiness: RouteReadiness::Ready {
+                extra: Default::default(),
+                availability_ref: "fixture".into(),
+                expires_unix_seconds: 5000,
+            },
+            confidentiality: provenant_records::RouteConfidentiality {
+                extra: Default::default(),
+                evidence_ref: "fixture".into(),
+            },
+            pool_selection: None,
+        };
+        let account = AccountScope {
+            adapter: "agy".into(),
+            account_key: "work".into(),
+            label: "work".into(),
+        };
+        let window = |pool: &str, used| QuotaWindow {
+            pool: pool.into(),
+            window_seconds: Some(604800),
+            used_basis_points: used,
+            resets_unix_seconds: Some(3000),
+        };
+        for (gemini, claude) in [(10000, 0), (0, 10000)] {
+            let mut record = AccountRecord::empty(account.clone());
+            record.snapshot = Some(QuotaSnapshot {
+                schema_version: 1,
+                account: account.clone(),
+                revision: 0,
+                status: QuotaStatus::Available,
+                observed_unix_seconds: 960,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                details: None,
+                windows: vec![
+                    window("gemini.weekly", gemini),
+                    window("claude.weekly", claude),
+                ],
+            });
+            for (model, pool) in [
+                ("gemini-3.8-flash", "gemini"),
+                ("claude-sonnet-4-6", "claude"),
+            ] {
+                let admitted = Admission {
+                    policies: crate::source::TEST_POLICIES,
+                    now_unix_seconds: 1000,
+                    records: &[record.clone()],
+                    pools: &[pool.into()],
+                }
+                .check(&route(model))
+                .is_ok();
+                let exhausted = if pool == "gemini" { gemini } else { claude } >= 10000;
+                assert_eq!(
+                    admitted, !exhausted,
+                    "{model} gemini={gemini} claude={claude}"
+                );
+            }
+        }
+    }
 }

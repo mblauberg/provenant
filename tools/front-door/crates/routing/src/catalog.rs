@@ -682,6 +682,10 @@ pub struct ModelEntry {
     pub trains_on_prompts: Option<bool>,
     #[serde(default)]
     pub monthly_allowance_usd: Option<MonthlyAllowance>,
+    /// The quota pool group this model draws on, for adapters whose windows
+    /// are grouped (`group.window`). Unset applies every window.
+    #[serde(default)]
+    pub quota_pool: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -838,6 +842,11 @@ impl Catalogue {
                 || row.efforts.len() > 16
                 || row.efforts.iter().any(|e| !effort_valid(e))
                 || row.family.as_deref().is_some_and(|f| !identifier(f))
+                || row.quota_pool.as_deref().is_some_and(|pool| {
+                    !identifier(pool)
+                        || !provenant_records::AdapterSpec::get(row.model.adapter())
+                            .is_some_and(|spec| spec.grouped_quota_pools)
+                })
             {
                 return Err(RoutingError::Catalogue);
             }
@@ -872,6 +881,10 @@ impl Catalogue {
     }
     pub fn model(&self, id: &ModelId) -> Option<&ModelEntry> {
         self.models.iter().find(|row| row.model == *id)
+    }
+    /// The single owner of a model's quota pool group.
+    pub fn quota_pool(&self, id: &ModelId) -> Option<&str> {
+        self.model(id)?.quota_pool.as_deref()
     }
     pub fn has_pool(&self, name: &str) -> bool {
         self.pools.contains_key(name)
