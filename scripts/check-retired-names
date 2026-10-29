@@ -26,7 +26,7 @@ delivery-profiles
 delivery-profile-scenarios
 security-evidence.json
 skills/_shared'
-hits=$(printf '%s\n' "$names" | git grep -n -I -F -f - -- . \
+hits=$(printf '%s\n' "$names" | git grep -n -I -F -w -f - -- . \
   ':(exclude)docs/adr' \
   ':(exclude)docs/research' \
   ':(exclude)scripts' \

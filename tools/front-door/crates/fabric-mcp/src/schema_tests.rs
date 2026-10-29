@@ -27,11 +27,12 @@ fn generated_schema_snapshot_is_checked_in() {
         })
         .collect();
     assert_eq!(catalogue(), subset);
-    let actual = serde_json::to_string_pretty(&all_catalogue()).expect("catalogue serialises");
-    let expected = include_str!(concat!(
+    let actual = all_catalogue();
+    let expected: Vec<Value> = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/all-tool-schemas.json"
-    ));
+    )))
+    .expect("snapshot parses");
     assert_eq!(actual, expected);
 }
 

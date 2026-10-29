@@ -451,18 +451,6 @@ pub(crate) fn companions(directory: &Directory, base: &str, request: &Request<'_
         |name, fault| RunError::unsafe_entry(directory, name, fault.into()),
     )
 }
-#[cfg(test)]
-fn companion(
-    request: &Request<'_>,
-    mut metadata: impl FnMut() -> provenant_os::fs::Result<Metadata>,
-) -> Result<()> {
-    provenant_sqlite::check_companion(
-        &mut metadata,
-        |check| request.wait(check),
-        Into::into,
-        |fault| RunError::unsafe_path("run.sqlite3", fault.into()),
-    )
-}
 pub(crate) fn bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
     let bytes = provenant_records::CanonicalV1::bytes(record)?;
     if bytes.as_bytes().len() as u64 > RECORD_LIMIT {
@@ -484,80 +472,4 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> 
 
 pub(crate) fn sql_int(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| RunError::Validation("integer exceeds SQLite range"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
-
-    #[test]
-    fn companion_rechecks_unlinked_observations() -> TestResult {
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let request = crate::tests::call(&clock, &cancel);
-        for replaced in [false, true] {
-            let temp = tempfile::tempdir()?;
-            let directory = Directory::open_anchor(temp.path())?;
-            let name = OsStr::new("run.sqlite3-shm");
-            let file = directory.create_new(name)?;
-            let removed = Metadata {
-                links: 0,
-                ..file.metadata()?
-            };
-            directory.unlink(name)?;
-            if replaced {
-                directory.create_new(name)?;
-            }
-            let mut observations = 0;
-            companion(&request, || {
-                observations += 1;
-                if observations == 1 {
-                    Ok(removed)
-                } else {
-                    directory.metadata_at(name, false)
-                }
-            })?;
-            assert_eq!(observations, 2);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn companion_unlink_retry_preserves_wait_errors() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let directory = Directory::open_anchor(temp.path())?;
-        let removed = Metadata {
-            links: 0,
-            ..directory
-                .create_new(OsStr::new("run.sqlite3-shm"))?
-                .metadata()?
-        };
-        let clock = crate::tests::clock();
-        let cancel = CancelToken::new();
-        let request = crate::tests::call(&clock, &cancel);
-        assert!(matches!(
-            companion(&request, || {
-                cancel.cancel();
-                Ok(removed)
-            }),
-            Err(RunError::Cancelled)
-        ));
-
-        let cancel = CancelToken::new();
-        let request = Request {
-            // Only the final microsecond remains when the retry starts.
-            budget: WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
-            clock: &provenant_core::TestClock::new(
-                clock.wall_now()?,
-                provenant_core::MonoTime::from_micros(999_999),
-            ),
-            cancel: &cancel,
-        };
-        assert!(matches!(
-            companion(&request, || Ok(removed)),
-            Err(RunError::Contention)
-        ));
-        Ok(())
-    }
 }

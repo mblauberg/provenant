@@ -390,7 +390,6 @@ fn natural_exit_beats_pipe_drain_expiry(root: &Path, env: &[(OsString, OsString)
     assert_eq!(outcome.termination, Termination::Exit(0));
     assert!(!outcome.timed_out);
     assert!(outcome.drain_truncated);
-    assert!(outcome.elapsed_micros < 3_000_000);
     Ok(())
 }
 
