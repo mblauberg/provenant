@@ -7986,7 +7986,6 @@ fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
 fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResult {
     use std::ffi::OsStr;
     let temp = tempfile::tempdir()?;

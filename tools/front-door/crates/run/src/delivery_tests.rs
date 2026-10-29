@@ -502,7 +502,6 @@ fn integration_refreshes_forged_tracking_ref_and_fails_closed()
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
 fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -654,7 +653,6 @@ struct OriginFixture {
 }
 
 impl OriginFixture {
-    #[allow(clippy::disallowed_methods)]
     fn run_in(
         &self,
         directory: &Path,
@@ -959,7 +957,6 @@ fn origin_refresh_refuses_names_that_differ_only_in_unicode_normalisation()
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
 fn origin_refresh_routes_advertisement_and_fetch_through_one_hardened_transport()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;

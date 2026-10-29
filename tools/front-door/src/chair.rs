@@ -760,8 +760,6 @@ struct LogInput {
     correction_of: Option<u64>,
 }
 
-// The standard input transport has a real deadline.
-#[allow(clippy::disallowed_methods)]
 fn log_input<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Error> {
     Ok(serde_json::from_slice(&log_bytes(path)?)?)
 }

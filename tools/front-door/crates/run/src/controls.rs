@@ -1479,7 +1479,6 @@ impl RunStore {
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
         self.cancel_with_observer(id, reason, call, &SystemProcessObserver)
     }
-    #[allow(clippy::disallowed_methods)]
     pub(crate) fn cancel_with_observer(
         &self,
         id: AttemptId,

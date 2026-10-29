@@ -68,7 +68,6 @@ fn peer_wait_views_remain_settling_until_terminal_custody_is_released() -> TestR
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
 fn dispatch_validates_review_commits() -> TestResult {
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
