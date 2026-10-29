@@ -164,8 +164,9 @@ impl HolderContext {
             .map_or(context.roots.state_root.as_path(), |host| {
                 host.configuration_root.as_path()
             });
-        let store = RunStore::open(&execution, &call(&SystemClock, &CancelToken::new())?)?
+        let mut store = RunStore::open(&execution, &call(&SystemClock, &CancelToken::new())?)?
             .with_writer_registry(registry);
+        store.reaction_launch = context.launch.clone();
         Ok((context, store))
     }
 }

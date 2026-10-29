@@ -3351,24 +3351,46 @@ pub(crate) fn advance_settled_graphs(
     };
     crate::settlement::seam(
         |before| provenant_cli::run::launch_policy_successor(&settled, before),
-        || settlement_reactions(&settled, workers),
+        || {
+            settlement_reactions(
+                &crate::settlement::Subject {
+                    home: settled.roots.home.clone(),
+                    checkout: settled.roots.checkout.clone(),
+                    state_root: settled.roots.state_root.clone(),
+                    project: settled.project_id,
+                    actor: settled.actor_id,
+                    run: settled.run_id,
+                },
+                workers,
+            )
+        },
     )
 }
 
-fn settlement_reactions(
-    settled: &provenant_run::HolderContext,
+/// Drain the reactions a settlement owes: the graph advance from its frozen
+/// launch inputs, then the notice and the chair log. Recovery calls this too.
+pub(crate) fn settlement_reactions(
+    subject: &crate::settlement::Subject,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let graphs = advance_graphs_after_settlement(settled, workers);
-    let reports = crate::settlement::drain_run(&crate::settlement::Subject {
-        home: settled.roots.home.clone(),
-        checkout: settled.roots.checkout.clone(),
-        state_root: settled.roots.state_root.clone(),
-        project: settled.project_id,
-        actor: settled.actor_id,
-        run: settled.run_id,
-    });
-    graphs.and(reports)
+    crate::settlement::drain_run(subject, &mut |reaction| {
+        let settled = provenant_run::HolderContext {
+            schema_version: 1,
+            roots: provenant_run::RootSeed {
+                home: subject.home.clone(),
+                checkout: subject.checkout.clone(),
+                state_root: subject.state_root.clone(),
+            },
+            project_id: reaction.project,
+            actor_id: subject.actor,
+            run_id: reaction.run,
+            attempt_id: reaction.attempt,
+            host_delivery: None,
+            launch: reaction.graph.clone(),
+            sealed: None,
+        };
+        advance_graphs_after_settlement(&settled, workers)
+    })
 }
 
 fn advance_graphs_after_settlement(

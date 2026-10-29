@@ -544,7 +544,8 @@ impl crate::RunStore {
         self.run(run, call)?;
         let attempts = self.pending_attempts(run, call)?;
         let now = now_ms()?;
-        let mut needs_worker = false;
+        // Owed reactions need a worker even when no attempt is live.
+        let mut needs_worker = !self.pending_reactions(run, call)?.is_empty();
         for attempt in &attempts {
             if matches!(
                 attempt.state,
