@@ -75,6 +75,7 @@ struct LaunchMessage {
     protected_commands: Vec<String>,
     argv: Vec<Vec<u8>>,
     environment: Vec<(Vec<u8>, Vec<u8>)>,
+    lane_ports: Option<provenant_os::lane_ports::Plan>,
     cwd: Vec<u8>,
     stdin: Vec<u8>,
     secret_input: Option<provenant_os::exec::SecretInput>,
@@ -136,6 +137,7 @@ pub(crate) fn handoff(
             .iter()
             .map(|(name, value)| (name.as_bytes().to_vec(), value.as_bytes().to_vec()))
             .collect(),
+        lane_ports: owned.command.lane_ports,
         cwd: owned.command.cwd.as_os_str().as_bytes().to_vec(),
         stdin: owned.command.stdin,
         secret_input: owned.command.secret_input,
@@ -458,6 +460,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         holder_context: message.holder_context,
         provider_lease: inherited.provider_lease,
         resolved_route: message.resolved_route,
+        lane_ports: message.lane_ports,
         secret_input: message.secret_input,
         priority: message.priority,
     };
@@ -482,6 +485,7 @@ struct Driver<'a> {
     holder_context: Vec<u8>,
     provider_lease: Option<provenant_os::fs::LockGuard>,
     resolved_route: String,
+    lane_ports: Option<provenant_os::lane_ports::Plan>,
     secret_input: Option<provenant_os::exec::SecretInput>,
     priority: u8,
     spared: crate::census::SparingTracker,
@@ -543,6 +547,23 @@ fn admission_refusal(error: &CustodyError) -> String {
         _ => "admission refused".into(),
     }
 }
+/// `env` with the lane's port block set, replacing any value it carried.
+fn with_lane_ports(
+    env: &[(OsString, OsString)],
+    lease: &provenant_os::lane_ports::Lease,
+) -> Vec<(OsString, OsString)> {
+    let ours = lease.environment();
+    let mut out: Vec<_> = env
+        .iter()
+        .filter(|(name, _)| !ours.iter().any(|(own, _)| name == *own))
+        .cloned()
+        .collect();
+    out.extend(
+        ours.into_iter()
+            .map(|(name, value)| (name.into(), value.into())),
+    );
+    out
+}
 impl Driver<'_> {
     // The guardian owns process lifecycle and its elapsed-time budgets.
     #[allow(clippy::disallowed_methods)]
@@ -581,6 +602,25 @@ impl Driver<'_> {
         {
             return self.never_spawned(&admission_refusal(&error));
         }
+        // Held until this function returns, which is after the provider and
+        // its descendants are settled; the kernel drops it if we die first.
+        let ports = match self.lane_ports.as_ref().map(|plan| plan.try_acquire()) {
+            None => None,
+            Some(Ok(Some(lease))) => Some(lease),
+            Some(Ok(None)) => {
+                return self.never_spawned(
+                    "no free lane port block; raise domains.fabric.lanes.lane_port_blocks",
+                );
+            }
+            Some(Err(_)) => return self.never_spawned("lane port blocks unavailable"),
+        };
+        let leased_env;
+        let env = if let Some(lease) = &ports {
+            leased_env = with_lane_ports(env, lease);
+            leased_env.as_slice()
+        } else {
+            env
+        };
         let started = Instant::now();
         #[cfg(feature = "fixture")]
         let clock = hooks.wall_clock;

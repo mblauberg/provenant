@@ -46,6 +46,15 @@ pub struct LaneBuildSettings {
     /// Minutes a build waits for a build slot or a Cargo lock before giving up.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub build_wait_minutes: Option<u64>,
+    /// First port of the range split into per-writer-lane blocks.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub lane_port_base: Option<u64>,
+    /// Ports in each writer lane's block.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub lane_port_block: Option<u64>,
+    /// Blocks in the range; 0 turns port allocation off.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub lane_port_blocks: Option<u64>,
     /// `CARGO_INCREMENTAL` for lanes; off unless set.
     pub cargo_incremental: Option<bool>,
     /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
@@ -71,6 +80,11 @@ pub struct LaneBuildSettings {
 pub const DEFAULT_MAX_WRITER_LANES: u64 = 40;
 pub const DEFAULT_MAX_PROJECT_WRITER_LANES: u64 = 30;
 pub const DEFAULT_BUILD_WAIT_MINUTES: u64 = 30;
+/// Default lane port space: 64 blocks of 16 ports from 30000, below the
+/// ephemeral ranges of macOS and Linux and one block per possible writer lane.
+pub const DEFAULT_LANE_PORT_BASE: u64 = 30000;
+pub const DEFAULT_LANE_PORT_BLOCK: u64 = 16;
+pub const DEFAULT_LANE_PORT_BLOCKS: u64 = 64;
 /// Hard ceilings on the configurable lane caps.
 pub const WRITER_LANES_CEILING: u64 = 64;
 pub const PROJECT_WRITER_LANES_CEILING: u64 = 32;
@@ -140,6 +154,24 @@ impl LaneBuildSettings {
             invalid.push("build_wait_minutes");
         }
         if self
+            .lane_port_base
+            .is_some_and(|n| !(1024..=65535).contains(&n))
+        {
+            invalid.push("lane_port_base");
+        }
+        if !in_range(self.lane_port_block, 1024) {
+            invalid.push("lane_port_block");
+        }
+        if self.lane_port_blocks.is_some_and(|n| n > 1024) {
+            invalid.push("lane_port_blocks");
+        }
+        if self.lane_port_blocks() > 0
+            && self.lane_port_base_value() + self.lane_port_block_size() * self.lane_port_blocks()
+                > 65536
+        {
+            invalid.push("lane_port_blocks");
+        }
+        if self
             .cargo_debug
             .as_deref()
             .is_some_and(|level| !CARGO_DEBUG_LEVELS.contains(&level))
@@ -147,6 +179,15 @@ impl LaneBuildSettings {
             invalid.push("cargo_debug");
         }
         invalid
+    }
+    pub fn lane_port_base_value(&self) -> u64 {
+        self.lane_port_base.unwrap_or(DEFAULT_LANE_PORT_BASE)
+    }
+    pub fn lane_port_block_size(&self) -> u64 {
+        self.lane_port_block.unwrap_or(DEFAULT_LANE_PORT_BLOCK)
+    }
+    pub fn lane_port_blocks(&self) -> u64 {
+        self.lane_port_blocks.unwrap_or(DEFAULT_LANE_PORT_BLOCKS)
     }
     /// Incremental compilation is off by default: its sessions grow without
     /// bound in a lane's target and are rarely reused.
@@ -550,6 +591,31 @@ mod build_tests {
             ["max_concurrent_builds", "cargo_build_jobs"]
         );
         assert!(toml_edit::de::from_str::<LaneBuildSettings>("cargo_build_jobs = -2").is_err());
+    }
+    #[test]
+    fn lane_port_space_defaults_validates_and_can_be_switched_off() {
+        let defaults = LaneBuildSettings::default();
+        assert!(defaults.invalid_keys().is_empty());
+        assert_eq!(
+            (
+                defaults.lane_port_base_value(),
+                defaults.lane_port_block_size(),
+                defaults.lane_port_blocks()
+            ),
+            (30000, 16, 64)
+        );
+        let off: LaneBuildSettings = toml_edit::de::from_str("lane_port_blocks = 0").unwrap();
+        assert!(off.invalid_keys().is_empty());
+        assert_eq!(off.lane_port_blocks(), 0);
+        let low: LaneBuildSettings = toml_edit::de::from_str("lane_port_base = 80").unwrap();
+        assert_eq!(low.invalid_keys(), ["lane_port_base"]);
+        let past_the_end: LaneBuildSettings =
+            toml_edit::de::from_str("lane_port_base = 65000\nlane_port_block = 64").unwrap();
+        assert_eq!(past_the_end.invalid_keys(), ["lane_port_blocks"]);
+        let huge: LaneBuildSettings =
+            toml_edit::de::from_str("lane_port_block = 1025\nlane_port_blocks = 1025").unwrap();
+        assert!(huge.invalid_keys().contains(&"lane_port_block"));
+        assert!(huge.invalid_keys().contains(&"lane_port_blocks"));
     }
     #[test]
     fn writer_caps_and_wait_validate_and_default() {

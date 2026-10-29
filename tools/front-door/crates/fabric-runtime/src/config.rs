@@ -240,6 +240,12 @@ pub struct Lanes {
     pub max_project_writer_lanes: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub build_wait_minutes: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub lane_port_base: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub lane_port_block: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub lane_port_blocks: Option<u64>,
     /// `CARGO_INCREMENTAL` for lanes; off unless set.
     pub cargo_incremental: Option<bool>,
     /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
@@ -293,6 +299,9 @@ impl Lanes {
             max_writer_lanes: self.max_writer_lanes,
             max_project_writer_lanes: self.max_project_writer_lanes,
             build_wait_minutes: self.build_wait_minutes,
+            lane_port_base: self.lane_port_base,
+            lane_port_block: self.lane_port_block,
+            lane_port_blocks: self.lane_port_blocks,
         }
     }
 }

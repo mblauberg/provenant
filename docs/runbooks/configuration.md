@@ -155,6 +155,9 @@ cargo_build_jobs = 5
 build_wait_minutes = 30
 max_writer_lanes = 40
 max_project_writer_lanes = 30
+lane_port_base = 30000
+lane_port_block = 16
+lane_port_blocks = 64
 ```
 
 Omit a key from `config.toml` to select its default. The host settings are
@@ -164,8 +167,10 @@ behaviour. `max_concurrent_builds` is 1 to 64, `cargo_build_jobs` 1 to 1024,
 `build_wait_minutes` 1 to 1440, `max_writer_lanes` 1 to 64 and
 `max_project_writer_lanes` 1 to 32 and, when set, at most `max_writer_lanes`
 (left unset it follows the host cap down, as the smaller of 30 and the host
-cap). An
-out-of-range value is rejected when configuration loads, so it never blocks
+cap). `lane_port_base` is 1024 to 65535, `lane_port_block` 1 to 1024 and
+`lane_port_blocks` 0 to 1024 (0 turns off the per-lane port blocks described in
+[providers](providers.md#writer-lanes)); the range must end at or below 65536.
+An out-of-range value is rejected when configuration loads, so it never blocks
 lane admission. A lane keeps the slot count and wait it was launched with; a
 change applies to lanes launched afterwards.
 

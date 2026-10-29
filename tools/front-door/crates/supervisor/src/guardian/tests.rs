@@ -124,6 +124,7 @@ fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
         ]
         .map(|(key, value)| (key.as_bytes().to_vec(), value.as_bytes().to_vec()))
         .to_vec(),
+        lane_ports: None,
         cwd: b"/fixture/repo".to_vec(),
         stdin: vec![0xff; 1024 * 1024],
         secret_input: Some(provenant_os::exec::SecretInput {
@@ -280,4 +281,30 @@ fn admission_configuration_and_guardian_failures_are_named() {
     assert!(configuration.contains("domains.fabric.lanes.max_concurrent_builds"));
     let guardian = super::admission_refusal(&super::CustodyError::AdmissionGuardianIdentity);
     assert!(guardian.contains("guardian process identity unavailable"));
+}
+
+#[test]
+fn a_leased_port_block_replaces_any_block_the_launch_environment_named() {
+    let temp = tempfile::tempdir().unwrap();
+    let plan = provenant_os::lane_ports::Plan {
+        state: temp.path().to_owned(),
+        base: 30000,
+        size: 16,
+        blocks: 2,
+    };
+    let held = plan.try_acquire().unwrap().unwrap();
+    let lease = plan.try_acquire().unwrap().unwrap();
+    assert_ne!(held.base, lease.base);
+    let env: Vec<(OsString, OsString)> = vec![
+        ("PATH".into(), "/bin".into()),
+        ("PROVENANT_LANE_PORT_BASE".into(), "1".into()),
+    ];
+    let out = with_lane_ports(&env, &lease);
+    assert_eq!(out.len(), 3);
+    assert!(out.contains(&("PATH".into(), "/bin".into())));
+    assert!(out.contains(&(
+        "PROVENANT_LANE_PORT_BASE".into(),
+        lease.base.to_string().into()
+    )));
+    assert!(out.contains(&("PROVENANT_LANE_PORT_COUNT".into(), "16".into())));
 }

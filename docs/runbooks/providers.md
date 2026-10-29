@@ -133,6 +133,25 @@ and build offline (`CARGO_NET_OFFLINE=true`) without Cargo's automatic cache
 clean-up. Pinning the build directory overrides inherited Cargo configuration.
 `provenant worktree remove` and `provenant gc` prune writer caches.
 
+Each writer lane also holds a private block of ports for its dev servers and
+tests, so parallel lanes do not collide. The lane sees it as
+`PROVENANT_LANE_PORT_BASE` (the first port) and `PROVENANT_LANE_PORT_COUNT`
+(how many consecutive ports it owns), for example `30032` and `16`. Blocks come
+from one host-wide range, `lane_port_base` (default 30000), `lane_port_block`
+(default 16) and `lane_port_blocks` (default 64), so the default range is
+30000 to 31023; set them under `[domains.fabric.lanes]` (see
+[configuration](configuration.md)) and set `lane_port_blocks = 0` to turn
+allocation off. The guardian takes the first free block with an advisory lock
+on `<state>/lane-ports/block-N.lock` just before the provider starts and holds
+it until the lane settles, so two live lanes never share a block, across every
+project on the same state directory. The kernel drops the lock when the
+guardian exits, even after a crash or `kill -9`, so there is no leaked range to
+reclaim and `provenant gc` has nothing to do; a later lane takes the same block
+again. A writer launched while every block is held does not start and reports
+`no free lane port block`; raise `lane_port_blocks`. Read-only lanes get no
+block. The block is a convention, not a firewall: a lane can still bind outside
+it, and an unrelated program can already be listening inside it.
+
 Node lanes run the host's installed pnpm. Lanes redirect the npm and pnpm
 caches and the Corepack home into the lane cache, but leave `PNPM_HOME` and the
 pnpm store unset: pnpm records the store directory in
