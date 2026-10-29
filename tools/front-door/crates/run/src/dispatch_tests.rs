@@ -3374,13 +3374,37 @@ fn handoff_missing_and_done_outcome_contradictions() -> TestResult {
 }
 
 #[test]
-fn failed_review_changes_has_typed_reason() -> TestResult {
-    let record = settle_with_role(
-        "Findings.\nVERDICT: changes\n",
-        Some(Outcome::Failed),
-        Vec::new(),
-        Some("reviewer"),
+fn identity_failure_names_requested_and_observed_models() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
     )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(RouteRecord {
+            model: Some("other/model".into()),
+            ..route()
+        }),
+        answer: Some("answer".into()),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
     let AttemptState::Terminal {
         outcome, reason, ..
     } = record.state
@@ -3388,7 +3412,63 @@ fn failed_review_changes_has_typed_reason() -> TestResult {
         return Err("not terminal".into());
     };
     assert_eq!(outcome, Outcome::Failed);
-    assert_eq!(reason.as_deref(), Some("review_verdict: changes"));
+    assert_eq!(
+        reason.as_deref(),
+        Some(
+            "provider identity was not observed: requested model fixture/model; observed model other/model"
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn runtime_deadline_reason_survives_a_cancellation_record() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"half an answer", CAPTURE_LIMIT)?;
+    artifacts::seal(
+        &dir,
+        "cancel.json",
+        br#"{"reason":"wall_deadline"}"#,
+        RECORD_LIMIT,
+    )?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    observed.termination = Some(Termination::Signal(9));
+    observed.stop_reason = Some(provenant_supervisor::machine::StopReason::WallDeadline);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        outcome: Some(Outcome::Failed),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(outcome, Outcome::Cancelled);
+    assert_eq!(
+        reason.as_deref(),
+        Some("runtime deadline exceeded: provider stopped after 3600s")
+    );
     Ok(())
 }
 

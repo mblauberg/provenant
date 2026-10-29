@@ -960,8 +960,15 @@ impl RunStore {
         let cancelled = cancellation.is_some();
         if cancelled {
             decoded.outcome = Outcome::Cancelled;
-            let reason = cancellation_reason(cancellation.as_deref());
-            if !exit.never_spawned || reason != "unknown" {
+            // A typed runtime deadline stays the reason when cancellation also
+            // applies, and a legacy scope-only record adds no invented cause.
+            let typed_deadline = decoded
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("runtime deadline exceeded"));
+            if let Some(reason) = cancellation_reason(cancellation.as_deref())
+                && !typed_deadline
+            {
                 decoded.reason = Some(format!("cancelled: {reason}"));
             }
         }
@@ -1056,17 +1063,32 @@ impl RunStore {
                 });
             }
         }
-        if decoded.outcome == Outcome::Failed
-            && review_changes(
-                task.context
-                    .as_ref()
-                    .and_then(|context| context.role.as_deref()),
-                &decoded.result,
-            )
-        {
+        // Decoding can reveal credential markers hidden by JSON escapes in
+        // the already-filtered capture. Seal only a filtered rendering.
+        // A filter failure withholds the result instead of blocking settlement
+        // forever: the lane fails with a fixed placeholder and stays terminal.
+        let (result, result_redaction_failed) =
+            match provenant_confinement::redact::known_shapes(decoded.result.as_bytes()) {
+                Ok(safe) => match String::from_utf8(safe) {
+                    Ok(text) => (text, false),
+                    Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
+                },
+                Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
+            };
+        let redaction_failed = result_redaction_failed || session_redaction_failed;
+        if redaction_failed {
+            // A redaction failure fails a lane that would otherwise succeed. A
+            // cancelled, timed-out or lost lane keeps its outcome, and every
+            // reason it already has survives with the redaction failure after it.
+            if matches!(
+                decoded.outcome,
+                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+            ) {
+                decoded.outcome = Outcome::Failed;
+            }
             decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("review_verdict: changes; {reason}"),
-                None => "review_verdict: changes".into(),
+                Some(reason) => format!("{reason}; {REDACTION_FAILED_REASON}"),
+                None => REDACTION_FAILED_REASON.into(),
             });
         }
         // Delivery keys off the outcome before a declared stop, so partial work
@@ -1074,7 +1096,10 @@ impl RunStore {
         let succeeded_before_stop = decoded.outcome == Outcome::Succeeded;
         // A declared stop requires review even when the provider succeeded.
         let mut partial = std::mem::take(&mut decoded.partial_signals);
-        if decoded.outcome == Outcome::Succeeded
+        if matches!(
+            decoded.outcome,
+            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+        ) && !matches!(&task.route, RequestedRoute::Adapter { .. })
             && provenant_records::handoff::Handoff::from_result(&decoded.result)
                 .ok()
                 .flatten()
@@ -1131,34 +1156,6 @@ impl RunStore {
         } else {
             partial.clear();
         }
-        // Decoding can reveal credential markers hidden by JSON escapes in
-        // the already-filtered capture. Seal only a filtered rendering.
-        // A filter failure withholds the result instead of blocking settlement
-        // forever: the lane fails with a fixed placeholder and stays terminal.
-        let (result, result_redaction_failed) =
-            match provenant_confinement::redact::known_shapes(decoded.result.as_bytes()) {
-                Ok(safe) => match String::from_utf8(safe) {
-                    Ok(text) => (text, false),
-                    Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
-                },
-                Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
-            };
-        let redaction_failed = result_redaction_failed || session_redaction_failed;
-        if redaction_failed {
-            // A redaction failure fails a lane that would otherwise succeed. A
-            // cancelled, timed-out or lost lane keeps its outcome, and every
-            // reason it already has survives with the redaction failure after it.
-            if matches!(
-                decoded.outcome,
-                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
-            ) {
-                decoded.outcome = Outcome::Failed;
-            }
-            decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{reason}; {REDACTION_FAILED_REASON}"),
-                None => REDACTION_FAILED_REASON.into(),
-            });
-        }
         // Recovered/result-only publication never starts external delivery.
         // A succeeded outcome already proves the provider's terminal event in
         // the sealed stdout, so no live frame observation is required.
@@ -1191,17 +1188,12 @@ impl RunStore {
             })?;
             if let Some(cancellation) = read_sealed(attempt, "cancel.json", RECORD_LIMIT)? {
                 decoded.outcome = Outcome::Cancelled;
-                let mut reason = format!(
-                    "cancelled during delivery: {}",
-                    cancellation_reason(Some(&cancellation))
-                );
-                if handoff
-                    .as_ref()
-                    .is_some_and(|handoff| !handoff.unfinished())
-                {
-                    reason.push_str("; handoff declared done but settlement was not successful");
-                }
-                decoded.reason = Some(reason);
+                decoded.reason = Some(delivery_cancellation_reason(
+                    Some(&cancellation),
+                    handoff
+                        .as_ref()
+                        .is_some_and(|handoff| !handoff.unfinished()),
+                ));
             }
         }
         let publication = TerminalPublication {
@@ -1588,60 +1580,58 @@ mod writer_recovery_tests {
     }
 }
 
-fn cancellation_reason(bytes: Option<&[u8]>) -> String {
-    bytes
-        .and_then(|bytes| {
-            serde_json::from_slice::<serde_json::Value>(bytes)
-                .ok()?
-                .get("reason")?
-                .as_str()
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "unknown".into())
+fn cancellation_reason(bytes: Option<&[u8]>) -> Option<String> {
+    bytes.and_then(|bytes| {
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()?
+            .get("reason")?
+            .as_str()
+            .map(str::to_owned)
+    })
 }
 
-fn review_changes(role: Option<&str>, result: &str) -> bool {
-    role.is_some_and(|role| {
-        role == "reviewer"
-            || role == "review"
-            || role.starts_with("review.")
-            || role == "lens"
-            || role.starts_with("lens.")
-    }) && result
-        .split("\n```handoff")
-        .next()
-        .unwrap_or(result)
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .is_some_and(|line| line.trim().eq_ignore_ascii_case("VERDICT: changes"))
+fn delivery_cancellation_reason(bytes: Option<&[u8]>, handoff_done: bool) -> String {
+    let mut reason = match cancellation_reason(bytes) {
+        Some(cancellation) => format!("cancelled during delivery: {cancellation}"),
+        None => "cancelled during delivery".into(),
+    };
+    if handoff_done {
+        reason.push_str("; handoff declared done but settlement was not successful");
+    }
+    reason
 }
 
 #[cfg(test)]
 mod friction_tests {
     #[test]
-    fn cancellation_reason_uses_request_reason() {
+    fn cancellation_reason_uses_request_reason_and_invents_none() {
         assert_eq!(
             super::cancellation_reason(Some(br#"{"reason":"explicit_cancellation"}"#)),
-            "explicit_cancellation"
+            Some("explicit_cancellation".into())
         );
-        assert_eq!(super::cancellation_reason(Some(b"{}")), "unknown");
+        assert_eq!(super::cancellation_reason(Some(b"{}")), None);
+        assert_eq!(super::cancellation_reason(Some(br#"{"scope":{}}"#)), None);
     }
 
     #[test]
-    fn changes_verdict_requires_review_role_and_final_verdict() {
-        assert!(super::review_changes(
-            Some("reviewer"),
-            "finding\nVERDICT: changes\n\n```handoff\n{}\n```"
-        ));
-        assert!(!super::review_changes(Some("writer"), "VERDICT: changes"));
-        assert!(!super::review_changes(
-            Some("reviewer"),
-            "> VERDICT: changes"
-        ));
-        assert!(!super::review_changes(
-            Some("reviewer"),
-            "VERDICT: changes\nmore"
-        ));
+    fn delivery_cancellation_reason_keeps_its_whole_cause() {
+        assert_eq!(
+            super::delivery_cancellation_reason(
+                Some(br#"{"reason":"explicit_cancellation"}"#),
+                false
+            ),
+            "cancelled during delivery: explicit_cancellation"
+        );
+        assert_eq!(
+            super::delivery_cancellation_reason(
+                Some(br#"{"reason":"explicit_cancellation"}"#),
+                true
+            ),
+            "cancelled during delivery: explicit_cancellation; handoff declared done but settlement was not successful"
+        );
+        assert_eq!(
+            super::delivery_cancellation_reason(Some(br#"{"scope":{}}"#), false),
+            "cancelled during delivery"
+        );
     }
 }
