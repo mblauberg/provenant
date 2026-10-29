@@ -583,14 +583,13 @@ fn codex_dispatch_observes_rollout() -> Result {
             ])?;
             assert_eq!(code(&slow), 124, "{slow:?}");
             let text = String::from_utf8(slow.stdout.bytes)?;
+            // Compact output names the attempt only in its one typed next step.
             let id = text
                 .lines()
-                .find_map(|line| line.strip_prefix("attempt "))
+                .find_map(|line| line.strip_prefix("next: provenant lanes --id "))
+                .and_then(|rest| rest.strip_suffix(" --wait 4m"))
                 .ok_or("timeout attempt")?;
-            assert!(
-                text.contains(&format!("provenant lanes --id {id} --wait 4m")),
-                "{text}"
-            );
+            assert_eq!(id.len(), 32, "{text}");
             let settled = rig.command(&["lanes", "--id", id, "--wait", "10s", "--json"])?;
             assert_eq!(code(&settled), 0, "{settled:?}");
         } else {
