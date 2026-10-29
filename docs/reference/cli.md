@@ -1960,7 +1960,7 @@ Accepted by every command, before or after the subcommand.
 | `--head` | `{"name": "head"}` |
 | `--base` | `{"name": "base"}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability"], "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "name": "manifest"}` |
 | `--worktree` | `{"name": "worktree"}` |
 | `--wait` | `{"bounds": [1, 14400], "defaults": ["240"], "name": "wait"}` |
 | `--branch` | `{"name": "branch"}` |
@@ -2178,7 +2178,7 @@ Accepted by every command, before or after the subcommand.
 | `--base` | `{"name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "name": "wait"}` |
 | `--model` | `{"conflicts": ["route"], "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "network", "capability"], "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "name": "manifest"}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 

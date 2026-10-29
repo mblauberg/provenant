@@ -521,7 +521,6 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                         "deliver",
                         "read_root",
                         "write_root",
-                        "network",
                         "capability",
                     ])
                 });

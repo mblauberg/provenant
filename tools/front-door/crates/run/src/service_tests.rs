@@ -180,6 +180,26 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
 }
 
 #[test]
+fn adapter_child_leaves_network_unset_so_the_parent_bound_applies() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = submission("command-child");
+    input.tasks[0].route = RequestedRoute::Adapter {
+        extra: Default::default(),
+        provider: "command".into(),
+        name: "fmt".into(),
+    };
+    input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
+    input.lane_depth = 2;
+    let record = Service::new(&store).dispatch(input, temp.path(), &call)?;
+    let request = store.request(record.run_id, &call)?;
+    assert_eq!(request.tasks[0].access.network, None);
+    Ok(())
+}
+
+#[test]
 fn child_dispatch_replays_original_id_scheme() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

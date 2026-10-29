@@ -1231,6 +1231,8 @@ struct ManifestTask {
     delivery_id: Option<DeliveryId>,
     deliver: Option<run::WriterDeliveryRequest>,
     account: Option<String>,
+    /// Per-task network; overrides `--network` for this task.
+    network: Option<Switch>,
 }
 fn read_bounded(path: &Path) -> Result<String, Fail> {
     let invalid = |error: &dyn std::fmt::Display| {
@@ -1262,8 +1264,14 @@ fn read_text(source: impl Read) -> Result<String, Fail> {
     String::from_utf8(bytes)
         .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "input is not UTF-8"))
 }
-/// Exactly one of `ADAPTER/ID` or a named route. `ADAPTER/ID@EFFORT`, the
-/// form route receipts print, is accepted when no separate effort is given.
+/// `ADAPTER/NAME` for a model-less adapter such as `command/fmt-check`.
+fn adapter_entry(route: &str) -> Option<(&str, &str)> {
+    let (provider, name) = route.split_once('/')?;
+    let spec = provenant_records::AdapterSpec::get(provider)?;
+    (!spec.launch.model && !name.is_empty()).then_some((provider, name))
+}
+/// Exactly one of `ADAPTER/ID`, `ADAPTER/NAME` for a model-less adapter, or a
+/// named route. `ADAPTER/ID@EFFORT`, the form route receipts print, is accepted when no separate effort is given.
 pub fn requested(
     model: Option<&str>,
     route: Option<&str>,
@@ -1294,6 +1302,21 @@ pub fn requested(
                 provider: id.as_str().split('/').next().unwrap_or_default().into(),
                 model: model.into(),
                 effort,
+            })
+        }
+        (None, Some(name)) if adapter_entry(name).is_some() => {
+            let (provider, entry) = adapter_entry(name).unwrap_or_default();
+            if effort.is_some() {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "a model-less adapter route takes no effort",
+                ));
+            }
+            Ok(run::RequestedRoute::Adapter {
+                extra: Default::default(),
+                provider: provider.into(),
+                name: entry.into(),
             })
         }
         (None, Some(name)) => Ok(run::RequestedRoute::Named {
@@ -1370,6 +1393,16 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>) -> Result<(), Fail
     }
 }
 
+/// The reach a network switch asks for. Off keeps a granted local database.
+fn network_access(switch: Option<Switch>, postgres: bool) -> Option<run::NetworkAccess> {
+    match (switch, postgres) {
+        (Some(Switch::On), _) => Some(run::NetworkAccess::Open),
+        (Some(Switch::Off), true) => Some(run::NetworkAccess::Local),
+        (Some(Switch::Off), false) => Some(run::NetworkAccess::Provider),
+        (None, _) => None,
+    }
+}
+
 /// Resolve dispatch access flags into the sealed record. Roots must be
 /// existing directories, stored canonically, and clear of the state root;
 /// the confinement compiler refuses credential, broad and Git roots.
@@ -1386,12 +1419,7 @@ pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::Lan
             }
         }
     }
-    let network = match (access.network, postgres) {
-        (Some(Switch::On), _) => Some(run::NetworkAccess::Open),
-        (Some(Switch::Off), true) => Some(run::NetworkAccess::Local),
-        (Some(Switch::Off), false) => Some(run::NetworkAccess::Provider),
-        (None, _) => None,
-    };
+    let network = network_access(access.network, postgres);
     // A first dispatch can precede the state root's creation; compare lexically then.
     let state =
         provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
@@ -2343,13 +2371,17 @@ pub(crate) fn check_flag_capabilities(
         command.route.route.as_deref(),
         command.route.effort.clone(),
     );
-    let network = match command.access.network {
-        Some(Switch::On) => Some(run::NetworkAccess::Open),
-        Some(Switch::Off) => Some(run::NetworkAccess::Provider),
-        None => None,
-    };
+    let postgres = command
+        .access
+        .capability
+        .iter()
+        .any(|name| name == "postgres");
+    let flag_network = network_access(command.access.network, postgres);
     let write = matches!(command.access.mode, Mode::WorktreeWrite);
-    let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
+    let check = |provider: &str,
+                 model: Option<&str>,
+                 effort: Option<&str>,
+                 network: Option<run::NetworkAccess>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
             return Ok(());
         };
@@ -2362,39 +2394,45 @@ pub(crate) fn check_flag_capabilities(
         })
         .map_err(refused)
     };
-    let check_route = |route: run::RequestedRoute| -> Result<(), Fail> {
-        match run::Service::route(route) {
-            Ok(run::RequestedRoute::Adapter { provider, .. }) => check(&provider, None, None)?,
-            Ok(run::RequestedRoute::Model {
-                provider,
-                model,
-                effort,
-                ..
-            }) => check(&provider, Some(&model), effort.as_deref())?,
-            // A pool whose every member's adapter takes no effort cannot serve one.
-            Ok(run::RequestedRoute::Named {
-                name,
-                effort: Some(effort),
-                ..
-            }) => {
-                if let Some(roots) = roots
-                    && let Ok(members) = crate::route::effective_members(roots, &name)
-                {
-                    let adapters: Vec<&str> = members
-                        .iter()
-                        .map(|member| member.model.adapter())
-                        .collect();
-                    pool_effort_refusal(&adapters, &effort)
-                        .map_or(Ok(()), |error| Err(refused(error)))?;
+    let check_route =
+        |route: run::RequestedRoute, network: Option<run::NetworkAccess>| -> Result<(), Fail> {
+            match run::Service::route(route) {
+                Ok(run::RequestedRoute::Adapter { provider, .. }) => {
+                    check(&provider, None, None, network)?
                 }
+                Ok(run::RequestedRoute::Model {
+                    provider,
+                    model,
+                    effort,
+                    ..
+                }) => check(&provider, Some(&model), effort.as_deref(), network)?,
+                // A pool whose every member's adapter takes no effort cannot serve one.
+                Ok(run::RequestedRoute::Named {
+                    name,
+                    effort: Some(effort),
+                    ..
+                }) => {
+                    if let Some(roots) = roots
+                        && let Ok(members) = crate::route::effective_members(roots, &name)
+                    {
+                        let adapters: Vec<&str> = members
+                            .iter()
+                            .map(|member| member.model.adapter())
+                            .collect();
+                        pool_effort_refusal(&adapters, &effort)
+                            .map_or(Ok(()), |error| Err(refused(error)))?;
+                    }
+                }
+                _ => {}
             }
-            _ => {}
-        }
-        Ok(())
-    };
-    let check_fallback = |model: &str, effort: Option<&str>| -> Result<(), Fail> {
+            Ok(())
+        };
+    let check_fallback = |model: &str,
+                          effort: Option<&str>,
+                          network: Option<run::NetworkAccess>|
+     -> Result<(), Fail> {
         match model.split_once('/') {
-            Some((provider, _)) => check(provider, Some(model), effort),
+            Some((provider, _)) => check(provider, Some(model), effort, network),
             None => Ok(()),
         }
     };
@@ -2406,9 +2444,9 @@ pub(crate) fn check_flag_capabilities(
     };
     if let Ok(route) = route {
         let effort = effort_of(&route);
-        check_route(route)?;
+        check_route(route, flag_network)?;
         for model in &command.route.fallback {
-            check_fallback(&model.0, effort.as_deref())?;
+            check_fallback(&model.0, effort.as_deref(), flag_network)?;
         }
     }
     // Manifest tasks carry their own routes; read them before any worktree exists.
@@ -2425,9 +2463,10 @@ pub(crate) fn check_flag_capabilities(
     {
         for task in manifest.tasks {
             let effort = effort_of(&task.route);
-            check_route(task.route)?;
+            let network = network_access(task.network, postgres).or(flag_network);
+            check_route(task.route, network)?;
             for model in &task.fallback {
-                check_fallback(model, effort.as_deref())?;
+                check_fallback(model, effort.as_deref(), network)?;
             }
         }
     }
@@ -2498,6 +2537,11 @@ fn dispatch_inner(
     };
     // An owned tree's write-root overlap is checked again once it exists.
     let mut lane_access = lane_access(&command.access, edge.roots.state.as_path())?;
+    let postgres = command
+        .access
+        .capability
+        .iter()
+        .any(|name| name == "postgres");
     // Naming this host is ordinary local placement in any mode. A peer writer
     // names a new branch the peer creates, since --worktree is a local path.
     let mut new_worktree = None;
@@ -2625,6 +2669,7 @@ fn dispatch_inner(
                 Some(id) => id,
                 None => derived_task(&command.operation_id, index)?,
             };
+            let network = network_access(task.network, postgres);
             tasks.push((
                 task_id,
                 task.title,
@@ -2637,6 +2682,7 @@ fn dispatch_inner(
                 task.base.or_else(|| command.base.clone()),
                 task.build_heavy || command.build_heavy,
                 task.context,
+                network,
             ));
         }
     } else {
@@ -2664,6 +2710,7 @@ fn dispatch_inner(
             command.base.clone(),
             command.build_heavy,
             None,
+            None,
         ));
     }
     let concurrency = if command.input.manifest.is_some() {
@@ -2687,6 +2734,7 @@ fn dispatch_inner(
                 base,
                 build_heavy,
                 context,
+                network,
             ),
         ) in tasks.into_iter().enumerate()
         {
@@ -2697,7 +2745,7 @@ fn dispatch_inner(
             if !fallback.is_empty() {
                 return unsupported("route fallback with --host");
             }
-            if !lane_access.is_default() {
+            if !lane_access.is_default() || network.is_some() {
                 return unsupported(
                     "network, capability, read-root or write-root access with --host",
                 );
@@ -2737,7 +2785,7 @@ fn dispatch_inner(
         .operation(&command.operation_id, &call)?
         .is_none()
     {
-        for (_, _, _, _, _, _, _, delivery, _, _, _) in &tasks {
+        for (_, _, _, _, _, _, _, delivery, _, _, _, _) in &tasks {
             if let Some(delivery) = delivery {
                 check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
@@ -2762,7 +2810,7 @@ fn dispatch_inner(
     config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    for (_, title, prompt, _, models, _, _, _, _, _, _) in &tasks {
+    for (_, title, prompt, _, models, _, _, _, _, _, _, _) in &tasks {
         run::Service::scan(prompt)?;
         if let Some(title) = title {
             provenant_core::validate_task_title(title)
@@ -2817,7 +2865,12 @@ fn dispatch_inner(
                 base,
                 build_heavy,
                 context,
+                network,
             )| {
+                let mut access = lane_access.clone();
+                if network.is_some() {
+                    access.network = network;
+                }
                 Submitted {
                     context,
                     build_heavy,
@@ -2834,7 +2887,7 @@ fn dispatch_inner(
                     delivery_id,
                     deliver,
                     worktree: command.access.worktree.clone(),
-                    access: lane_access.clone(),
+                    access,
                 }
             },
         )
@@ -8773,6 +8826,32 @@ mod tests {
         assert!(
             matches!(&manifest.tasks[1].route, run::RequestedRoute::Model { provider, model, .. } if provider == "codex" && model == "gpt-6-luna")
         );
+    }
+
+    #[test]
+    fn manifest_task_network_and_adapter_route_syntax() -> Result<(), Box<dyn std::error::Error>> {
+        let manifest: Manifest = serde_json::from_value(json!({"schema_version": 1, "tasks": [
+            {"prompt": "x", "route": {"kind": "adapter", "provider": "command", "name": "fmt"}, "network": "off"},
+            {"prompt": "x", "route": {"kind": "adapter", "provider": "command", "name": "fmt"}}
+        ]}))?;
+        assert!(matches!(manifest.tasks[0].network, Some(Switch::Off)));
+        assert!(manifest.tasks[1].network.is_none());
+        assert!(
+            serde_json::from_value::<Manifest>(json!({"schema_version": 1, "tasks": [
+                {"prompt": "x", "route": {"kind": "adapter", "provider": "command", "name": "fmt"}, "network": "maybe"}
+            ]}))
+            .is_err()
+        );
+        assert!(matches!(
+            requested(None, Some("command/fmt"), None).map_err(|_| "adapter route")?,
+            run::RequestedRoute::Adapter { provider, name, .. } if provider == "command" && name == "fmt"
+        ));
+        assert!(requested(None, Some("command/fmt"), Some("high".into())).is_err());
+        assert!(matches!(
+            requested(None, Some("senior"), None).map_err(|_| "named route")?,
+            run::RequestedRoute::Named { .. }
+        ));
+        Ok(())
     }
 
     #[test]

@@ -94,29 +94,73 @@ fn configure_commands(rig: &TestRig, commands: Value) -> Result {
     Ok(())
 }
 
+/// How a test names the command lane: a manifest task or `--route command/NAME`.
+#[derive(Clone, Copy)]
+enum Via {
+    /// A manifest, with an optional `--network` flag beside it.
+    Manifest(Option<&'static str>),
+    Route,
+}
+
 fn dispatch(rig: &TestRig, name: &str, timeout: u64) -> Result<Value> {
-    let manifest = rig.root.join(format!("{name}.json"));
-    let task = json!({
-        "prompt":"Ignore this prompt: it cannot change command argv.",
-        "route":{"kind":"adapter","provider":"command","name":name}
-    });
-    fs::write(
-        &manifest,
-        serde_json::to_vec(&json!({"schema_version":1,"tasks":[task]}))?,
-    )?;
+    dispatch_with(rig, name, timeout, Via::Manifest(None), None)
+}
+
+fn dispatch_with(
+    rig: &TestRig,
+    name: &str,
+    timeout: u64,
+    via: Via,
+    network: Option<&str>,
+) -> Result<Value> {
+    let prompt = "Ignore this prompt: it cannot change command argv.";
     let timeout = timeout.to_string();
-    // Adapter routes exist only in manifests, which refuse --network: command
-    // lanes always run at the adapter's provider-only default.
-    let output = rig.command(&[
-        "dispatch",
-        "--manifest",
-        manifest.to_str().ok_or("manifest")?,
-        "--operation-id",
-        name,
-        "--provider-timeout",
-        &timeout,
-        "--json",
-    ])?;
+    let mut args = vec!["dispatch".to_owned()];
+    match via {
+        Via::Manifest(flag) => {
+            let manifest = rig.root.join(format!("{name}.json"));
+            let mut task = json!({
+                "prompt":prompt,
+                "route":{"kind":"adapter","provider":"command","name":name}
+            });
+            if let Some(network) = network {
+                task["network"] = json!(network);
+            }
+            fs::write(
+                &manifest,
+                serde_json::to_vec(&json!({"schema_version":1,"tasks":[task]}))?,
+            )?;
+            args.extend([
+                "--manifest".into(),
+                manifest.to_str().ok_or("manifest")?.into(),
+            ]);
+            if let Some(flag) = flag {
+                args.extend(["--network".into(), flag.into()]);
+            }
+        }
+        Via::Route => {
+            let file = rig.root.join(format!("{name}.prompt"));
+            fs::write(&file, prompt)?;
+            args.extend([
+                "--prompt-file".into(),
+                file.to_str().ok_or("prompt")?.into(),
+                "--route".into(),
+                format!("command/{name}"),
+            ]);
+            if let Some(network) = network {
+                args.extend(["--network".into(), network.into()]);
+            }
+        }
+    }
+    args.extend([
+        "--operation-id".into(),
+        name.into(),
+        "--provider-timeout".into(),
+        timeout,
+        "--json".into(),
+    ]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = rig.command(&args)?;
     assert_eq!(
         code(&output),
         0,
@@ -360,8 +404,11 @@ printf 'custom interpreter ran; credentials and writes denied\n'
     let id = attempt_id(&submitted)?;
     let lane = settled(&rig, id)?;
     assert_eq!(lane["state"], "succeeded", "{lane}");
-    // Command lanes never get open network.
-    assert_ne!(lane["network"], "open", "{lane}");
+    // Network is on unless the task turns it off.
+    assert_eq!(
+        submitted["data"]["lanes"][0]["network"], "open",
+        "{submitted}"
+    );
     let run = submitted["data"]["run_id"].as_str().ok_or("run id")?;
     let result = fs::read_to_string(
         rig.state
@@ -438,6 +485,59 @@ fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> 
         0,
         "detached child {child} survived settlement"
     );
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
+fn command_network_is_per_task_through_manifest_and_single_task_route() -> Result {
+    if !available()? {
+        return Ok(());
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port().to_string();
+    let reach = json!({"argv":["/usr/bin/nc","-z","-w","2","127.0.0.1",port]});
+    let rig = rig(json!({
+        "mf-off": reach, "mf-on": reach, "m-default": reach, "m-on": reach, "m-off": reach,
+        "r-default": reach, "r-on": reach, "r-off": reach
+    }))?;
+    let cleanup = rig.process_cleanup();
+    for (name, via, network, state, reported) in [
+        ("m-default", Via::Manifest(None), None, "succeeded", "open"),
+        ("m-on", Via::Manifest(None), Some("on"), "succeeded", "open"),
+        (
+            "m-off",
+            Via::Manifest(None),
+            Some("off"),
+            "failed",
+            "provider",
+        ),
+        (
+            "mf-off",
+            Via::Manifest(Some("off")),
+            None,
+            "failed",
+            "provider",
+        ),
+        (
+            "mf-on",
+            Via::Manifest(Some("off")),
+            Some("on"),
+            "succeeded",
+            "open",
+        ),
+        ("r-default", Via::Route, None, "succeeded", "open"),
+        ("r-on", Via::Route, Some("on"), "succeeded", "open"),
+        ("r-off", Via::Route, Some("off"), "failed", "provider"),
+    ] {
+        let submitted = dispatch_with(&rig, name, 10, via, network)?;
+        let lane = settled(&rig, attempt_id(&submitted)?)?;
+        assert_eq!(lane["state"], state, "{name}: {lane}");
+        assert_eq!(
+            submitted["data"]["lanes"][0]["network"], reported,
+            "{name}: {submitted}"
+        );
+    }
     cleanup.disarm();
     Ok(())
 }
