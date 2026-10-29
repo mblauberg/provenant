@@ -368,7 +368,6 @@ impl<'de> Deserialize<'de> for ModelPolicies {
             rules: Vec<RuleInput>,
         }
         let input = Input::deserialize(deserializer)?;
-        let now = jiff::Timestamp::now().as_second();
         let migrated = input.rules.iter().any(|rule| {
             rule.starts_unix_seconds.is_some()
                 || rule.expires_unix_seconds.is_some()
@@ -378,26 +377,20 @@ impl<'de> Deserialize<'de> for ModelPolicies {
         let rules: Vec<ModelPolicyRule> = input
             .rules
             .into_iter()
-            .filter_map(|rule| {
-                let legacy = rule.starts_unix_seconds.is_some()
-                    || rule.expires_unix_seconds.is_some()
-                    || rule.windows.is_some();
+            .map(|rule| {
                 let schedule = rule.schedule.unwrap_or_else(|| Schedule {
                     starts: rule.starts_unix_seconds,
                     expires: rule.expires_unix_seconds,
                     windows: rule.windows.unwrap_or_default(),
                     ..Default::default()
                 });
-                if legacy && schedule.expires.is_some_and(|expiry| expiry <= now) {
-                    return None;
-                }
-                Some(ModelPolicyRule {
+                ModelPolicyRule {
                     adapter: rule.adapter,
                     model: rule.model,
                     account: rule.account,
                     schedule,
                     policy: rule.policy,
-                })
+                }
             })
             .collect();
         if migrated {
@@ -926,7 +919,7 @@ mod tests {
         );
         let expired: ModelPolicies =
             toml_edit::de::from_str("[[rules]]\nexpires_unix_seconds=1\n")?;
-        assert!(expired.rules.is_empty());
+        assert_eq!(expired.rules.len(), 1);
         let sunday_monday = Schedule {
             windows: vec![ScheduleWindow {
                 weekdays: vec![6],
@@ -983,6 +976,29 @@ mod tests {
             .as_second();
         assert!(unknown.active(sunday_utc));
         assert!(unknown.tz.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_expiry_is_evaluated_at_the_supplied_instant() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let model = ModelId::parse("codex/gpt-6.1-terra")?;
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            "[[rules]]\nmodel='codex/gpt-6.1-terra'\nexpires_unix_seconds=100\n[rules.policy.lane]\nmax_turns=17\n",
+        )?;
+
+        assert_eq!(
+            policies.effective(&model, None, 99).policy.lane.max_turns,
+            Some(17)
+        );
+        assert_eq!(
+            policies.effective(&model, None, 100).policy.lane.max_turns,
+            None
+        );
+        assert_eq!(
+            policies.effective(&model, None, 101).policy.lane.max_turns,
+            None
+        );
         Ok(())
     }
 

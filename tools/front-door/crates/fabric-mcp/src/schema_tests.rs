@@ -1083,6 +1083,36 @@ fn published_output_schemas_accept_real_runtime_records() {
 }
 
 #[test]
+fn submit_accepts_optional_bounded_work_context() {
+    use provenant_fabric_runtime::coordination::facade::SubmitInput;
+    let schema = &all_catalogue()
+        .iter()
+        .find(|tool| tool["name"] == "fabric_run")
+        .unwrap()["inputSchema"];
+    let mut input = json!({
+        "op":"submit", "operation_id":"work-context", "tasks":[{
+            "prompt":"review", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1,
+            "context":{"graph_id":"graph", "node_id":"inspect", "pattern":"council"}
+        }]
+    });
+    assert!(accepts(schema, schema, &input));
+    assert!(ToolCall::parse("fabric_run", input.clone()).is_ok());
+    let SubmitInput::Submit { tasks, .. } = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(
+        tasks[0].context.as_ref().unwrap().pattern.as_deref(),
+        Some("council")
+    );
+    for invalid in ["".to_owned(), "x".repeat(257), "line\nbreak".to_owned()] {
+        input["tasks"][0]["context"]["pattern"] = json!(invalid);
+        assert!(ToolCall::parse("fabric_run", input.clone()).is_err());
+    }
+    input["tasks"][0].as_object_mut().unwrap().remove("context");
+    assert!(accepts(schema, schema, &input));
+    let SubmitInput::Submit { tasks, .. } = serde_json::from_value(input).unwrap();
+    assert!(tasks[0].context.is_none());
+}
+
+#[test]
 fn submit_accepts_optional_bounded_git_base() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
 

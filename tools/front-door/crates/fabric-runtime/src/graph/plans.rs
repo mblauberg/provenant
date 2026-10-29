@@ -337,6 +337,7 @@ fn fragment(
         }
     }
     let local = GraphDocument {
+        context: document.context.clone(),
         extra: Default::default(),
         schema_version: 1,
         graph_id: "fragment".into(),
