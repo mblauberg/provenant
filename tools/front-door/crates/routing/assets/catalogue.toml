@@ -1,3 +1,6 @@
+# `quota_pool` (optional) names the quota pool group a model draws on, for
+# adapters with grouped quota windows (`group.window`, such as agy). Only that
+# group's windows pace, reserve or exhaust the model. Unset applies every window.
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
@@ -176,18 +179,21 @@ trains_on_prompts = false
 
 [[models]]
 model = "agy/gemini-3.8-flash"
+quota_pool = "gemini"
 efforts = ["low", "medium", "high"]
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
 
 [[models]]
 model = "agy/claude-sonnet-4-6"
+quota_pool = "claude"
 efforts = []
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
 
 [[models]]
 model = "agy/claude-opus-4-6-thinking"
+quota_pool = "claude"
 efforts = []
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false

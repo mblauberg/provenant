@@ -478,14 +478,16 @@ fn selected_window(
     window: &provenant_quota::QuotaWindow,
     profile: Option<&PacingProfile>,
     adapter: &str,
+    model_pool: Option<&str>,
 ) -> bool {
-    profile
-        .and_then(|p| p.windows.as_ref())
-        .is_none_or(|windows| {
-            windows
-                .iter()
-                .any(|kind| window_matches(window, *kind, adapter))
-        })
+    window_serves(adapter, &window.pool, model_pool)
+        && profile
+            .and_then(|p| p.windows.as_ref())
+            .is_none_or(|windows| {
+                windows
+                    .iter()
+                    .any(|kind| window_matches(window, *kind, adapter))
+            })
 }
 /// Returns the instant and, when a monthly day was clamped to a shorter month,
 /// the requested and the actual day.
@@ -587,6 +589,7 @@ fn reference_status_usable(status: QuotaStatus) -> bool {
 fn reference_deadline(
     deadline: &ResetDeadline,
     window: Option<&provenant_quota::QuotaWindow>,
+    model_pool: Option<&str>,
     context: &RoutingContext<'_>,
 ) -> Option<i64> {
     let observation = reference_observation(deadline, context)
@@ -596,6 +599,7 @@ fn reference_deadline(
         .windows
         .iter()
         .filter(|w| window_matches(w, deadline.window, &observation.snapshot.account.adapter))
+        .filter(|w| window_serves(&observation.snapshot.account.adapter, &w.pool, model_pool))
         .filter_map(|peer| {
             let reset = peer.resets_unix_seconds?;
             if reset <= observation.snapshot.observed_unix_seconds {
@@ -625,12 +629,13 @@ fn pace_snapshot_factor(
     now: i64,
     profile: Option<&PacingProfile>,
     adapter: &str,
+    model_pool: Option<&str>,
     context: &RoutingContext<'_>,
 ) -> Option<(u32, String, bool)> {
     snapshot
         .windows
         .iter()
-        .filter(|w| selected_window(w, profile, adapter))
+        .filter(|w| selected_window(w, profile, adapter, model_pool))
         .filter_map(|window| {
             let duration = window.window_seconds?;
             if duration == 0 {
@@ -659,7 +664,8 @@ fn pace_snapshot_factor(
             let configured = profile.and_then(|p| p.deadline.as_ref());
             let resolved = configured.and_then(|d| match d {
                 PacingDeadline::ResetOf(reference) => {
-                    reference_deadline(reference, Some(window), context).map(|d| (d, None))
+                    reference_deadline(reference, Some(window), model_pool, context)
+                        .map(|d| (d, None))
                 }
                 PacingDeadline::Fixed(fixed) => window_deadline(fixed, window),
             });
@@ -723,6 +729,16 @@ fn pacing_factor_basis_points(
         "source={source} policy={policy:?}{}",
         expiry.map(|e| format!(" until={e}")).unwrap_or_default()
     );
+    let detail = match (
+        provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.grouped_quota_pools),
+        context.catalogue.quota_pool(model),
+    ) {
+        (true, Some(pool)) => format!("{detail} quota_pool={pool}"),
+        (true, None) => {
+            format!("{detail} quota_pool unset; all quota windows apply (conservative)")
+        }
+        _ => detail,
+    };
     let detail = if model.adapter() == "opencode" && model.model().starts_with("opencode-go/") {
         let observation = go_quota_observation(model, account, context);
         let details = observation.and_then(|o| o.snapshot.details.as_ref());
@@ -776,6 +792,7 @@ fn pacing_factor_basis_points(
                 context.now_seconds(),
                 profile,
                 model.adapter(),
+                context.catalogue.quota_pool(model),
                 context,
             )
         });
@@ -802,6 +819,7 @@ fn pacing_factor_basis_points(
                     .unwrap_or_default(),
                 profile,
                 model.adapter(),
+                context.catalogue.quota_pool(model),
             )
         })
         .map(|window| format!(" reserve exclusion window={window}"))
@@ -809,7 +827,13 @@ fn pacing_factor_basis_points(
     let detail = format!("{detail}{reserve_detail}");
     let neutral_detail = match profile.and_then(|p| p.deadline.as_ref()) {
         Some(PacingDeadline::ResetOf(reference))
-            if reference_deadline(reference, None, context).is_none() =>
+            if reference_deadline(
+                reference,
+                None,
+                context.catalogue.quota_pool(model),
+                context,
+            )
+            .is_none() =>
         {
             format!(
                 "{detail} {}; falling back to window reset; unobserved windows neutral",
@@ -888,11 +912,12 @@ fn pacing_reserve_window(
     reserve: PacingReserve,
     profile: Option<&PacingProfile>,
     adapter: &str,
+    model_pool: Option<&str>,
 ) -> Option<String> {
     snapshot
         .windows
         .iter()
-        .filter(|w| selected_window(w, profile, adapter))
+        .filter(|w| selected_window(w, profile, adapter, model_pool))
         .find(|window| {
             let kind = [
                 PacingWindow::Rolling,
@@ -984,10 +1009,21 @@ fn account_reason<'q>(
         && let Some(q) = quota
     {
         reason = match q.snapshot.status {
-            QuotaStatus::Exhausted if !exhaustion_lapsed(&q.snapshot, context.now_seconds()) => {
+            QuotaStatus::Exhausted
+                if !exhaustion_lapsed(
+                    &q.snapshot,
+                    context.now_seconds(),
+                    context.catalogue.quota_pool(model),
+                ) =>
+            {
                 Some(RouteExclusionReason::Exhausted)
             }
             QuotaStatus::AuthRequired => Some(RouteExclusionReason::AuthRequired),
+            QuotaStatus::Available | QuotaStatus::CreditOnly
+                if model_pool_exhausted(&q.snapshot, model, context) =>
+            {
+                Some(RouteExclusionReason::Exhausted)
+            }
             _ => None,
         };
     }
@@ -1014,6 +1050,7 @@ fn account_reason<'q>(
                 .unwrap_or_default(),
             profile,
             model.adapter(),
+            context.catalogue.quota_pool(model),
         )
         .is_some()
     {
@@ -1021,11 +1058,47 @@ fn account_reason<'q>(
     }
     (reason, quota)
 }
+/// A grouped adapter's snapshot stays available while another group has
+/// capacity; the windows serving this model (its pool, ungrouped windows, or
+/// every window when it has no pool) may still be spent.
+fn model_pool_exhausted(
+    snapshot: &provenant_quota::QuotaSnapshot,
+    model: &ModelId,
+    context: &RoutingContext<'_>,
+) -> bool {
+    if !provenant_records::AdapterSpec::get(model.adapter()).is_some_and(|s| s.grouped_quota_pools)
+    {
+        return false;
+    }
+    let pool = context.catalogue.quota_pool(model);
+    let now = context.now_seconds();
+    snapshot
+        .windows
+        .iter()
+        .filter(|w| window_serves(model.adapter(), &w.pool, pool))
+        .any(|w| {
+            w.used_basis_points >= 10_000
+                && (w.resets_unix_seconds.is_none_or(|reset| reset > now)
+                    || snapshot
+                        .details
+                        .as_ref()
+                        .is_some_and(|d| d.calibration_active(&w.pool, now)))
+        })
+}
+fn window_serves(adapter: &str, window: &str, model_pool: Option<&str>) -> bool {
+    provenant_records::AdapterSpec::get(adapter)
+        .is_none_or(|spec| spec.window_serves_pool(window, model_pool))
+}
 /// An exhausted snapshot stops binding once every full window has reset.
-fn exhaustion_lapsed(snapshot: &provenant_quota::QuotaSnapshot, now_seconds: i64) -> bool {
+fn exhaustion_lapsed(
+    snapshot: &provenant_quota::QuotaSnapshot,
+    now_seconds: i64,
+    model_pool: Option<&str>,
+) -> bool {
     let mut full = snapshot
         .windows
         .iter()
+        .filter(|w| window_serves(&snapshot.account.adapter, &w.pool, model_pool))
         .filter(|w| w.used_basis_points >= 10_000)
         .peekable();
     full.peek().is_some()
