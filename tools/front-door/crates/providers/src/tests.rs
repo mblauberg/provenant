@@ -1315,7 +1315,7 @@ fn claude_usage_comes_from_the_result_event() -> Result<(), ProviderError> {
     let stream = concat!(
         "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
         "{\"type\":\"assistant\",\"session_id\":\"s\",\"parent_tool_use_id\":null,\"message\":{\"model\":\"claude-sonnet-5\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n",
-        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40}}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40,\"cache_creation\":{\"ephemeral_5m_input_tokens\":15,\"ephemeral_1h_input_tokens\":25}}}\n",
     );
     let (events, _) = replay(&claude::Claude, stream, EXIT)?;
     let usage: Vec<_> = events
@@ -1329,6 +1329,86 @@ fn claude_usage_comes_from_the_result_event() -> Result<(), ProviderError> {
             output: 20,
             cache_read: Some(30),
             cache_write: Some(40),
+            cache_write_1h: Some(25),
+        }]
+    );
+    Ok(())
+}
+
+fn usage_events(events: &[ProviderEvent]) -> Vec<&ProviderEvent> {
+    events
+        .iter()
+        .filter(|event| matches!(event, ProviderEvent::Usage { .. }))
+        .collect()
+}
+
+#[test]
+fn codex_cached_input_is_cache_read_and_leaves_uncached_input() -> Result<(), ProviderError> {
+    // Shape of the recorded exec stream: `input_tokens` contains the cached part.
+    let stream = concat!(
+        "{\"type\":\"thread.started\",\"thread_id\":\"t1\"}\n",
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":13501,\"cached_input_tokens\":11520,\"cache_write_input_tokens\":1000,\"output_tokens\":5,\"reasoning_output_tokens\":0}}\n",
+    );
+    let (events, _) = replay(&codex::Codex, stream, EXIT)?;
+    assert_eq!(
+        usage_events(&events),
+        [&ProviderEvent::Usage {
+            input: 981,
+            output: 5,
+            cache_read: Some(11520),
+            cache_write: Some(1000),
+            cache_write_1h: None,
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn codex_usage_without_cache_fields_stays_unknown_and_never_underflows() -> Result<(), ProviderError>
+{
+    let stream = concat!(
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}\n",
+        // A cached count above the input cannot make the remainder negative.
+        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":5,\"cached_input_tokens\":9,\"output_tokens\":2}}\n",
+    );
+    let (events, _) = replay(&codex::Codex, stream, EXIT)?;
+    assert_eq!(
+        usage_events(&events),
+        [
+            &ProviderEvent::Usage {
+                input: 7,
+                output: 2,
+                cache_read: None,
+                cache_write: None,
+                cache_write_1h: None,
+            },
+            &ProviderEvent::Usage {
+                input: 0,
+                output: 2,
+                cache_read: Some(9),
+                cache_write: None,
+                cache_write_1h: None,
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn cursor_cache_tokens_are_recorded_beside_input() -> Result<(), ProviderError> {
+    let stream = concat!(
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"inputTokens\":10,\"outputTokens\":20,\"cacheReadTokens\":30,\"cacheWriteTokens\":40}}\n",
+    );
+    let (events, _) = replay(&cursor::Cursor, stream, EXIT)?;
+    assert_eq!(
+        usage_events(&events),
+        [&ProviderEvent::Usage {
+            input: 10,
+            output: 20,
+            cache_read: Some(30),
+            cache_write: Some(40),
+            cache_write_1h: None,
         }]
     );
     Ok(())

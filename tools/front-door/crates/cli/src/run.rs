@@ -442,12 +442,14 @@ impl Registry<'_> {
                     output,
                     cache_read,
                     cache_write,
+                    cache_write_1h,
                 } => {
                     has_usage = true;
                     decoded.usage.uncached_input = Some(*input);
                     decoded.usage.output_excluding_reasoning = Some(*output);
                     decoded.usage.cache_read = *cache_read;
                     decoded.usage.cache_write = *cache_write;
+                    decoded.usage.cache_write_1h = *cache_write_1h;
                     decoded.usage.source = Some("provider".into());
                 }
                 _ => {}
@@ -8283,7 +8285,7 @@ mod tests {
         };
         let stream = concat!(
             "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40,\"cache_creation\":{\"ephemeral_1h_input_tokens\":25}}}\n",
         );
         let decoded = Registry::default()
             .decode(
@@ -8297,7 +8299,34 @@ mod tests {
         assert_eq!(decoded.usage.output_excluding_reasoning, Some(20));
         assert_eq!(decoded.usage.cache_read, Some(30));
         assert_eq!(decoded.usage.cache_write, Some(40));
+        assert_eq!(decoded.usage.cache_write_1h, Some(25));
         assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
+    }
+
+    #[test]
+    fn codex_usage_records_cache_read_apart_from_uncached_input() {
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-terra".into()),
+            ..Default::default()
+        };
+        let stream = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7}}\n",
+        );
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.usage.uncached_input, Some(20));
+        assert_eq!(decoded.usage.cache_read, Some(80));
+        assert_eq!(decoded.usage.cache_write, None);
+        assert_eq!(decoded.usage.output_excluding_reasoning, Some(7));
     }
 
     #[test]

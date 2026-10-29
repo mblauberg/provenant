@@ -361,6 +361,9 @@ pub struct UsageRecord {
     pub uncached_input: Option<u64>,
     pub cache_read: Option<u64>,
     pub cache_write: Option<u64>,
+    /// The long-TTL part of `cache_write`, where the provider splits writes.
+    #[serde(default)]
+    pub cache_write_1h: Option<u64>,
     pub output_excluding_reasoning: Option<u64>,
     pub reasoning: Option<u64>,
     pub source: Option<String>,
@@ -372,6 +375,7 @@ impl From<UsageRecord> for crate::Usage {
             uncached_input: u.uncached_input,
             cache_read: u.cache_read,
             cache_write: u.cache_write,
+            cache_write_1h: u.cache_write_1h,
             output_excluding_reasoning: u.output_excluding_reasoning,
             reasoning: u.reasoning,
         }

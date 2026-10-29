@@ -818,6 +818,14 @@ struct Usage {
     cache_read_input_tokens: Option<u64>,
     #[serde(default)]
     cache_creation_input_tokens: Option<u64>,
+    /// Cache writes split by time-to-live bucket.
+    #[serde(default)]
+    cache_creation: Option<CacheCreation>,
+}
+#[derive(Deserialize)]
+struct CacheCreation {
+    #[serde(default)]
+    ephemeral_1h_input_tokens: Option<u64>,
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
@@ -891,6 +899,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                     output: usage.output_tokens,
                     cache_read: usage.cache_read_input_tokens,
                     cache_write: usage.cache_creation_input_tokens,
+                    cache_write_1h: usage
+                        .cache_creation
+                        .and_then(|split| split.ephemeral_1h_input_tokens),
                 });
             }
             if is_error || subtype != "success" {

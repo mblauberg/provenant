@@ -52,6 +52,7 @@ fn fact(number: u64, input: Option<u64>) -> AttemptFact {
             uncached_input: input,
             cache_read: Some(0),
             cache_write: Some(0),
+            cache_write_1h: None,
             output_excluding_reasoning: Some(0),
             reasoning: Some(0),
         },
@@ -98,6 +99,19 @@ fn quota_usage_separates_accounts_projects_and_chairs_from_lane_tokens() {
         account: "account".into(),
         session: "session".into(),
         project: Some(project),
+        config: None,
+        usage: vec![crate::ChairModelUsage {
+            model: "m".into(),
+            usage: Usage {
+                uncached_input: Some(1),
+                cache_read: Some(9),
+                cache_write: Some(0),
+                cache_write_1h: None,
+                output_excluding_reasoning: Some(2),
+                reasoning: None,
+            },
+        }],
+        unread: None,
     };
     let rows = quota_usage(
         [first, second, other_account, unknown],
@@ -295,6 +309,7 @@ fn exact_disjoint_usage_is_not_subtracted_or_attributed_from_requested_routes() 
         uncached_input: Some(10),
         cache_read: Some(20),
         cache_write: Some(30),
+        cache_write_1h: None,
         output_excluding_reasoning: Some(40),
         reasoning: Some(50),
     };
@@ -695,6 +710,7 @@ fn claude_attempt_with_cache_usage_reports_all_four_categories() {
         uncached_input: Some(10),
         cache_read: Some(30),
         cache_write: Some(40),
+        cache_write_1h: None,
         output_excluding_reasoning: Some(20),
         reasoning: None,
     };
@@ -719,4 +735,175 @@ fn claude_attempt_with_cache_usage_reports_all_four_categories() {
     );
     assert_eq!(report.coverage.missing_categories.cache_read, 0);
     assert_eq!(report.coverage.missing_categories.cache_write, 0);
+}
+
+fn cached(n: u64, uncached: u64, read: Option<u64>, write: Option<u64>) -> AttemptFact {
+    let mut fact = fact(n, Some(uncached));
+    fact.usage.cache_read = read;
+    fact.usage.cache_write = write;
+    fact
+}
+
+#[test]
+fn cache_read_share_is_reported_per_model_account_provider_and_source() {
+    use crate::usage::ChairSession;
+    let mut other_model = cached(3, 50, Some(50), Some(0));
+    other_model.resolved_route.as_mut().unwrap().model = Some("m2".into());
+    let mut other_account = cached(4, 100, Some(0), Some(0));
+    other_account.resolved_route.as_mut().unwrap().account_label = Some("other".into());
+    let chair = ChairSession {
+        adapter: "p".into(),
+        account: "account".into(),
+        session: "s".into(),
+        project: None,
+        config: None,
+        usage: vec![crate::ChairModelUsage {
+            model: "m".into(),
+            usage: Usage {
+                uncached_input: Some(10),
+                cache_read: Some(980),
+                cache_write: Some(10),
+                cache_write_1h: Some(4),
+                output_excluding_reasoning: Some(5),
+                reasoning: None,
+            },
+        }],
+        unread: None,
+    };
+    let facts = [
+        // 900 read of 1,000 input.
+        cached(1, 50, Some(900), Some(50)),
+        cached(2, 100, Some(0), Some(0)),
+        other_model,
+        other_account,
+        // Reports no cache split: counted as missing, not as a miss.
+        cached(5, 1_000_000, None, None),
+    ];
+    let report = stats_with_chair(
+        facts,
+        [chair],
+        &prices(Some(1)),
+        Window::default(),
+    )
+    .unwrap();
+    let find = |rows: &[CacheGroup], source: &str, model: Option<&str>, account: Option<&str>| {
+        rows.iter()
+            .find(|g| {
+                g.source == source
+                    && g.model.as_deref() == model
+                    && g.account.as_deref() == account
+            })
+            .map(|g| g.cache.clone())
+            .unwrap()
+    };
+    let by_model = find(&report.cache.by_model, "lane", Some("m"), None);
+    assert_eq!(by_model.reporting, 3);
+    assert_eq!(by_model.missing, 1);
+    assert_eq!(by_model.input_tokens, 1_200);
+    assert_eq!(by_model.read_tokens, 900);
+    assert_eq!(by_model.read_share_basis_points, Some(7_500));
+    let other = find(&report.cache.by_model, "lane", Some("m2"), None);
+    assert_eq!(other.read_share_basis_points, Some(5_000));
+    let account = find(&report.cache.by_account, "lane", None, Some("account"));
+    assert_eq!(account.read_tokens, 950);
+    assert_eq!(
+        find(&report.cache.by_account, "lane", None, Some("other")).read_share_basis_points,
+        Some(0)
+    );
+    let chair_model = find(&report.cache.by_model, "chair", Some("p/m"), None);
+    assert_eq!(chair_model.read_share_basis_points, Some(9_800));
+    assert_eq!(chair_model.write_1h_tokens, 4);
+    assert_eq!(report.cache.by_source.len(), 2);
+    assert_eq!(report.totals.cache.reporting, 4);
+    let chair = report.chair.unwrap();
+    assert_eq!(chair.sessions, 1);
+    assert_eq!(chair.groups[0].sessions, 1);
+    assert_eq!(chair.groups[0].usage.cache_read.known, 980);
+}
+
+#[test]
+fn chair_usage_is_priced_by_the_adapter_qualified_model() {
+    use crate::usage::ChairSession;
+    let mut config = configured(Some(1_000_000));
+    config.models[0].provider = "claude".into();
+    config.models[0].model = "claude/claude-opus-5-5".into();
+    let table = validate_prices(&config).unwrap();
+    let chair = ChairSession {
+        adapter: "claude".into(),
+        account: "work".into(),
+        session: "s".into(),
+        project: None,
+        config: None,
+        usage: vec![crate::ChairModelUsage {
+            model: "claude-opus-5-5".into(),
+            usage: Usage {
+                uncached_input: Some(1),
+                cache_read: Some(2),
+                cache_write: Some(3),
+                cache_write_1h: None,
+                output_excluding_reasoning: Some(4),
+                reasoning: None,
+            },
+        }],
+        unread: None,
+    };
+    let report = stats_with_chair([], [chair], &table, Window::default()).unwrap();
+    let group = &report.chair.unwrap().groups[0];
+    assert_eq!(group.model, "claude/claude-opus-5-5");
+    // Ten tokens at one dollar per million.
+    assert_eq!(group.cost.complete.as_ref().unwrap().microdollars, 10);
+    assert_eq!(group.cost.subscription_attempts, 1);
+}
+
+#[test]
+fn an_empty_cache_has_no_share() {
+    let report = reduce([cached(1, 0, Some(0), Some(0))], Some(1)).unwrap();
+    assert_eq!(report.totals.cache.read_share_basis_points, None);
+    let report = reduce([], None).unwrap();
+    assert!(report.cache.by_model.is_empty());
+    assert!(report.chair.is_none());
+}
+
+#[test]
+fn absent_reasoning_does_not_make_the_cost_a_lower_bound() {
+    // Providers count reasoning inside output, so only a missing price or a
+    // missing priced count leaves the cost unknown.
+    let mut attempt = fact(1, Some(1_000_000));
+    attempt.usage.reasoning = None;
+    let report = reduce([attempt.clone()], Some(1)).unwrap();
+    assert!(report.totals.cost.complete.is_some());
+    assert_eq!(report.coverage.missing_categories.reasoning, 1);
+    attempt.usage.cache_read = None;
+    let report = reduce([attempt], Some(1)).unwrap();
+    assert!(report.totals.cost.complete.is_none());
+}
+
+#[test]
+fn unread_chair_sessions_are_counted_not_dropped() {
+    use crate::usage::ChairSession;
+    let chair = |session: &str, unread| ChairSession {
+        adapter: "claude".into(),
+        account: crate::usage::UNATTRIBUTED.into(),
+        session: session.into(),
+        project: None,
+        config: None,
+        usage: Vec::new(),
+        unread,
+    };
+    let report = stats_with_chair(
+        [],
+        [
+            chair("a", Some(crate::Unread::TranscriptNotFound)),
+            chair("a", Some(crate::Unread::TranscriptNotFound)),
+            chair("b", Some(crate::Unread::NoConfigDir)),
+        ],
+        &prices(None),
+        Window::default(),
+    )
+    .unwrap();
+    let chair = report.chair.unwrap();
+    assert_eq!(chair.sessions, 2);
+    assert_eq!(chair.unread[&crate::Unread::TranscriptNotFound], 1);
+    assert_eq!(chair.unread[&crate::Unread::NoConfigDir], 1);
+    assert!(chair.groups.is_empty());
 }
