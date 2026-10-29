@@ -43,7 +43,7 @@ jobs:
   stress-tests:
     name: Changed-test stress signals
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     if: github.event_name == 'pull_request' && github.event.action != 'labeled'
     permissions:
       contents: read
