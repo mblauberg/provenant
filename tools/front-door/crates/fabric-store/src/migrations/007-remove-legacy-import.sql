@@ -1,14 +1,31 @@
--- The one-shot legacy import is gone. Opening refuses this migration while any
--- data that import wrote remains (db.rs), so only always-null members and the
--- `imported` event of an import that brought nothing over are left. Delete that
--- event, drop the marker table and strip those members wherever a Task or
--- Message is stored: records, coordination receipts (TaskResult) and committed
--- peer replies (PeerResponse carrying a TaskResult). json_remove keeps the other members
--- verbatim, so canonical records stay byte-identical to a fresh encode. Only
--- rows that hold a removed member are rewritten.
+-- Deliberately discard imported rows and references that current readers cannot
+-- interpret. Null retired members on ordinary records are removed below.
+DELETE FROM deliveries
+ WHERE (project, message) IN (
+   SELECT project, id FROM messages
+   WHERE json_type(CAST(record AS TEXT), '$.legacy') NOT IN ('null')
+      OR json_type(CAST(record AS TEXT), '$.legacy_output_path') NOT IN ('null')
+      OR EXISTS (SELECT 1 FROM json_tree(CAST(record AS TEXT))
+                 WHERE key = 'scope' AND value = 'legacy')
+ );
+DELETE FROM messages
+ WHERE json_type(CAST(record AS TEXT), '$.legacy') NOT IN ('null')
+    OR json_type(CAST(record AS TEXT), '$.legacy_output_path') NOT IN ('null')
+    OR EXISTS (SELECT 1 FROM json_tree(CAST(record AS TEXT))
+               WHERE key = 'scope' AND value = 'legacy');
+DELETE FROM tasks
+ WHERE json_type(CAST(record AS TEXT), '$.legacy') NOT IN ('null');
 DELETE FROM events
- WHERE json_extract(CAST(record AS TEXT), '$.kind') = 'imported'
-   AND project IN (SELECT project FROM imports WHERE tasks = 0 AND messages = 0);
+ WHERE json_extract(CAST(record AS TEXT), '$.kind') = 'imported';
+DELETE FROM coordination_operations
+ WHERE EXISTS (SELECT 1 FROM json_tree(CAST(result AS TEXT))
+               WHERE (key IN ('legacy', 'legacy_output_path') AND type <> 'null')
+                  OR (key = 'scope' AND value = 'legacy'));
+DELETE FROM peer_operations
+ WHERE CASE WHEN json_valid(CAST(response AS TEXT)) THEN
+   EXISTS (SELECT 1 FROM json_tree(CAST(response AS TEXT))
+           WHERE (key IN ('legacy', 'legacy_output_path') AND type <> 'null')
+              OR (key = 'scope' AND value = 'legacy')) END;
 DROP TABLE imports;
 UPDATE messages
  SET record = CAST(json_remove(CAST(record AS TEXT), '$.legacy', '$.legacy_output_path') AS BLOB)

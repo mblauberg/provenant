@@ -414,6 +414,7 @@ impl Registry<'_> {
             result: String::new(),
             complete: true,
             observed_route: observed_model.map(|model| run::RouteRecord {
+                extra: Default::default(),
                 provider: Some(adapter.id().into()),
                 model: Some(if model.contains('/') {
                     model.into()
@@ -673,7 +674,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         run::RequestedRoute::Model {
             model: id, effort, ..
         } => (RouteChoice::Model(model(id)?), effort.clone()),
-        run::RequestedRoute::Named { name, effort }
+        run::RequestedRoute::Named { name, effort, .. }
         | run::RequestedRoute::Review { name, effort, .. } => (
             RouteChoice::NamedRoute(RouteName::parse(name).map_err(|error| error.to_string())?),
             effort.clone(),
@@ -881,12 +882,14 @@ pub fn requested(
                 )
             })?;
             Ok(run::RequestedRoute::Model {
+                extra: Default::default(),
                 provider: id.as_str().split('/').next().unwrap_or_default().into(),
                 model: model.into(),
                 effort,
             })
         }
         (None, Some(name)) => Ok(run::RequestedRoute::Named {
+            extra: Default::default(),
             name: name.into(),
             effort,
         }),
@@ -1022,6 +1025,7 @@ fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAcc
         }
     }
     Ok(run::LaneAccess {
+        extra: Default::default(),
         network,
         read_roots: resolve(&access.read_root, "--read-root")?,
         write_roots,
@@ -2044,6 +2048,7 @@ fn dispatch_inner(
             .deliver_remote
             .zip(command.deliver_branch)
             .map(|(remote, branch)| run::WriterDeliveryRequest {
+                extra: Default::default(),
                 mode: Default::default(),
                 remote,
                 branch,
@@ -2301,6 +2306,7 @@ fn dispatch_inner(
                         Fail::new(Status::Error, ErrorKind::Identity, error.to_string())
                     })?;
                 Some(run::ChairBinding {
+                    extra: Default::default(),
                     host: context.identity.inbox.host,
                     actor: crate::workflow::session_actor(&context, None)
                         .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error))?,
@@ -2397,6 +2403,7 @@ fn replay_owned_dispatch(
             .clone()
             .zip(command.deliver_branch.clone())
             .map(|(remote, branch)| run::WriterDeliveryRequest {
+                extra: Default::default(),
                 mode: Default::default(),
                 remote,
                 branch,
@@ -3096,6 +3103,21 @@ pub fn state_and_reason(state: &run::AttemptState) -> (String, Option<String>) {
     };
     (state_name(state), reason)
 }
+fn delivery_state_text(state: &provenant_records::run::WriterDeliveryState) -> String {
+    use provenant_records::run::WriterDeliveryState;
+    match state {
+        WriterDeliveryState::Delivered { pull_request, .. } => format!(
+            "Delivered {{ pull_request: {:?} }}",
+            pull_request
+                .as_deref()
+                .map(|value| plain_text(value, usize::MAX))
+        ),
+        WriterDeliveryState::NoNewCommits { .. } => "NoNewCommits".into(),
+        WriterDeliveryState::NotAttempted { .. } => "NotAttempted".into(),
+        WriterDeliveryState::Failed { stage, .. } => format!("Failed {{ stage: {stage:?} }}"),
+    }
+}
+
 fn render_lanes(
     lanes: &[run::AttemptRecord],
     waits: &[run::LaneWait],
@@ -3210,10 +3232,10 @@ fn render_lanes(
             }
             if let Some(delivery) = &lane.delivery {
                 human.push_str(&format!(
-                    "  delivery {}:{} {:?} head={}\n",
+                    "  delivery {}:{} {} head={}\n",
                     plain_text(&delivery.remote, usize::MAX),
                     plain_text(&delivery.branch, usize::MAX),
-                    delivery.state,
+                    delivery_state_text(&delivery.state),
                     delivery
                         .head
                         .map(|h| h.to_string())
@@ -4928,7 +4950,7 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
                 accept_review,
                 &call,
             )?;
-            if let run::WriterDeliveryState::Failed { stage } = &receipt.state {
+            if let run::WriterDeliveryState::Failed { stage, .. } = &receipt.state {
                 return Err(run::RunError::Delivery(*stage).into());
             }
             Ok((
@@ -5333,6 +5355,7 @@ fn fresh_continuation_worktree(
     })?;
     Ok((
         run::WriterRequest {
+            extra: Default::default(),
             project: writer.project,
             worktree: info.path,
         },
@@ -6328,7 +6351,7 @@ mod tests {
                 std::fs::write(
                     &manifest,
                     serde_json::to_vec(&json!({"schema_version":1,"tasks":[{
-                        "prompt":"reply OK", "route":run::RequestedRoute::Model { provider:"codex".into(), model:"codex/gpt-6-luna".into(), effort:None },
+                        "prompt":"reply OK", "route":run::RequestedRoute::Model {extra: Default::default(),  provider:"codex".into(), model:"codex/gpt-6-luna".into(), effort:None },
                         "deliver":run::HostDeliveryContext::destination(mode, target)?
                     }]}))?,
                 )?;
@@ -6673,6 +6696,7 @@ mod tests {
             cwd: &cwd,
         };
         let chair = Some(run::ChairBinding {
+            extra: Default::default(),
             host: provenant_core::HostId::from_bytes([4; 16]),
             actor: ActorId::from_bytes([5; 16]),
         });
@@ -6687,6 +6711,7 @@ mod tests {
                 base: Some(base.into()),
                 head: None,
                 route: run::RequestedRoute::Model {
+                    extra: Default::default(),
                     provider: "fixture".into(),
                     model: "fixture/model".into(),
                     effort: None,
@@ -6745,6 +6770,7 @@ mod tests {
         // host index row. Repair must use the immutable original request.
         let mut replay = submission("context-base");
         replay.chair = Some(run::ChairBinding {
+            extra: Default::default(),
             host: provenant_core::HostId::from_bytes([6; 16]),
             actor: ActorId::from_bytes([7; 16]),
         });
@@ -6800,11 +6826,13 @@ mod tests {
             operation_id: OperationId::parse(&format!("trace-{n}"))?,
             created_at,
             request: run::CanonicalRequest {
+                extra: Default::default(),
                 child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    extra: Default::default(),
                     build_heavy: false,
                     title: None,
                     base: None,
@@ -6813,6 +6841,7 @@ mod tests {
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"p"),
                     route: run::RequestedRoute::Model {
+                        extra: Default::default(),
                         provider: "fixture".into(),
                         model: "fixture/model".into(),
                         effort: None,
@@ -7010,6 +7039,7 @@ mod tests {
         let mut record = store.record(prepared.attempts[0].attempt_id, &call)?;
         assert_eq!(grants_lines(&record), "");
         record.write_grants = vec![run::WriteGrantRecord {
+            extra: Default::default(),
             source: run::WriteSource::WriteRoot,
             path: provenant_records::AbsolutePath::new(std::path::Path::new("/work/shared"))?,
             scope: run::PathScope::Subtree,
@@ -7144,6 +7174,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
         let route = run::RouteRecord {
+            extra: Default::default(),
             provider: Some("codex".into()),
             model: Some("codex/model".into()),
             effort: None,
@@ -7176,6 +7207,7 @@ mod tests {
         };
         let mut record = provenant_quota::AccountRecord::empty(account.clone());
         record.capacity_cooldowns = vec![provenant_quota::CapacityCooldown {
+            extra: Default::default(),
             account,
             model: "model".into(),
             observed_unix_seconds: 100,
@@ -7187,6 +7219,35 @@ mod tests {
         assert!(human.contains("codex/model [work]: 300s remaining"));
         assert!(render_cooldowns(&[record.clone()], 700, &mut String::new()).is_empty());
         assert!(render_cooldowns(&[record], 99, &mut String::new()).is_empty());
+    }
+
+    #[test]
+    fn delivery_state_text_retains_known_details_without_extensions() {
+        for (wire, expected) in [
+            (json!({"state":"not_attempted"}), "NotAttempted"),
+            (json!({"state":"no_new_commits"}), "NoNewCommits"),
+            (
+                json!({"state":"failed","stage":"push"}),
+                "Failed { stage: Push }",
+            ),
+            (
+                json!({"state":"delivered","pull_request":null}),
+                "Delivered { pull_request: None }",
+            ),
+            (
+                json!({"state":"delivered","pull_request":"https://example.invalid/pr/1"}),
+                "Delivered { pull_request: Some(\"https://example.invalid/pr/1\") }",
+            ),
+            (
+                json!({"state":"delivered","pull_request":"pr\u{001b}\n1"}),
+                "Delivered { pull_request: Some(\"pr1\") }",
+            ),
+        ] {
+            let mut wire = wire;
+            wire["future_note"] = json!("future-secret");
+            let state = serde_json::from_value(wire).unwrap();
+            assert_eq!(delivery_state_text(&state), expected);
+        }
     }
 
     #[test]
@@ -7226,7 +7287,7 @@ mod tests {
                 "redacted": false
             },
             "skipped_routes": [{"route":"fixture/\x1b[33mfallback","kind":"unavailable","detail":detail}],
-            "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted"}}
+            "delivery": {"schema_version":1,"remote":remote,"branch":branch,"state":{"state":"not_attempted","future_note":"future-secret"}}
         }))?;
         let (data, human) = render_lanes_without_cooldowns(
             std::slice::from_ref(&lane),
@@ -7277,7 +7338,13 @@ mod tests {
         );
         assert_eq!(data["lanes"][0]["delivery"]["remote"], json!(remote));
         assert_eq!(data["lanes"][0]["delivery"]["branch"], json!(branch));
+        assert_eq!(
+            data["lanes"][0]["delivery"]["state"]["future_note"],
+            "future-secret"
+        );
+        assert!(!human.contains("future-secret"));
         lane.state = run::AttemptState::Terminal {
+            extra: Default::default(),
             outcome: run::Outcome::ModelUnavailable,
             exit_code: Some(1),
             finished_at: now,
@@ -7318,6 +7385,7 @@ mod tests {
         assert!(!human.contains("provenant resume"));
         assert!(human.contains("redispatch with a corrected model"));
         lane.state = run::AttemptState::Terminal {
+            extra: Default::default(),
             outcome: run::Outcome::ReviewRequired,
             exit_code: Some(0),
             finished_at: now,
@@ -7371,6 +7439,7 @@ mod tests {
             }
         }))?;
         lane.state = run::AttemptState::Terminal {
+            extra: Default::default(),
             outcome: run::Outcome::ReviewRequired,
             exit_code: Some(0),
             finished_at: now,
@@ -7437,6 +7506,7 @@ mod tests {
         let path = account.join("sess-1848.jsonl");
         std::fs::write(&path, "{}\n")?;
         lane.write_grants = vec![run::WriteGrantRecord {
+            extra: Default::default(),
             source: run::WriteSource::StateWrite,
             scope: run::PathScope::Exact,
             path: provenant_records::AbsolutePath::new(&path)?,
@@ -7564,7 +7634,9 @@ mod tests {
                 if reads == 2 {
                     session.store.withdraw(
                         id,
-                        run::AttemptState::Queued,
+                        run::AttemptState::Queued {
+                            extra: Default::default(),
+                        },
                         run::Outcome::Cancelled,
                         "fixture settlement",
                         finished_at,
@@ -7635,6 +7707,7 @@ mod tests {
             }
         }))?;
         let wait = run::LaneWait {
+            extra: Default::default(),
             attempt_id: lane.attempt_id,
             lane_class: run::LaneClass::ReadOnly,
             waiting_for: "read-only startup spacing: 1.2 s left of 2.0 s".into(),
@@ -8559,7 +8632,9 @@ mod tests {
             reviewer_receipt(&record, false, &[]).unwrap().0["model"],
             "unknown"
         );
-        record.state = run::AttemptState::Running;
+        record.state = run::AttemptState::Running {
+            extra: Default::default(),
+        };
         let refused = reviewer_receipt(&record, false, &[]).unwrap_err();
         assert_eq!(refused.status, Status::Refused);
         assert_eq!(refused.kind, ErrorKind::Nonterminal);

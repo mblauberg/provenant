@@ -219,6 +219,23 @@ fn check_push_policy(rig: &TestRig) -> Result {
     git(rig, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
     let first = commit(rig, "initial", "initial\n")?;
     let second = commit(rig, "second", "second\n")?;
+    git(
+        rig,
+        &[
+            "remote",
+            "add",
+            "origin",
+            rig.project.to_str().ok_or("project")?,
+        ],
+    )?;
+    git(
+        rig,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/stale",
+        ],
+    )?;
     let zero = "0".repeat(first.len());
     let cases = [
         (

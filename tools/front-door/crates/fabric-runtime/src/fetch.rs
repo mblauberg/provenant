@@ -5,10 +5,10 @@
 //! directory and published as one directory rename.
 use provenant_core::{Digest, HostId, RelativePath, RunId};
 use provenant_os::fs::{self, Directory, FileKind, FsError, PublishMode};
-use provenant_records::{CanonicalV1, FileDigest};
+use provenant_records::{CanonicalV1, ExtraFields, FileDigest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
-use std::{collections::BTreeMap, ffi::OsStr};
+use std::ffi::OsStr;
 use thiserror::Error;
 
 pub const MAX_FETCH_FILES: usize = 16;
@@ -22,16 +22,18 @@ const MAX_CLEANUP_DEPTH: usize = 64;
 const MAX_CLEANUP_DIRECTORY_ENTRIES: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FetchFile {
     pub path: String,
     pub size: u64,
     pub digest: FileDigest,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FetchManifest {
+    #[serde(flatten)]
+    pub extra: ExtraFields,
     pub version: u8,
     pub files: Vec<FetchFile>,
     pub digest: Digest,
@@ -39,6 +41,8 @@ pub struct FetchManifest {
 
 #[derive(Serialize)]
 struct ManifestBody<'a> {
+    #[serde(flatten)]
+    extra: &'a ExtraFields,
     version: u8,
     files: &'a [FetchFile],
 }
@@ -88,8 +92,10 @@ impl FetchManifest {
     /// Build a canonical version 1 manifest. Entries are ordered by path.
     pub fn new(mut files: Vec<FetchFile>) -> Result<Self> {
         files.sort_by(|left, right| left.path.cmp(&right.path));
-        let digest = manifest_digest(FETCH_VERSION, &files)?;
+        let extra = ExtraFields::new();
+        let digest = manifest_digest(FETCH_VERSION, &files, &extra)?;
         let manifest = Self {
+            extra,
             version: FETCH_VERSION,
             files,
             digest,
@@ -140,18 +146,22 @@ impl FetchManifest {
         }
         // A later path can be the prefix of an earlier one only if ordering is
         // malformed, which the strict-order check above already rejects.
-        if manifest_digest(self.version, &self.files)? != self.digest {
+        if manifest_digest(self.version, &self.files, &self.extra)? != self.digest {
             return Err(FetchError::Invalid("manifest digest"));
         }
         Ok(())
     }
 }
 
-fn manifest_digest(version: u8, files: &[FetchFile]) -> Result<Digest> {
+fn manifest_digest(version: u8, files: &[FetchFile], extra: &ExtraFields) -> Result<Digest> {
     Ok(CanonicalV1::record_digest(
         "fabric-fetch-manifest",
         1,
-        &ManifestBody { version, files },
+        &ManifestBody {
+            version,
+            files,
+            extra,
+        },
     )?)
 }
 
@@ -239,7 +249,7 @@ fn verify_chunks(manifest: &FetchManifest, chunks: Vec<FetchChunk>) -> Result<Ve
     if chunks.len() > MAX_FETCH_CHUNKS {
         return Err(FetchError::Invalid("chunk count"));
     }
-    let mut indexes = BTreeMap::new();
+    let mut indexes = std::collections::BTreeMap::new();
     let mut contents = Vec::with_capacity(manifest.files.len());
     let mut offsets = Vec::with_capacity(manifest.files.len());
     for (index, file) in manifest.files.iter().enumerate() {
@@ -390,6 +400,7 @@ mod tests {
             path: path.to_owned(),
             size: bytes.len() as u64,
             digest: FileDigest::from_bytes(Sha256::digest(bytes).into()),
+            extra: ExtraFields::new(),
         }
     }
 
@@ -399,6 +410,43 @@ mod tests {
             offset,
             bytes: bytes.to_vec(),
         }
+    }
+
+    #[test]
+    fn manifest_preserves_digest_with_future_file_fields() {
+        let mut entry = file("output", b"payload");
+        entry
+            .extra
+            .insert("future".into(), serde_json::json!({"nested": true}));
+        let manifest = FetchManifest::new(vec![entry]).unwrap();
+        let decoded = FetchManifest::decode(&manifest.encode().unwrap()).unwrap();
+        assert_eq!(decoded.digest, manifest.digest);
+        assert_eq!(decoded.files, manifest.files);
+    }
+
+    #[test]
+    fn manifest_preserves_digest_with_future_manifest_fields() {
+        let manifest = FetchManifest::new(vec![file("output", b"payload")]).unwrap();
+        let mut newer = serde_json::to_value(manifest).unwrap();
+        newer["future"] = serde_json::json!({"nested":[null,u64::MAX]});
+        let mut body = newer.clone();
+        body.as_object_mut().unwrap().remove("digest");
+        let digest = CanonicalV1::record_digest("fabric-fetch-manifest", 1, &body).unwrap();
+        newer["digest"] = serde_json::json!(digest.to_string());
+        let decoded = FetchManifest::decode(&serde_json::to_vec(&newer).unwrap()).unwrap();
+        assert_eq!(decoded.digest, digest);
+        assert_eq!(
+            CanonicalV1::bytes(&decoded).unwrap(),
+            CanonicalV1::bytes(&newer).unwrap()
+        );
+        let encoded = decoded.encode().unwrap();
+        assert_eq!(FetchManifest::decode(&encoded).unwrap(), decoded);
+        let mut tampered = newer;
+        tampered["future"]["nested"] = serde_json::json!([1]);
+        assert!(matches!(
+            FetchManifest::decode(&serde_json::to_vec(&tampered).unwrap()),
+            Err(FetchError::Invalid("manifest digest"))
+        ));
     }
 
     #[test]
@@ -528,8 +576,9 @@ mod tests {
             "a//b",
         ] {
             let files = vec![file(path, b"x")];
-            let digest = manifest_digest(FETCH_VERSION, &files).unwrap();
+            let digest = manifest_digest(FETCH_VERSION, &files, &ExtraFields::new()).unwrap();
             let manifest = FetchManifest {
+                extra: Default::default(),
                 version: FETCH_VERSION,
                 files,
                 digest,

@@ -1546,6 +1546,7 @@ mod tests {
             PublishMode::Replace,
         )?)?;
         let route = provenant_records::run::RouteRecord {
+            extra: Default::default(),
             provider: Some("claude".into()),
             model: None,
             effort: None,

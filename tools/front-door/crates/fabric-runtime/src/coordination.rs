@@ -47,9 +47,6 @@ pub enum CoordinationError {
     ResponseEncoding(#[source] serde_json::Error),
     #[error("Fabric store operation failed")]
     Store(#[source] provenant_fabric_store::Error),
-    /// The store refused an upgrade; its message names the data and remedy.
-    #[error(transparent)]
-    UpgradeRefused(provenant_fabric_store::Error),
     #[error("clock operation failed")]
     Time(#[from] provenant_core::TimeError),
 }
@@ -65,17 +62,15 @@ impl From<provenant_fabric_store::Error> for CoordinationError {
         match error {
             provenant_fabric_store::Error::Busy => Self::Busy,
             provenant_fabric_store::Error::Cancelled => Self::Cancelled,
-            error @ provenant_fabric_store::Error::LegacyImportData { .. } => {
-                Self::UpgradeRefused(error)
-            }
             other => Self::Store(other),
         }
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TaskProof {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub task: TaskId,
     pub generation: u64,
     #[serde(with = "input::hex_token")]
@@ -91,8 +86,9 @@ impl std::fmt::Debug for TaskProof {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ClaimProof {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub id: ClaimId,
     pub generation: u64,
     #[serde(with = "input::hex_token")]
@@ -108,8 +104,9 @@ impl std::fmt::Debug for ClaimProof {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LandingProof {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub reference: String,
     pub id: ClaimId,
     pub generation: u64,
@@ -145,11 +142,24 @@ bounded_input! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum MailResult {
-    Sent { id: MessageId },
-    Read { page: Page<Delivery>, cursor: i64 },
-    MarkedRead { cursor: i64 },
+    Sent {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        id: MessageId,
+    },
+    Read {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        page: Page<Delivery>,
+        cursor: i64,
+    },
+    MarkedRead {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        cursor: i64,
+    },
 }
 
 bounded_input! {
@@ -172,14 +182,38 @@ bounded_input! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum TaskResult {
-    Created { task: Task },
-    Listed { page: Page<Task> },
-    Claimed { proof: TaskProof },
-    Updated { task: Task },
-    Finished { task: Task },
-    Released { task: Task },
+    Created {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        task: Task,
+    },
+    Listed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        page: Page<Task>,
+    },
+    Claimed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        proof: TaskProof,
+    },
+    Updated {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        task: Task,
+    },
+    Finished {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        task: Task,
+    },
+    Released {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        task: Task,
+    },
 }
 
 bounded_input! {
@@ -194,9 +228,11 @@ bounded_input! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum EventsResult {
     Read {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         page: Page<Event>,
         cursor: i64,
         timed_out: bool,
@@ -206,6 +242,8 @@ pub enum EventsResult {
         run_events_pending: bool,
     },
     Noted {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         seq: i64,
     },
 }
@@ -213,7 +251,9 @@ pub enum EventsResult {
 impl EventsResult {
     pub fn empty_timeout(after: Option<i64>) -> Self {
         Self::Read {
+            extra: Default::default(),
             page: Page {
+                extra: Default::default(),
                 items: vec![],
                 truncated: false,
             },
@@ -232,6 +272,7 @@ fn bounded_page<T: Serialize>(
     truncated: bool,
 ) -> Result<Page<T>, CoordinationError> {
     let mut page = Page {
+        extra: Default::default(),
         items: Vec::with_capacity(items.len()),
         truncated,
     };
@@ -269,13 +310,34 @@ bounded_input! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum ClaimResult {
-    Acquired { proof: ClaimProof, claim: WorkClaim },
-    Renewed { claim: WorkClaim },
-    Verified { claim: WorkClaim },
-    Released { id: ClaimId },
-    Listed { page: Page<WorkClaim> },
+    Acquired {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        proof: ClaimProof,
+        claim: WorkClaim,
+    },
+    Renewed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        claim: WorkClaim,
+    },
+    Verified {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        claim: WorkClaim,
+    },
+    Released {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        id: ClaimId,
+    },
+    Listed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        page: Page<WorkClaim>,
+    },
 }
 
 bounded_input! {
@@ -299,23 +361,33 @@ bounded_input! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum LandingResult {
     Acquired {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         proof: LandingProof,
         landing: Landing,
     },
     Renewed {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         landing: Landing,
     },
     Verified {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         landing: Landing,
     },
     Released {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         id: ClaimId,
         reference: String,
     },
     Waited {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         landing: Option<Landing>,
         timed_out: bool,
     },
@@ -473,6 +545,7 @@ impl<'a> LocalCoordination<'a> {
 
     fn task_fence(&self, proof: &TaskProof) -> provenant_fabric_store::TaskFence {
         provenant_fabric_store::TaskFence {
+            extra: Default::default(),
             task: proof.task,
             actor: self.actor,
             generation: proof.generation,
@@ -482,6 +555,7 @@ impl<'a> LocalCoordination<'a> {
 
     fn claim_fence(&self, proof: &ClaimProof) -> ClaimFence {
         ClaimFence {
+            extra: Default::default(),
             id: proof.id,
             actor: self.actor,
             generation: proof.generation,
@@ -491,6 +565,7 @@ impl<'a> LocalCoordination<'a> {
 
     fn landing_fence(&self, proof: &LandingProof) -> ClaimFence {
         ClaimFence {
+            extra: Default::default(),
             id: proof.id,
             actor: self.actor,
             generation: proof.generation,
@@ -500,6 +575,7 @@ impl<'a> LocalCoordination<'a> {
 
     fn claim_proof(&self, fence: ClaimFence) -> ClaimProof {
         ClaimProof {
+            extra: Default::default(),
             id: fence.id,
             generation: fence.generation,
             token: fence.token,
@@ -508,6 +584,7 @@ impl<'a> LocalCoordination<'a> {
 
     fn landing_proof(&self, reference: String, fence: ClaimFence) -> LandingProof {
         LandingProof {
+            extra: Default::default(),
             reference,
             id: fence.id,
             generation: fence.generation,
@@ -550,9 +627,11 @@ impl CoordinationApi for LocalCoordination<'_> {
                 artifacts,
                 reply_to,
                 task,
+                ..
             } => {
                 let id = MessageId::from_bytes(Self::new_id_bytes()?);
                 let message = Message {
+                    extra: Default::default(),
                     header: RecordHeader::V1,
                     project: self.project,
                     id,
@@ -567,9 +646,12 @@ impl CoordinationApi for LocalCoordination<'_> {
                     created_at: self.clock.wall_now()?,
                 };
                 self.store.send(&message, &request)?;
-                Ok(MailResult::Sent { id })
+                Ok(MailResult::Sent {
+                    extra: Default::default(),
+                    id,
+                })
             }
-            MailInput::Read { after, limit } => {
+            MailInput::Read { after, limit, .. } => {
                 let prior_cursor = self.store.mail_cursor(self.project, self.actor, &request)?;
                 let page =
                     self.store
@@ -580,13 +662,20 @@ impl CoordinationApi for LocalCoordination<'_> {
                     .last()
                     .map(|delivery| delivery.seq)
                     .unwrap_or_else(|| after.unwrap_or(prior_cursor));
-                Ok(MailResult::Read { page, cursor })
+                Ok(MailResult::Read {
+                    extra: Default::default(),
+                    page,
+                    cursor,
+                })
             }
-            MailInput::MarkRead { through } => {
+            MailInput::MarkRead { through, .. } => {
                 self.store
                     .mark_mail_read(self.project, self.actor, through, &request)?;
                 let cursor = self.store.mail_cursor(self.project, self.actor, &request)?;
-                Ok(MailResult::MarkedRead { cursor })
+                Ok(MailResult::MarkedRead {
+                    extra: Default::default(),
+                    cursor,
+                })
             }
         }
     }
@@ -601,9 +690,12 @@ impl CoordinationApi for LocalCoordination<'_> {
         self.ensure_active(budget, cancel)?;
         let request = self.request(budget, cancel);
         match input {
-            TaskInput::Create { objective, note } => {
+            TaskInput::Create {
+                objective, note, ..
+            } => {
                 let now = self.clock.wall_now()?;
                 let task = Task {
+                    extra: Default::default(),
                     header: RecordHeader::V1,
                     project: self.project,
                     id: TaskId::from_bytes(Self::new_id_bytes()?),
@@ -617,21 +709,28 @@ impl CoordinationApi for LocalCoordination<'_> {
                     updated_at: now,
                 };
                 self.store.create_task(&task, &request)?;
-                Ok(TaskResult::Created { task })
+                Ok(TaskResult::Created {
+                    extra: Default::default(),
+                    task,
+                })
             }
             TaskInput::List {
                 state,
                 after,
                 limit,
+                ..
             } => {
                 let page = self
                     .store
                     .tasks(self.project, state, after, limit, &request)?;
                 Ok(TaskResult::Listed {
+                    extra: Default::default(),
                     page: bounded_page(page.items, page.truncated)?,
                 })
             }
-            TaskInput::Claim { id, lease_seconds } => {
+            TaskInput::Claim {
+                id, lease_seconds, ..
+            } => {
                 let fence = self.store.claim_task(
                     &TaskClaim {
                         project: self.project,
@@ -643,7 +742,9 @@ impl CoordinationApi for LocalCoordination<'_> {
                     &request,
                 )?;
                 Ok(TaskResult::Claimed {
+                    extra: Default::default(),
                     proof: TaskProof {
+                        extra: Default::default(),
                         task: fence.task,
                         generation: fence.generation,
                         token: fence.token,
@@ -654,6 +755,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 proof,
                 objective,
                 note,
+                ..
             } => {
                 let fence = self.task_fence(&proof);
                 self.store.update_task(
@@ -664,20 +766,29 @@ impl CoordinationApi for LocalCoordination<'_> {
                     &request,
                 )?;
                 let task = self.store.task(self.project, proof.task, &request)?;
-                Ok(TaskResult::Updated { task })
+                Ok(TaskResult::Updated {
+                    extra: Default::default(),
+                    task,
+                })
             }
-            TaskInput::Finish { proof, state } => {
+            TaskInput::Finish { proof, state, .. } => {
                 let fence = self.task_fence(&proof);
                 self.store
                     .finish_task(self.project, &fence, state, &request)?;
                 let task = self.store.task(self.project, proof.task, &request)?;
-                Ok(TaskResult::Finished { task })
+                Ok(TaskResult::Finished {
+                    extra: Default::default(),
+                    task,
+                })
             }
-            TaskInput::Release { proof } => {
+            TaskInput::Release { proof, .. } => {
                 let fence = self.task_fence(&proof);
                 self.store.release_task(self.project, &fence, &request)?;
                 let task = self.store.task(self.project, proof.task, &request)?;
-                Ok(TaskResult::Released { task })
+                Ok(TaskResult::Released {
+                    extra: Default::default(),
+                    task,
+                })
             }
         }
     }
@@ -699,7 +810,9 @@ impl CoordinationApi for LocalCoordination<'_> {
                         ..
                     },
                 ) => Ok(EventsResult::Read {
+                    extra: Default::default(),
                     page: Page {
+                        extra: Default::default(),
                         items: Vec::new(),
                         truncated: false,
                     },
@@ -717,6 +830,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 after,
                 limit,
                 wait_seconds,
+                ..
             } => {
                 let read_budget = match wait_seconds {
                     Some(ms) => self.observation_budget(budget, ms)?,
@@ -745,6 +859,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 let page = bounded_page(page.items, page.truncated)?;
                 let cursor = page.items.last().map(|event| event.seq).unwrap_or(start);
                 Ok(EventsResult::Read {
+                    extra: Default::default(),
                     page,
                     cursor,
                     timed_out,
@@ -752,8 +867,11 @@ impl CoordinationApi for LocalCoordination<'_> {
                     run_events_pending: false,
                 })
             }
-            EventsInput::Note { note, dedup_key } => {
+            EventsInput::Note {
+                note, dedup_key, ..
+            } => {
                 let record = EventRecord {
+                    extra: Default::default(),
                     header: RecordHeader::V1,
                     project: self.project,
                     actor: Some(self.actor),
@@ -763,7 +881,10 @@ impl CoordinationApi for LocalCoordination<'_> {
                     at: self.clock.wall_now()?,
                 };
                 let seq = self.store.note(&record, dedup_key.as_deref(), &request)?;
-                Ok(EventsResult::Noted { seq })
+                Ok(EventsResult::Noted {
+                    extra: Default::default(),
+                    seq,
+                })
             }
         }
     }
@@ -781,9 +902,11 @@ impl CoordinationApi for LocalCoordination<'_> {
             ClaimInput::Acquire {
                 scope,
                 lease_seconds,
+                ..
             } => {
                 let fence = self.store.acquire_claim(
                     &ClaimRequest {
+                        extra: Default::default(),
                         id: ClaimId::from_bytes(Self::new_id_bytes()?),
                         project: self.project,
                         actor: self.actor,
@@ -795,6 +918,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 )?;
                 let claim = self.store.verify_claim(self.project, &fence, &request)?;
                 Ok(ClaimResult::Acquired {
+                    extra: Default::default(),
                     proof: self.claim_proof(fence),
                     claim,
                 })
@@ -802,6 +926,7 @@ impl CoordinationApi for LocalCoordination<'_> {
             ClaimInput::Renew {
                 proof,
                 lease_seconds,
+                ..
             } => {
                 let fence = self.claim_fence(&proof);
                 self.store.renew_claim(
@@ -811,24 +936,36 @@ impl CoordinationApi for LocalCoordination<'_> {
                     &request,
                 )?;
                 let claim = self.store.verify_claim(self.project, &fence, &request)?;
-                Ok(ClaimResult::Renewed { claim })
+                Ok(ClaimResult::Renewed {
+                    extra: Default::default(),
+                    claim,
+                })
             }
-            ClaimInput::Verify { proof } => {
+            ClaimInput::Verify { proof, .. } => {
                 let claim =
                     self.store
                         .verify_claim(self.project, &self.claim_fence(&proof), &request)?;
-                Ok(ClaimResult::Verified { claim })
+                Ok(ClaimResult::Verified {
+                    extra: Default::default(),
+                    claim,
+                })
             }
-            ClaimInput::Release { proof } => {
+            ClaimInput::Release { proof, .. } => {
                 let id = proof.id;
                 self.store
                     .release_claim(self.project, &self.claim_fence(&proof), &request)?;
-                Ok(ClaimResult::Released { id })
+                Ok(ClaimResult::Released {
+                    extra: Default::default(),
+                    id,
+                })
             }
-            ClaimInput::List { after, limit } => {
+            ClaimInput::List { after, limit, .. } => {
                 let page = self.store.claims(self.project, after, limit, &request)?;
                 let page = bounded_page(page.items, page.truncated)?;
-                Ok(ClaimResult::Listed { page })
+                Ok(ClaimResult::Listed {
+                    extra: Default::default(),
+                    page,
+                })
             }
         }
     }
@@ -844,6 +981,7 @@ impl CoordinationApi for LocalCoordination<'_> {
             return match (&error, &input) {
                 (CoordinationError::Timeout, LandingInput::Wait { .. }) => {
                     Ok(LandingResult::Waited {
+                        extra: Default::default(),
                         landing: None,
                         timed_out: true,
                     })
@@ -857,6 +995,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                 reference,
                 generation,
                 wait_seconds,
+                ..
             } => {
                 let poll_budget = self.observation_budget(budget, wait_seconds)?;
                 let poll_request = self.request(poll_budget, cancel);
@@ -867,6 +1006,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     }
                     if poll_budget.remaining(self.clock.mono_now()).as_micros() == 0 {
                         return Ok(LandingResult::Waited {
+                            extra: Default::default(),
                             landing: current,
                             timed_out: true,
                         });
@@ -884,6 +1024,7 @@ impl CoordinationApi for LocalCoordination<'_> {
                     });
                     if changed {
                         return Ok(LandingResult::Waited {
+                            extra: Default::default(),
                             landing: current,
                             timed_out: false,
                         });
@@ -913,10 +1054,12 @@ impl LocalCoordination<'_> {
                 expected,
                 candidate,
                 lease_seconds,
+                ..
             } => {
                 let fence = self.store.acquire_landing(
                     guard,
                     &LandingRequest {
+                        extra: Default::default(),
                         id: ClaimId::from_bytes(Self::new_id_bytes()?),
                         project: self.project,
                         actor: self.actor,
@@ -930,6 +1073,7 @@ impl LocalCoordination<'_> {
                 )?;
                 let landing = self.store.verify_landing(guard, &fence, request)?;
                 Ok(LandingResult::Acquired {
+                    extra: Default::default(),
                     proof: self.landing_proof(reference, fence),
                     landing,
                 })
@@ -937,6 +1081,7 @@ impl LocalCoordination<'_> {
             LandingInput::Renew {
                 proof,
                 lease_seconds,
+                ..
             } => {
                 let fence = self.landing_fence(&proof);
                 self.store.renew_landing(
@@ -946,19 +1091,26 @@ impl LocalCoordination<'_> {
                     request,
                 )?;
                 let landing = self.store.verify_landing(guard, &fence, request)?;
-                Ok(LandingResult::Renewed { landing })
+                Ok(LandingResult::Renewed {
+                    extra: Default::default(),
+                    landing,
+                })
             }
-            LandingInput::Verify { proof } => {
+            LandingInput::Verify { proof, .. } => {
                 let landing =
                     self.store
                         .verify_landing(guard, &self.landing_fence(&proof), request)?;
-                Ok(LandingResult::Verified { landing })
+                Ok(LandingResult::Verified {
+                    extra: Default::default(),
+                    landing,
+                })
             }
-            LandingInput::Release { proof } => {
+            LandingInput::Release { proof, .. } => {
                 let id = proof.id;
                 self.store
                     .release_landing(guard, &self.landing_fence(&proof), request)?;
                 Ok(LandingResult::Released {
+                    extra: Default::default(),
                     id,
                     reference: proof.reference,
                 })
@@ -989,54 +1141,37 @@ impl LocalCoordination<'_> {
             None
         };
         let frozen = input.clone();
-        self.store
-            .coordination_operation(
-                self.project,
-                self.actor,
-                id,
-                &frozen,
-                &request,
-                || match input {
-                    Mutation::Mail(value) => match value {
-                        MailInput::Read { .. } => {
-                            Err(CoordinationError::InvalidInput("read is an observation"))
-                        }
-                        value => self.mail(value, budget, cancel).map(MutationResult::Mail),
-                    },
-                    Mutation::Task(value) => match value {
-                        TaskInput::List { .. } => {
-                            Err(CoordinationError::InvalidInput("list is an observation"))
-                        }
-                        value => self.task(value, budget, cancel).map(MutationResult::Task),
-                    },
-                    Mutation::Events(value) => match value {
-                        EventsInput::Read { .. } => {
-                            Err(CoordinationError::InvalidInput("read is an observation"))
-                        }
-                        value => self
-                            .events(value, budget, cancel)
-                            .map(MutationResult::Events),
-                    },
-                    Mutation::Claim(value) => match value {
-                        ClaimInput::Verify { .. } | ClaimInput::List { .. } => {
-                            Err(CoordinationError::InvalidInput("read is an observation"))
-                        }
-                        value => self.claim(value, budget, cancel).map(MutationResult::Claim),
-                    },
-                    Mutation::Landing(value) => {
-                        value.validate_input(WaitTransport::Cli)?;
-                        match (&value, guard.as_ref()) {
-                            (LandingInput::Verify { .. } | LandingInput::Wait { .. }, _) => {
-                                Err(CoordinationError::InvalidInput("read is an observation"))
-                            }
-                            (_, Some(guard)) => self
-                                .landing_locked(value, guard, &request)
-                                .map(MutationResult::Landing),
-                            _ => Err(CoordinationError::InvalidInput("landing lock required")),
-                        }
-                    }
-                },
-            )
+        // The frozen input identifies the result domain. Untagged result shapes
+        // overlap, so replay must decode the domain's concrete result type.
+        macro_rules! record {
+            ($variant:ident, $action:expr) => {
+                self.store
+                    .coordination_operation(self.project, self.actor, id, &frozen, &request, || {
+                        $action
+                    })
+                    .map(MutationResult::$variant)
+            };
+        }
+        match input {
+            Mutation::Mail(MailInput::Read { .. })
+            | Mutation::Task(TaskInput::List { .. })
+            | Mutation::Events(EventsInput::Read { .. })
+            | Mutation::Claim(ClaimInput::Verify { .. } | ClaimInput::List { .. })
+            | Mutation::Landing(LandingInput::Verify { .. } | LandingInput::Wait { .. }) => {
+                Err(CoordinationError::InvalidInput("read is an observation"))
+            }
+            Mutation::Mail(value) => record!(Mail, self.mail(value, budget, cancel)),
+            Mutation::Task(value) => record!(Task, self.task(value, budget, cancel)),
+            Mutation::Events(value) => record!(Events, self.events(value, budget, cancel)),
+            Mutation::Claim(value) => record!(Claim, self.claim(value, budget, cancel)),
+            Mutation::Landing(value) => {
+                value.validate_input(WaitTransport::Cli)?;
+                let guard = guard
+                    .as_ref()
+                    .ok_or(CoordinationError::InvalidInput("landing lock required"))?;
+                record!(Landing, self.landing_locked(value, guard, &request))
+            }
+        }
     }
 }
 
@@ -1044,8 +1179,8 @@ fn landing_reference(input: &LandingInput) -> Result<&str, CoordinationError> {
     match input {
         LandingInput::Acquire { reference, .. } => Ok(reference),
         LandingInput::Renew { proof, .. }
-        | LandingInput::Release { proof }
-        | LandingInput::Verify { proof } => Ok(&proof.reference),
+        | LandingInput::Release { proof, .. }
+        | LandingInput::Verify { proof, .. } => Ok(&proof.reference),
         LandingInput::Wait { .. } => Err(CoordinationError::InvalidInput("wait is an observation")),
     }
 }
@@ -1058,7 +1193,9 @@ pub enum Mutation {
     Claim(ClaimInput),
     Landing(LandingInput),
 }
-#[derive(Debug, Serialize, Deserialize)]
+// Untagged wrappers add no object layer; their inner result retains extensions.
+// Decode through the frozen input domain because result shapes overlap.
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum MutationResult {
     Mail(MailResult),
@@ -1143,6 +1280,82 @@ mod tests {
         }
     }
 
+    fn assert_upgrade(error: &CoordinationError, expected_record: &str, expected_version: u64) {
+        let facade = facade::FacadeError::from(error);
+        assert_eq!(error.code(), "upgrade_required");
+        let facade::FacadeError::UpgradeRequired {
+            reader_release,
+            writer_release,
+            record,
+            version,
+        } = facade
+        else {
+            panic!("expected upgrade_required");
+        };
+        assert_eq!(reader_release, env!("CARGO_PKG_VERSION"));
+        assert_eq!(writer_release, "unknown");
+        assert_eq!(record, expected_record);
+        assert_eq!(version, expected_version);
+    }
+
+    #[test]
+    fn newer_stored_task_reports_upgrade_required() {
+        let f = Fixture::new();
+        let service = f.service();
+        let cancel = CancelToken::new();
+        service
+            .task(
+                TaskInput::Create {
+                    extra: Default::default(),
+                    objective: "future task".into(),
+                    note: None,
+                },
+                f.budget(),
+                &cancel,
+            )
+            .unwrap();
+        let db =
+            rusqlite::Connection::open(f.root.as_path().join("fabric/fabric.sqlite3")).unwrap();
+        db.execute("UPDATE tasks SET record=CAST(json_set(CAST(record AS TEXT),'$.header.schema_version',2) AS BLOB)", []).unwrap();
+        let error = service
+            .task(
+                TaskInput::List {
+                    extra: Default::default(),
+                    state: None,
+                    after: None,
+                    limit: 10,
+                },
+                f.budget(),
+                &cancel,
+            )
+            .unwrap_err();
+        assert_upgrade(&error, "record schema", 2);
+    }
+
+    #[test]
+    fn newer_database_schema_reports_upgrade_required() {
+        let f = Fixture::new();
+        drop(f.service());
+        let version = provenant_fabric_store::CURRENT_SCHEMA_VERSION + 1;
+        let db =
+            rusqlite::Connection::open(f.root.as_path().join("fabric/fabric.sqlite3")).unwrap();
+        db.pragma_update(None, "user_version", i64::try_from(version).unwrap())
+            .unwrap();
+        drop(db);
+        let error = LocalCoordination::open(
+            &f.root,
+            f.project,
+            f.actor,
+            &f.clock,
+            &f.backoff,
+            f.budget(),
+            &CancelToken::new(),
+        )
+        .err()
+        .unwrap();
+        assert_upgrade(&error, "database schema", version as u64);
+    }
+
     struct TickingClock(std::cell::Cell<i64>);
     impl Clock for TickingClock {
         fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
@@ -1164,21 +1377,6 @@ mod tests {
             CoordinationError::Time(provenant_core::TimeError::WallRange).code(),
             "state_corrupt"
         );
-    }
-
-    #[test]
-    fn refused_upgrade_has_its_own_code_and_names_the_data() {
-        let error = CoordinationError::from(provenant_fabric_store::Error::LegacyImportData {
-            table: "tasks",
-            rows: 2,
-        });
-        assert_eq!(error.code(), "upgrade_refused");
-        let text = error.to_string();
-        assert!(
-            text.contains("2 row(s) of legacy import data in table tasks"),
-            "{text}"
-        );
-        assert_eq!(facade::FacadeError::from(&error).code(), "upgrade_refused");
     }
 
     #[test]
@@ -1209,9 +1407,10 @@ mod tests {
         )
         .expect("open service");
 
-        let TaskResult::Created { task } = service
+        let TaskResult::Created { task, .. } = service
             .task(
                 TaskInput::Create {
+                    extra: Default::default(),
                     objective: "single timestamp".into(),
                     note: None,
                 },
@@ -1267,13 +1466,86 @@ mod tests {
     }
 
     #[test]
+    fn landing_replay_keeps_its_domain_and_result_extensions() {
+        let fixture = Fixture::new();
+        let service = fixture.service();
+        let cancel = CancelToken::new();
+        let acquire_id = provenant_core::OperationId::parse("acquire").unwrap();
+        let MutationResult::Landing(LandingResult::Acquired { proof, .. }) = service
+            .mutate(
+                Mutation::Landing(LandingInput::Acquire {
+                    extra: Default::default(),
+                    reference: "refs/heads/main".into(),
+                    expected: GitOid::parse(&"1".repeat(40)).unwrap(),
+                    candidate: GitOid::parse(&"2".repeat(40)).unwrap(),
+                    lease_seconds: 60,
+                }),
+                &acquire_id,
+                fixture.budget(),
+                &cancel,
+            )
+            .unwrap()
+        else {
+            panic!("landing acquisition");
+        };
+        let release = Mutation::Landing(LandingInput::Release {
+            extra: Default::default(),
+            proof,
+        });
+        let release_id = provenant_core::OperationId::parse("release").unwrap();
+        let first = service
+            .mutate(release.clone(), &release_id, fixture.budget(), &cancel)
+            .unwrap();
+        assert!(matches!(
+            first,
+            MutationResult::Landing(LandingResult::Released { .. })
+        ));
+        let database =
+            rusqlite::Connection::open(fixture.root.as_path().join("fabric/fabric.sqlite3"))
+                .unwrap();
+        database.execute(
+            "UPDATE coordination_operations SET result=CAST(json_set(CAST(result AS TEXT),'$.future',json_object('revision',2)) AS BLOB) WHERE id=?1",
+            [release_id.to_string()],
+        ).unwrap();
+        let MutationResult::Landing(LandingResult::Released {
+            reference, extra, ..
+        }) = service
+            .mutate(release, &release_id, fixture.budget(), &cancel)
+            .unwrap()
+        else {
+            panic!("replay must retain the landing domain");
+        };
+        assert_eq!(reference, "refs/heads/main");
+        assert_eq!(extra["future"], serde_json::json!({"revision":2}));
+        let (input, result) = service
+            .store
+            .coordination_receipt_with_input::<Mutation, serde_json::Value>(
+                fixture.project,
+                fixture.actor,
+                &release_id,
+                &service.request(fixture.budget(), &cancel),
+            )
+            .unwrap()
+            .unwrap();
+        let crate::hosts::CoordinationResult::Landing {
+            result: LandingResult::Released { extra, .. },
+            ..
+        } = crate::hosts::CoordinationResult::from_stored(&input, result).unwrap()
+        else {
+            panic!("recovered receipt must retain the landing domain");
+        };
+        assert_eq!(extra["future"], serde_json::json!({"revision": 2}));
+    }
+
+    #[test]
     fn mail_and_events_use_authenticated_scope_and_cursor() {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
-        let MailResult::Sent { id } = service
+        let MailResult::Sent { id, .. } = service
             .mail(
                 MailInput::Send {
+                    extra: Default::default(),
                     recipients: vec![fixture.actor],
                     kind: MessageKind::Request,
                     body: "please inspect".into(),
@@ -1288,9 +1560,10 @@ mod tests {
         else {
             panic!("send result")
         };
-        let MailResult::Read { page, cursor } = service
+        let MailResult::Read { page, cursor, .. } = service
             .mail(
                 MailInput::Read {
+                    extra: Default::default(),
                     after: Some(0),
                     limit: 10,
                 },
@@ -1307,9 +1580,10 @@ mod tests {
         assert_eq!(page.items[0].message.sender, fixture.actor);
         assert!(cursor > 0);
 
-        let EventsResult::Noted { seq } = service
+        let EventsResult::Noted { seq, .. } = service
             .events(
                 EventsInput::Note {
+                    extra: Default::default(),
                     note: "handoff ready".into(),
                     dedup_key: None,
                 },
@@ -1328,6 +1602,7 @@ mod tests {
         } = service
             .events(
                 EventsInput::Read {
+                    extra: Default::default(),
                     after: None,
                     limit: 10,
                     wait_seconds: None,
@@ -1349,6 +1624,7 @@ mod tests {
         } = service
             .events(
                 EventsInput::Read {
+                    extra: Default::default(),
                     after: None,
                     limit: 10,
                     wait_seconds: None,
@@ -1365,6 +1641,7 @@ mod tests {
         let EventsResult::Read { page, .. } = service
             .events(
                 EventsInput::Read {
+                    extra: Default::default(),
                     after: Some(cursor),
                     limit: 10,
                     wait_seconds: None,
@@ -1384,9 +1661,10 @@ mod tests {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
-        let TaskResult::Created { task } = service
+        let TaskResult::Created { task, .. } = service
             .task(
                 TaskInput::Create {
+                    extra: Default::default(),
                     objective: "review change".into(),
                     note: None,
                 },
@@ -1397,9 +1675,10 @@ mod tests {
         else {
             panic!("create result")
         };
-        let TaskResult::Claimed { proof } = service
+        let TaskResult::Claimed { proof, .. } = service
             .task(
                 TaskInput::Claim {
+                    extra: Default::default(),
                     id: task.id,
                     lease_seconds: 5,
                 },
@@ -1410,9 +1689,10 @@ mod tests {
         else {
             panic!("claim result")
         };
-        let TaskResult::Updated { task: updated } = service
+        let TaskResult::Updated { task: updated, .. } = service
             .task(
                 TaskInput::Update {
+                    extra: Default::default(),
                     proof: proof.clone(),
                     objective: "review and report".into(),
                     note: Some("bounded".into()),
@@ -1442,7 +1722,14 @@ mod tests {
             &fixture.backoff,
         );
         assert!(matches!(
-            other.task(TaskInput::Release { proof }, fixture.budget(), &cancel),
+            other.task(
+                TaskInput::Release {
+                    extra: Default::default(),
+                    proof
+                },
+                fixture.budget(),
+                &cancel
+            ),
             Err(CoordinationError::Store(
                 provenant_fabric_store::Error::StaleFence
             ))
@@ -1454,10 +1741,12 @@ mod tests {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
-        let ClaimResult::Acquired { proof, claim } = service
+        let ClaimResult::Acquired { proof, claim, .. } = service
             .claim(
                 ClaimInput::Acquire {
+                    extra: Default::default(),
                     scope: WorkScope::Issue {
+                        extra: Default::default(),
                         key: "PR-42".into(),
                     },
                     lease_seconds: 5,
@@ -1473,6 +1762,7 @@ mod tests {
         assert!(matches!(
             service.claim(
                 ClaimInput::Verify {
+                    extra: Default::default(),
                     proof: proof.clone()
                 },
                 fixture.budget(),
@@ -1481,13 +1771,21 @@ mod tests {
             Ok(ClaimResult::Verified { .. })
         ));
         assert!(matches!(
-            service.claim(ClaimInput::Release { proof }, fixture.budget(), &cancel),
+            service.claim(
+                ClaimInput::Release {
+                    extra: Default::default(),
+                    proof
+                },
+                fixture.budget(),
+                &cancel
+            ),
             Ok(ClaimResult::Released { .. })
         ));
 
-        let LandingResult::Acquired { proof, landing } = service
+        let LandingResult::Acquired { proof, landing, .. } = service
             .landing(
                 LandingInput::Acquire {
+                    extra: Default::default(),
                     reference: "refs/heads/release".into(),
                     expected: GitOid::parse("0123456789012345678901234567890123456789")
                         .expect("expected OID"),
@@ -1506,6 +1804,7 @@ mod tests {
         assert!(matches!(
             service.landing(
                 LandingInput::Wait {
+                    extra: Default::default(),
                     reference: proof.reference.clone(),
                     generation: 0,
                     wait_seconds: 1,
@@ -1515,11 +1814,19 @@ mod tests {
             ),
             Ok(LandingResult::Waited {
                 landing: Some(_),
-                timed_out: false
+                timed_out: false,
+                ..
             })
         ));
         assert!(matches!(
-            service.landing(LandingInput::Release { proof }, fixture.budget(), &cancel),
+            service.landing(
+                LandingInput::Release {
+                    extra: Default::default(),
+                    proof
+                },
+                fixture.budget(),
+                &cancel
+            ),
             Ok(LandingResult::Released { .. })
         ));
     }
@@ -1542,6 +1849,7 @@ mod tests {
         let LandingResult::Acquired { landing, .. } = service
             .landing(
                 LandingInput::Acquire {
+                    extra: Default::default(),
                     reference: "refs/heads/expired-wait".into(),
                     expected: GitOid::parse(&"a".repeat(40)).expect("expected oid"),
                     candidate: GitOid::parse(&"b".repeat(40)).expect("candidate oid"),
@@ -1561,6 +1869,7 @@ mod tests {
         assert!(matches!(
             service.landing(
                 LandingInput::Wait {
+                    extra: Default::default(),
                     reference: landing.reference,
                     generation: landing.generation,
                     wait_seconds: 5,
@@ -1571,6 +1880,7 @@ mod tests {
             Ok(LandingResult::Waited {
                 landing: Some(_),
                 timed_out: false,
+                ..
             })
         ));
     }
@@ -1612,6 +1922,7 @@ mod tests {
         let acquired = service
             .landing(
                 LandingInput::Acquire {
+                    extra: Default::default(),
                     reference: "refs/heads/main".into(),
                     expected: GitOid::parse(&"a".repeat(40)).expect("oid"),
                     candidate: GitOid::parse(&"b".repeat(40)).expect("oid"),
@@ -1627,6 +1938,7 @@ mod tests {
         let result = service
             .landing(
                 LandingInput::Wait {
+                    extra: Default::default(),
                     reference: "refs/heads/main".into(),
                     generation: landing.generation,
                     wait_seconds: 1,
@@ -1641,6 +1953,7 @@ mod tests {
         let EventsResult::Read { cursor, .. } = service
             .events(
                 EventsInput::Read {
+                    extra: Default::default(),
                     after: None,
                     limit: 100,
                     wait_seconds: None,
@@ -1655,6 +1968,7 @@ mod tests {
         assert!(matches!(
             service.events(
                 EventsInput::Read {
+                    extra: Default::default(),
                     after: Some(cursor),
                     limit: 100,
                     wait_seconds: Some(1),
@@ -1673,6 +1987,7 @@ mod tests {
         assert!(matches!(
             service.events(
                 EventsInput::Read {
+                    extra: Default::default(),
                     after: Some(cursor),
                     limit: 100,
                     wait_seconds: Some(1),
@@ -1688,6 +2003,7 @@ mod tests {
         assert!(matches!(
             service.landing(
                 LandingInput::Wait {
+                    extra: Default::default(),
                     reference: "refs/heads/main".into(),
                     generation: landing.generation,
                     wait_seconds: 1,
@@ -1703,17 +2019,7 @@ mod tests {
     }
 
     #[test]
-    fn input_enums_reject_unknown_fields_and_calls_honor_cancellation() {
-        assert!(
-            serde_json::from_str::<MailInput>(
-                r#"{"op":"mark_read","through":1,"project":"forged"}"#
-            )
-            .is_err()
-        );
-        assert!(serde_json::from_str::<TaskInput>(
-            r#"{"op":"claim","id":"00000000000000000000000000000001","lease_seconds":1,"actor":"forged"}"#
-        )
-        .is_err());
+    fn calls_honour_cancellation() {
         let fixture = Fixture::new();
         let service = fixture.service();
         let cancel = CancelToken::new();
@@ -1721,6 +2027,7 @@ mod tests {
         assert!(matches!(
             service.events(
                 EventsInput::Read {
+                    extra: Default::default(),
                     after: None,
                     limit: 10,
                     wait_seconds: None,

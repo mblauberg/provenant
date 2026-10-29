@@ -89,6 +89,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     base: None,
                     head: None,
                     route: provenant_run::RequestedRoute::Named {
+                        extra: Default::default(),
                         name: "senior".into(),
                         effort: None,
                     },
@@ -153,7 +154,9 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         }
         store.withdraw(
             attempt,
-            provenant_run::AttemptState::Queued,
+            provenant_run::AttemptState::Queued {
+                extra: Default::default(),
+            },
             provenant_run::Outcome::Cancelled,
             "fixture ended",
             clock.wall_now()?,
@@ -400,6 +403,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     base: None,
                     head: None,
                     route: provenant_run::RequestedRoute::Named {
+                        extra: Default::default(),
                         name: "senior".into(),
                         effort: None,
                     },
@@ -1339,7 +1343,9 @@ pub(crate) fn pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores
         let mut running = store.record(id, &call)?;
         running.revision += 1;
         running.generation = 1;
-        running.state = AttemptState::Running;
+        running.state = AttemptState::Running {
+            extra: Default::default(),
+        };
         running.started_at = Some(clock.wall_now()?);
         running.provider_launched = Some(true);
         // The provider seam advances admission without launching a backend;

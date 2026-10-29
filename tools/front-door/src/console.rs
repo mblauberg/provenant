@@ -45,6 +45,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             } => (
                 hosts,
                 provenant_fabric_runtime::hosts::PeerAction::ConsoleBoard {
+                    extra: Default::default(),
                     all: *all,
                     limit: *limit,
                     selected: selected.is_some(),
@@ -58,6 +59,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             } => (
                 hosts,
                 provenant_fabric_runtime::hosts::PeerAction::ConsoleTree {
+                    extra: Default::default(),
                     max_depth: *max_depth,
                     max_nodes: *max_nodes,
                     detail: *detail,
@@ -180,7 +182,7 @@ fn compose_peers(
         if board {
             use provenant_cli::console::peer::{BoardObservation as O, PeerBoard};
             let observation = match result {
-                Ok(PeerResult::Console(page)) => O::Page(page),
+                Ok(PeerResult::Console { data: page, .. }) => O::Page(page),
                 _ if unsupported => O::Unsupported,
                 _ if unavailable => O::Unreachable,
                 _ => O::Page(serde_json::Value::Null),
@@ -189,7 +191,7 @@ fn compose_peers(
         } else {
             use provenant_cli::console::tree_peer::{PeerTree, TreeObservation as O};
             let observation = match result {
-                Ok(PeerResult::Console(tree)) => O::Tree(tree),
+                Ok(PeerResult::Console { data: tree, .. }) => O::Tree(tree),
                 _ if unsupported => O::Unsupported,
                 _ if unavailable => O::Unreachable,
                 _ => O::Tree(serde_json::Value::Null),
@@ -343,9 +345,10 @@ mod tests {
         let results = super::read_peers(hosts.clone(), start + budget, move |_| {
             counter.fetch_add(1, Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(650));
-            Ok(provenant_fabric_runtime::hosts::PeerResult::Console(
-                serde_json::Value::Null,
-            ))
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Console {
+                data: serde_json::Value::Null,
+                extra: Default::default(),
+            })
         });
         let elapsed = start.elapsed();
         assert!(elapsed >= budget);

@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 /// reuses an existing ID; a field unknown or inapplicable where the record is
 /// written stays `None` and is never guessed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Trace {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub host: Option<HostId>,
     pub project: Option<ProjectId>,
     pub run: Option<RunId>,

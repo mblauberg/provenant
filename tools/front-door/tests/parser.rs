@@ -266,6 +266,66 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     rig.assert_legacy_unchanged()
 }
 #[test]
+fn creation_commands_refuse_colliding_branch_names() -> Result {
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let commit = rig.execute(
+        &git,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&commit), 0);
+    let branch = rig.execute(&git, &["branch", "Existing"], None)?;
+    assert_eq!(code(&branch), 0);
+
+    let explicit = rig.command(&["worktree", "create", "existing", "--base", "HEAD"])?;
+    assert_ne!(code(&explicit), 0);
+    let message = format!(
+        "{}{}",
+        String::from_utf8_lossy(&explicit.stdout.bytes),
+        String::from_utf8_lossy(&explicit.stderr.bytes)
+    );
+    assert!(message.contains("collides"), "{message}");
+
+    for flag in ["--worktree", "--branch"] {
+        let out = rig.execute(
+            std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "run",
+                "--prompt-stdin",
+                "--model",
+                "codex/id",
+                flag,
+                "existing",
+                "--base",
+                "HEAD",
+                "--wait",
+                "1s",
+            ],
+            Some(b"fixture"),
+        )?;
+        assert_ne!(code(&out), 0);
+        let message = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout.bytes),
+            String::from_utf8_lossy(&out.stderr.bytes)
+        );
+        assert!(message.contains("collides"), "{flag}: {message}");
+    }
+    assert!(!rig.project.join(".worktrees/existing").exists());
+    Ok(())
+}
+
+#[test]
 fn core_run_creates_a_new_managed_worktree_from_a_name_or_branch() -> Result {
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;

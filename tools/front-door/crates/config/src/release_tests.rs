@@ -50,6 +50,7 @@ impl Fixture {
             ),
         ]);
         let version = VersionInfo {
+            extra: Default::default(),
             source_digest: SourceDigest::from_bytes([0x11; 32]),
             asset_digest: asset_inventory_digest(&files).unwrap(),
             target: "fixture-target".into(),

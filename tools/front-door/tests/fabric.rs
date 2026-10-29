@@ -31,7 +31,7 @@ fn token(proof: &Value) -> Result<String> {
 }
 
 #[test]
-fn events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
+fn events_read_upgrades_after_dropping_legacy_import_data() -> Result {
     let rig = TestRig::new()?;
     call(
         &rig,
@@ -48,7 +48,10 @@ fn events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
     )?;
     let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
     db.execute_batch(
-        "CREATE TABLE imports(source TEXT PRIMARY KEY, project TEXT NOT NULL, \
+        "DROP TABLE viewer_requests; DROP TABLE viewer_summaries; \
+         DROP TABLE run_chairs; DROP TABLE human_answer_outbox; \
+         DROP TABLE human_answers; DROP TABLE human_request_history; DROP TABLE human_requests; \
+         CREATE TABLE imports(source TEXT PRIMARY KEY, project TEXT NOT NULL, \
          legacy_project TEXT NOT NULL, imported_at INTEGER NOT NULL, \
          tasks INTEGER NOT NULL, messages INTEGER NOT NULL, \
          skipped_rows BLOB NOT NULL DEFAULT X'7B7D') STRICT; \
@@ -56,8 +59,11 @@ fn events_read_reports_upgrade_refused_for_legacy_import_data() -> Result {
          PRAGMA user_version=6;",
     )?;
     drop(db);
-    let result = call(&rig, &["fabric", "events", "read"], 1)?;
-    assert_eq!(result["error"]["code"], "upgrade_refused");
+    let result = call(&rig, &["fabric", "events", "read"], 0)?;
+    assert_eq!(
+        result["data"]["page"]["items"][0]["record"]["detail"],
+        "seed store"
+    );
     Ok(())
 }
 

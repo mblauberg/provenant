@@ -51,3 +51,6 @@ pub use resolved_route::{
 
 pub mod result_capture;
 pub mod run;
+
+/// Fields from newer writers, retained in canonical record bytes.
+pub type ExtraFields = std::collections::BTreeMap<String, serde_json::Value>;

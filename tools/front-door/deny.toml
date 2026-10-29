@@ -19,6 +19,8 @@ allow = [
 
 exceptions = [
   { crate = "unicode-ident", allow = ["Unicode-3.0"] },
+  # Unicode data tables for NFC comparison of ref names; the code is MIT or Apache-2.0.
+  { crate = "unicode-normalization@=0.1.26", allow = ["Unicode-3.0"] },
   # Already in the approved transitive set and lockfile through hashbrown.
   # Keep this exception version-scoped; no additional crate or feature is enabled.
   { crate = "foldhash@=0.2.0", allow = ["Zlib"] },
@@ -123,12 +125,14 @@ allow = [
   "tempfile",
   "thiserror",
   "thiserror-impl",
+  "tinyvec",
   "toml_datetime",
   "toml_edit",
   "toml_parser",
   "toml_writer",
   "typenum",
   "unicode-ident",
+  "unicode-normalization",
   "unicode-width",
   "vcpkg",
   "winnow",

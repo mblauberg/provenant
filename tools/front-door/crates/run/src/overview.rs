@@ -85,9 +85,9 @@ impl RunStore {
                     continue;
                 }
                 let state = match record.state {
-                    AttemptState::Queued => OverviewState::Queued,
-                    AttemptState::Starting => OverviewState::Starting,
-                    AttemptState::Running => OverviewState::Running,
+                    AttemptState::Queued { .. } => OverviewState::Queued,
+                    AttemptState::Starting { .. } => OverviewState::Starting,
+                    AttemptState::Running { .. } => OverviewState::Running,
                     AttemptState::Settling { .. } => OverviewState::Settling,
                     AttemptState::Terminal { outcome, .. } => OverviewState::Terminal(outcome),
                 };

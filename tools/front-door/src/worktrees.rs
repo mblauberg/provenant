@@ -95,7 +95,10 @@ impl Error {
             Self::Root(roots::RootError::Checkout | roots::RootError::State(_))
             | Self::InvalidScope
             | Self::Worktree(
-                WorktreeError::InvalidRequest | WorktreeError::NotFound | WorktreeError::CheckedOut,
+                WorktreeError::InvalidRequest
+                | WorktreeError::NotFound
+                | WorktreeError::CheckedOut
+                | WorktreeError::BranchCollision { .. },
             ) => Outcome::Invalid,
             Self::Worktree(
                 WorktreeError::Dirty
@@ -1350,7 +1353,11 @@ fn with_context_mode<T>(
         child(&state, "utility-home")?
     };
     let git = provenant_os::git::git_executable().ok_or(Error::GitUnavailable)?;
-    let runtime = UtilityRuntime::new(git, roots.state.as_path().join("utility-home"))?;
+    // Lane scratch and provider state live below the state directory's runs.
+    let runtime = UtilityRuntime::new(git, roots.state.as_path().join("utility-home"))?
+        .with_lane_roots(provenant_confinement::utility::lane_state_roots(
+            roots.state.as_path(),
+        ));
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     let budget = UtilityBudget::bounded(Duration::from_secs(5))?;

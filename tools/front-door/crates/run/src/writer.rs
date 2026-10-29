@@ -62,7 +62,10 @@ fn runtime(state: &Path) -> Result<UtilityRuntime> {
     }
     let git = provenant_os::git::git_executable()
         .ok_or(RunError::Validation("Git executable unavailable"))?;
-    UtilityRuntime::new(canonicalize(&git)?, home.clone())
+    UtilityRuntime::new(&git, home.clone())
+        .map(|runtime| {
+            runtime.with_lane_roots(provenant_confinement::utility::lane_state_roots(state))
+        })
         .map_err(error("initialise writer Git runtime", Some(&home)))
 }
 fn budget() -> Result<UtilityBudget> {
@@ -112,6 +115,7 @@ fn resolve_writer_with(
             return Err(RunError::unsafe_path(path, PathCheck::Containment));
         }
         return Ok(WriterRequest {
+            extra: Default::default(),
             project: project.to_path_buf(),
             worktree: path,
         });
@@ -119,6 +123,7 @@ fn resolve_writer_with(
     let worktree = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
     Ok(WriterRequest {
+        extra: Default::default(),
         project: project.to_path_buf(),
         worktree: worktree.path().to_path_buf(),
     })
@@ -528,6 +533,7 @@ fn prepare_writer_git(
         .map_err(error("verify writer repository before fetch", Some(&path)))?;
     crate::HostDeliveryContext::refresh_origin(
         &WriterRequest {
+            extra: Default::default(),
             project: project.clone(),
             worktree: path.clone(),
         },
@@ -1584,7 +1590,6 @@ mod uncommitted_tests {
     }
 }
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct WriterTerminal {
     pub schema_version: u64,
     pub head: GitOid,
@@ -1618,7 +1623,6 @@ pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
 
 /// Launch-time lifecycle evidence, sealed while writer custody is held.
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct WriterOwnership {
     pub schema_version: u64,
     pub lane_owned: bool,

@@ -108,6 +108,7 @@ mod tests {
     }
     fn input() -> ReceiptInput {
         let factors = RiskFactors {
+            extra: Default::default(),
             blast_radius: BlastRadius::Local,
             reversibility: Reversibility::Easy,
             data_sensitivity: DataSensitivity::Public,
@@ -120,11 +121,13 @@ mod tests {
             delivery_id: DeliveryId::from_bytes([1; 16]),
             project_id: ProjectId::from_bytes([2; 16]),
             subject: Subject::Pr {
+                extra: Default::default(),
                 repository: RepoId::from_bytes([3; 16]),
                 number: 42,
                 head: GitOid::Sha256([4; 32]),
             },
             authors: vec![Author::User {
+                extra: Default::default(),
                 actor_id: ActorId::from_bytes([5; 16]),
             }],
             risk: risk::assess(factors, RiskTier::Routine, &RiskPolicy::default(), None).unwrap(),
@@ -145,6 +148,7 @@ mod tests {
         for head in [GitOid::Sha1([4; 20]), GitOid::Sha256([4; 32])] {
             let mut input = input();
             input.subject = Subject::Pr {
+                extra: Default::default(),
                 repository: RepoId::from_bytes([3; 16]),
                 number: u64::MAX,
                 head,
@@ -194,8 +198,10 @@ mod tests {
     }
     fn approval_ref() -> ApprovalRef {
         ApprovalRef {
+            extra: Default::default(),
             actor_id: ActorId::from_bytes([8; 16]),
             evidence: EvidenceRef {
+                extra: Default::default(),
                 path: PathWire::from_relative(&RelativePath::parse("approval.md").unwrap())
                     .unwrap(),
                 digest: Digest::from_bytes([9; 32]),
@@ -206,6 +212,7 @@ mod tests {
     fn document_identity_binds_path_and_digest() {
         let r = changed(|v| {
             v["subject"] = serde_json::to_value(Subject::Document {
+                extra: Default::default(),
                 path: PathWire::from_relative(&RelativePath::parse("docs/result.md").unwrap())
                     .unwrap(),
                 digest: Digest::from_bytes([9; 32]),
@@ -219,12 +226,11 @@ mod tests {
         assert_ne!(digest(&r).unwrap(), digest(&other).unwrap());
     }
     #[test]
-    fn bounds_versions_unknown_tags_fields_and_duplicate_keys_fail_closed() {
+    fn bounds_versions_unknown_tags_and_duplicate_keys_fail_closed() {
         let bytes = canonical(&receipt()).unwrap();
         let text = std::str::from_utf8(bytes.as_bytes()).unwrap();
         for bad in [
             text.replace("\"schema_version\":1", "\"schema_version\":2"),
-            text.replacen('{', "{\"extra\":0,", 1),
             text.replacen('{', "{\"revision\":1,", 1),
             text.replace("\"created_at\":1234567", "\"created_at\":1.5"),
             text.replace("\"revision\":1", "\"revision\":18446744073709551616"),
@@ -277,8 +283,11 @@ mod tests {
     #[test]
     fn attested_and_unknown_authors_are_stored_without_promoting_lineage() {
         for route in [
-            RouteProvenance::Unknown {},
+            RouteProvenance::Unknown {
+                extra: Default::default(),
+            },
             RouteProvenance::ChairAttested {
+                extra: Default::default(),
                 route: "codex/gpt-6.1-sol@high".into(),
                 tier: ModelTier::Principal,
                 declared_family: None,
@@ -287,8 +296,9 @@ mod tests {
         ] {
             let r = changed(|v| {
                 v["authors"] = serde_json::to_value(vec![Author::Agent {
+                    extra: Default::default(),
                     actor_id: ActorId::from_bytes([1; 16]),
-                    route: route.clone(),
+                    route: Box::new(route.clone()),
                 }])
                 .unwrap()
             });
@@ -297,13 +307,15 @@ mod tests {
         }
         let r = changed(|v| {
             v["authors"] = serde_json::to_value(vec![Author::Agent {
+                extra: Default::default(),
                 actor_id: ActorId::from_bytes([1; 16]),
-                route: RouteProvenance::ChairAttested {
+                route: Box::new(RouteProvenance::ChairAttested {
+                    extra: Default::default(),
                     route: " ".into(),
                     tier: ModelTier::Principal,
                     declared_family: None,
                     evidence: approval_ref().evidence,
-                },
+                }),
             }])
             .unwrap()
         });

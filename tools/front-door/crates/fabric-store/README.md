@@ -165,19 +165,8 @@ Identical live acquire retries by the same actor/token return the existing fence
 without renewing it or appending an event. Landing retries also match frozen OIDs;
 a changed expected or candidate OID conflicts, including during an unresolved push.
 
-Migration 7 drops the removed legacy import's table and strips its always-null
-`legacy` members from messages, tasks, coordination receipts and committed peer
-replies, and deletes the `imported` event of an import that brought nothing
-over. While any data that import wrote remains, opening refuses the upgrade with
-`LegacyImportData` (service code `upgrade_refused`), naming the table and its
-row count. Earlier migrations commit separately, so the store stays at a version
-the previous release still opens. The supported remedy is to keep the previous
-release or archive the store, as the
-[Fabric hosts runbook](../../../../docs/runbooks/fabric-hosts.md#legacy-import-data)
-describes. Records no longer decode `legacy` or `legacy_output_path` at all,
-even as null, so a row or peer reply that carries either fails to decode. A
-binary from before migration 7 may still write a null one after it, so upgrade
-every host together.
+Migration 7 removes the retired legacy import table and fields. Stores carrying
+legacy markers can migrate; the migration removes those retired fields.
 All mutations and their events share an immediate transaction, injected clock,
 budget and BUSY retry. Tests use temporary roots, barrier handshakes, exact clock
 boundaries and real SQLite BUSY/FULL failures; no old store or install is opened.

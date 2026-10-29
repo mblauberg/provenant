@@ -119,6 +119,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
         let context = crate::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)
             .map_err(|e| Fail::new(Status::Error, ErrorKind::Identity, e.to_string()))?;
         Some(run::ChairBinding {
+            extra: Default::default(),
             host: context.identity.inbox.host,
             actor: crate::workflow::session_actor(&context, None)
                 .map_err(|e| Fail::new(Status::Error, ErrorKind::Identity, e))?,
@@ -504,6 +505,7 @@ fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>
         base: None,
         head: Some(head.into()),
         route: run::RequestedRoute::Review {
+            extra: Default::default(),
             name: slot.pool.clone(),
             effort: None,
             distinct_families: slot.distinct,
@@ -792,6 +794,7 @@ mod review_shape_tests {
             review_identity("head", "standard", shape, "brief", 0, 0, 0).map_err(|e| e.message)?;
         let run_id = RunId::from_bytes([9; 16]);
         let mut prepared = run::OperationRecord {
+            extra: Default::default(),
             schema_version: 1,
             project_id: provenant_core::ProjectId::from_bytes([1; 16]),
             actor_id: ActorId::from_bytes([2; 16]),
@@ -857,6 +860,7 @@ mod review_shape_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let id = RunId::from_bytes([4; 16]);
         let terminal = |outcome| run::AttemptState::Terminal {
+            extra: Default::default(),
             outcome,
             exit_code: None,
             finished_at: WallTime::from_micros(1).unwrap(),
@@ -879,7 +883,12 @@ mod review_shape_tests {
             SlotProbe::Reattach(id)
         );
         assert_eq!(
-            probe_state(id, &run::AttemptState::Running),
+            probe_state(
+                id,
+                &run::AttemptState::Running {
+                    extra: Default::default()
+                }
+            ),
             SlotProbe::Reattach(id)
         );
         assert_eq!(

@@ -1095,16 +1095,22 @@ fn candidate(
     };
     let account = availability.and_then(|a| a.account_key.clone());
     let readiness = match (reason, availability) {
-        (Some(reason), _) => RouteReadiness::Unavailable { reason },
+        (Some(reason), _) => RouteReadiness::Unavailable {
+            extra: Default::default(),
+            reason,
+        },
         (None, Some(a)) => RouteReadiness::Ready {
+            extra: Default::default(),
             availability_ref: a.fixture_ref.clone(),
             expires_unix_seconds: a.expires_unix_seconds,
         },
         _ => RouteReadiness::Unavailable {
+            extra: Default::default(),
             reason: RouteExclusionReason::UnknownAvailability,
         },
     };
     Ok(RouteAlternative {
+        extra: Default::default(),
         adapter: model.adapter().into(),
         model: model.model().into(),
         effort: effort.map(str::to_owned),
@@ -1117,6 +1123,7 @@ fn candidate(
         },
         readiness,
         confidentiality: RouteConfidentiality {
+            extra: Default::default(),
             evidence_ref: access.map_or("", |a| a.disclosure_ref).into(),
         },
     })
@@ -1305,8 +1312,9 @@ fn resolve_inner(
     let exclusions = std::iter::once(&primary)
         .chain(alternatives.iter())
         .filter_map(|candidate| {
-            if let RouteReadiness::Unavailable { reason } = &candidate.readiness {
+            if let RouteReadiness::Unavailable { reason, .. } = &candidate.readiness {
                 Some(RouteExclusion {
+                    extra: Default::default(),
                     adapter: candidate.adapter.clone(),
                     model: candidate.model.clone(),
                     reason: reason.clone(),
@@ -1317,6 +1325,7 @@ fn resolve_inner(
         })
         .collect();
     Ok(ResolvedRoute {
+        extra: Default::default(),
         adapter: primary.adapter,
         model: primary.model,
         effort: primary.effort,
@@ -1393,6 +1402,7 @@ fn classify_pool(
                 .exclusions
                 .push(format!("{}: admission rejected", member.model.as_str()));
             classified.candidates.push(RouteSelectionCandidate {
+                extra: Default::default(),
                 model: member.model.as_str().into(),
                 weight: member.weight,
                 factor_basis_points,
@@ -1439,6 +1449,7 @@ fn classify_pool(
                         && cooling(&member.model, resolved.account_key.as_deref(), context)
                     {
                         classified.candidates.push(RouteSelectionCandidate {
+                            extra: Default::default(),
                             model: member.model.as_str().into(),
                             weight: member.weight,
                             factor_basis_points,
@@ -1468,7 +1479,7 @@ fn classify_pool(
                                 .weighted
                                 .push((classified.candidates.len(), weight));
                         }
-                    } else if let RouteReadiness::Unavailable { reason } = &resolved.readiness {
+                    } else if let RouteReadiness::Unavailable { reason, .. } = &resolved.readiness {
                         match reason {
                             RouteExclusionReason::Disabled => classified
                                 .exclusions
@@ -1501,6 +1512,7 @@ fn classify_pool(
             }
         };
         classified.candidates.push(RouteSelectionCandidate {
+            extra: Default::default(),
             model: member.model.as_str().into(),
             weight: member.weight,
             factor_basis_points,
@@ -1563,6 +1575,7 @@ fn selection_receipt(
     route: &RouteAlternative,
 ) -> RouteSelectionReceipt {
     RouteSelectionReceipt {
+        extra: Default::default(),
         pool: name.into(),
         candidates: classified.candidates.clone(),
         roll: draw.roll,

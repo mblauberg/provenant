@@ -59,7 +59,7 @@ fn tier(route: &RouteProvenance) -> Option<ModelTier> {
         RouteProvenance::Observed { tier, .. } | RouteProvenance::ChairAttested { tier, .. } => {
             Some(*tier)
         }
-        RouteProvenance::Unknown {} => None,
+        RouteProvenance::Unknown { .. } => None,
     }
 }
 /// Most candidates the exhaustive selection considers (2^16 subsets).
@@ -71,7 +71,7 @@ fn declared_family(route: &RouteProvenance) -> Option<&str> {
         RouteProvenance::ChairAttested {
             declared_family, ..
         } => declared_family.as_deref(),
-        RouteProvenance::Unknown {} => None,
+        RouteProvenance::Unknown { .. } => None,
     }
 }
 fn lens_key(lens: &str) -> String {
@@ -103,7 +103,7 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
         .authors
         .iter()
         .filter_map(|a| match a {
-            Author::Agent { route, .. } => Some(route),
+            Author::Agent { route, .. } => Some(route.as_ref()),
             Author::User { .. } => None,
         })
         .collect();
@@ -154,7 +154,7 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
                 "reviewer is an author or decision maker".into(),
                 "use a reviewer who did not author or decide this work",
             );
-        } else if matches!(fact.eligibility.provenance, RouteProvenance::Unknown {}) {
+        } else if matches!(fact.eligibility.provenance, RouteProvenance::Unknown { .. }) {
             note(
                 "reviewer_route_unknown",
                 field,
@@ -319,18 +319,21 @@ mod tests {
 
     fn evidence() -> EvidenceRef {
         EvidenceRef {
+            extra: Default::default(),
             path: PathWire::from_relative(&RelativePath::parse("e.md").unwrap()).unwrap(),
             digest: Digest::from_bytes([0; 32]),
         }
     }
     fn subject() -> Subject {
         Subject::Document {
+            extra: Default::default(),
             path: evidence().path,
             digest: evidence().digest,
         }
     }
     fn observed(tier: ModelTier, family: &str) -> RouteProvenance {
         RouteProvenance::Observed {
+            extra: Default::default(),
             route: "codex/m@high".into(),
             tier,
             adapter: "codex".into(),
@@ -341,6 +344,7 @@ mod tests {
     }
     fn attested(tier: ModelTier) -> RouteProvenance {
         RouteProvenance::ChairAttested {
+            extra: Default::default(),
             route: "native@high".into(),
             tier,
             declared_family: Some("anthropic".into()),
@@ -349,8 +353,9 @@ mod tests {
     }
     fn author(route: RouteProvenance) -> Author {
         Author::Agent {
+            extra: Default::default(),
             actor_id: ActorId::from_bytes([1; 16]),
-            route,
+            route: Box::new(route),
         }
     }
     fn review(n: u8, route: RouteProvenance, verified: Option<&str>, lens: &str) -> ReviewFact {
@@ -441,7 +446,14 @@ mod tests {
             Some("openai"),
             "correctness",
         );
-        let extra = review(3, RouteProvenance::Unknown {}, None, "security");
+        let extra = review(
+            3,
+            RouteProvenance::Unknown {
+                extra: Default::default(),
+            },
+            None,
+            "security",
+        );
         let report = run(RiskTier::Substantial, &authors, &[good, extra], &[]);
         assert_eq!(report.status, Status::Passed);
         assert_eq!(report.counted.len(), 1);
@@ -548,7 +560,14 @@ mod tests {
             Some("openai"),
             "c",
         );
-        let unknown = review(4, RouteProvenance::Unknown {}, None, "d");
+        let unknown = review(
+            4,
+            RouteProvenance::Unknown {
+                extra: Default::default(),
+            },
+            None,
+            "d",
+        );
         let report = run(
             RiskTier::Substantial,
             &authors,
@@ -581,7 +600,9 @@ mod tests {
 
     #[test]
     fn unknown_author_tier_blocks_substantial_coverage() {
-        let authors = [author(RouteProvenance::Unknown {})];
+        let authors = [author(RouteProvenance::Unknown {
+            extra: Default::default(),
+        })];
         let good = review(
             2,
             observed(ModelTier::Principal, "openai"),
@@ -640,6 +661,7 @@ mod tests {
             "a",
         );
         stale.subject = Subject::Document {
+            extra: Default::default(),
             path: evidence().path,
             digest: Digest::from_bytes([7; 32]),
         };

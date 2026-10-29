@@ -150,9 +150,9 @@ fn accepts(root: &Value, schema: &Value, value: &Value) -> bool {
     {
         return false;
     }
-    if let Some(object) = value.as_object()
-        && let Some(properties) = schema.get("properties").and_then(Value::as_object)
-        && (schema
+    if let Some(object) = value.as_object() {
+        let properties = schema.get("properties").and_then(Value::as_object);
+        if schema
             .get("required")
             .and_then(Value::as_array)
             .is_some_and(|rs| {
@@ -161,12 +161,17 @@ fn accepts(root: &Value, schema: &Value, value: &Value) -> bool {
                     .any(|k| !object.contains_key(k))
             })
             || (schema["additionalProperties"] == false
-                && object.keys().any(|k| !properties.contains_key(k)))
-            || object
-                .iter()
-                .any(|(k, v)| properties.get(k).is_some_and(|s| !accepts(root, s, v))))
-    {
-        return false;
+                && object
+                    .keys()
+                    .any(|k| !properties.is_some_and(|p| p.contains_key(k))))
+            || object.iter().any(|(k, v)| {
+                properties
+                    .and_then(|p| p.get(k))
+                    .is_some_and(|s| !accepts(root, s, v))
+            })
+        {
+            return false;
+        }
     }
     if let Some(array) = value.as_array()
         && (schema
@@ -235,8 +240,9 @@ fn sample(root: &Value, schema: &Value) -> Option<Value> {
     match schema.get("type")?.as_str()? {
         "object" => Some(Value::Object(
             schema["properties"]
-                .as_object()?
-                .iter()
+                .as_object()
+                .into_iter()
+                .flatten()
                 .map(|(k, s)| Some((k.clone(), sample(root, s)?)))
                 .collect::<Option<Map<_, _>>>()?,
         )),
@@ -626,6 +632,129 @@ fn generated_schema_values_match_strict_serde_for_every_operation_and_field() {
     assert!(
         counts.0 > 0 && counts.1 > counts.0,
         "insufficient generated probes: {counts:?}"
+    );
+}
+
+/// Enumerate every object shape, including optional objects, array elements and
+/// every tagged variant, in otherwise valid complete tool requests.
+fn unknown_field_cases(
+    root: &Value,
+    schema: &Value,
+    request: &Value,
+    path: &str,
+    cases: &mut Vec<(String, Value)>,
+) {
+    if let Some(resolved) = deref(root, schema) {
+        unknown_field_cases(root, resolved, request, path, cases);
+        return;
+    }
+    if let Some(options) = schema
+        .get("oneOf")
+        .or_else(|| schema.get("anyOf"))
+        .and_then(Value::as_array)
+    {
+        for option in options {
+            // Scalar alternatives cannot contain unknown object fields.
+            if matches!(
+                option.get("type").and_then(Value::as_str),
+                Some("null" | "string" | "integer" | "boolean")
+            ) {
+                continue;
+            }
+
+            let value = sample(root, option)
+                .unwrap_or_else(|| panic!("no variant sample at {path}: {option}"));
+            let mut request = replace(request, path, value).expect("variant path exists");
+            normalise(&mut request);
+            unknown_field_cases(root, option, &request, path, cases);
+        }
+        return;
+    }
+    let value = request.pointer(path).expect("sample path exists");
+    if value.is_object() {
+        assert_eq!(
+            schema["additionalProperties"], false,
+            "open input at {path}"
+        );
+        let mut changed = request.clone();
+        changed
+            .pointer_mut(path)
+            .and_then(Value::as_object_mut)
+            .expect("object path")
+            .insert("__unknown_input".into(), json!(true));
+        cases.push((path.into(), changed));
+        for (key, field) in schema["properties"].as_object().into_iter().flatten() {
+            unknown_field_cases(root, field, request, &child_path(path, key), cases);
+        }
+    } else if let Some(items) = value.as_array() {
+        for index in 0..items.len() {
+            unknown_field_cases(
+                root,
+                &schema["items"],
+                request,
+                &child_path(path, &index.to_string()),
+                cases,
+            );
+        }
+    }
+}
+
+#[test]
+fn every_tool_rejects_unknown_fields_in_every_input_object() {
+    let mut checked_tools = Vec::new();
+    let mut checked_paths = Vec::new();
+    for tool in strict_catalogue() {
+        let name = tool["name"].as_str().expect("tool name");
+        let root = &tool["inputSchema"];
+        let mut request = sample(root, root).expect("tool has a sample");
+        normalise(&mut request);
+        assert!(
+            ToolCall::parse(name, request.clone()).is_ok(),
+            "{name}: {request}"
+        );
+        let mut cases = Vec::new();
+        unknown_field_cases(root, root, &request, "", &mut cases);
+        assert!(!cases.is_empty(), "no object probes for {name}");
+        for (path, request) in cases {
+            assert!(!accepts(root, root, &request), "{name} {path}: {request}");
+            assert!(
+                invalid_path(name, &request).is_some_and(|path| path.ends_with(".__unknown_input")),
+                "schema walker accepted unknown field at {name} {path}: {request}"
+            );
+            assert!(ToolCall::parse(name, request).is_err(), "{name} {path}");
+            checked_paths.push(format!("{name}{path}"));
+        }
+        checked_tools.push(name);
+    }
+    assert_eq!(checked_tools, TOOL_NAMES.map(|(_, name)| name));
+    // These nested shared records tolerate future fields on peer ingress, so
+    // their strict MCP boundary must be exercised below the top-level input.
+    for path in [
+        "fabric_run/tasks/0/route",
+        "fabric_run/tasks/0/deliver",
+        "fabric_mail/artifacts/0/path",
+        "fabric_lease/scope",
+        "fabric_inbox/request/work/repository/relative_to_root",
+    ] {
+        assert!(
+            checked_paths.iter().any(|checked| checked == path),
+            "missing {path}"
+        );
+    }
+}
+
+#[test]
+fn closed_object_without_properties_rejects_unknown_fields() {
+    let schema = json!({"type": "object", "additionalProperties": false});
+    assert!(accepts(&schema, &schema, &json!({})));
+    assert!(!accepts(&schema, &schema, &json!({"unknown": true})));
+    assert_eq!(
+        structural_path(&schema, &schema, &json!({}), "arguments"),
+        None
+    );
+    assert_eq!(
+        structural_path(&schema, &schema, &json!({"unknown": true}), "arguments"),
+        Some("arguments.unknown".into())
     );
 }
 
