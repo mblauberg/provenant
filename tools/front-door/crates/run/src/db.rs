@@ -86,9 +86,6 @@ pub struct RunStore {
     pub(crate) launched_tasks: std::cell::RefCell<
         std::collections::BTreeSet<(provenant_core::RunId, provenant_core::TaskId)>,
     >,
-    /// Trusted launch inputs a graph advance needs, frozen into the reaction
-    /// row when this view commits a terminal record.
-    pub(crate) reaction_launch: Option<crate::HostLaunchContext>,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
@@ -251,7 +248,6 @@ impl RunStore {
             host: None,
             launched: Default::default(),
             launched_tasks: Default::default(),
-            reaction_launch: None,
             _owner: PhantomData,
         }))
     }
@@ -272,7 +268,6 @@ impl RunStore {
             host: None,
             launched: Default::default(),
             launched_tasks: Default::default(),
-            reaction_launch: None,
             _owner: PhantomData,
         };
         if schema_version < 6 {

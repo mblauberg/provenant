@@ -3361,19 +3361,42 @@ pub(crate) fn advance_settled_graphs(
                     actor: settled.actor_id,
                     run: settled.run_id,
                 },
+                settled.launch.clone(),
                 workers,
             )
         },
     )
 }
 
-/// Drain the reactions a settlement owes: the graph advance from its frozen
-/// launch inputs, then the notice and the chair log. Recovery calls this too.
+/// Launch inputs for a graph advance when no live guardian supplies them,
+/// derived the way a fresh host launch derives them: from this trusted process
+/// and the recovery edge, never from the run store, which a lane can rewrite.
+/// The graph's own directory comes from the host-owned graph journal.
+pub(crate) fn recovery_launch(
+    state_root: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<provenant_run::HostLaunchContext, Box<dyn std::error::Error>> {
+    Ok(provenant_run::HostLaunchContext::from_environment(
+        state_root,
+        cwd,
+        provenant_os::git::git_executable().ok_or("Git unavailable")?,
+    ))
+}
+
+/// Drain the reactions a settlement owes: the graph advance, then the notice
+/// and the chair log. `live` is the launch context of the guardian that
+/// settled, which only the host holds; recovery has none and derives its own.
+/// If those cannot be derived the graph reaction stays pending.
 pub(crate) fn settlement_reactions(
     subject: &crate::settlement::Subject,
+    live: Option<provenant_run::HostLaunchContext>,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
     crate::settlement::drain_run(subject, &mut |reaction| {
+        let launch = match &live {
+            Some(live) => live.clone(),
+            None => recovery_launch(&subject.state_root, &subject.checkout)?,
+        };
         let settled = provenant_run::HolderContext {
             schema_version: 1,
             roots: provenant_run::RootSeed {
@@ -3386,7 +3409,7 @@ pub(crate) fn settlement_reactions(
             run_id: reaction.run,
             attempt_id: reaction.attempt,
             host_delivery: None,
-            launch: reaction.graph.clone(),
+            launch: Some(launch),
             sealed: None,
         };
         advance_graphs_after_settlement(&settled, workers)

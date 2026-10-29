@@ -213,16 +213,20 @@ recovery, head, pull request), then the chair's session log gains a
 
 The run store owns the obligation. The terminal commit inserts a `reactions`
 row (schema v6) in the same transaction, freezing the notice, the message
-envelope, the pull request and issue IDs, and the trusted launch inputs a graph
-advance needs. The first drain also resolves the chair and its session once and
-freezes them in the row. Reactions are at-least-once and exactly-once in
-effect: the normal path and crash recovery drain pending rows under the run's
-`reactions.lock`, a busy lock means another drain covers the run, and a failed
-reaction stays pending and retries on the next drain. Recovery is scheduled
-whenever a run has pending rows. Attempts that settled before v6 have no row,
-so nothing is backfilled. Finished rows are pruned with `[retention] logs_days`.
-A graph advance needs the guardian's launch inputs, so a settlement committed
-by recovery alone has none and skips that step.
+envelope, the pull request and issue IDs, and that a graph advance is due. The
+row never carries host authority: it lives in lane-writable state, so graph
+launch inputs come from the live guardian, or, in recovery, are derived afresh
+from the trusted process and the host-owned graph journal. If they cannot be
+derived the graph reaction stays pending. The first drain resolves the chair
+and its session and persists them before any effect uses them, then saves
+progress at every step boundary with a fresh call budget. Reactions are
+at-least-once and exactly-once in effect: the normal path and crash recovery
+drain pending rows under the run's `reactions.lock`, a busy lock means another
+drain covers the run, and a failed reaction, or a busy host store, leaves only
+that reaction pending without stopping the others. `run reconcile` and recovery
+scheduling both see a closed run that still has pending rows. Attempts that
+settled before v6 have no row, so nothing is backfilled. Finished rows are
+pruned with `[retention] logs_days`.
 
 The chair log goes to the session in `PROVENANT_SESSION_ID`, else the session
 the chair saved, which must still be current and name the chair in its own

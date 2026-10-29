@@ -114,7 +114,8 @@ fn resolve(reaction: &mut Reaction, roots: &Roots) -> Result<(), Error> {
 /// under the run's reaction lock so concurrent drains do not repeat each
 /// other. A reaction that fails stays owed and is retried on the next drain;
 /// the others still run, and the first error is returned. `graph` advances the
-/// graphs for an attempt from its frozen launch inputs.
+/// graphs for an attempt from launch inputs the host supplies, never from the
+/// row.
 pub(crate) fn drain_run(
     subject: &Subject,
     graph: &mut dyn FnMut(&Reaction) -> Result<(), Error>,
@@ -136,36 +137,80 @@ pub(crate) fn drain_run(
     let store = provenant_run::RunStore::open(&context, &call)?;
     let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
     let settings = config.domains.fabric.lanes.settlement;
-    store.drain_reactions(subject.run, &call, &mut |reaction| {
-        if !reaction.resolved {
-            resolve(reaction, &roots)?;
+    store.drain_reactions(subject.run, &clock, &cancel, &mut |reaction, save| {
+        react(
+            reaction,
+            save,
+            graph,
+            &mut |reaction| resolve(reaction, &roots),
+            &settings,
+            &config.retention,
+            &roots,
+        )
+    })
+}
+
+/// One attempt's reactions. They are independent: one failing, or the host
+/// store being busy, leaves it pending without stopping the others, and the
+/// first failure in time order is reported. The destination is persisted
+/// before any effect that uses it, so a replay after a crash cannot pick a
+/// different session.
+fn react(
+    reaction: &mut Reaction,
+    save: &mut provenant_run::reactions::Saver<'_>,
+    graph: &mut dyn FnMut(&Reaction) -> Result<(), Error>,
+    resolve: &mut dyn FnMut(&mut Reaction) -> Result<(), Error>,
+    settings: &provenant_fabric_runtime::config::Settlement,
+    retention: &provenant_config::RetentionSettings,
+    roots: &Roots,
+) -> Result<(), Error> {
+    let mut first: Option<Error> = None;
+    if !reaction.resolved {
+        let outcome = resolve(reaction).and_then(|()| save(reaction));
+        if let Err(error) = outcome {
+            reaction.resolved = false;
+            reaction.chair = None;
+            reaction.session = None;
+            first = Some(error);
         }
-        // Each reaction runs whatever the others did; the first failure wins.
-        let mut first: Option<Error> = None;
-        if reaction.graph.is_some() && !reaction.graph_done {
-            match graph(reaction) {
-                Ok(()) => reaction.graph_done = true,
-                Err(error) => first = Some(error),
+    }
+    if reaction.graph && !reaction.graph_done {
+        match graph(reaction) {
+            Ok(()) => {
+                reaction.graph_done = true;
+                if let Err(error) = save(reaction) {
+                    first.get_or_insert(error);
+                }
+            }
+            Err(error) => {
+                first.get_or_insert(error);
             }
         }
+    }
+    if reaction.resolved {
         if !reaction.notice_done {
-            match post_notice(reaction, &settings, &roots) {
-                Ok(()) => reaction.notice_done = true,
+            match post_notice(reaction, settings, roots) {
+                Ok(()) => {
+                    reaction.notice_done = true;
+                    if let Err(error) = save(reaction) {
+                        first.get_or_insert(error);
+                    }
+                }
                 Err(error) => {
                     first.get_or_insert(error);
                 }
             }
         }
         if !reaction.log_done {
-            match append_chair_log(reaction, &settings, &config.retention, &roots) {
+            match append_chair_log(reaction, settings, retention, roots) {
                 Ok(()) => reaction.log_done = true,
                 Err(error) => {
                     first.get_or_insert(error);
                 }
             }
         }
-        first.map_or(Ok(()), Err)
-    })
+    }
+    first.map_or(Ok(()), Err)
 }
 
 /// Post the frozen notice to the dispatcher's inbox. Quiet cases and a
@@ -359,7 +404,7 @@ mod tests {
             finished_micros: now() * 1_000_000,
             pr_ids: vec![],
             issue_ids: vec![],
-            graph: None,
+            graph: false,
             resolved: true,
             chair: Some(ChairBinding {
                 extra: Default::default(),
@@ -450,6 +495,128 @@ mod tests {
         other.attempt = provenant_core::AttemptId::from_bytes([7; 16]);
         post_notice(&other, &loud, &roots).unwrap();
         assert_eq!(inbox(&roots).len(), 2);
+    }
+
+    fn unresolved(_session: &str) -> Reaction {
+        let mut reaction = reaction("settled three", None);
+        reaction.attempt = provenant_core::AttemptId::from_bytes([6; 16]);
+        reaction.resolved = false;
+        reaction.graph = true;
+        reaction.session = None;
+        reaction.chair = None;
+        reaction
+    }
+
+    fn binding(session: &str) -> ChairBinding {
+        ChairBinding {
+            extra: Default::default(),
+            host: provenant_core::HostId::from_bytes([1; 16]),
+            actor: ActorId::from_bytes([2; 16]),
+            session: Some(session.into()),
+        }
+    }
+
+    fn run_react(
+        reaction: &mut Reaction,
+        roots: &Roots,
+        events: &RefCell<Vec<&'static str>>,
+        graph_fails: bool,
+        resolve_fails: bool,
+        save_fails_at: Option<usize>,
+    ) -> Result<(), Error> {
+        let saves = RefCell::new(0usize);
+        react(
+            reaction,
+            &mut |_| {
+                let n = *saves.borrow();
+                *saves.borrow_mut() += 1;
+                events.borrow_mut().push("save");
+                if save_fails_at == Some(n) {
+                    return Err("db".into());
+                }
+                Ok(())
+            },
+            &mut |_| {
+                events.borrow_mut().push("graph");
+                if graph_fails {
+                    Err("graph".into())
+                } else {
+                    Ok(())
+                }
+            },
+            &mut |reaction| {
+                events.borrow_mut().push("resolve");
+                if resolve_fails {
+                    return Err("host store busy".into());
+                }
+                reaction.chair = Some(binding("session-1"));
+                reaction.session = Some("session-1".into());
+                reaction.resolved = true;
+                Ok(())
+            },
+            &provenant_fabric_runtime::config::Settlement::default(),
+            &provenant_config::RetentionSettings::default(),
+            roots,
+        )
+    }
+
+    #[test]
+    fn a_busy_host_store_does_not_stop_the_graph_and_lookup_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp.path().canonicalize().unwrap());
+        let events = RefCell::new(Vec::new());
+        let mut reaction = unresolved("session-1");
+        let error = run_react(&mut reaction, &roots, &events, false, true, None).unwrap_err();
+        assert_eq!(error.to_string(), "host store busy");
+        assert!(reaction.graph_done && !reaction.resolved);
+        assert!(!reaction.notice_done && !reaction.log_done && reaction.pending());
+        assert!(inbox(&roots).is_empty());
+        // The next drain resolves and finishes the other two.
+        run_react(&mut reaction, &roots, &events, false, false, None).unwrap();
+        assert!(!reaction.pending());
+        assert_eq!(inbox(&roots), ["settled three"]);
+    }
+
+    #[test]
+    fn a_failed_graph_does_not_stop_the_notice_and_stays_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp.path().canonicalize().unwrap());
+        let events = RefCell::new(Vec::new());
+        let mut reaction = unresolved("session-1");
+        let error = run_react(&mut reaction, &roots, &events, true, false, None).unwrap_err();
+        assert_eq!(error.to_string(), "graph");
+        assert!(reaction.notice_done && reaction.log_done && !reaction.graph_done);
+        assert!(reaction.pending());
+    }
+
+    #[test]
+    fn the_destination_is_saved_before_any_effect_uses_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp.path().canonicalize().unwrap());
+        let events = RefCell::new(Vec::new());
+        let mut reaction = unresolved("session-1");
+        run_react(&mut reaction, &roots, &events, false, false, None).unwrap();
+        assert_eq!(events.borrow()[..3], ["resolve", "save", "graph"]);
+        // A destination that cannot be persisted is not used: no notice, no
+        // log, and nothing frozen in memory for the driver to save later.
+        let mut other = unresolved("session-2");
+        other.attempt = provenant_core::AttemptId::from_bytes([5; 16]);
+        let events = RefCell::new(Vec::new());
+        let error = run_react(&mut other, &roots, &events, false, false, Some(0)).unwrap_err();
+        assert_eq!(error.to_string(), "db");
+        assert!(!other.resolved && other.chair.is_none() && other.session.is_none());
+        assert!(!other.notice_done && !other.log_done);
+        assert_eq!(inbox(&roots).len(), 1);
+    }
+
+    #[test]
+    fn replay_launch_inputs_come_from_the_host_not_from_the_row() {
+        let state = std::path::Path::new("/trusted/state");
+        let launch =
+            crate::fabric::recovery_launch(state, std::path::Path::new("/trusted/cwd")).unwrap();
+        // A forged row has nowhere to name an executable or a config root.
+        assert!(launch.executables.is_empty());
+        assert_eq!(launch.configuration_root, state);
     }
 
     fn retention_for(settings: &provenant_config::RetentionSettings) -> Retention {

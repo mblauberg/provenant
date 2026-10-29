@@ -4,18 +4,20 @@
 //! stores each reaction writes to make it exactly once. Rows exist only for
 //! attempts that settle after the schema that introduced them.
 use crate::{
-    AttemptRecord, AttemptState, HostLaunchContext, Request, Result, RunError, RunStore,
-    WriterDeliveryState, db::bytes, db::decode,
+    AttemptRecord, AttemptState, Request, Result, RunError, RunStore, WriterDeliveryState,
+    db::bytes, db::decode,
 };
-use provenant_core::{ActorId, AttemptId, ProjectId, RunId};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RunId, WaitBudget};
 use provenant_records::run::ChairBinding;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-/// One drain step over a reaction: it records its progress on the reaction and
-/// returns its first failure.
-pub type Step<'a> =
-    dyn FnMut(&mut Reaction) -> std::result::Result<(), Box<dyn std::error::Error>> + 'a;
+/// One drain step over a reaction: it records its progress on the reaction,
+/// saves it at each boundary, and returns its first failure.
+pub type Saver<'a> =
+    dyn FnMut(&Reaction) -> std::result::Result<(), Box<dyn std::error::Error>> + 'a;
+pub type Step<'a> = dyn FnMut(&mut Reaction, &mut Saver<'_>) -> std::result::Result<(), Box<dyn std::error::Error>>
+    + 'a;
 
 /// A notice is an outcome for the chair to read, never an instruction.
 pub const NOTICE_BYTES: usize = 300;
@@ -33,9 +35,9 @@ pub struct Reaction {
     pub finished_micros: i64,
     pub pr_ids: Vec<String>,
     pub issue_ids: Vec<String>,
-    /// Trusted host launch inputs a graph advance needs; absent when the
-    /// settlement committed without a live guardian.
-    pub graph: Option<HostLaunchContext>,
+    /// A graph advance is due. The row carries no launch inputs: it lives in
+    /// lane-writable state, so the host supplies them at drain time.
+    pub graph: bool,
     /// Set once by the first drain, which resolves the chair and its session
     /// and freezes both here.
     #[serde(default)]
@@ -54,7 +56,7 @@ pub struct Reaction {
 
 impl Reaction {
     pub fn pending(&self) -> bool {
-        !(self.graph_done || self.graph.is_none()) || !self.notice_done || !self.log_done
+        !(self.graph_done || !self.graph) || !self.notice_done || !self.log_done
     }
 }
 
@@ -171,7 +173,7 @@ impl RunStore {
                 .and_then(number)
                 .into_iter()
                 .collect(),
-            graph: self.reaction_launch.clone(),
+            graph: true,
             resolved: false,
             chair: None,
             session: None,
@@ -256,16 +258,27 @@ impl RunStore {
     /// Run `step` on every attempt of `run` that owes reactions, under the
     /// run's reaction lock so concurrent drains do not repeat each other (a
     /// busy lock means another drain covers the run). `step` records progress
-    /// on the reaction it is given and returns its first failure; the progress
-    /// is saved either way, a failed reaction stays pending for the next drain,
-    /// and the others still run. The first failure is returned.
+    /// on the reaction it is given and calls the saver it is handed at each
+    /// boundary, so work already done survives a crash. A step may outlast any
+    /// one call budget, so every persistence operation here takes a fresh one.
+    /// A failed reaction stays pending for the next drain, the others still
+    /// run, and the first failure is returned.
     pub fn drain_reactions(
         &self,
         run: RunId,
-        call: &Request<'_>,
+        clock: &dyn Clock,
+        cancel: &CancelToken,
         step: &mut Step<'_>,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        if self.pending_reactions(run, call)?.is_empty() {
+        let fresh = || -> Result<Request<'_>> {
+            Ok(Request {
+                clock,
+                budget: WaitBudget::cli(clock.mono_now(), 30)
+                    .map_err(|_| RunError::Validation("call budget"))?,
+                cancel,
+            })
+        };
+        if self.pending_reactions(run, &fresh()?)?.is_empty() {
             return Ok(());
         }
         let Some(_lock) = self.reaction_lock(run)? else {
@@ -273,15 +286,19 @@ impl RunStore {
         };
         let mut first = None;
         // Re-read under the lock: a drain that just finished leaves nothing.
-        for attempt in self.pending_reactions(run, call)? {
-            let Some(mut reaction) = self.reaction(attempt, call)? else {
+        for attempt in self.pending_reactions(run, &fresh()?)? {
+            let Some(mut reaction) = self.reaction(attempt, &fresh()?)? else {
                 continue;
             };
-            if let Err(error) = step(&mut reaction) {
+            let mut save =
+                |reaction: &Reaction| -> std::result::Result<(), Box<dyn std::error::Error>> {
+                    Ok(self.save_reaction(reaction, &fresh()?)?)
+                };
+            if let Err(error) = step(&mut reaction, &mut save) {
                 first.get_or_insert(error);
             }
-            if let Err(error) = self.save_reaction(&reaction, call) {
-                first.get_or_insert(error.into());
+            if let Err(error) = save(&reaction) {
+                first.get_or_insert(error);
             }
         }
         first.map_or(Ok(()), Err)

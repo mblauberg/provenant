@@ -39,6 +39,34 @@ pub struct HostLaunchContext {
     #[serde(default)]
     pub fixture_state_write: bool,
 }
+impl HostLaunchContext {
+    /// The inputs a host derives for itself when no guardian handed it any:
+    /// the caller's trusted roots and git, with search path and tool homes
+    /// from this process's environment and no pinned executables.
+    pub fn from_environment(
+        configuration_root: &std::path::Path,
+        cwd: &std::path::Path,
+        git: PathBuf,
+    ) -> Self {
+        Self {
+            configuration_root: configuration_root.into(),
+            cwd: cwd.into(),
+            executables: Default::default(),
+            executable_search_path: std::env::var_os("PATH")
+                .map(|path| {
+                    std::env::split_paths(&path)
+                        .filter(|path| path.is_absolute())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            git,
+            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
+            #[cfg(feature = "fixture")]
+            fixture_state_write: false,
+        }
+    }
+}
 /// Opaque to supervisor; travels on the handoff pipe only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HolderContext {
@@ -164,9 +192,8 @@ impl HolderContext {
             .map_or(context.roots.state_root.as_path(), |host| {
                 host.configuration_root.as_path()
             });
-        let mut store = RunStore::open(&execution, &call(&SystemClock, &CancelToken::new())?)?
+        let store = RunStore::open(&execution, &call(&SystemClock, &CancelToken::new())?)?
             .with_writer_registry(registry);
-        store.reaction_launch = context.launch.clone();
         Ok((context, store))
     }
 }

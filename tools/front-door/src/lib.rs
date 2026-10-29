@@ -667,7 +667,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             .map_err(|error| error.to_string())
             .and_then(|()| {
                 let subject = drained.map_err(|error| error.to_string())?;
-                fabric::settlement_reactions(&subject, process.workers())
+                fabric::settlement_reactions(&subject, None, process.workers())
                     .map_err(|error| error.to_string())
             }) {
                 Ok(()) => 0,
