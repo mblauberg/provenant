@@ -299,12 +299,11 @@ impl super::SessionStore {
         &self,
         dir: &super::Directory,
     ) -> Result<(), super::SessionError> {
-        let bytes =
-            match dir.read_bounded(std::ffi::OsStr::new(PENDING), super::CHECKPOINT_LIMIT * 4) {
-                Ok(bytes) => bytes,
-                Err(error) if error.is_not_found() => return Ok(()),
-                Err(error) => return Err(error.into()),
-            };
+        let bytes = match dir.read_bounded(std::ffi::OsStr::new(PENDING), PENDING_LIMIT) {
+            Ok(bytes) => bytes,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
         let pending: Pending =
             serde_json::from_slice(&bytes).map_err(|_| super::SessionError::Journal)?;
         self.finish_pending(dir, pending).map(|_| ())
@@ -342,6 +341,12 @@ impl super::SessionStore {
 }
 
 const PENDING: &str = "summary-pending.json";
+/// Worst case for a journal: two checkpoint texts (the replaced and the new)
+/// as JSON strings, where one control character escapes to six bytes, plus the
+/// revision chain, discovery record and receipt.
+const PENDING_LIMIT: u64 = 2 * super::CHECKPOINT_LIMIT * 6 + 1024 * 1024;
+/// Receipts hold a summary (at most an 8 KiB header, escaped) each.
+const RECEIPTS_LIMIT: u64 = RECEIPTS_KEPT as u64 * (8192 * 6 + 16 * 1024);
 const RECEIPTS: &str = "summary-receipts.json";
 /// Receipts kept per session; the oldest are forgotten first.
 const RECEIPTS_KEPT: usize = 64;
@@ -375,7 +380,7 @@ pub(super) struct Pending {
     receipt: SummaryReceipt,
 }
 fn read_receipts(dir: &super::Directory) -> Result<Receipts, super::SessionError> {
-    match dir.read_bounded(std::ffi::OsStr::new(RECEIPTS), 4 * 1024 * 1024) {
+    match dir.read_bounded(std::ffi::OsStr::new(RECEIPTS), RECEIPTS_LIMIT) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| super::SessionError::Journal),
         Err(error) if error.is_not_found() => Ok(Receipts::default()),
         Err(error) => Err(error.into()),

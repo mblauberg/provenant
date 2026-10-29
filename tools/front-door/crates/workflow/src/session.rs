@@ -63,6 +63,9 @@ pub(super) struct PublishPlan {
     chain: Vec<Revision>,
     unchanged: bool,
     keep: u64,
+    /// The discovery record to publish, fixed when the plan is made so that
+    /// recovery never derives it from whichever writer recovers.
+    discovery: Option<SessionDiscovery>,
 }
 /// Checkpoints are UTF-8, so plans carry them as JSON strings.
 mod utf8_bytes {
@@ -421,7 +424,7 @@ impl SessionStore {
         if text.len() as u64 > CHECKPOINT_LIMIT {
             return Err(SessionError::TooLarge);
         }
-        std::str::from_utf8(text)?;
+        let markdown = std::str::from_utf8(text)?;
         // A checkpoint that cannot be read (a symlink, say) is replaced, not kept.
         let existing = read_current(dir).ok().flatten();
         let discovery = self.load_discovery(dir)?;
@@ -446,6 +449,9 @@ impl SessionStore {
                 saved_at: now,
             });
         }
+        let current = chain.last().ok_or(SessionError::History)?;
+        let summary = parse_summary(markdown).ok().flatten();
+        let discovery = self.saved_discovery(discovery, current, summary, now);
         Ok(PublishPlan {
             now,
             prev,
@@ -453,6 +459,7 @@ impl SessionStore {
             chain,
             unchanged,
             keep: self.keep,
+            discovery,
         })
     }
 
@@ -465,8 +472,6 @@ impl SessionStore {
         publish_discovery: impl FnOnce(&Directory, &SessionDiscovery) -> Result<(), SessionError>,
     ) -> Result<Saved, SessionError> {
         let markdown = std::str::from_utf8(&plan.text)?;
-        let now = plan.now;
-        let discovery = self.load_discovery(dir)?;
         if let Some((revision, bytes)) = &plan.prev {
             publish(dir, &revision_file(*revision), bytes)?;
         }
@@ -482,15 +487,11 @@ impl SessionStore {
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| SessionError::History)?;
         publish(dir, MANIFEST, &manifest_bytes)?;
         let mut warnings = Vec::new();
-        let summary = match parse_summary(markdown) {
-            Ok(summary) => summary,
-            Err(error) => {
-                warnings.push(format!("checkpoint saved; summary unavailable: {error}"));
-                None
-            }
-        };
-        if let Some(record) = self.saved_discovery(discovery, &current, summary, now)
-            && let Err(error) = publish_discovery(dir, &record)
+        if let Err(error) = parse_summary(markdown) {
+            warnings.push(format!("checkpoint saved; summary unavailable: {error}"));
+        }
+        if let Some(record) = &plan.discovery
+            && let Err(error) = publish_discovery(dir, record)
         {
             let rebind = if self.rebind {
                 " (including --rebind)"
@@ -1828,6 +1829,48 @@ mod tests {
             assert_eq!(retry.summary.revision, 2);
         }
     }
+    #[test]
+    fn recovery_reads_a_journal_inflated_by_escaping() {
+        let (_t, root, project) = setup();
+        let chair = chair_store(&root, project);
+        // 200 KB of control characters escape to about 1.2 MB each in the
+        // previous and the new text of the journal.
+        let heavy = format!("{CHAIR_TEXT}{}", "\u{1}".repeat(200_000));
+        saved(&chair, &heavy);
+        crash_after(&chair, 0, "op-1");
+        let dir = chair.directory(false).unwrap();
+        let size = dir
+            .read_bounded(OsStr::new("summary-pending.json"), 8 << 20)
+            .unwrap()
+            .len();
+        assert!(size > 1 << 20, "{size}");
+        let retry = update_at(&chair, change("crashed"), 1, "op-1", 99).unwrap();
+        assert_eq!(retry.summary.revision, 2);
+        saved(&chair, "---\n---\nafter\n");
+    }
+
+    #[test]
+    fn recovery_publishes_the_journaled_discovery_not_the_recoverers() {
+        use provenant_core::{ActorId, HostId};
+        let (_t, root, project) = setup();
+        saved(&store(&root, project, "chair"), CHAIR_TEXT);
+        let a = chair_store(&root, project);
+        crash_after(&a, 0, "op-1");
+        let b = store(&root, project, "chair")
+            .with_chair(HostId::from_bytes([3; 16]), ActorId::from_bytes([5; 16]));
+        let clock = clock(20);
+        let result = b.save_revision(
+            b"other",
+            WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+            &CancelToken::new(),
+            &clock,
+        );
+        assert!(matches!(result, Err(SessionError::DiscoveryIdentity)));
+        let record = a.discovery().unwrap().unwrap().record;
+        assert_eq!(record.chair_actor, ActorId::from_bytes([4; 16]));
+        assert_eq!(record.checkpoint.revision, 2);
+    }
+
     #[test]
     fn enforces_utf8_and_byte_bounds_on_read_and_write() {
         let (_temp, root, project) = setup();
