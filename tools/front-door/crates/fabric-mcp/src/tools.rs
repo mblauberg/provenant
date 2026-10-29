@@ -43,6 +43,17 @@ pub enum ConsoleInput {
         cursor: Option<String>,
         hosts: Option<String>,
     },
+    Detail {
+        id: String,
+    },
+    Search {
+        query: String,
+        part: String,
+        session: Option<String>,
+        #[serde(default = "page_default")]
+        limit: u64,
+        cursor: Option<String>,
+    },
     Tree {
         #[serde(default = "depth_default")]
         max_depth: u64,
@@ -93,6 +104,15 @@ impl ConsoleInput {
                 if !(1..=100).contains(limit) =>
             {
                 Err(bad("limit"))
+            }
+            Self::Search {
+                query, part, limit, ..
+            } if query.is_empty()
+                || query.len() > 1_024
+                || !matches!(part.as_str(), "prompt" | "result")
+                || !(1..=100).contains(limit) =>
+            {
+                Err(bad("search"))
             }
             Self::Tree { max_depth, .. } if !(1..=16).contains(max_depth) => Err(bad("max_depth")),
             Self::Tree { max_nodes, .. } if !(1..=100).contains(max_nodes) => Err(bad("max_nodes")),

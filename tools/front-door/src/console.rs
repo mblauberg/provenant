@@ -16,6 +16,8 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
         Console::Open => "console open",
         Console::Projects => "console projects",
         Console::Sessions { .. } => "console sessions",
+        Console::Detail { .. } => "console detail",
+        Console::Search { .. } => "console search",
     };
     let result = (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         let resolved = crate::roots::resolve(
@@ -40,6 +42,46 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             None
         };
         let local = provenant_cli::console::read(&resolved.roots, selected, &command)?;
+        if let Console::Detail { id } = &command
+            && local["reason"] == "remote_detail_requires_host_read"
+        {
+            let (host, attempt) = id.split_once('/').ok_or("invalid remote detail ID")?;
+            let context = provenant_cli::fabric::Context::open_read_only(
+                resolved.roots,
+                &resolved.home,
+                &resolved.project,
+            )?;
+            let Some(peer) = context.peer_host(host) else {
+                return Ok(
+                    serde_json::json!({"lane_id":{"host":host,"attempt_id":attempt},"status":"unavailable","reason":"unknown_peer"}),
+                );
+            };
+            use provenant_core::Clock;
+            let clock = provenant_os::clock::SystemClock::new();
+            let seconds = context.config.limits.peer_seconds;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            let budget = provenant_core::WaitBudget::cli(clock.mono_now(), seconds)?;
+            let executor = provenant_os::exec::SystemExecutor::new(1)?;
+            let action = provenant_fabric_runtime::hosts::PeerAction::ConsoleDetail {
+                extra: Default::default(),
+                id: attempt.to_owned(),
+            };
+            let result = read_peers(vec![peer], deadline, move |host| {
+                context.peer_with(
+                    &executor,
+                    &provenant_os::clock::SystemClock::new(),
+                    host,
+                    action.clone(),
+                    budget,
+                    &CancelToken::new(),
+                )
+            });
+            return Ok(compose_detail(
+                peer,
+                attempt,
+                result.into_iter().next().and_then(|(_, result)| result),
+            ));
+        }
         let (hosts, action) = match &command {
             Console::Board {
                 hosts: Some(hosts),
@@ -121,7 +163,8 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
                 Some(
                     provenant_cli::console::Error::Cursor
                     | provenant_cli::console::Error::InvalidSession
-                    | provenant_cli::console::Error::BoardCursor,
+                    | provenant_cli::console::Error::BoardCursor
+                    | provenant_cli::console::Error::SearchCursor,
                 ) => (Outcome::Invalid, "CATALOGUE_INPUT"),
                 _ => (Outcome::Error, "CATALOGUE"),
             };
@@ -215,6 +258,37 @@ fn unavailable(message: String) -> CommandResult<Option<serde_json::Value>> {
         repair: None,
     });
     result
+}
+
+fn compose_detail(
+    host: provenant_core::HostId,
+    attempt: &str,
+    result: Option<
+        Result<provenant_fabric_runtime::hosts::PeerResult, provenant_cli::fabric::PeerFailure>,
+    >,
+) -> serde_json::Value {
+    use provenant_fabric_runtime::hosts::PeerResult;
+    match result {
+        Some(Ok(PeerResult::Console { mut data, .. }))
+            if data["schema_version"] == 1
+                && matches!(
+                    data["status"].as_str(),
+                    Some("found" | "missing" | "unavailable")
+                )
+                && data["lane_id"]["attempt_id"] == attempt =>
+        {
+            if let Some(lane) = data
+                .get_mut("lane_id")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                lane.insert("host".into(), serde_json::json!(host));
+            }
+            data
+        }
+        _ => {
+            serde_json::json!({"schema_version":1,"lane_id":{"host":host,"attempt_id":attempt},"status":"unavailable","reason":"peer_unavailable"})
+        }
+    }
 }
 
 fn compose_peers(
@@ -429,6 +503,37 @@ mod tests {
                 serde_json::json!(host)
             );
             assert_eq!(composed["coverage"]["peers"][index]["state"], "unreachable");
+        }
+    }
+
+    #[test]
+    fn peer_detail_preserves_data_and_reports_unavailable() {
+        use provenant_fabric_runtime::hosts::PeerResult;
+        let host = provenant_core::HostId::from_bytes([2; 16]);
+        let response = PeerResult::Console {
+            data: serde_json::json!({"schema_version":1,"lane_id":{"host":null,"attempt_id":"a"},"status":"found","trace":[1]}),
+            extra: Default::default(),
+        };
+        let detail = super::compose_detail(host, "a", Some(Ok(response)));
+        assert_eq!(detail["status"], "found");
+        assert_eq!(detail["lane_id"]["host"], serde_json::json!(host));
+        assert_eq!(detail["trace"], serde_json::json!([1]));
+        let missing = super::compose_detail(host, "a", None);
+        assert_eq!(missing["status"], "unavailable");
+        assert_eq!(missing["lane_id"]["host"], serde_json::json!(host));
+        for data in [
+            serde_json::json!({"lane_id":{"attempt_id":"a"},"status":"found"}),
+            serde_json::json!({"schema_version":2,"lane_id":{"attempt_id":"a"},"status":"found"}),
+            serde_json::json!({"schema_version":1,"lane_id":{"attempt_id":"a"},"status":"invalid"}),
+        ] {
+            let response = PeerResult::Console {
+                data,
+                extra: Default::default(),
+            };
+            assert_eq!(
+                super::compose_detail(host, "a", Some(Ok(response)))["reason"],
+                "peer_unavailable"
+            );
         }
     }
 

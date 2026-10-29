@@ -87,6 +87,9 @@ def cli_reference(data):
         text += "\n"
     for command in data["commands"]:
         text += f"## `{command['command']}`\n\n"
+        if command["command"] == "provenant console search":
+            text += ("Search is local only; peers are not searched. Only the first match "
+                     "per artifact is returned, and each cursor page rescans.\n\n")
         if command["command"] == "provenant pr contributions":
             text += ("Response fields, nullability, coverage values and capture roles: "
                      "[PR contributions JSON reference](../specs/run.md#pr-contributions-json-reference).\n\n")

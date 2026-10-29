@@ -8,8 +8,11 @@ use serde_json::{Value, json};
 use std::os::unix::ffi::OsStrExt;
 
 mod board;
+mod detail;
+mod detail_inbox;
 mod overview;
 pub mod peer;
+mod search;
 mod tree;
 pub mod tree_peer;
 
@@ -47,6 +50,21 @@ pub enum Console {
         #[arg(long, value_name = "all|LABEL,...")]
         hosts: Option<String>,
     },
+    /// Read one attempt's bounded metadata and artifact inventory
+    Detail { id: String },
+    /// Search local prompt or result content; returns the first match per artifact.
+    /// Each cursor page rescans the bounded local content; peers are not searched.
+    Search {
+        query: String,
+        #[arg(long, value_parser = ["prompt", "result"])]
+        part: String,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=100))]
+        limit: u64,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Summarise local attention and running work
     Overview,
     /// Open the native console app (macOS)
@@ -82,6 +100,10 @@ pub enum Error {
     InvalidSession,
     #[error("invalid or stale cursor; restart the catalogue without --cursor")]
     Cursor,
+    #[error(
+        "invalid or stale search cursor; restart console search with the same query and filters and without --cursor"
+    )]
+    SearchCursor,
     #[error("cannot encode catalogue")]
     Encode,
 }
@@ -138,11 +160,32 @@ fn read_with_budget(
     {
         return tree::read(roots, selected, *max_depth, *max_nodes, *detail);
     }
+    if let Console::Detail { id } = command {
+        return detail::read(roots, id);
+    }
+    if let Console::Search {
+        query,
+        part,
+        session,
+        limit,
+        cursor,
+    } = command
+    {
+        return search::read(
+            roots,
+            query,
+            part,
+            session.as_deref(),
+            *limit,
+            cursor.as_deref(),
+        );
+    }
     let projects = projects(roots, selected)?;
     let (session, limit, cursor) = match command {
         Console::Board { .. } => unreachable!("board handled above"),
         Console::Tree { .. } => unreachable!("tree handled above"),
         Console::Open => unreachable!("open is handled at the process edge"),
+        Console::Detail { .. } | Console::Search { .. } => unreachable!("read handled above"),
         Console::Overview => return overview::read(roots, &projects),
         Console::Projects => {
             return Ok(json!({"projects":projects, "coverage":{"scope":"local"}}));
