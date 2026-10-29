@@ -212,7 +212,7 @@ impl RunStore {
                 let observation = Request {
                     clock: call.clock,
                     cancel: call.cancel,
-                    budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 5)
+                    budget: provenant_core::WaitBudget::per_transaction(call.clock.mono_now(), 5)
                         .map_err(|_| RunError::Contention)?,
                 };
                 let continuing: bool = observation.retry(|| Ok(self.db.query_row(
@@ -270,12 +270,7 @@ impl RunStore {
                     let collection = (|| -> Result<()> {
                         collect_temporary(&attempt, &temporary, dry_run, &mut report)?;
                         if !dry_run {
-                            let update = Request {
-                                budget: provenant_core::WaitBudget::cli(call.clock.mono_now(), 5)
-                                    .map_err(|_| RunError::Contention)?,
-                                ..observation
-                            };
-                            self.write(&update, |tx| {
+                            self.write(&observation, |tx| {
                                 tx.execute(
                                     "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND run=?2 AND project=?3 AND terminal=1",
                                     rusqlite::params![id, record.run_id.to_string(), record.project_id.to_string()],

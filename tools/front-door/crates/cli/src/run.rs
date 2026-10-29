@@ -1427,6 +1427,7 @@ pub struct Submitted {
     pub task_id: TaskId,
     pub prompt: String,
     pub base: Option<String>,
+    pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
     pub route: run::RequestedRoute,
     pub account: Option<String>,
@@ -1636,6 +1637,7 @@ pub fn submit_with_host(
                 task_id: task.task_id,
                 prompt: task.prompt,
                 base: task.base,
+                pinned_base: task.pinned_base,
                 head: task.head,
                 route: task.route,
                 account: task.account,
@@ -2721,9 +2723,24 @@ fn dispatch_inner(
                 .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error))?,
         })
     };
+    // Validate deterministic admission inputs before creating or claiming a tree.
+    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    config
+        .dispatch_profile(&command.knobs)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    for (_, title, prompt, _, models, _, _, _, _, _) in &tasks {
+        run::Service::scan(prompt)?;
+        if let Some(title) = title {
+            provenant_core::validate_task_title(title)
+                .map_err(|message| Fail::new(Status::Invalid, ErrorKind::Invalid, message))?;
+        }
+        fallback(models)?;
+    }
     // Preflight is complete: create or claim the owned tree, then admit.
+    let mut pinned_base = None;
     let worktree = if let Some(owned) = owned {
-        let info = own_worktree(
+        let (info, base) = own_worktree(
             &owned,
             command.base.as_deref(),
             &command.operation_id,
@@ -2733,6 +2750,7 @@ fn dispatch_inner(
             &clock,
             &cancel,
         )?;
+        pinned_base = Some(base);
         command.access.worktree = Some(info.path.clone());
         lane_access = self::lane_access(&command.access, edge.roots.state.as_path())?;
         Some(json!({"path": info.path, "branch": owned.branch, "owned": true}))
@@ -2770,6 +2788,7 @@ fn dispatch_inner(
                     build_heavy,
                     title,
                     base,
+                    pinned_base,
                     head: command.head.clone(),
                     task_id,
                     prompt,
@@ -2825,7 +2844,13 @@ fn own_worktree(
     created: &mut Option<(PathBuf, String)>,
     clock: &SystemClock,
     cancel: &CancelToken,
-) -> Result<provenant_confinement::worktrees::WorktreeInfo, Fail> {
+) -> Result<
+    (
+        provenant_confinement::worktrees::WorktreeInfo,
+        provenant_core::GitOid,
+    ),
+    Fail,
+> {
     let OwnedWorktree {
         branch,
         host,
@@ -2922,7 +2947,9 @@ fn own_worktree(
             } else {
                 worktrees::save_lane_owner_when_free(context, &verified, &owner, cancel)?;
             }
-            Ok(info)
+            let base = provenant_core::GitOid::parse(&owner.base)
+                .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+            Ok((info, base))
         },
     )
     .map_err(|error| {
@@ -7949,7 +7976,7 @@ mod tests {
                         .contains("adopted or foreign owner")
                 );
             } else {
-                assert_eq!(claimed.map_err(|fail| fail.message)?.path, path);
+                assert_eq!(claimed.map_err(|fail| fail.message)?.0.path, path);
                 assert_eq!(owner.origin, WorktreeOrigin::Lane);
                 assert_eq!(
                     owner.operation_id,
@@ -8048,41 +8075,151 @@ mod tests {
             assets: &project,
             cwd: &project,
         };
+        let prompt = root.join("prompt");
+        let secret = root.join("secret-prompt");
+        std::fs::write(&prompt, "review changes")?;
+        std::fs::write(&secret, "sk-abcdefghijklmnopqrstuvwxyz123456")?;
         let missing = root.join("missing-prompt");
-        let args: Vec<OsString> = [
-            "dispatch",
-            "--operation-id",
-            "preflight-lane",
-            "--model",
-            "codex/gpt-6-luna",
-            "--mode",
-            "worktree-write",
-            "--worktree-branch",
-            "preflight-lane",
-            "--base",
-            "HEAD",
-            "--prompt-file",
-            missing.to_str().ok_or("path")?,
-        ]
-        .into_iter()
-        .map(OsString::from)
-        .collect();
-        let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
-            return Err("parse".into());
-        };
-        let crate::Command::Dispatch(command) = invocation.command else {
-            return Err("dispatch".into());
-        };
-        let reply = dispatch_with_workers(*command, &edge, &Unknown);
-        assert_ne!(reply.result.status, Status::Ok);
-        assert!(!project.join(".worktrees").join("preflight-lane").exists());
-        let branch = run_git(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "refs/heads/preflight-lane",
+        for (input, extra, invalid) in [
+            (&missing, vec![], None),
+            (&prompt, vec!["--knob", "not.a.knob=1"], None),
+            (&prompt, vec![], Some("title")),
+            (&prompt, vec![], Some("fallback")),
+            (&secret, vec![], None),
+        ] {
+            let mut args: Vec<OsString> = [
+                "dispatch",
+                "--operation-id",
+                "preflight-lane",
+                "--model",
+                "codex/gpt-6-luna",
+                "--mode",
+                "worktree-write",
+                "--worktree-branch",
+                "preflight-lane",
+                "--base",
+                "HEAD",
+                "--prompt-file",
+                input.to_str().ok_or("path")?,
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            args.extend(extra.into_iter().map(OsString::from));
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
+                return Err("parse".into());
+            };
+            let crate::Command::Dispatch(mut command) = invocation.command else {
+                return Err("dispatch".into());
+            };
+            match invalid {
+                Some("title") => command.title = Some("invalid\ntitle".into()),
+                Some("fallback") => {
+                    command.route.fallback = vec![crate::route::Model("invalid".into())]
+                }
+                _ => {}
+            }
+            let reply = dispatch_with_workers(*command, &edge, &Unknown);
+            assert_ne!(reply.result.status, Status::Ok);
+            assert!(
+                !project.join(".worktrees").join("preflight-lane").exists(),
+                "{:?}",
+                reply.result
+            );
+            let branch = run_git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/preflight-lane",
+            ])?;
+            assert_ne!(branch.termination, Termination::Exit(0), "{branch:?}");
+        }
+        // A relative base is resolved in the source checkout exactly once.
+        // The new tree has no HEAD^, so admission must use creation's receipt.
+        let out = run_git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "second",
         ])?;
-        assert_ne!(branch.termination, Termination::Exit(0), "{branch:?}");
+        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+        let session = open(&edge, &call).map_err(|fail| fail.message)?;
+        let operation = OperationId::parse("relative-base-lane")?;
+        let (info, pinned) = own_worktree(
+            &OwnedWorktree {
+                branch: "relative-base-lane".into(),
+                host: provenant_config::bind_host(&roots)?,
+                created_at: clock.wall_now()?,
+            },
+            Some("HEAD^"),
+            &operation,
+            &edge,
+            &Unknown,
+            &mut None,
+            &clock,
+            &cancel,
+        )
+        .map_err(|fail| fail.message)?;
+        assert_eq!(info.head, pinned);
+        let dispatch = |base: &str| run::DispatchRequest {
+            chair: None,
+            operation_id: operation.clone(),
+            concurrency: 1,
+            lane_depth: 0,
+            parent_attempt: None,
+            tasks: vec![run::DispatchTask {
+                context: None,
+                build_heavy: false,
+                title: None,
+                task_id: TaskId::from_bytes([3; 16]),
+                prompt: "review changes".into(),
+                base: Some(base.into()),
+                pinned_base: Some(pinned),
+                head: None,
+                route: run::RequestedRoute::Model {
+                    extra: Default::default(),
+                    provider: "fixture".into(),
+                    model: "fixture/model".into(),
+                    effort: None,
+                },
+                account: None,
+                fallback: vec![],
+                profile: Default::default(),
+                timeout_seconds: 10,
+                delivery_id: None,
+                deliver: None,
+                worktree: Some(info.path.clone()),
+                access: Default::default(),
+            }],
+        };
+        let service = run::Service::new(&session.store);
+        let record = service.dispatch(dispatch("HEAD^"), &project, &call)?;
+        let canonical = session.store.request(record.run_id, &call)?;
+        assert_eq!(
+            canonical.tasks[0].base.as_deref(),
+            Some(pinned.to_string().as_str())
+        );
+        assert_eq!(canonical.tasks[0].base_ref.as_deref(), Some("HEAD^"));
+        assert_eq!(
+            service.dispatch(dispatch("HEAD^"), &project, &call)?.run_id,
+            record.run_id
+        );
+        let changed_base = service.dispatch(dispatch("HEAD"), &project, &call);
+        assert!(
+            matches!(changed_base, Err(run::RunError::OperationConflict)),
+            "{changed_base:?}"
+        );
+        let mut with_head = dispatch("HEAD^");
+        with_head.operation_id = OperationId::parse("relative-base-with-head")?;
+        with_head.tasks[0].head = Some(pinned.to_string());
+        service.dispatch(with_head, &project, &call)?;
         Ok(())
     }
 
@@ -8274,6 +8411,7 @@ mod tests {
                 task_id: TaskId::from_bytes([3; 16]),
                 prompt: "review".into(),
                 base: Some(base.into()),
+                pinned_base: None,
                 head: None,
                 route: run::RequestedRoute::Model {
                     extra: Default::default(),

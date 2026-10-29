@@ -541,15 +541,18 @@ fn observe_worker_holders(
     // Custody is decided per root. A gap that could hide a process anywhere
     // (an incomplete or truncated listing, or a process that could not be
     // described or placed) leaves every root that is not positively live
-    // unknown. A process the kernel refuses to describe belongs to another
-    // user or a protected service: it is a host diagnostic, not evidence
-    // about any root, since lane writers are this user's processes and also
-    // hold the writer lock.
+    // unknown. Permission denial alone cannot exclude a same-user writer:
+    // Linux processes can disable dumpability and hide their cwd.
     let mut unknown_all = !census.listing_is_complete()
         || census
             .unknown_pids()
             .values()
             .any(|issue| *issue != ObservationIssue::PermissionDenied);
+    for (&pid, &issue) in census.unknown_pids() {
+        if issue == ObservationIssue::PermissionDenied {
+            record_denied_process(&mut states, cwd_observer.uid(pid));
+        }
+    }
     // Exclude the caller's verified ancestors. A walk that stops early leaves
     // the remaining ancestors in the census, where one inside a root still
     // makes it live, so an incomplete ancestry hides nothing.
@@ -576,7 +579,10 @@ fn observe_worker_holders(
             continue;
         }
         match observe_same_process(observer, cwd_observer, fact) {
-            NativeCwd::Gone | NativeCwd::Denied => {}
+            NativeCwd::Gone => {}
+            NativeCwd::Denied => {
+                record_denied_process(&mut states, cwd_observer.uid(fact.identity.pid));
+            }
             NativeCwd::Unknown => unknown_all = true,
             NativeCwd::Path(path) => {
                 let Some(canonical) = canonical_cwd(&path) else {
@@ -628,10 +634,27 @@ fn canonical_cwd(path: &Path) -> Option<PathBuf> {
 enum NativeCwd {
     Path(PathBuf),
     Gone,
-    /// The kernel refused to describe the process: another user's or a
-    /// protected one. It binds no root.
+    /// Denial needs independent credentials and root permissions to exclude access.
     Denied,
     Unknown,
+}
+
+fn record_denied_process(states: &mut BTreeMap<PathBuf, WorkerState>, uid: Option<u32>) {
+    for (root, state) in states {
+        if *state != WorkerState::Free {
+            continue;
+        }
+        // Conservatively ignore group membership: either group or other write
+        // permission prevents exclusion under the tree's discretionary permissions.
+        let excluded = uid.is_some_and(|uid| {
+            Directory::open_anchor(root)
+                .and_then(|directory| directory.metadata())
+                .is_ok_and(|metadata| metadata.uid != uid && metadata.mode & 0o022 == 0)
+        });
+        if !excluded {
+            *state = WorkerState::Unknown;
+        }
+    }
 }
 
 fn observe_same_process(
@@ -4958,6 +4981,7 @@ mod lifecycle_tests {
         census: provenant_supervisor::census::Census,
         cwds: BTreeMap<i64, CwdObservation>,
         current: ProcessFact,
+        uids: BTreeMap<i64, u32>,
     }
     impl ProcessObserver for InjectedCensus {
         fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
@@ -4978,6 +5002,9 @@ mod lifecycle_tests {
         }
     }
     impl CwdObserver for InjectedCensus {
+        fn uid(&self, pid: i64) -> Option<u32> {
+            self.uids.get(&pid).copied()
+        }
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             Ok(self.cwds.get(&pid).cloned().unwrap_or(CwdObservation::Gone))
         }
@@ -4989,6 +5016,74 @@ mod lifecycle_tests {
         fn requires_complete_census(&self) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn denied_same_user_writer_keeps_the_tree_unknown() -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, ProcessIdentity};
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new()?;
+        let root = canonicalize(&fixture.root)?;
+        let fact = |pid: i64| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let owner = provenant_os::fs::effective_uid();
+        // Exercise both a denied cwd and a process whose entire fact is denied.
+        for denied_fact in [false, true] {
+            let mut observer = InjectedCensus {
+                census: Census::from_observations(
+                    if denied_fact {
+                        vec![fact(100)]
+                    } else {
+                        vec![fact(100), fact(200)]
+                    },
+                    if denied_fact {
+                        vec![(200, ObservationIssue::PermissionDenied)]
+                    } else {
+                        vec![]
+                    },
+                    [],
+                    true,
+                    false,
+                    32,
+                )?,
+                cwds: BTreeMap::from([(200, CwdObservation::PermissionDenied)]),
+                current: fact(100),
+                uids: BTreeMap::new(),
+            };
+            for uid in [None, Some(owner)] {
+                observer.uids = uid
+                    .map(|uid| BTreeMap::from([(200, uid)]))
+                    .unwrap_or_default();
+                assert_eq!(
+                    observer.observe_roots(std::slice::from_ref(&root))[&root],
+                    WorkerState::Unknown
+                );
+            }
+            observer.uids.insert(200, owner + 1);
+            for mode in [0o755, 0o775, 0o757] {
+                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode))?;
+                assert_eq!(
+                    observer.observe_roots(std::slice::from_ref(&root))[&root],
+                    if mode == 0o755 {
+                        WorkerState::Free
+                    } else {
+                        WorkerState::Unknown
+                    }
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -5037,6 +5132,17 @@ mod lifecycle_tests {
                 census: census(unknown)?,
                 cwds,
                 current: fact(100),
+                uids: BTreeMap::from([
+                    (
+                        300,
+                        if provenant_os::fs::effective_uid() == 0 {
+                            1
+                        } else {
+                            0
+                        },
+                    ),
+                    (400, provenant_os::fs::effective_uid() + 1),
+                ]),
             })
         };
         let remove_named = |workers: &InjectedCensus, name: &str| {
@@ -5062,6 +5168,8 @@ mod lifecycle_tests {
             },
             &cancellation,
         )?;
+        // Make the permission evidence independent of the test runner's umask.
+        fs::set_permissions(&created.path, fs::Permissions::from_mode(0o755))?;
 
         // Uncertainty that could place a process anywhere keeps the tree.
         let unplaced = observer(ObservationIssue::Io, None)?;
@@ -5081,7 +5189,8 @@ mod lifecycle_tests {
         ));
         assert!(created.path.exists());
 
-        // Processes the kernel refuses to describe are host diagnostics.
+        // Independent foreign credentials and unwritable root permissions
+        // exclude these denied processes from this tree.
         let foreign = observer(ObservationIssue::PermissionDenied, None)?;
         assert_eq!(
             foreign.observe_roots(std::slice::from_ref(&created.path))[&created.path],
