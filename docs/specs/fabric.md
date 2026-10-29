@@ -608,20 +608,16 @@ round records and outputs, including failed checks and skipped future rounds.
 If every allowed round settles without passing, the wrapper stays pending and
 the graph pauses with an exhaustion reason. Optional `decision_session` names
 the originating chair session explicitly; graphs do not infer a session from
-their actor. With this field, exhaustion posts one blocking human request per
-exhausted allowance using the existing inbox service. The request offers
+their actor. With this field, exhaustion raises one loop ask (see [Node asks and decide
+nodes](#node-asks-and-decide-nodes)) per exhausted allowance, with ask ID
+`LOOP.rounds-N`. The request offers
 `stop`, `extend` and `accept`: stop fails the wrapper, extend adds one round,
 and accept succeeds with the existing outputs. A reply of
-`{"decision":"extend","rounds":K}` adds a positive integer K within the safety bounds. A random checkpoint instance ID and the original actor bind the request.
-Both survive replay; recreating state for the same document gets a new instance
-and cannot reuse an old answer. Resume reads and
-acknowledges an immutable answer and saves its decision before advancing;
-answer delivery alone does not resume work. Resolved, rejected and cancelled
-asks are superseded through the inbox's revision-checked close path after the
-graph transition is saved. Pending cleanup survives crashes and is retried on graph advancement or an
-explicit resume/cancel command. Inbox access restrictions still apply; a failed
-close remains visible as `loop_inbox_error` until it can be retried.
-Inbox availability errors retain a per-loop pause and explicit-resume hint;
+`{"decision":"extend","rounds":K}` adds a positive integer K within the safety
+bounds. The answer is saved on the ask before it is applied, so a crash
+re-applies the recorded answer rather than asking again. An answer that cannot
+be applied stays on the ask as `rejected` and keeps the exhaustion pause with
+its explicit-resume hint. Inbox availability errors retain a per-loop pause and explicit-resume hint;
 they do not stop observations of independent running attempts. Status retains
 all loop pause reasons when several loops exhaust together.
 
@@ -645,6 +641,100 @@ remain in use. Existing graph budget and limit extensions still apply.
   `::loop_body_failure_blocks_later_rounds_and_dependants`.
 - Owner: `crates/fabric-runtime/src/graph/loops.rs`, `src/fabric.rs`
 
+### Node asks and decide nodes
+
+A node ask is one blocking inbox decision raised by the graph. Loop exhaustion,
+a `decide` node and a non-loop graph pause each raise one. Asks live on the
+checkpoint in `asks`, keyed by an `ask_id` unique within the checkpoint, so
+several can be open at once. Each ask stores its rendered title, body, options,
+optional default and deadline, so a replay sends the identical request under
+the same inbox operation. A random checkpoint `instance_id` and the
+`ask_actor` recorded before the first ask bind every request. Both survive
+replay; recreating state for the same document gets a new instance and cannot
+reuse an old answer. A checkpoint written before node asks, whose nodes still
+carry `loop_asks`, `loop_inbox_error` or `loop_decision_actor`, is not
+migrated: advancing or resuming it is refused with a message that names
+`graph cancel`, which still works on it, and a rerun under a new `graph_id`.
+Cancelling it also supersedes each open loop request under the inbox operation
+it was first sent with, without rewriting the checkpoint.
+
+A node with `kind: "decide"` and `access: "read_only"` declares a `decide`
+object: a `question`, 2 to 16 `options` (each an `id` that is a valid inbox
+option ID, a `label` and an optional `description`), an optional `default`
+naming an option, an optional positive `timeout_seconds` whose deadline falls
+within the wall-time range (a timeout needs a default; an advance whose
+deadline from now would pass the last representable wall time is refused) and an
+optional inbox `session`. Without `session`, the graph's
+top-level `decision_session` is used; one of the two is required. A decide node
+takes no prompt, route, worktree, inputs, delivery, `required_verdict` or
+`on_fail`. Limits follow the inbox request contract: the rendered request
+body, with the question, must fit the inbox's 8192 bytes, and an option
+without a description sends its label as the description. Decide nodes may appear at
+the top level, in loop bodies, in composites and, where `plan.kinds` allows
+`decide`, in planner fragments. A decide node in a loop body asks once per
+round, with the round's node ID in its ask ID.
+
+When a decide node becomes ready, it raises ask `NODE.ask-N` and runs without
+an attempt, so a waiting decide node does not count toward `concurrency`. `N`
+follows the node's previous ask, so a replacement after cancel and resume
+never reuses an ID or its inbox operation. A timeout's deadline is fixed when
+the ask is raised; without a host wall clock the advance is refused and
+retried, and the ask is not raised without its deadline. The answer, or the default once the deadline has passed, becomes
+the node's output: the chosen option ID is its verdict, and its result excerpt
+records the ask ID, the option and who answered or that the default was taken.
+A verdict gate on that verdict routes the graph; with `on_fail`, the gate picks
+one of two edges. A reply whose text, trimmed, is an option ID chooses that
+option. Any other answer is saved on the ask with the reason it was rejected,
+and the node stays open: once the old request is closed, the next advance asks
+again under a new ask ID, and the new body ends with that reason.
+
+With a graph `decision_session`, a non-loop pause such as a budget pause
+raises ask `pause-N` with options `resume` and `cancel`. A reply of
+`{"decision":"extend","extensions":["budget.KEY=VALUE"]}` raises budgets
+first; it is checked like `graph resume --extend` and against the envelope.
+Other extensions still need an explicit resume. An answer that cannot be
+applied keeps the pause and the next ask names the reason. One pause ask is
+open at a time, and the newest eight closed pause asks are kept as history.
+When every node settles, a pause that no longer applies is cleared and its
+ask is closed before the graph reports complete.
+
+Each answered ask records `answer.source` (`answered` or `default`), the
+option or reply text, the answering `actor` and `at`. The runtime reads and
+acknowledges an immutable answer and saves it before acting on it; answer
+delivery alone does not resume work. Resolved and cancelled asks are superseded
+through the inbox's revision-checked close path after the graph transition is
+saved. Pending cleanup survives crashes and is retried on graph advancement or
+an explicit resume or cancel. A failed poll or close remains visible as the
+ask's `inbox_error` until it can be retried.
+
+An ask with a deadline stores `wake_at`, and the checkpoint's `wake_at` is the
+earliest deadline among open asks. The inbox request carries the same deadline
+and the default as its recommendation. Until a host tick reads `wake_at`, every
+graph advance compares the deadline with the host wall clock itself.
+
+- Why: graphs need human decisions at known points, with durable history and a
+  safe default when nobody answers.
+- Test: `crates/fabric-runtime/src/graph/ask_tests.rs::decide_answer_becomes_the_verdict_and_routes_the_chosen_edge`;
+  `::decide_reply_text_naming_an_option_is_accepted_and_other_text_asks_again`;
+  `::decide_ids_stay_unique_across_repeated_cancel_and_resume`;
+  `::waiting_decide_nodes_do_not_use_up_concurrency`;
+  `::decide_deadlines_wait_for_a_clock_instead_of_dropping_the_timeout`;
+  `::completion_closes_a_pause_ask_left_by_lowered_limits`;
+  `::decide_timeout_persists_wake_at_and_takes_the_default`;
+  `::several_decide_asks_are_open_at_once_and_resolve_independently`;
+  `::decide_nodes_run_inside_loop_bodies_once_per_round`;
+  `::decide_configuration_is_checked_against_the_inbox_contract`;
+  `::a_budget_pause_raises_one_ask_and_an_extend_answer_resumes`;
+  `::a_pause_answer_can_cancel_and_a_rejected_answer_asks_again`;
+  `::a_planner_fragment_can_add_a_decide_node_when_its_kinds_allow_it`;
+  `::decide_timeouts_past_a_century_are_kept_until_the_deadline_overflows`;
+  `crates/fabric-runtime/src/graph/loop_tests.rs::loop_checkpoint_from_before_node_asks_refuses_to_advance_but_can_be_cancelled`;
+  `src/fabric.rs::graph_ask_inbox_tests::graph_ask_inbox_replays_requests_and_acknowledged_answers`;
+  `::graph_decide_asks_stay_fresh_across_repeated_cancel_and_resume`;
+  `::cancel_closes_a_legacy_loop_request_by_its_original_operation`;
+  `src/fabric/loop_repair_tests.rs::bound_loop_inbox_keeps_original_actor_under_another_client`.
+- Owner: `crates/fabric-runtime/src/graph/asks.rs`, `src/fabric.rs`
+
 ### Plan expansion and honest-stop continuation
 
 A read-only `plan` node must declare `plan.kinds` and a positive
@@ -652,7 +742,8 @@ A read-only `plan` node must declare `plan.kinds` and a positive
 `fragment` JSON block, schema version 1, within 12 KiB. Agent children require
 a goal or brief, relative literal write scopes, dependencies and acceptance
 checks; omitted routes resolve through `senior`. Gates use their deterministic
-condition. Supported fragment kinds are `task`, `plan`, `synthesise` and `gate`.
+condition and decide nodes their `decide` object. Supported fragment kinds are
+`task`, `plan`, `synthesise`, `gate` and `decide`.
 The kind allow-list is the extension point for future fragment capabilities;
 presets and review shapes are not interpreted here.
 
@@ -719,9 +810,10 @@ SHA-256 of the complete stored result's raw bytes. This identifies the stored
 artifact: it is not a hash of the excerpt or of the redacted output returned by
 run output reads, and cannot be verified by hashing those redacted bytes when
 redaction changed the content. The runtime applies stateful credential
-redaction while streaming the result. Its `excerpt` is a UTF-8 prefix of at
-most 4096 bytes of the redacted text, and `truncated` indicates that either the
-stored result or redacted text exceeded that window. A local attempt may also
+redaction while streaming the result. Its `excerpt` is the longest UTF-8 prefix
+of the redacted text whose canonical JSON encoding fits in 4096 bytes, so
+control characters count at their escaped size. `truncated` indicates that the
+stored result, the redacted text or the encoded excerpt exceeded that window. A local attempt may also
 have a run-file path. The runtime retains only the excerpt and a 16 KiB tail
 of the redacted text for parsing.
 
@@ -792,6 +884,60 @@ detect tampering. Cancelling a graph persists the admission fence first.
 - Test: `crates/fabric-runtime/src/graph.rs::checkpoint_attempts_require_launch_evidence_and_actor`;
   `::cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key`
 - Owner: `crates/fabric-runtime/src/graph.rs`
+
+### Checkpoint envelope
+
+A graph checkpoint, with its document and host directory, must stay within
+16 MiB of canonical JSON. Before the first save, the runtime computes a
+worst-case size for the expanded plan and refuses a plan that could exceed the
+envelope. The refusal names the bound, for example `graph checkpoint could
+reach 25903705 bytes, over its 16777216-byte limit`. Host preflight shows the
+same message. The bound counts the document and admitted expansions at their
+actual size. To that it adds, for each planned node, the most its progress row
+can hold:
+
+| Stored text | Canonical cap |
+| --- | --- |
+| Result excerpt (composite) | 4096 (65536) bytes |
+| Findings list | 9216 bytes, otherwise the block is invalid |
+| Warning | 512 bytes each, at most 4 |
+| Verdict, path, branch, commit, gate reason, CI summary, PR URL | 1024 bytes each |
+| Advance error, expansion pause, loop reason | 2048 bytes each |
+| Usage failure and unknown-cost reason | 512 bytes each |
+| Graph pause reason | 4096 bytes |
+| Planner fragment and handoff note | 24576 and 8192 bytes, otherwise invalid |
+| Host attempt reference, actor and boot identity | 256 bytes each, reserved |
+| Ask answer text, option ID | 1024 and 128 bytes; longer text is recorded as rejected |
+
+The runtime cuts each runtime string to its cap when it stores it. Lists that
+grow during a run keep only their newest entries and count the rest:
+`unknown_usage` keeps the 64 lines of the most recently settled attempts,
+ordered by each attempt's `settled` sequence (a delivery retry clears it, so
+the retried attempt is ordered by when it settles again), with
+`unknown_usage_omitted`, and
+`usage_events` keeps 128 events with `usage_events_omitted`. Events are emitted
+once, when their attempt settles. Extensions have no count or length cap of
+their own; the bound counts the saved extensions at their actual size, and an
+extension that would take the checkpoint past the envelope is refused with
+that message. The bound also reserves every ask the plan can hold: one per
+loop round with a decision session, one per decide node and, with a graph
+`decision_session`, the kept pause asks plus one open and one awaiting close.
+A planner admission or loop extension whose plan would exceed the envelope
+pauses with that message instead of growing the checkpoint. A checkpoint loads under its
+byte limit alone: the member limit is half the byte limit, so a checkpoint that
+saved can be read back.
+- Why: a graph that was accepted cannot later stop on a checkpoint too large
+  to save or load.
+- Test: `crates/fabric-runtime/src/graph/envelope_tests.rs::worst_case_checkpoint_fits_its_bound`;
+  `::an_oversized_graph_is_refused_before_its_first_save_naming_the_size`;
+  `::a_graph_at_the_default_node_limit_is_admitted`;
+  `::a_loop_extension_past_the_envelope_pauses_instead_of_growing`;
+  `::usage_events_keep_the_newest_and_count_the_rest_without_churn`;
+  `::usage_warnings_keep_the_most_recently_settled_attempts`;
+  `::a_delivery_retry_takes_a_fresh_settlement_order`;
+  `::long_and_many_extensions_are_kept_and_count_toward_the_envelope`;
+  `::a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit`
+- Owner: `crates/fabric-runtime/src/graph/envelope.rs`
 
 ### Fallback only for unavailability
 
