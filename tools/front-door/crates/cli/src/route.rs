@@ -851,6 +851,7 @@ fn record_pool_redraw(
     }
     let mut redraws = previous.redraws.clone();
     redraws.push(provenant_records::RouteSelectionRedraw {
+        extra: Default::default(),
         rejected_pick: previous.pick.clone(),
         roll: previous.roll,
         total_weight: previous.total_weight,
@@ -1922,12 +1923,14 @@ mod route_tests {
         assert_eq!(
             exhausted.readiness,
             RouteReadiness::Unavailable {
+                extra: Default::default(),
                 reason: RouteExclusionReason::Exhausted,
             }
         );
         assert_eq!(
             exhausted.alternatives.as_slice()[0].readiness,
             RouteReadiness::Unavailable {
+                extra: Default::default(),
                 reason: RouteExclusionReason::Exhausted,
             }
         );
@@ -2005,10 +2008,12 @@ mod route_tests {
 
     fn resolved(adapter: &str, model: &str, roll: u64) -> ResolvedRoute {
         let readiness = RouteReadiness::Ready {
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 200,
         };
         ResolvedRoute {
+            extra: Default::default(),
             adapter: adapter.into(),
             model: model.into(),
             effort: None,
@@ -2020,11 +2025,14 @@ mod route_tests {
             eligibility: RouteEligibility::Eligible,
             readiness: readiness.clone(),
             confidentiality: RouteConfidentiality {
+                extra: Default::default(),
                 evidence_ref: "fixture".into(),
             },
             pool_selection: Some(RouteSelectionReceipt {
+                extra: Default::default(),
                 pool: "junior".into(),
                 candidates: vec![RouteSelectionCandidate {
+                    extra: Default::default(),
                     pacing_detail: None,
                     model: format!("{adapter}/{model}"),
                     weight: 1,
@@ -2055,6 +2063,7 @@ mod route_tests {
             .ok_or("third receipt")?
             .candidates
             .push(RouteSelectionCandidate {
+                extra: Default::default(),
                 pacing_detail: None,
                 model: "codex/paid".into(),
                 weight: 1,

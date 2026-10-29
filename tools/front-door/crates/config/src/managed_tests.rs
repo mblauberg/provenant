@@ -96,6 +96,7 @@ fn package_fixture_release(
         files.insert(relative, (bytes, mode));
     }
     let expected = VersionInfo {
+        extra: Default::default(),
         source_digest,
         asset_digest: crate::release::asset_inventory_digest(&files).unwrap(),
         target: "fixture-target".into(),
@@ -122,6 +123,9 @@ impl InstallReporter for Reporter {
     }
 }
 struct Smoke;
+
+#[path = "account_sync_tests.rs"]
+mod account_sync;
 
 #[test]
 fn peer_agent_accepts_a_symlinked_home() {
@@ -779,6 +783,7 @@ fn moved_receipt_rejects_entries_outside_both_state_roots() {
         .find(|entry| entry.selector == "skill")
         .unwrap();
     skill.expected = OwnedValue::Link {
+        extra: Default::default(),
         target: AbsolutePath::new(&f.base.join("foreign/skills/example")).unwrap(),
     };
     fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
@@ -1173,6 +1178,7 @@ fn peer_agent_refuses_symlinked_plist_and_parent_before_writes() {
 impl ReleaseSmoke for Smoke {
     fn check(&self, release: &Release, _: &CancelToken) -> io::Result<VersionInfo> {
         Ok(VersionInfo {
+            extra: Default::default(),
             source_digest: release.manifest.source_digest,
             asset_digest: release.manifest.asset_digest,
             target: release.manifest.target.clone(),
@@ -2181,6 +2187,7 @@ fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
     for entry in &mut receipt.entries {
         if entry.selector == "binary" {
             entry.expected = OwnedValue::Link {
+                extra: Default::default(),
                 target: AbsolutePath::new(Path::new("/foreign/provenant")).unwrap(),
             };
         }
@@ -3931,6 +3938,7 @@ fn retired_disk_guard_is_not_managed_by_install_or_uninstall() {
     fs::create_dir_all(plist.parent().unwrap()).unwrap();
     fs::write(&plist, b"old plist").unwrap();
     receipt.entries.push(OwnedEntry {
+        extra: Default::default(),
         path: AbsolutePath::new(&plist).unwrap(),
         harness: None,
         selector: "disk-guard-agent".into(),

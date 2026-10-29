@@ -106,6 +106,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         exit_code,
         finished_at,
         reason,
+        ..
     } = r.state
     else {
         return Err(RunError::Nonterminal);

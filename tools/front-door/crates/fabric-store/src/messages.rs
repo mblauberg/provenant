@@ -11,20 +11,39 @@ pub enum MessageKind {
     Response,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "scope", rename_all = "snake_case")]
 pub enum MessageRef {
-    Local { id: MessageId },
-    Remote { host: HostId, id: MessageId },
+    Local {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        id: MessageId,
+    },
+    Remote {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        host: HostId,
+        id: MessageId,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "scope", rename_all = "snake_case")]
 pub enum TaskRef {
-    Local { id: TaskId },
-    Remote { host: HostId, id: TaskId },
+    Local {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        id: TaskId,
+    },
+    Remote {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        host: HostId,
+        id: TaskId,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Message {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub header: RecordHeader,
     pub project: ProjectId,
     pub id: MessageId,
@@ -39,8 +58,9 @@ pub struct Message {
     pub created_at: WallTime,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Delivery {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub seq: i64,
     pub message: Message,
 }
@@ -164,8 +184,9 @@ impl Store {
                 let message: Message=decode(&bytes)?;
                 let id: String=row.get(2)?;
                 if message.project != project || message.id.to_string() != id { return Err(Error::Invalid("stored message identity")); }
-                output.push(Delivery {seq:row.get(0)?,message}); }
-            Ok(Page { items: output, truncated })
+                output.push(Delivery {
+        extra: Default::default(),seq:row.get(0)?,message}); }
+            Ok(Page { extra: Default::default(),  items: output, truncated })
         })
     }
     /// The service supplies the authenticated recipient, never a mail sender.

@@ -49,6 +49,7 @@ pub fn resolve_delivery_target(
         })?
         .ok_or(InboxError::Conflict)?;
     Ok(AnswerTarget {
+        extra: Default::default(),
         host: registered.record.host,
         project: registered.record.project_id,
         session: registered.record.host_session_id.as_str().into(),
@@ -212,19 +213,13 @@ impl HumanCommand {
     fn input(self) -> Result<InboxInput, Error> {
         Ok(match self {
             Self::Ask(args) => InboxInput::Ask {
+                extra: Default::default(),
                 session: args.session,
-                request: provenant_records::decode(
-                    read_file(&args.file)?.as_slice(),
-                    provenant_records::Limits {
-                        max_bytes: 32768,
-                        max_depth: 16,
-                        max_members: 1024,
-                    },
-                )
-                .map_err(|_| Error::Input("invalid request JSON; provide request content only"))?,
+                request: Box::new(request_content(read_file(&args.file)?.as_slice())?),
                 operation_id: args.operation_id,
             },
             Self::Answer(args) => InboxInput::Answer {
+                extra: Default::default(),
                 id: args.id.id,
                 action: match args.action {
                     Action::Choose => AnswerAction::Choose,
@@ -263,6 +258,7 @@ impl HumanCommand {
                     expect_revision,
                     operation_id,
                 } => InboxInput::Close {
+                    extra: Default::default(),
                     id: id.id,
                     state: match state {
                         Closure::Withdrawn => RequestState::Withdrawn,
@@ -280,6 +276,7 @@ impl HumanCommand {
                     session,
                     operation_id,
                 } => InboxInput::Acknowledge {
+                    extra: Default::default(),
                     id: id.id,
                     answer_id: answer,
                     session,
@@ -287,6 +284,7 @@ impl HumanCommand {
                 },
             },
             Self::Inbox(args) => InboxInput::List {
+                extra: Default::default(),
                 id: args.id.map(|reference| reference.id),
                 session: args.session,
                 state: match args.state {
@@ -374,6 +372,60 @@ fn read_file(path: &Path) -> Result<Vec<u8>, Error> {
     }
     Ok(bytes)
 }
+
+/// Authored files are strict even though stored and peer request records retain
+/// newer fields. Ownership is supplied by Fabric rather than request content.
+fn request_content(bytes: &[u8]) -> Result<RequestDraft, Error> {
+    let invalid = || Error::Input("invalid request JSON; provide request content only");
+    let value: serde_json::Value = provenant_records::decode(
+        bytes,
+        provenant_records::Limits {
+            max_bytes: 32768,
+            max_depth: 16,
+            max_members: 1024,
+        },
+    )
+    .map_err(|_| invalid())?;
+    let known = |value: &serde_json::Value, fields: &[&str]| {
+        value
+            .as_object()
+            .is_none_or(|object| object.keys().all(|key| fields.contains(&key.as_str())))
+    };
+    if !known(
+        &value,
+        &[
+            "supersedes",
+            "deadline",
+            "work",
+            "kind",
+            "title",
+            "body",
+            "blocking",
+            "options",
+            "recommended_option_id",
+            "proceeding_with",
+        ],
+    ) || !known(&value["supersedes"], &["id", "expect_revision"])
+        || !known(
+            &value["work"],
+            &["run_id", "task_id", "attempt_id", "repository", "head"],
+        )
+        || !known(&value["work"]["repository"], &["relative_to_root"])
+        || !known(
+            &value["work"]["repository"]["relative_to_root"],
+            &["encoding", "path"],
+        )
+        || value["options"].as_array().is_some_and(|options| {
+            options
+                .iter()
+                .any(|option| !known(option, &["id", "label", "description"]))
+        })
+    {
+        return Err(invalid());
+    }
+    serde_json::from_value(value).map_err(|_| invalid())
+}
+
 #[allow(clippy::disallowed_methods)]
 fn read_text() -> Result<String, Error> {
     let bytes = provenant_os::sys::hook_io::read_stdin(
@@ -495,17 +547,22 @@ fn execute(
         let reply = context.peer(
             &clock,
             target,
-            provenant_fabric_runtime::hosts::PeerAction::Inbox { input },
+            provenant_fabric_runtime::hosts::PeerAction::Inbox {
+                extra: Default::default(),
+                input,
+            },
             budget,
             &provenant_core::CancelToken::new(),
         );
         return match reply {
-            Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox(
-                provenant_fabric_runtime::inbox::InboxReply::Ok { result },
-            )) => Ok(*result),
-            Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox(
-                provenant_fabric_runtime::inbox::InboxReply::Error { code, message },
-            )) => Err(remote_error(code, message, operation_id.clone())),
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox {
+                data: provenant_fabric_runtime::inbox::InboxReply::Ok { result, .. },
+                ..
+            }) => Ok(*result),
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Inbox {
+                data: provenant_fabric_runtime::inbox::InboxReply::Error { code, message, .. },
+                ..
+            }) => Err(remote_error(code, message, operation_id.clone())),
             Ok(_) => Err(Error::Remote {
                 code: "unsupported_owner".into(),
                 message: "peer does not support inbox operations".into(),
@@ -619,6 +676,40 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_requests_reject_unknown_fields_at_every_depth() {
+        let value = serde_json::json!({
+            "kind": "decision", "title": "Repair", "body": "Choose a repair",
+            "supersedes": {"id": "01".repeat(16), "expect_revision": 1},
+            "work": {
+                "run_id": "02".repeat(16),
+                "repository": {"relative_to_root": {"encoding": "utf8", "path": "repo"}}
+            },
+            "options": [{"id": "repair", "label": "Repair", "description": "Fix the check"}]
+        });
+        assert!(request_content(&serde_json::to_vec(&value).unwrap()).is_ok());
+        for path in [
+            "",
+            "/supersedes",
+            "/work",
+            "/work/repository",
+            "/work/repository/relative_to_root",
+            "/options/0",
+        ] {
+            let mut forged = value.clone();
+            forged
+                .pointer_mut(path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("owner_host".into(), serde_json::json!("03".repeat(16)));
+            assert!(
+                request_content(&serde_json::to_vec(&forged).unwrap()).is_err(),
+                "{path}"
+            );
+        }
+    }
 
     #[test]
     fn remote_uncertain_answer_retains_operation_id() {

@@ -38,8 +38,9 @@ factors! {
     CriticalSurface { None => Routine, PublicContract => Substantial, AuthSecurity => Crucial, Privacy => Crucial, Financial => Crucial, Legal => Crucial, BuildReleaseGate => Crucial, LifeSafety => Terminal },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RiskFactors {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub blast_radius: BlastRadius,
     pub reversibility: Reversibility,
     pub data_sensitivity: DataSensitivity,
@@ -62,14 +63,16 @@ impl Default for RiskPolicy {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EvidenceRef {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub path: PathWire,
     pub digest: Digest,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ApprovalRef {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub actor_id: ActorId,
     pub evidence: EvidenceRef,
 }
@@ -80,8 +83,9 @@ pub struct UserApproval {
     pub evidence: EvidenceRef,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RiskRecord {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     factors: RiskFactors,
     derived: RiskTier,
     tier: RiskTier,
@@ -108,6 +112,7 @@ impl RiskRecord {
         downgrade_approval: Option<ApprovalRef>,
     ) -> Result<Self, RecordError> {
         let record = Self {
+            extra: Default::default(),
             factors,
             derived,
             tier,
@@ -136,14 +141,18 @@ impl RiskRecord {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Subject {
     Pr {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         repository: RepoId,
         number: u64,
         head: GitOid,
     },
     Document {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         path: PathWire,
         digest: Digest,
     },
@@ -157,9 +166,11 @@ pub enum ModelTier {
 }
 /// Stored provenance claims. Deserializing these never verifies lineage or authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "source", rename_all = "snake_case")]
 pub enum RouteProvenance {
     Observed {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         route: String,
         tier: ModelTier,
         adapter: String,
@@ -168,28 +179,37 @@ pub enum RouteProvenance {
         evidence: EvidenceRef,
     },
     ChairAttested {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         route: String,
         tier: ModelTier,
         declared_family: Option<String>,
         evidence: EvidenceRef,
     },
-    Unknown {},
+    Unknown {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Author {
     User {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         actor_id: ActorId,
     },
     Agent {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         actor_id: ActorId,
-        route: RouteProvenance,
+        route: Box<RouteProvenance>,
     },
 }
 impl Author {
     pub fn actor_id(&self) -> ActorId {
         match self {
-            Self::User { actor_id } | Self::Agent { actor_id, .. } => *actor_id,
+            Self::User { actor_id, .. } | Self::Agent { actor_id, .. } => *actor_id,
         }
     }
 }
@@ -203,10 +223,15 @@ pub enum DecisionStatus {
     Abandoned,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "status", rename_all = "snake_case")]
 enum DecisionState {
-    Pending {},
+    Pending {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
+    },
     Accepted {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         actor_id: ActorId,
         #[serde(with = "micros")]
         at: UtcMicros,
@@ -214,6 +239,8 @@ enum DecisionState {
         user_approval: Option<ApprovalRef>,
     },
     Abandoned {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         actor_id: ActorId,
         #[serde(with = "micros")]
         at: UtcMicros,
@@ -231,13 +258,15 @@ pub struct DecisionContext {
 impl Decision {
     pub fn status(&self) -> DecisionStatus {
         match &self.0 {
-            DecisionState::Pending {} => DecisionStatus::Pending,
+            DecisionState::Pending { .. } => DecisionStatus::Pending,
             DecisionState::Accepted { .. } => DecisionStatus::Accepted,
             DecisionState::Abandoned { .. } => DecisionStatus::Abandoned,
         }
     }
     pub fn pending() -> Self {
-        Self(DecisionState::Pending {})
+        Self(DecisionState::Pending {
+            extra: Default::default(),
+        })
     }
     pub fn accept(
         context: DecisionContext,
@@ -247,6 +276,7 @@ impl Decision {
         approval: Option<&UserApproval>,
     ) -> Result<Self, RecordError> {
         let decision = Self(DecisionState::Accepted {
+            extra: Default::default(),
             actor_id,
             at,
             reason,
@@ -263,6 +293,7 @@ impl Decision {
         approval: Option<&UserApproval>,
     ) -> Result<Self, RecordError> {
         let decision = Self(DecisionState::Abandoned {
+            extra: Default::default(),
             actor_id,
             at,
             reason,
@@ -273,20 +304,20 @@ impl Decision {
     }
     pub fn at(&self) -> Option<UtcMicros> {
         match &self.0 {
-            DecisionState::Pending {} => None,
+            DecisionState::Pending { .. } => None,
             DecisionState::Accepted { at, .. } | DecisionState::Abandoned { at, .. } => Some(*at),
         }
     }
     pub fn actor_id(&self) -> Option<ActorId> {
         match &self.0 {
-            DecisionState::Pending {} => None,
+            DecisionState::Pending { .. } => None,
             DecisionState::Accepted { actor_id, .. }
             | DecisionState::Abandoned { actor_id, .. } => Some(*actor_id),
         }
     }
     pub fn reason(&self) -> Option<&str> {
         match &self.0 {
-            DecisionState::Pending {} => None,
+            DecisionState::Pending { .. } => None,
             DecisionState::Accepted { reason, .. } | DecisionState::Abandoned { reason, .. } => {
                 Some(reason)
             }
@@ -294,7 +325,7 @@ impl Decision {
     }
     pub fn user_approval(&self) -> Option<&ApprovalRef> {
         match &self.0 {
-            DecisionState::Pending {} => None,
+            DecisionState::Pending { .. } => None,
             DecisionState::Accepted { user_approval, .. }
             | DecisionState::Abandoned { user_approval, .. } => user_approval.as_ref(),
         }
@@ -317,14 +348,16 @@ impl Decision {
 impl From<&UserApproval> for ApprovalRef {
     fn from(approval: &UserApproval) -> Self {
         Self {
+            extra: Default::default(),
             actor_id: approval.actor_id,
             evidence: approval.evidence.clone(),
         }
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DeliveryReceipt {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     schema_version: u64,
     delivery_id: DeliveryId,
     project_id: ProjectId,
@@ -349,6 +382,7 @@ impl DeliveryReceipt {
         now: UtcMicros,
     ) -> Result<Self, RecordError> {
         let receipt = Self {
+            extra: Default::default(),
             schema_version: 1,
             delivery_id,
             project_id,
@@ -536,6 +570,7 @@ mod tests {
         UserApproval {
             actor_id: ActorId::from_bytes([1; 16]),
             evidence: EvidenceRef {
+                extra: Default::default(),
                 path: PathWire::from_relative(&RelativePath::parse("approval.md").unwrap())
                     .unwrap(),
                 digest: Digest::from_bytes([2; 32]),
@@ -545,6 +580,7 @@ mod tests {
     fn risk() -> RiskRecord {
         RiskRecord::new(
             RiskFactors {
+                extra: Default::default(),
                 blast_radius: BlastRadius::Local,
                 reversibility: Reversibility::Easy,
                 data_sensitivity: DataSensitivity::Public,
@@ -564,18 +600,21 @@ mod tests {
             DeliveryId::from_bytes([1; 16]),
             ProjectId::from_bytes([2; 16]),
             Subject::Pr {
+                extra: Default::default(),
                 repository: RepoId::from_bytes([3; 16]),
                 number: 1,
                 head: GitOid::Sha1([4; 20]),
             },
             vec![Author::Agent {
+                extra: Default::default(),
                 actor_id: ActorId::from_bytes([5; 16]),
-                route: RouteProvenance::ChairAttested {
+                route: Box::new(RouteProvenance::ChairAttested {
+                    extra: Default::default(),
                     route: "codex/gpt-6.1-sol@high".into(),
                     tier: ModelTier::Principal,
                     declared_family: None,
                     evidence: approval().evidence,
-                },
+                }),
             }],
             risk(),
             time(10),
@@ -637,32 +676,8 @@ mod tests {
         }
     }
     #[test]
-    fn nested_records_and_enum_tags_reject_unknown_input() {
+    fn enum_tags_and_user_policy_reject_unknown_input() {
         let r = receipt();
-        for pointer in [
-            "/risk",
-            "/risk/factors",
-            "/authors/0",
-            "/authors/0/route",
-            "/authors/0/route/evidence",
-            "/subject",
-            "/decision",
-        ] {
-            let mut value = serde_json::to_value(&r).unwrap();
-            value
-                .pointer_mut(pointer)
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .insert("unknown".into(), json!(0));
-            assert!(
-                serde_json::from_value::<DeliveryReceipt>(value).is_err(),
-                "{pointer}"
-            );
-        }
-        let mut approval_value = serde_json::to_value(ApprovalRef::from(&approval())).unwrap();
-        approval_value["unknown"] = json!(0);
-        assert!(serde_json::from_value::<ApprovalRef>(approval_value).is_err());
         for (pointer, tag) in [
             ("/subject/kind", "future"),
             ("/decision/status", "future"),
@@ -673,26 +688,6 @@ mod tests {
             *value.pointer_mut(pointer).unwrap() = json!(tag);
             assert!(serde_json::from_value::<DeliveryReceipt>(value).is_err());
         }
-        let mut value = serde_json::to_value(&r).unwrap();
-        value["authors"][0]["route"] = json!({"source": "unknown", "extra": 1});
-        assert!(serde_json::from_value::<DeliveryReceipt>(value).is_err());
-        let context = DecisionContext {
-            tier: RiskTier::Routine,
-            created_at: time(10),
-            updated_at: time(20),
-        };
-        let accepted = Decision::accept(
-            context,
-            approval().actor_id,
-            time(15),
-            "done".into(),
-            Some(&approval()),
-        )
-        .unwrap();
-        assert_eq!(accepted.status(), DecisionStatus::Accepted);
-        let mut value = serde_json::to_value(&accepted).unwrap();
-        value["user_approval"]["evidence"]["extra"] = json!(1);
-        assert!(serde_json::from_value::<Decision>(value).is_err());
         let policy = ReviewPolicy::default();
         let mut value = serde_json::to_value(&policy).unwrap();
         value["unknown"] = json!(0);
@@ -744,6 +739,7 @@ mod tests {
         assert_eq!(unchanged.review_attempts(), previous.review_attempts());
 
         candidate.subject = Subject::Pr {
+            extra: Default::default(),
             repository: RepoId::from_bytes([3; 16]),
             number: 1,
             head: GitOid::Sha256([9; 32]),

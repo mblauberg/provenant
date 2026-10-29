@@ -135,6 +135,19 @@ pub struct HarnessTarget {
     pub hook_file: Option<PathBuf>,
     pub instruction: Option<PathBuf>,
 }
+/// A registered account's configuration directory. The process edge reads the
+/// registrations; install, sync and `check install` keep every one identical.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountHome {
+    pub harness: Harness,
+    pub label: String,
+    pub home: PathBuf,
+}
+impl AccountHome {
+    pub fn target(&self, user_home: &Path) -> HarnessTarget {
+        HarnessTarget::at(self.harness, user_home, &self.home)
+    }
+}
 /// Fixture-backed registration supplied by the CLI composition root.
 /// `None` harness denotes Git, outside the managed harness configuration.
 #[derive(Debug, Clone, Copy)]
@@ -161,6 +174,13 @@ pub struct Targets {
     /// Exact recognised historical rendering, for migration from pre-receipt agents.
     pub peer_agent_previous: Option<Vec<u8>>,
     pub hook_specs: Vec<HookRegistration>,
+    /// Registered account directories, which `check install` expects to be
+    /// recorded targets. Supplied only by the process edge.
+    pub accounts: Vec<AccountHome>,
+    /// Allow-listed Claude settings kept identical across accounts.
+    pub shared_settings: Option<crate::shared_settings::SharedSettings>,
+    /// Overwrite locally edited shared settings instead of reporting them.
+    pub force_settings: bool,
     pub protected_roots: Vec<PathBuf>,
     pub(crate) configured_homes: BTreeSet<Harness>,
     pub(crate) configured_configs: BTreeSet<Harness>,
@@ -176,8 +196,25 @@ impl HarnessTarget {
     pub(crate) fn id(&self) -> TargetId {
         (self.harness, self.skills_dir.clone())
     }
+    /// The target of `harness` whose configuration directory is `base`.
+    /// `home` is the user's home, which decides where Claude keeps its MCP file.
+    pub fn at(harness: Harness, home: &Path, base: &Path) -> Self {
+        let instruction = match harness {
+            Harness::Claude => Some("CLAUDE.md"),
+            Harness::Codex | Harness::Opencode => Some("AGENTS.md"),
+            Harness::Cursor => None,
+            Harness::Agy => Some("GEMINI.md"),
+        };
+        Self {
+            harness,
+            mcp_file: crate::harness::default_mcp(harness, home, base),
+            hook_file: crate::harness::default_hooks(harness, base),
+            skills_dir: base.join("skills"),
+            instruction: instruction.map(|name| base.join(name)),
+        }
+    }
 }
-fn recorded_id(target: &ResolvedHarnessTarget) -> Result<TargetId, InstallError> {
+pub(crate) fn recorded_id(target: &ResolvedHarnessTarget) -> Result<TargetId, InstallError> {
     Ok((target.harness, target.skills_dir.to_path_buf()?))
 }
 impl Targets {
@@ -187,21 +224,14 @@ impl Targets {
         let targets = harnesses
             .iter()
             .map(|h| {
-                let (base, instruction) = match h {
-                    Harness::Claude => (".claude", Some("CLAUDE.md")),
-                    Harness::Codex => (".codex", Some("AGENTS.md")),
-                    Harness::Cursor => (".cursor", None),
-                    Harness::Agy => (".gemini", Some("GEMINI.md")),
-                    Harness::Opencode => (".config/opencode", Some("AGENTS.md")),
+                let base = match h {
+                    Harness::Claude => ".claude",
+                    Harness::Codex => ".codex",
+                    Harness::Cursor => ".cursor",
+                    Harness::Agy => ".gemini",
+                    Harness::Opencode => ".config/opencode",
                 };
-                let base = home.join(base);
-                HarnessTarget {
-                    harness: *h,
-                    mcp_file: crate::harness::default_mcp(*h, home, &base),
-                    hook_file: crate::harness::default_hooks(*h, &base),
-                    skills_dir: base.join("skills"),
-                    instruction: instruction.map(|n| base.join(n)),
-                }
+                HarnessTarget::at(*h, home, &home.join(base))
             })
             .collect();
         Self {
@@ -216,6 +246,9 @@ impl Targets {
             gc_agent: None,
             peer_agent_previous: None,
             hook_specs: Vec::new(),
+            accounts: Vec::new(),
+            shared_settings: None,
+            force_settings: false,
             protected_roots: Vec::new(),
             configured_homes: BTreeSet::new(),
             configured_configs: BTreeSet::new(),
@@ -707,7 +740,8 @@ fn desired(
     }
     Ok(result)
 }
-pub(crate) fn release_root(state: &Path, digest: provenant_records::SourceDigest) -> PathBuf {
+/// Where state keeps the immutable files of the release with `digest`.
+pub fn release_root(state: &Path, digest: provenant_records::SourceDigest) -> PathBuf {
     state.join("releases").join(digest.to_string())
 }
 
@@ -744,10 +778,12 @@ fn validate_removal(
 pub(crate) fn owned(value: &Value) -> Result<OwnedValue, InstallError> {
     match value {
         Value::File { bytes, mode } => Ok(OwnedValue::File {
+            extra: Default::default(),
             digest: CanonicalV1::file_digest(bytes),
             mode: *mode,
         }),
         Value::Link(target) => Ok(OwnedValue::Link {
+            extra: Default::default(),
             target: AbsolutePath::new(target)?,
         }),
         Value::Other => Err(InstallError::Manifest("unsupported ownership value")),
@@ -885,6 +921,7 @@ pub fn plan_install(
         }
         if want.selector != "release" && want.selector != "config" {
             entries.push(OwnedEntry {
+                extra: Default::default(),
                 path: AbsolutePath::new(path)?,
                 harness: want.harness,
                 selector: want.selector.clone(),
@@ -955,6 +992,7 @@ pub fn plan_install(
             } else if entry.selector == "gc-agent" {
                 snapshots.harness.findings.push(InstallFinding {
                     rule: "relinquished_modified_entry".into(),
+                    detail: None,
                     path: entry.path.clone(),
                 });
             }
@@ -990,6 +1028,7 @@ pub fn plan_install(
         resolved_targets.insert(
             target.id(),
             ResolvedHarnessTarget {
+                extra: Default::default(),
                 harness: target.harness,
                 skills_dir: AbsolutePath::new(&target.skills_dir)?,
                 mcp_file: AbsolutePath::new(&target.mcp_file)?,
@@ -1003,6 +1042,7 @@ pub fn plan_install(
                     .as_deref()
                     .map(AbsolutePath::new)
                     .transpose()?,
+                hooks_relinquished: snapshots.harness.relinquished.contains(&target.id()),
             },
         );
     }
@@ -1014,6 +1054,7 @@ pub fn plan_install(
         .into_iter()
         .collect();
     let receipt = InstallReceipt {
+        extra: Default::default(),
         schema_version: 1,
         source_digest: release.manifest.source_digest,
         manifest_digest: CanonicalV1::file_digest(&release.manifest_bytes),
@@ -1054,6 +1095,7 @@ pub fn plan_install(
                 .as_ref()
                 .and_then(|snapshot| owned(&snapshot.value).ok()),
             after: Some(OwnedValue::File {
+                extra: Default::default(),
                 digest: CanonicalV1::file_digest(&bytes),
                 mode: 0o600,
             }),
@@ -1608,6 +1650,9 @@ fn snapshot_at_inspected(
 pub struct InstallFinding {
     pub rule: String,
     pub path: AbsolutePath,
+    /// What the rule names beyond the path, such as the setting in conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 #[cfg(test)]
 pub(crate) fn read_receipt(targets: &Targets) -> Result<Option<InstallReceipt>, InstallError> {
@@ -1667,11 +1712,13 @@ impl Decoded {
         if let Some(old_state) = &self.moved {
             findings.push(InstallFinding {
                 rule: "state_root_moved".into(),
+                detail: None,
                 path: AbsolutePath::new(old_state)?,
             });
         }
         findings.extend(self.stale.iter().map(|entry| InstallFinding {
             rule: "relocated_stale_entry".into(),
+            detail: None,
             path: entry.path.clone(),
         }));
         Ok(findings)
@@ -1723,7 +1770,7 @@ fn decode_receipt(bytes: &[u8], targets: &Targets) -> Result<Decoded, InstallErr
         return Err(InstallError::Manifest("receipt requires one binary entry"));
     };
     let old_state = match &binary.expected {
-        OwnedValue::Link { target } => {
+        OwnedValue::Link { target, .. } => {
             let target = target.to_path_buf()?;
             let root = target
                 .ancestors()
@@ -1919,14 +1966,14 @@ fn permitted_entry(
             && path == binary
             && matches!(
                 &entry.expected,
-                OwnedValue::Link { target }
+                OwnedValue::Link { target, .. }
                     if target.to_path_buf()? == expected_target
             ));
     }
     Ok(entry_owner(entry, receipt, state_root)?.is_some())
 }
 /// The recorded target that owns a harness entry; `None` for shared entries.
-fn entry_owner(
+pub(crate) fn entry_owner(
     entry: &OwnedEntry,
     receipt: &InstallReceipt,
     state_root: &Path,
@@ -1953,7 +2000,7 @@ fn permitted_for(
         && path.file_name().is_some_and(|name| {
             matches!(
                 &entry.expected,
-                OwnedValue::Link { target }
+                OwnedValue::Link { target, .. }
                     if target.to_path_buf().is_ok_and(|link| {
                         asset_target(
                             &link,
@@ -1975,7 +2022,7 @@ fn permitted_for(
         if (agents || harness)
             && matches!(
                 &entry.expected,
-                OwnedValue::Link { target }
+                OwnedValue::Link { target, .. }
                     if target.to_path_buf().is_ok_and(|link| {
                         asset_target(
                             &link,
@@ -2060,11 +2107,13 @@ fn check_install_inspected(
     let Some(decoded) = read_receipt_inspected(targets, Some(evidence))? else {
         return Ok(vec![InstallFinding {
             rule: "missing_receipt".into(),
+            detail: None,
             path: AbsolutePath::new(&receipt_path)?,
         }]);
     };
     let mut findings = decoded.findings()?;
     let stale_binary = decoded.stale.iter().any(|entry| entry.selector == "binary");
+    let stale_targets = decoded.stale_targets;
     let receipt = decoded.receipt;
     let release_path = release_root(state_root, receipt.source_digest);
     match Release::read_scoped_inspected(&release_path, target, state_root, Some(evidence)) {
@@ -2077,6 +2126,7 @@ fn check_install_inspected(
                 && CanonicalV1::file_digest(&release.manifest_bytes) == receipt.manifest_digest
             {
                 let expected = OwnedValue::Link {
+                    extra: Default::default(),
                     target: AbsolutePath::new(&release_path.join("bin/provenant"))?,
                 };
                 if !stale_binary
@@ -2093,6 +2143,7 @@ fn check_install_inspected(
             } else {
                 findings.push(InstallFinding {
                     rule: "release_drift".into(),
+                    detail: None,
                     path: AbsolutePath::new(&release_path)?,
                 });
             }
@@ -2100,12 +2151,14 @@ fn check_install_inspected(
         Err(InstallError::Tampered(_)) | Err(InstallError::Manifest(_)) => {
             findings.push(InstallFinding {
                 rule: "release_drift".into(),
+                detail: None,
                 path: AbsolutePath::new(&release_path)?,
             });
         }
         Err(InstallError::Fs(error)) if error.is_not_found() => {
             findings.push(InstallFinding {
                 rule: "missing_release".into(),
+                detail: None,
                 path: AbsolutePath::new(&release_path)?,
             });
         }
@@ -2121,16 +2174,33 @@ fn check_install_inspected(
         {
             findings.push(InstallFinding {
                 rule: "source_digest".into(),
+                detail: None,
                 path: AbsolutePath::new(&receipt_path)?,
             });
         }
     }
+    findings.extend(owned_entry_drift(&receipt, state_root, evidence)?);
+    findings.extend(crate::account_sync::findings(
+        &receipt,
+        &stale_targets,
+        targets,
+        evidence,
+    )?);
+    Ok(findings)
+}
+
+fn owned_entry_drift(
+    receipt: &InstallReceipt,
+    state_root: &Path,
+    evidence: &mut InspectionEvidence,
+) -> Result<Vec<InstallFinding>, InstallError> {
+    let mut findings = Vec::new();
     for entry in &receipt.entries {
-        if !permitted_entry(entry, &receipt, state_root)? {
+        if !permitted_entry(entry, receipt, state_root)? {
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
-        let current = snapshot_scoped_inspected(&path, state_root, Some(evidence))?;
+        let current = snapshot_scoped_inspected(&path, state_root, Some(&mut *evidence))?;
         let matches = match &current {
             Some(current) => crate::harness::entry_matches(&current.value, entry)?,
             None => false,
@@ -2138,11 +2208,96 @@ fn check_install_inspected(
         if !matches {
             findings.push(InstallFinding {
                 rule: "owned_entry_drift".into(),
+                detail: None,
                 path: entry.path.clone(),
             });
         }
     }
     Ok(findings)
+}
+
+/// How one registered account directory compares with the installed release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountState {
+    /// No install receipt exists, so there is nothing to keep in sync.
+    NotInstalled,
+    MissingDirectory,
+    /// Registered, but install has never reached the directory.
+    Unsynced,
+    Drift,
+    Synced,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountStatus {
+    pub harness: Harness,
+    pub label: String,
+    pub home: AbsolutePath,
+    pub state: AccountState,
+    /// Findings inside this account's directory; each names the drifted path.
+    pub findings: Vec<InstallFinding>,
+}
+
+/// Per-account sync state from the receipt and the files it owns. Unlike
+/// `inspect_install`, it does not run the installed binary or read the release.
+pub fn inspect_accounts(targets: &Targets) -> Result<Vec<AccountStatus>, InstallError> {
+    let state_root = targets.roots.state.as_path();
+    let mut evidence = InspectionEvidence::default();
+    let decoded = read_receipt_inspected(targets, Some(&mut evidence))?;
+    let findings = match &decoded {
+        Some(decoded) => {
+            let mut findings = owned_entry_drift(&decoded.receipt, state_root, &mut evidence)?;
+            findings.extend(crate::account_sync::findings(
+                &decoded.receipt,
+                &decoded.stale_targets,
+                targets,
+                &mut evidence,
+            )?);
+            findings
+        }
+        None => Vec::new(),
+    };
+    let mut statuses = Vec::new();
+    // A finding belongs to the account whose directory is its longest prefix,
+    // as `check install` attributes it, so nested directories do not both claim it.
+    let owner = |path: &Path| {
+        targets
+            .accounts
+            .iter()
+            .filter(|account| path.starts_with(&account.home))
+            .max_by_key(|account| account.home.components().count())
+    };
+    for account in &targets.accounts {
+        let findings: Vec<_> = findings
+            .iter()
+            .filter(|finding| {
+                finding.path.to_path_buf().is_ok_and(|path| {
+                    owner(&path).is_some_and(|found| std::ptr::eq(found, account))
+                })
+            })
+            .cloned()
+            .collect();
+        let has = |rule: &str| findings.iter().any(|finding| finding.rule == rule);
+        let state = if decoded.is_none() {
+            AccountState::NotInstalled
+        } else if has("missing_account_directory") || has("unusable_account_directory") {
+            AccountState::MissingDirectory
+        } else if has("unsynced_account") {
+            AccountState::Unsynced
+        } else if findings.is_empty() {
+            AccountState::Synced
+        } else {
+            AccountState::Drift
+        };
+        statuses.push(AccountStatus {
+            harness: account.harness,
+            label: account.label.clone(),
+            home: AbsolutePath::new(&account.home)?,
+            state,
+            findings,
+        });
+    }
+    Ok(statuses)
 }
 
 /// Removes unchanged entries of the selected recorded targets, preserves user
@@ -2160,6 +2315,7 @@ fn not_installed(
         0,
         InstallFinding {
             rule: "not_installed".into(),
+            detail: None,
             path: AbsolutePath::new(receipt_path)?,
         },
     );
@@ -2217,6 +2373,7 @@ pub fn uninstall(
             _ => 0o600,
         };
         receipt.entries.push(OwnedEntry {
+            extra: Default::default(),
             path: AbsolutePath::new(&path)?,
             harness: None,
             selector: "peer-agent".into(),
@@ -2277,6 +2434,7 @@ pub fn uninstall(
                 } else {
                     findings.push(InstallFinding {
                         rule: "relinquished_modified_entry".into(),
+                        detail: None,
                         path: entry.path.clone(),
                     });
                 }
@@ -2309,6 +2467,7 @@ pub fn uninstall(
         } else {
             findings.push(InstallFinding {
                 rule: "relinquished_modified_entry".into(),
+                detail: None,
                 path: entry.path.clone(),
             });
         }
@@ -2346,6 +2505,7 @@ pub fn uninstall(
             .as_ref()
             .and_then(|snapshot| owned(&snapshot.value).ok()),
         after: Some(OwnedValue::File {
+            extra: Default::default(),
             digest: CanonicalV1::file_digest(&receipt_bytes),
             mode: 0o600,
         }),

@@ -31,6 +31,7 @@ impl LocalReader<'_> {
         deadline: Instant,
     ) -> Result<Page<AnswerOffer>, Error> {
         let empty = Page {
+            extra: Default::default(),
             items: Vec::new(),
             truncated: false,
         };
@@ -72,6 +73,7 @@ impl LocalReader<'_> {
             return Ok(None);
         }
         Ok(Some(AnswerTarget {
+            extra: Default::default(),
             host,
             project: found.record.project_id,
             session: session.as_str().into(),
@@ -172,9 +174,11 @@ mod tests {
         let service = InboxService::open(&roots.state, &identity, &clock, budget(), &cancel)?;
         let created = service.execute(
             InboxInput::Ask {
+                extra: Default::default(),
                 session: "chair-a".into(),
                 operation_id: None,
                 request: Box::new(RequestDraft {
+                    extra: Default::default(),
                     deadline: None,
                     supersedes: None,
                     work: None,
@@ -195,6 +199,7 @@ mod tests {
         };
         let answered = service.execute(
             InboxInput::Answer {
+                extra: Default::default(),
                 id: receipt.request_id,
                 action: AnswerAction::Reply,
                 option_id: None,
@@ -284,6 +289,7 @@ mod tests {
             .save(b"returned", budget(), &cancel, &clock)?;
         service.execute(
             InboxInput::Acknowledge {
+                extra: Default::default(),
                 id: receipt.request_id,
                 answer_id: receipt.answer_id.unwrap(),
                 session: "chair-a".into(),

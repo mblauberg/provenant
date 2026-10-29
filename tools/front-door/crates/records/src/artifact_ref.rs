@@ -3,8 +3,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 /// Stored artefact reference. Unlike an output fact, an input may lack a digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ArtifactRef {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub path: PathWire,
     #[serde(deserialize_with = "digest")]
     pub digest: Option<FileDigest>,
@@ -22,9 +23,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stored_artifact_is_strict_and_round_trips_optional_digest() {
+    fn stored_artifact_round_trips_and_validates_optional_digest() {
         for digest in [None, Some(FileDigest::from_bytes([7; 32]))] {
             let reference = ArtifactRef {
+                extra: Default::default(),
                 path: PathWire::from_relative(
                     &provenant_core::RelativePath::parse("result.txt").unwrap(),
                 )
@@ -44,11 +46,5 @@ mod tests {
             let value = serde_json::json!({"path":{"encoding":"utf8","path":"a"},"digest":digest});
             assert!(serde_json::from_value::<ArtifactRef>(value).is_err());
         }
-        assert!(
-            serde_json::from_value::<ArtifactRef>(serde_json::json!({
-                "path":{"encoding":"utf8","path":"a"},"digest":null,"extra":true
-            }))
-            .is_err()
-        );
     }
 }

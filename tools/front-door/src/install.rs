@@ -3,9 +3,10 @@
 use crate::release_smoke::SystemSmoke;
 use crate::roots::{self, Product, Resolved, Workspace};
 use provenant_cli as cli;
+use provenant_config::shared_settings::SharedSettings;
 use provenant_config::{
-    Action, HarnessTarget, InstallContext, InstallError, InstallFinding, InstallOutcome,
-    InstallReporter, ManualInclude, Targets,
+    AccountHome, Action, HarnessTarget, InstallContext, InstallError, InstallFinding,
+    InstallOutcome, InstallReporter, ManualInclude, Targets,
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_runtime::peer_agent::{AgentError, launchctl};
@@ -27,6 +28,12 @@ enum EdgeError {
 }
 
 fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
+    prepare_agents_with(targets, true)
+}
+
+/// `strict` false (uninstall) ignores a configuration defect, which only the
+/// optional scheduled-gc agent reads.
+fn prepare_agents_with(targets: &mut Targets, strict: bool) -> Result<(), EdgeError> {
     let state = targets.roots.state.as_path();
     if provenant_fabric_runtime::peer_agent::eligible(state, &targets.home) {
         let program = targets.bin_dir.join("provenant");
@@ -44,8 +51,12 @@ fn prepare_agents(targets: &mut Targets) -> Result<(), EdgeError> {
         targets.peer_agent_previous =
             provenant_fabric_runtime::peer_agent::previous_plist(&previous, state, &targets.home)
                 .map_err(EdgeError::Peer)?;
-        let config = provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS)
-            .map_err(|error| EdgeError::Install(InstallError::Config(error)))?;
+        let config =
+            match provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS) {
+                Ok(config) => config,
+                Err(_) if !strict => return Ok(()),
+                Err(error) => return Err(EdgeError::Install(InstallError::Config(error))),
+            };
         if config.gc.schedule {
             targets.gc_agent = Some(
                 super::gc_agent::render(&program, state, &config.gc).map_err(EdgeError::Peer)?,
@@ -85,26 +96,154 @@ fn selected_targets(
     {
         targets.protected_roots.push(environment.assets.clone());
     }
+    let (accounts, shared) =
+        account_config(&targets.roots, &environment.home).map_err(EdgeError::Install)?;
+    targets.accounts = accounts;
+    targets.shared_settings = shared;
     Ok((environment, targets))
+}
+
+/// Largest shared settings source read.
+const SETTINGS_SOURCE_LIMIT: u64 = 1024 * 1024;
+
+/// Registered account directories of every adapter and the shared settings.
+/// Registration, not directory discovery, decides which accounts install keeps
+/// in sync. A defect here fails install, upgrade and sync; uninstall never asks.
+fn account_config(
+    roots: &provenant_core::Roots,
+    home: &Path,
+) -> Result<(Vec<AccountHome>, Option<SharedSettings>), InstallError> {
+    let config = provenant_config::read_with_domains(roots, &cli::domains::SECTIONS)?;
+    let accounts = &config.domains.accounts;
+    Ok((
+        cli::accounts::homes(accounts),
+        shared_settings(accounts, home)?,
+    ))
+}
+
+/// The allow-listed values of the source file, with each account's overrides.
+/// `None` when there is no source and no override, so nothing is synced.
+pub(crate) fn shared_settings(
+    accounts: &provenant_providers::accounts::Settings,
+    home: &Path,
+) -> Result<Option<SharedSettings>, InstallError> {
+    if let Some(code) = accounts.settings_error() {
+        return Err(InstallError::InvalidConfig(code));
+    }
+    let configured = accounts
+        .shared_settings
+        .as_ref()
+        .and_then(|shared| shared.source.clone());
+    let explicit = configured.is_some();
+    let source_file = configured.unwrap_or_else(|| home.join(".claude/settings.json"));
+    let keys = accounts.settings_keys();
+    let mut source = std::collections::BTreeMap::new();
+    match std::fs::File::open(&source_file) {
+        Ok(file) => {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.take(SETTINGS_SOURCE_LIMIT + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| InstallError::InvalidConfig("shared settings source is unreadable"))?;
+            if bytes.len() as u64 > SETTINGS_SOURCE_LIMIT {
+                return Err(InstallError::InvalidConfig(
+                    "shared settings source is larger than 1 MiB",
+                ));
+            }
+            let serde_json::Value::Object(object) =
+                serde_json::from_slice(&bytes).map_err(|_| {
+                    InstallError::InvalidConfig("shared settings source is not a JSON object")
+                })?
+            else {
+                return Err(InstallError::InvalidConfig(
+                    "shared settings source is not a JSON object",
+                ));
+            };
+            for key in &keys {
+                if let Some(value) = object.get(key) {
+                    provenant_config::shared_settings::check_value(key, value).map_err(|reason| {
+                        InstallError::InvalidConfig(provenant_config::shared_settings::interned(
+                            format!(
+                                "shared settings source: {reason}; remove it or drop `{key}` from `keys`"
+                            ),
+                        ))
+                    })?;
+                    source.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !explicit => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(InstallError::InvalidConfig(
+                "shared settings source file does not exist",
+            ));
+        }
+        Err(_) => {
+            return Err(InstallError::InvalidConfig(
+                "shared settings source is unreadable",
+            ));
+        }
+    }
+    let overrides: std::collections::BTreeMap<_, _> = accounts
+        .entries
+        .values()
+        .filter(|entry| entry.adapter == "claude" && !entry.settings.is_empty())
+        .map(|entry| {
+            (
+                provenant_config::shared_settings::canonical(&entry.directory),
+                entry.settings.clone().into_iter().collect(),
+            )
+        })
+        .collect();
+    if source.is_empty() && overrides.is_empty() && !explicit {
+        return Ok(None);
+    }
+    Ok(Some(SharedSettings {
+        source_file,
+        source,
+        keys,
+        overrides,
+    }))
 }
 
 /// Resolves targets as install does, so `CLAUDE_CONFIG_DIR`/`CODEX_HOME`
 /// select the matching recorded target. Without them, uninstall acts on every
 /// recorded target of each harness, at its recorded paths.
-fn receipt_targets(globals: &cli::Globals, harnesses: &[Harness]) -> Result<Targets, EdgeError> {
+fn receipt_targets(
+    globals: &cli::Globals,
+    harnesses: &[Harness],
+) -> Result<(Targets, Option<String>), EdgeError> {
     let environment = environment(globals)?;
-    let mut targets = cli::install::configured_targets(
-        environment.roots,
+    // A defect in the configuration (an invalid account section, say) must not
+    // stop removal: fall back to the default targets and say so.
+    let mut warning = None;
+    let mut targets = match cli::install::configured_targets(
+        environment.roots.clone(),
         &environment.home,
         harnesses,
         environment.claude_config.as_deref(),
         environment.codex_home.as_deref(),
-    )
-    .map_err(EdgeError::Install)?;
+    ) {
+        Ok(targets) => targets,
+        Err(InstallError::Config(error)) => {
+            warning = Some(format!(
+                "warning: configuration ignored for uninstall ({error}); removing recorded targets only"
+            ));
+            let mut targets = Targets::new(environment.roots, &environment.home, harnesses);
+            targets
+                .apply_environment(
+                    environment.claude_config.as_deref(),
+                    environment.codex_home.as_deref(),
+                )
+                .map_err(EdgeError::Install)?;
+            targets
+        }
+        Err(error) => return Err(EdgeError::Install(error)),
+    };
     targets
         .resolve_destinations(&provenant_os::fs::SystemPathResolver)
         .map_err(EdgeError::Install)?;
-    Ok(targets)
+    Ok((targets, warning))
 }
 
 #[derive(Default)]
@@ -299,6 +438,20 @@ fn output_install(
     gc_agent: Option<super::gc_agent::Installed>,
     globals: &cli::Globals,
 ) -> u8 {
+    output_install_noted(
+        "", command, summaries, result, peer_agent, gc_agent, globals,
+    )
+}
+/// `notes` lead the human output, for steps that ran before the install.
+fn output_install_noted(
+    notes: &str,
+    command: &str,
+    summaries: &[HarnessTarget],
+    result: Result<InstallOutcome, InstallError>,
+    peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
+    gc_agent: Option<super::gc_agent::Installed>,
+    globals: &cli::Globals,
+) -> u8 {
     match result {
         Ok(outcome) => {
             let (mut links, mut hooks, mut mcp) = (0, 0, 0);
@@ -316,7 +469,7 @@ fn output_install(
                 }
             }
             let mut human = format!(
-                "{command}: {} changes ({links} links, {hooks} hooks, {mcp} MCP); {} targets",
+                "{notes}{command}: {} changes ({links} links, {hooks} hooks, {mcp} MCP); {} targets",
                 outcome.actions.len(),
                 summaries.len(),
             );
@@ -350,9 +503,29 @@ fn output_install(
                     human.push_str(&format!(
                         "  State root moved from {path}; old paths left untouched\n"
                     ));
+                } else if let Some(detail) = &finding.detail {
+                    human.push_str(&format!("  {}: {path} ({detail})\n", finding.rule));
                 } else {
                     human.push_str(&format!("  {}: {path}\n", finding.rule));
                 }
+            }
+            if outcome
+                .findings
+                .iter()
+                .any(|finding| finding.rule == "settings_conflict")
+            {
+                human.push_str(
+                    "  A shared setting was edited in an account and was not overwritten.\n  Keep the account's value: `provenant accounts sync --adopt <account>`\n  Use the source's value: `provenant accounts sync --force-settings`\n",
+                );
+            }
+            if outcome
+                .findings
+                .iter()
+                .any(|finding| finding.rule == "orphaned_account")
+            {
+                human.push_str(
+                    "  An install target's account is no longer registered and was not synced.\n  Remove its managed content: `provenant accounts sync --prune-orphans`\n",
+                );
             }
             for manual in &outcome.manual_includes {
                 let path = manual
@@ -409,7 +582,107 @@ fn read_install_receipt(
     }
 }
 
-fn install_batches(globals: &cli::Globals, args: &cli::Install) -> Result<Vec<Targets>, EdgeError> {
+/// Recorded account directories that are no longer registered. Only judged when
+/// the user registers accounts of that harness at all: with none registered,
+/// recorded directories are the detected ones and stay in sync as before.
+fn orphaned_targets(
+    environment: &Resolved,
+    base: &Targets,
+    receipt: &provenant_records::InstallReceipt,
+) -> Vec<provenant_records::ResolvedHarnessTarget> {
+    let canonical = |path: &Path| provenant_config::shared_settings::canonical(path);
+    let home = canonical(&environment.home);
+    receipt
+        .harness_targets
+        .iter()
+        .filter(|record| {
+            let base_dir = match record.harness {
+                Harness::Claude => ".claude",
+                Harness::Codex => ".codex",
+                _ => return false,
+            };
+            let Ok(skills) = record.skills_dir.to_path_buf() else {
+                return false;
+            };
+            let Some(directory) = skills.parent().map(canonical) else {
+                return false;
+            };
+            let env_dir = match record.harness {
+                Harness::Claude => environment.claude_config.as_deref(),
+                _ => environment.codex_home.as_deref(),
+            };
+            base.accounts.iter().any(|a| a.harness == record.harness)
+                && directory != home.join(base_dir)
+                && env_dir.is_none_or(|dir| canonical(dir) != directory)
+                && !base
+                    .accounts
+                    .iter()
+                    .any(|a| a.harness == record.harness && canonical(&a.home) == directory)
+        })
+        .cloned()
+        .collect()
+}
+
+struct Batches {
+    targets: Vec<Targets>,
+    /// Registered accounts install had to skip, reported as findings.
+    findings: Vec<InstallFinding>,
+}
+
+/// The selected, recorded or detected targets plus one batch for every
+/// registered account directory of a selected harness, so a new or upgraded
+/// install leaves every account with the same managed content.
+fn install_batches(globals: &cli::Globals, args: &cli::Install) -> Result<Batches, EdgeError> {
+    let mut targets = detected_batches(globals, args)?;
+    let (environment, base) = selected_targets(globals, &[])?;
+    let mut findings = Vec::new();
+    if args.harness.is_empty()
+        && let Some(receipt) = read_install_receipt(&base).map_err(EdgeError::Install)?
+    {
+        for record in orphaned_targets(&environment, &base, &receipt) {
+            findings.push(InstallFinding {
+                rule: "orphaned_account".into(),
+                detail: None,
+                path: record.skills_dir.clone(),
+            });
+        }
+    }
+    let bin_dir = targets
+        .first()
+        .map_or_else(|| base.bin_dir.clone(), |batch| batch.bin_dir.clone());
+    for account in &base.accounts {
+        if !args.harness.is_empty() && !args.harness.contains(&account.harness) {
+            continue;
+        }
+        let target = account.target(&base.home);
+        if targets
+            .iter()
+            .flat_map(|batch| &batch.harnesses)
+            .any(|known| known.harness == target.harness && known.skills_dir == target.skills_dir)
+        {
+            continue;
+        }
+        if !std::fs::metadata(&account.home).is_ok_and(|metadata| metadata.is_dir()) {
+            findings.push(InstallFinding {
+                rule: "missing_account_directory".into(),
+                detail: None,
+                path: provenant_records::AbsolutePath::new(&account.home)
+                    .map_err(|error| EdgeError::Install(error.into()))?,
+            });
+            continue;
+        }
+        let mut batch = base.clone();
+        batch.bin_dir = bin_dir.clone();
+        batch.harnesses = vec![target];
+        targets.push(batch);
+    }
+    Ok(Batches { targets, findings })
+}
+
+fn detected_batches(
+    globals: &cli::Globals,
+    args: &cli::Install,
+) -> Result<Vec<Targets>, EdgeError> {
     if !args.harness.is_empty() {
         return selected_targets(globals, &args.harness).map(|(_, targets)| vec![targets]);
     }
@@ -421,9 +694,11 @@ fn install_batches(globals: &cli::Globals, args: &cli::Install) -> Result<Vec<Ta
             .to_path_buf()
             .map_err(InstallError::from)
             .map_err(EdgeError::Install)?;
+        let orphans = orphaned_targets(&environment, &base, &receipt);
         return receipt
             .harness_targets
             .into_iter()
+            .filter(|record| !orphans.contains(record))
             .map(|record| {
                 let mut batch = base.clone();
                 batch.bin_dir = bin.clone();
@@ -496,75 +771,133 @@ fn install_batches(globals: &cli::Globals, args: &cli::Install) -> Result<Vec<Ta
     Ok(batches)
 }
 
-pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 {
-    match provenant_core::PathResolver::resolve_existing_ancestor(
-        &provenant_os::fs::SystemPathResolver,
-        &args.source,
-    ) {
-        Ok(source) => args.source = source,
-        Err(source) => {
-            return install_error(
-                "install",
-                &InstallError::Fs(provenant_os::fs::FsError::Io {
-                    operation: "resolve install source",
-                    path: args.source.clone(),
-                    source,
-                }),
-                globals,
-            );
+/// A refusal before the install ran, rendered as the command's own error.
+enum Refused {
+    Edge(EdgeError),
+    Install(InstallError),
+    Fail(Outcome, &'static str, String),
+}
+impl From<EdgeError> for Refused {
+    fn from(error: EdgeError) -> Self {
+        Self::Edge(error)
+    }
+}
+impl From<InstallError> for Refused {
+    fn from(error: InstallError) -> Self {
+        Self::Install(error)
+    }
+}
+impl Refused {
+    fn emit(self, command: &str, globals: &cli::Globals) -> u8 {
+        match self {
+            Self::Edge(error) => edge_error(command, error, globals),
+            Self::Install(error) => install_error(command, &error, globals),
+            Self::Fail(status, code, message) => {
+                super::fail(command, status, code, &message, globals)
+            }
         }
     }
-    let mut batches = match install_batches(globals, &args) {
-        Ok(value) => value,
-        Err(error) => return edge_error("install", error, globals),
-    };
+    fn message(&self) -> String {
+        match self {
+            Self::Edge(EdgeError::Root(error)) => error.to_string(),
+            Self::Edge(EdgeError::Install(error)) | Self::Install(error) => error.to_string(),
+            Self::Edge(EdgeError::Peer(error)) => error.to_string(),
+            Self::Edge(EdgeError::Home) => "HOME must be an absolute directory".into(),
+            Self::Fail(_, _, message) => message.clone(),
+        }
+    }
+}
+
+/// What one pass over every batch produced, before any output is rendered.
+struct Applied {
+    result: Result<InstallOutcome, InstallError>,
+    summaries: Vec<HarnessTarget>,
+    peer_agent: Option<provenant_fabric_runtime::peer_agent::Installed>,
+    gc_agent: Option<super::gc_agent::Installed>,
+}
+
+/// What a sync does beyond reapplying the release.
+#[derive(Clone, Copy, Default)]
+struct SyncOptions {
+    /// Overwrite shared settings edited in an account since the last sync.
+    force_settings: bool,
+}
+
+pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
+    match apply_install(args, globals, true, SyncOptions::default()) {
+        Ok(applied) => output_install(
+            "install",
+            &applied.summaries,
+            applied.result,
+            applied.peer_agent,
+            applied.gc_agent,
+            globals,
+        ),
+        Err(refused) => refused.emit("install", globals),
+    }
+}
+
+/// Installs every batch. `agents` also settles the per-user LaunchAgents,
+/// which only a new release needs; a sync leaves them running as they are.
+fn apply_install(
+    mut args: cli::Install,
+    globals: &cli::Globals,
+    agents: bool,
+    options: SyncOptions,
+) -> Result<Applied, Refused> {
+    args.source = provenant_core::PathResolver::resolve_existing_ancestor(
+        &provenant_os::fs::SystemPathResolver,
+        &args.source,
+    )
+    .map_err(|source| {
+        InstallError::Fs(provenant_os::fs::FsError::Io {
+            operation: "resolve install source",
+            path: args.source.clone(),
+            source,
+        })
+    })?;
+    let Batches {
+        targets: mut batches,
+        findings: skipped,
+    } = install_batches(globals, &args)?;
     for targets in &mut batches {
         targets.bin_dir = args
             .bin_dir
             .clone()
             .unwrap_or_else(|| targets.bin_dir.clone());
-        if let Err(error) = targets.resolve_destinations(&provenant_os::fs::SystemPathResolver) {
-            return install_error("install", &error, globals);
-        }
+        targets.resolve_destinations(&provenant_os::fs::SystemPathResolver)?;
+    }
+    // A registered account may also be a default or recorded target.
+    let mut seen = std::collections::BTreeSet::new();
+    for batch in &mut batches {
+        batch
+            .harnesses
+            .retain(|target| seen.insert((target.harness, target.skills_dir.clone())));
+    }
+    batches.retain(|batch| !batch.harnesses.is_empty());
+    for batch in &mut batches {
+        batch.force_settings = options.force_settings;
     }
     let summaries: Vec<_> = batches
         .iter()
         .flat_map(|batch| batch.harnesses.clone())
         .collect();
     let Some(mut targets) = batches.last().cloned() else {
-        return super::fail(
-            "install",
+        return Err(Refused::Fail(
             Outcome::Invalid,
             "NO_HARNESSES",
-            "No harness CLIs or Claude config directories found; select --harness",
-            globals,
-        );
+            "No harness CLIs, Claude config directories or registered accounts found; select --harness".into(),
+        ));
     };
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let context = match context(&clock, &cancel) {
-        Ok(context) => context,
-        Err(error) => {
-            return super::fail("install", Outcome::Error, "WAIT_BUDGET", &error, globals);
-        }
-    };
-    let smoke = match SystemSmoke::new(None) {
-        Ok(smoke) => smoke,
-        Err(error) => {
-            return super::fail(
-                "install",
-                Outcome::Error,
-                "SMOKE_EXECUTOR",
-                &error.to_string(),
-                globals,
-            );
-        }
-    };
+    let context = context(&clock, &cancel)
+        .map_err(|error| Refused::Fail(Outcome::Error, "WAIT_BUDGET", error))?;
+    let smoke = SystemSmoke::new(None)
+        .map_err(|error| Refused::Fail(Outcome::Error, "SMOKE_EXECUTOR", error.to_string()))?;
     let state = targets.roots.state.as_path().to_path_buf();
     let home = targets.home.clone();
-    if let Err(error) = prepare_agents(&mut targets) {
-        return edge_error("install", error, globals);
-    }
+    prepare_agents(&mut targets)?;
     let gc_enabled = targets.gc_agent.is_some();
     let mut reporter = PreviewReporter {
         home: Some(home.clone()),
@@ -572,7 +905,7 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
     let result = (|| {
         let mut combined = InstallOutcome {
             actions: Vec::new(),
-            findings: Vec::new(),
+            findings: skipped,
             manual_includes: Vec::new(),
             dry_run: args.dry_run,
         };
@@ -613,7 +946,8 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
                 env!("PROVENANT_TARGET_TRIPLE"),
             )?;
         }
-        if !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home) {
+        if agents && !args.dry_run && provenant_fabric_runtime::peer_agent::eligible(&state, &home)
+        {
             retire_disk_guard(&home)
                 .map_err(|error| InstallError::AgentRetirement(error.to_string()))?;
         }
@@ -661,22 +995,33 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
             }
             combined.findings.extend(inspection.findings);
         }
+        // The plan and the final inspection can name the same finding.
+        let mut seen = std::collections::BTreeSet::new();
+        combined.findings.retain(|finding| {
+            seen.insert((
+                finding.rule.clone(),
+                finding.path.to_path_buf().ok(),
+                finding.detail.clone(),
+            ))
+        });
         Ok(combined)
     })();
     // The release is installed first; the agent then serves the new binary.
     let peer_agent = match &result {
-        Ok(outcome) if !outcome.dry_run => Some(provenant_fabric_runtime::peer_agent::install(
-            &state,
-            &home,
-            outcome
-                .actions
-                .iter()
-                .any(|action| action.selector == "peer-agent"),
-        )),
+        Ok(outcome) if agents && !outcome.dry_run => {
+            Some(provenant_fabric_runtime::peer_agent::install(
+                &state,
+                &home,
+                outcome
+                    .actions
+                    .iter()
+                    .any(|action| action.selector == "peer-agent"),
+            ))
+        }
         _ => None,
     };
     let gc_agent = match &result {
-        Ok(outcome) if !outcome.dry_run => Some(super::gc_agent::install(
+        Ok(outcome) if agents && !outcome.dry_run => Some(super::gc_agent::install(
             &state,
             &home,
             outcome
@@ -687,7 +1032,255 @@ pub(super) fn run_install(mut args: cli::Install, globals: &cli::Globals) -> u8 
         )),
         _ => None,
     };
-    output_install("install", &summaries, result, peer_agent, gc_agent, globals)
+    Ok(Applied {
+        result,
+        summaries,
+        peer_agent,
+        gc_agent,
+    })
+}
+
+/// Reapplies the installed release to every registered account directory and
+/// recorded target. `None` when nothing is installed, so nothing can drift.
+fn sync_accounts(
+    globals: &cli::Globals,
+    dry_run: bool,
+    options: SyncOptions,
+) -> Result<Option<Applied>, Refused> {
+    let (_, targets) = selected_targets(globals, &[])?;
+    let Some(receipt) = read_install_receipt(&targets)? else {
+        return Ok(None);
+    };
+    let source =
+        provenant_config::release_root(targets.roots.state.as_path(), receipt.source_digest);
+    let args = cli::Install {
+        source,
+        harness: Vec::new(),
+        bin_dir: None,
+        hooks: None,
+        adopt_existing: false,
+        dry_run,
+    };
+    apply_install(args, globals, false, options).map(Some)
+}
+
+/// Copies the locally edited shared settings of `account` into the source file
+/// and returns the keys moved. The source account itself cannot be adopted.
+fn adopt_settings(globals: &cli::Globals, account: &str) -> Result<Vec<String>, String> {
+    let (_, targets) = selected_targets(globals, &[]).map_err(|e| Refused::from(e).message())?;
+    let shared = targets
+        .shared_settings
+        .as_ref()
+        .ok_or("no shared settings are configured")?;
+    let config = provenant_config::read_with_domains(&targets.roots, &cli::domains::SECTIONS)
+        .map_err(|error| error.to_string())?;
+    let accounts = &config.domains.accounts;
+    let id = cli::accounts::resolve(accounts, account)?;
+    let entry = accounts.entries.get(&id).ok_or("unknown account")?;
+    if entry.adapter != "claude" {
+        return Err("only Claude accounts have shared settings".into());
+    }
+    let canonical = |path: &Path| provenant_config::shared_settings::canonical(path);
+    let file = canonical(&entry.directory).join("settings.json");
+    if file == canonical(&shared.source_file) {
+        return Err("that account holds the source settings; there is nothing to adopt".into());
+    }
+    let read = |path: &Path| -> Result<Vec<u8>, String> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .and_then(|f| f.take(SETTINGS_SOURCE_LIMIT + 1).read_to_end(&mut bytes))
+            .map_err(|error| format!("cannot read {}: {}", path.display(), error.kind()))?;
+        if bytes.len() as u64 > SETTINGS_SOURCE_LIMIT {
+            return Err(format!("{} is larger than 1 MiB", path.display()));
+        }
+        Ok(bytes)
+    };
+    let account_bytes = read(&file)?;
+    let source_bytes = read(&shared.source_file)?;
+    let synced: std::collections::BTreeMap<String, serde_json::Value> =
+        read_install_receipt(&targets)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .flat_map(|receipt| receipt.entries)
+            .filter(|e| e.path.to_path_buf().is_ok_and(|p| canonical(&p) == file))
+            .filter_map(|e| match e.expected {
+                provenant_records::OwnedValue::Selector { value } => e
+                    .selector
+                    .strip_prefix("setting:")
+                    .map(|key| (key.to_owned(), value)),
+                _ => None,
+            })
+            .collect();
+    let overridden = entry.settings.keys().cloned().collect();
+    let (bytes, adopted) = provenant_config::shared_settings::adopt(
+        &source_bytes,
+        &account_bytes,
+        &shared.keys,
+        &synced,
+        &overridden,
+    )
+    .map_err(|error| error.to_string())?;
+    if !adopted.is_empty() {
+        provenant_config::shared_settings::publish_source(
+            &shared.source_file,
+            &source_bytes,
+            &bytes,
+            || {},
+        )
+        .map_err(|error| match error {
+            InstallError::Drift(path) => format!(
+                "{} changed while adopting; nothing was written. Rerun `accounts sync --adopt`",
+                path.display()
+            ),
+            other => format!("cannot write the source settings: {other}"),
+        })?;
+    }
+    Ok(adopted)
+}
+
+/// Removes managed content from recorded targets that are no longer registered.
+fn prune_orphans(globals: &cli::Globals) -> Result<Vec<String>, String> {
+    let (environment, base) =
+        selected_targets(globals, &[]).map_err(|e| Refused::from(e).message())?;
+    let Some(receipt) = read_install_receipt(&base).map_err(|e| e.to_string())? else {
+        return Ok(Vec::new());
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let context = context(&clock, &cancel)?;
+    let mut pruned = Vec::new();
+    for record in orphaned_targets(&environment, &base, &receipt) {
+        let directory = record
+            .skills_dir
+            .to_path_buf()
+            .map_err(|e| e.to_string())?
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or("invalid recorded target")?;
+        let mut targets = receipt_targets(globals, &[record.harness])
+            .map_err(|e| Refused::from(e).message())?
+            .0;
+        match record.harness {
+            Harness::Claude => targets.apply_environment(Some(&directory), None),
+            _ => targets.apply_environment(None, Some(&directory)),
+        }
+        .map_err(|e| e.to_string())?;
+        let mut reporter = PreviewReporter {
+            home: Some(targets.home.clone()),
+        };
+        let outcome = cli::install::execute_uninstall(
+            &cli::Uninstall {
+                harness: vec![record.harness],
+            },
+            &targets,
+            &context,
+            &mut reporter,
+        )
+        .map_err(|e| e.to_string())?;
+        pruned.push(format!(
+            "{} ({} changes, {} findings)",
+            directory.display(),
+            outcome.actions.len(),
+            outcome.findings.len()
+        ));
+    }
+    Ok(pruned)
+}
+
+/// `accounts sync`: the repair for what `check install` and `accounts list` report.
+pub(super) fn run_sync(
+    dry_run: bool,
+    adopt: Option<&str>,
+    force_settings: bool,
+    prune: bool,
+    globals: &cli::Globals,
+) -> u8 {
+    let mut notes = String::new();
+    if let Some(account) = adopt {
+        if dry_run {
+            notes.push_str("dry run: --adopt not applied\n");
+        } else {
+            match adopt_settings(globals, account) {
+                Ok(keys) if keys.is_empty() => {
+                    notes.push_str("adopted no settings: nothing differs in that account\n");
+                }
+                Ok(keys) => {
+                    notes.push_str(&format!(
+                        "adopted settings into the source: {}\n",
+                        keys.join(", ")
+                    ));
+                }
+                Err(message) => {
+                    return super::fail(
+                        "accounts sync",
+                        Outcome::Invalid,
+                        "SYNC_ADOPT",
+                        &message,
+                        globals,
+                    );
+                }
+            }
+        }
+    }
+    if prune && !dry_run {
+        match prune_orphans(globals) {
+            Ok(pruned) => {
+                for directory in pruned {
+                    notes.push_str(&format!("removed managed content from {directory}\n"));
+                }
+            }
+            Err(message) => {
+                return super::fail(
+                    "accounts sync",
+                    Outcome::Error,
+                    "SYNC_PRUNE",
+                    &message,
+                    globals,
+                );
+            }
+        }
+    }
+    match sync_accounts(globals, dry_run, SyncOptions { force_settings }) {
+        Ok(Some(applied)) => output_install_noted(
+            &notes,
+            "accounts sync",
+            &applied.summaries,
+            applied.result,
+            None,
+            None,
+            globals,
+        ),
+        Ok(None) => super::fail(
+            "accounts sync",
+            Outcome::Invalid,
+            "SYNC_RECEIPT",
+            "No install receipt; run install first",
+            globals,
+        ),
+        Err(refused) => refused.emit("accounts sync", globals),
+    }
+}
+
+/// Per-account sync state for `accounts list`; reads only the receipt and the
+/// files it owns.
+pub(super) fn account_status(
+    globals: &cli::Globals,
+) -> Result<Vec<provenant_config::AccountStatus>, String> {
+    let (_, targets) =
+        selected_targets(globals, &[]).map_err(|error| Refused::from(error).message())?;
+    provenant_config::inspect_accounts(&targets).map_err(|error| error.to_string())
+}
+
+/// The sync that follows a registration. `Ok(None)` when nothing is installed.
+pub(super) fn sync_after_registration(
+    globals: &cli::Globals,
+) -> Result<Option<InstallOutcome>, String> {
+    match sync_accounts(globals, false, SyncOptions::default()) {
+        Ok(Some(applied)) => applied.result.map(Some).map_err(|error| error.to_string()),
+        Ok(None) => Ok(None),
+        Err(refused) => Err(refused.message()),
+    }
 }
 
 struct UpgradeRunner {
@@ -956,11 +1549,11 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
 }
 
 pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 {
-    let mut targets = match receipt_targets(globals, &args.harness) {
+    let (mut targets, warning) = match receipt_targets(globals, &args.harness) {
         Ok(value) => value,
         Err(error) => return edge_error("uninstall", error, globals),
     };
-    if let Err(error) = prepare_agents(&mut targets) {
+    if let Err(error) = prepare_agents_with(&mut targets, false) {
         return edge_error("uninstall", error, globals);
     }
     let clock = SystemClock::new();
@@ -979,7 +1572,11 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     {
         return edge_error("uninstall", EdgeError::Peer(error), globals);
     }
-    output_install(
+    let notes = warning
+        .map(|warning| format!("{warning}\n"))
+        .unwrap_or_default();
+    output_install_noted(
+        &notes,
         "uninstall",
         &[],
         cli::install::execute_uninstall(&args, &targets, &context, &mut reporter),
@@ -1036,6 +1633,7 @@ mod tests {
         })?;
         assert_eq!(stops, 2);
         action.before = Some(provenant_records::OwnedValue::File {
+            extra: Default::default(),
             digest: provenant_records::CanonicalV1::file_digest(b"rendered plist\n"),
             mode: 0o600,
         });

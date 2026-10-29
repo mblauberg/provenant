@@ -51,7 +51,7 @@ pub fn validate_provenance(route: &RouteProvenance) -> Result<(), ReviewError> {
                     .as_ref()
                     .is_some_and(|s| s.trim().is_empty())
         }
-        RouteProvenance::Unknown {} => false,
+        RouteProvenance::Unknown { .. } => false,
     };
     if incomplete {
         return Err(ReviewError::Incomplete);
@@ -98,6 +98,7 @@ mod tests {
     use provenant_records::PathWire;
     fn fact() -> ReviewFact {
         let output = EvidenceRef {
+            extra: Default::default(),
             path: PathWire::from_relative(&RelativePath::parse("reviews/result.md").unwrap())
                 .unwrap(),
             digest: Digest::from_bytes([0; 32]),
@@ -106,6 +107,7 @@ mod tests {
             attempt_id: AttemptId::from_bytes([1; 16]),
             reviewer_id: ActorId::from_bytes([2; 16]),
             subject: Subject::Document {
+                extra: Default::default(),
                 path: output.path.clone(),
                 digest: output.digest,
             },
@@ -114,6 +116,7 @@ mod tests {
             blocking_findings: vec!["failed bound".into()],
             eligibility: ReviewEligibility {
                 provenance: RouteProvenance::ChairAttested {
+                    extra: Default::default(),
                     route: "native/explicit@high".into(),
                     tier: ModelTier::Principal,
                     declared_family: Some("declared".into()),
@@ -131,6 +134,7 @@ mod tests {
     fn output_subject_must_match_reviewed_subject() {
         let review = fact();
         let subject = Subject::Document {
+            extra: Default::default(),
             path: review.output.path.clone(),
             digest: Digest::from_bytes([9; 32]),
         };
@@ -151,7 +155,9 @@ mod tests {
             Err(ReviewError::UnverifiedFamily)
         );
         let mut unknown = review;
-        unknown.eligibility.provenance = RouteProvenance::Unknown {};
+        unknown.eligibility.provenance = RouteProvenance::Unknown {
+            extra: Default::default(),
+        };
         assert!(checked(unknown, &policy).is_ok());
     }
     #[test]
@@ -185,6 +191,7 @@ mod tests {
         );
         let mut review = fact();
         review.eligibility.provenance = RouteProvenance::Observed {
+            extra: Default::default(),
             route: String::new(),
             tier: ModelTier::Junior,
             adapter: "codex".into(),

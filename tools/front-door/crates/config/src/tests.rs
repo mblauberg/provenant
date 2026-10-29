@@ -381,12 +381,9 @@ fn domain_registration_checks_closed_types_and_semantics_after_applying_defaults
     assert!(matches!(
         error,
         ConfigError::Domain {
-            source: SectionError {
-                field,
-                ..
-            },
+            source,
             ..
-        } if field == "domains.sample.limit"
+        } if source.field == "domains.sample.limit"
     ));
     let config = load_with_domains(
         &roots(),

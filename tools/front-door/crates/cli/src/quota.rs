@@ -1320,6 +1320,7 @@ mod tests {
         }))?;
         let mut entries = provenant_providers::accounts::Settings {
             entries: [("codex-work".into(), registration)].into(),
+            ..Default::default()
         };
         let account = AccountScope {
             adapter: "codex".into(),
@@ -1490,6 +1491,7 @@ mod tests {
             PublishMode::Replace,
         )?)?;
         let route = provenant_records::run::RouteRecord {
+            extra: Default::default(),
             provider: Some("claude".into()),
             model: None,
             effort: None,

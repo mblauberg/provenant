@@ -1623,6 +1623,7 @@ fn persisted_attempt_with(
     let attempt_id = AttemptId::from_bytes([24; 16]);
     let task_id = TaskId::from_bytes([25; 16]);
     let applied = RouteRecord {
+        extra: Default::default(),
         provider: Some(provider.into()),
         model: Some(model.into()),
         effort: None,
@@ -1636,11 +1637,13 @@ fn persisted_attempt_with(
         run_id,
         operation_id: OperationId::parse(&format!("{provider}-cooldown"))?,
         request: CanonicalRequest {
+            extra: Default::default(),
             child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                extra: Default::default(),
                 build_heavy: false,
                 title: None,
                 base: None,
@@ -1650,6 +1653,7 @@ fn persisted_attempt_with(
                 task_id,
                 prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
                 route: RequestedRoute::Model {
+                    extra: Default::default(),
                     provider: provider.into(),
                     model: model.into(),
                     effort: None,
@@ -1677,6 +1681,7 @@ fn persisted_attempt_with(
     };
     if options.writer {
         prepared.request.tasks[0].writer = Some(provenant_records::run::WriterRequest {
+            extra: Default::default(),
             project: rig.project.clone(),
             worktree: rig.project.join(".worktrees/receipt-writer"),
         });
@@ -1699,7 +1704,9 @@ fn persisted_attempt_with(
     running.applied_route = Some(applied.clone());
     running.started_at = Some(started_at);
     running.provider_launched = Some(true);
-    running.state = provenant_run::AttemptState::Running;
+    running.state = provenant_run::AttemptState::Running {
+        extra: Default::default(),
+    };
     let running_bytes = CanonicalV1::bytes(&running)?.as_bytes().to_vec();
     let database = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
     database.execute(
@@ -1715,6 +1722,7 @@ fn persisted_attempt_with(
         running.applied_route = None;
         running.resolved_route = None;
         running.state = provenant_run::AttemptState::Terminal {
+            extra: Default::default(),
             outcome: provenant_run::Outcome::Lost,
             exit_code: None,
             finished_at: clock.wall_now()?,
@@ -2129,6 +2137,7 @@ fn opencode_free_pool_cools_second_model() -> Result {
     let now = quota_record.refusals[0].observed_unix_seconds;
 
     let second = ResolvedRoute {
+        extra: Default::default(),
         adapter: "opencode".into(),
         model: "opencode/glm-5.3-flash-free".into(),
         effort: None,
@@ -2139,10 +2148,12 @@ fn opencode_free_pool_cools_second_model() -> Result {
         exclusions: vec![],
         eligibility: RouteEligibility::Eligible,
         readiness: RouteReadiness::Ready {
+            extra: Default::default(),
             availability_ref: "fixture-preflight".into(),
             expires_unix_seconds: now + 300,
         },
         confidentiality: RouteConfidentiality {
+            extra: Default::default(),
             evidence_ref: "fixture-access".into(),
         },
         pool_selection: None,
@@ -2182,6 +2193,7 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
     assert_eq!(refusal.resets_unix_seconds, Some(resets));
 
     let first = ResolvedRoute {
+        extra: Default::default(),
         adapter: "opencode".into(),
         model: "opencode/deepseek-v4.1-flash-free".into(),
         effort: None,
@@ -2192,10 +2204,12 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
         exclusions: vec![],
         eligibility: RouteEligibility::Eligible,
         readiness: RouteReadiness::Ready {
+            extra: Default::default(),
             availability_ref: "fixture-preflight".into(),
             expires_unix_seconds: resets + 300,
         },
         confidentiality: RouteConfidentiality {
+            extra: Default::default(),
             evidence_ref: "fixture-access".into(),
         },
         pool_selection: None,
@@ -2297,6 +2311,7 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     assert_eq!(refusal.resets_unix_seconds, Some(resets));
 
     let mut route = ResolvedRoute {
+        extra: Default::default(),
         adapter: "agy".into(),
         model: "gemini-3.8-flash".into(),
         effort: None,
@@ -2307,10 +2322,12 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
         exclusions: vec![],
         eligibility: RouteEligibility::Eligible,
         readiness: RouteReadiness::Ready {
+            extra: Default::default(),
             availability_ref: "fixture-preflight".into(),
             expires_unix_seconds: resets + 300,
         },
         confidentiality: RouteConfidentiality {
+            extra: Default::default(),
             evidence_ref: "fixture-access".into(),
         },
         pool_selection: None,

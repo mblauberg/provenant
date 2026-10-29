@@ -1134,11 +1134,13 @@ pub(super) fn writer_run(
         run_id: provenant_core::RunId::from_bytes([seed.wrapping_add(2); 16]),
         operation_id: provenant_core::OperationId::parse(operation)?,
         request: provenant_run::CanonicalRequest {
+            extra: Default::default(),
             child_attempt_id_version: None,
             chair: None,
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![provenant_run::TaskRequest {
+                extra: Default::default(),
                 build_heavy: false,
                 title: None,
                 base: None,
@@ -1149,6 +1151,7 @@ pub(super) fn writer_run(
                 task_id: task,
                 prompt_digest,
                 route: provenant_run::RequestedRoute::Model {
+                    extra: Default::default(),
                     provider: "claude".into(),
                     model: "claude/test-model".into(),
                     effort: None,
@@ -2833,6 +2836,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         }
         // Catalogue models only: production refuses unverified exact IDs.
         task.route = provenant_run::RequestedRoute::Model {
+            extra: Default::default(),
             provider: "claude".into(),
             model: "claude/claude-sonnet-5".into(),
             effort: None,
@@ -3642,6 +3646,7 @@ fn verify_lane_profile(
         let original = finished.clone();
         let mut sibling = finished.clone();
         finished.state = provenant_run::AttemptState::Terminal {
+            extra: Default::default(),
             outcome: provenant_run::Outcome::Rejected,
             exit_code: None,
             finished_at: finished.queued_at,
@@ -3696,7 +3701,9 @@ fn verify_lane_profile(
         pause(Duration::from_millis(500));
         db.execute("DELETE FROM attempts WHERE id=?1", [garbage.to_string()])?;
         sibling.attempt_id = provenant_core::AttemptId::from_bytes([68; 16]);
-        sibling.state = provenant_run::AttemptState::Queued;
+        sibling.state = provenant_run::AttemptState::Queued {
+            extra: Default::default(),
+        };
         sibling.generation = 0;
         sibling.attempt_number = 2;
         sibling.revision = 1;
@@ -4314,6 +4321,7 @@ fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Result {
     let call = writer_call(&clock, &cancel)?;
     let mut input = writer_run(
         provenant_run::WriterRequest {
+            extra: Default::default(),
             project: rig.project.clone(),
             worktree: rig.project.join(".worktrees/gc-tmp"),
         },
@@ -4327,7 +4335,9 @@ fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Result {
     let id = input.attempts[0].attempt_id;
     store.withdraw(
         id,
-        provenant_run::AttemptState::Queued,
+        provenant_run::AttemptState::Queued {
+            extra: Default::default(),
+        },
         provenant_run::Outcome::Cancelled,
         "fixture",
         provenant_core::WallTime::from_micros(2)?,
@@ -4477,6 +4487,7 @@ fn resume_refuses_low_disk_writer() -> Result {
     let call = writer_call(&clock, &cancel)?;
     let input = writer_run(
         provenant_run::WriterRequest {
+            extra: Default::default(),
             project: rig.project.clone(),
             worktree: rig.project.join(".worktrees/resume-disk"),
         },

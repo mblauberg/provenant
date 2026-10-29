@@ -8,8 +8,9 @@ use thiserror::Error;
 
 /// An MCP run target is an attempt ID, optionally qualified by its owning host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AttemptTarget {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub attempt: AttemptId,
     #[serde(default)]
     pub host: Option<HostId>,
@@ -18,8 +19,9 @@ pub struct AttemptTarget {
 /// One task in an MCP submission. Project, actor, authority and cwd come from
 /// the service's authenticated identity rather than request supplied paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SubmittedTask {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub build_heavy: bool,
     #[serde(default)]
@@ -49,8 +51,9 @@ pub struct SubmittedTask {
 
 /// A new branch at `base`, which the peer resolves after fetching its remotes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct NewWorktree {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub base: String,
     pub branch: String,
 }
@@ -158,7 +161,7 @@ bounded_input! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
-#[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "code", rename_all = "snake_case")]
 pub enum FacadeError {
     #[error("run execution owner is unavailable")]
     OwnerUnavailable,
@@ -212,6 +215,15 @@ pub enum FacadeError {
     OutputTooLarge,
     #[error("stored state is corrupt")]
     StateCorrupt,
+    #[error(
+        "upgrade required: reader release {reader_release}, writer release {writer_release}, {record} version {version}"
+    )]
+    UpgradeRequired {
+        reader_release: String,
+        writer_release: String,
+        record: String,
+        version: u64,
+    },
     #[error("Fabric store upgrade was refused")]
     UpgradeRefused,
     #[error("output publication failed")]
@@ -253,6 +265,7 @@ impl FacadeError {
             Self::BranchExists => "branch_exists",
             Self::OutputTooLarge => "output_too_large",
             Self::StateCorrupt => "state_corrupt",
+            Self::UpgradeRequired { .. } => "upgrade_required",
             Self::UpgradeRefused => "upgrade_refused",
             Self::PublicationFailed => "publication_failed",
             Self::Cancelled => "cancelled",
@@ -342,7 +355,6 @@ impl From<&super::CoordinationError> for FacadeError {
             CoordinationError::Entropy(_) | CoordinationError::EntropyEncoding => {
                 Self::io("generate entropy")
             }
-            CoordinationError::UpgradeRefused(_) => Self::UpgradeRefused,
             CoordinationError::Store(error) => Self::from(error),
         }
     }
@@ -363,13 +375,32 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::Invalid(_) | Error::PathEncoding | Error::ViewerLimit | Error::ViewerNotOpen => {
                 Self::InvalidInput
             }
+            Error::Decode(provenant_records::DecodeError::UnsupportedVersion { found, .. })
+                if *found > 1 =>
+            {
+                Self::UpgradeRequired {
+                    reader_release: env!("CARGO_PKG_VERSION").into(),
+                    writer_release: "unknown".into(),
+                    record: "record schema".into(),
+                    version: *found,
+                }
+            }
+            Error::SchemaVersion(version)
+                if *version > provenant_fabric_store::CURRENT_SCHEMA_VERSION as i64 =>
+            {
+                Self::UpgradeRequired {
+                    reader_release: env!("CARGO_PKG_VERSION").into(),
+                    writer_release: "unknown".into(),
+                    record: "database schema".into(),
+                    version: *version as u64,
+                }
+            }
             Error::Decode(_)
             | Error::Encode(_)
             | Error::SchemaVersion(_)
             | Error::UnversionedDatabase
             | Error::JournalMode(_)
             | Error::Time(_) => Self::StateCorrupt,
-            Error::LegacyImportData { .. } => Self::UpgradeRefused,
             // checked_directory's device refusal names only the child component.
             Error::Filesystem(provenant_os::fs::FsError::CrossDevice { .. }) => {
                 Self::io("verify Fabric filesystem device")
@@ -394,6 +425,30 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::FacadeError;
+
+    #[test]
+    fn future_schema_requires_upgrade_with_version_diagnostics() {
+        use provenant_fabric_store::Error;
+        let errors = [
+            Error::SchemaVersion(99),
+            Error::Decode(provenant_records::DecodeError::UnsupportedVersion {
+                found: 2,
+                line: 1,
+                column: 1,
+            }),
+        ];
+        for error in errors {
+            let facade = FacadeError::from(&error);
+            assert_eq!(facade.code(), "upgrade_required");
+            let message = facade.to_string();
+            assert!(message.contains(env!("CARGO_PKG_VERSION")));
+            assert!(message.contains("writer release unknown"));
+        }
+        assert_eq!(
+            FacadeError::from(&Error::SchemaVersion(1)),
+            FacadeError::StateCorrupt
+        );
+    }
 
     #[test]
     fn resume_preserves_no_fallback_and_defaults_for_older_senders()
@@ -546,6 +601,8 @@ impl OutputBytes {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputResult {
     Chunk {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         target: AttemptTarget,
         part: OutputPart,
         /// The attempt's state name, so a reader can tell a clean success
@@ -560,6 +617,8 @@ pub enum OutputResult {
         bytes: OutputBytes,
     },
     Artifact {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         target: AttemptTarget,
         artifact: ArtifactRef,
         digest: Digest,

@@ -61,6 +61,7 @@ pub fn review_fact(
         _ => {}
     }
     let evidence = EvidenceRef {
+        extra: Default::default(),
         path: output.path.clone(),
         digest: Digest::from_bytes(*output.digest.bytes()),
     };
@@ -96,6 +97,7 @@ pub fn review_fact(
             );
             (
                 RouteProvenance::Observed {
+                    extra: Default::default(),
                     route,
                     tier: claim.tier,
                     adapter,
@@ -108,6 +110,7 @@ pub fn review_fact(
         }
         ReviewerProvenance::ChairAttested => (
             RouteProvenance::ChairAttested {
+                extra: Default::default(),
                 route,
                 tier: claim.tier,
                 declared_family: reviewer.family.clone(),
@@ -115,7 +118,12 @@ pub fn review_fact(
             },
             None,
         ),
-        ReviewerProvenance::Unknown => (RouteProvenance::Unknown {}, None),
+        ReviewerProvenance::Unknown => (
+            RouteProvenance::Unknown {
+                extra: Default::default(),
+            },
+            None,
+        ),
     };
     Ok(review::fact(
         ReviewFact {
@@ -188,6 +196,7 @@ mod tests {
     }
     fn subject() -> Subject {
         Subject::Pr {
+            extra: Default::default(),
             repository: RepoId::from_bytes([8; 16]),
             number: 1,
             head: GitOid::Sha1([6; 20]),

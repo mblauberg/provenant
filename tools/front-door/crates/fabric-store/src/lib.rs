@@ -16,7 +16,7 @@ mod viewer;
 
 pub use chairs::*;
 pub use claims::*;
-pub use db::{Request, RetryWait, Store, ThreadWait};
+pub use db::{CURRENT_SCHEMA_VERSION, Request, RetryWait, Store, ThreadWait};
 pub use events::*;
 pub use federation::*;
 pub use human_inbox::{
@@ -41,8 +41,9 @@ pub(crate) const MAX_PAGE_BYTES: usize = 1_048_576;
 
 /// Bounded reads expose byte-cap truncation; resume after the last item's cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Page<T> {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub items: Vec<T>,
     pub truncated: bool,
 }
@@ -99,13 +100,6 @@ pub enum Error {
     Encode(#[from] provenant_records::CanonicalError),
     #[error("time is outside the supported range")]
     Time(#[from] provenant_core::TimeError),
-    #[error(
-        "Fabric store holds {rows} row(s) of legacy import data in table {table}, which this \
-         release would discard, so it stopped before migration 7; the store stays at a version \
-         the previous release still opens. Keep the previous release, or \
-         archive the store as docs/runbooks/fabric-hosts.md (Legacy import data) describes"
-    )]
-    LegacyImportData { table: &'static str, rows: i64 },
 }
 
 // SQLite's detailed message can contain SQL values, paths, or other private
@@ -130,14 +124,36 @@ fn encode<T: Serialize>(record: &T) -> Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    Ok(provenant_records::decode(
+    let decoded = provenant_records::decode(
         bytes,
         Limits {
             max_bytes: MAX_RECORD_BYTES as u64,
             max_depth: 64,
             max_members: 10_000,
         },
-    )?)
+    );
+    match decoded {
+        Err(provenant_records::DecodeError::Typed { line, column }) => {
+            // Store records carry their version in a nested header. Inspect only
+            // that header, not version fields in embedded application data.
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes)
+                && let Some(found) = value
+                    .get("header")
+                    .and_then(|h| h.get("schema_version"))
+                    .and_then(serde_json::Value::as_u64)
+                && found > 1
+            {
+                return Err(provenant_records::DecodeError::UnsupportedVersion {
+                    found,
+                    line,
+                    column,
+                }
+                .into());
+            }
+            Err(provenant_records::DecodeError::Typed { line, column }.into())
+        }
+        result => Ok(result?),
+    }
 }
 fn text(value: &str, field: &'static str) -> Result<()> {
     if value.is_empty() || value.len() > MAX_BODY_BYTES || value.contains('\0') {

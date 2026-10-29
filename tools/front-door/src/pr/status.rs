@@ -230,6 +230,7 @@ fn summarise_ci(
     let policy = required.map_or("all-reported", |(policy, _)| policy);
     let Some(checks) = checks else {
         return CiObservation {
+            extra: Default::default(),
             state: CiState::Unavailable,
             summary: format!("policy={policy} checks unavailable"),
         };
@@ -269,6 +270,7 @@ fn summarise_ci(
     };
     let selection = required.map_or_else(String::new, |(_, names)| format!(" names={names:?}"));
     CiObservation {
+        extra: Default::default(),
         state,
         summary: format!(
             "policy={policy}{selection} checks={passed}/{total} fail={failed} pending={pending} skipped={skipped} missing={missing}"

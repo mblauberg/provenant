@@ -246,6 +246,7 @@ fn prepare_candidates(
                 hidden: false,
                 order: None,
                 headline: None,
+                settings: Default::default(),
             });
         }
     }
@@ -275,6 +276,7 @@ fn prepare_candidates(
                 hidden: false,
                 order: None,
                 headline: None,
+                settings: Default::default(),
             });
         }
     }
@@ -285,6 +287,7 @@ fn prepare_candidates(
             .enumerate()
             .map(|(i, entry)| (i.to_string(), entry))
             .collect(),
+        ..Default::default()
     }
     .with_derived_accounts();
     let entries: Vec<_> = settings.entries.into_values().collect();
@@ -483,7 +486,7 @@ fn prepare_candidates(
             continue;
         };
         let adapter = registration.adapter;
-        if let provenant_records::RouteReadiness::Unavailable { reason } = &route.readiness {
+        if let provenant_records::RouteReadiness::Unavailable { reason, .. } = &route.readiness {
             // An adapter left out of `access` names its confinement error, not the router's denial.
             let detail = plan_errors
                 .get(route.adapter.as_str())
@@ -938,6 +941,7 @@ mod cargo_jobs_tests {
 /// A candidate that did not launch, typed by why it was skipped.
 fn skip(route: &str, kind: SkipKind, detail: impl Into<String>) -> SkippedRoute {
     SkippedRoute {
+        extra: Default::default(),
         route: route.to_owned(),
         kind,
         detail: detail.into(),
@@ -1603,6 +1607,7 @@ fn candidates(resolved: ResolvedRoute) -> Vec<ResolvedRoute> {
 
 fn with_alternative(base: &ResolvedRoute, alternative: &RouteAlternative) -> ResolvedRoute {
     ResolvedRoute {
+        extra: Default::default(),
         adapter: alternative.adapter.clone(),
         model: alternative.model.clone(),
         effort: alternative.effort.clone(),
@@ -2691,6 +2696,7 @@ mod tests {
         for entry in REGISTRY {
             let adapter = entry.adapter.id();
             let requested = run::TaskRequest {
+                extra: Default::default(),
                 build_heavy: false,
                 title: None,
                 base: None,
@@ -2700,6 +2706,7 @@ mod tests {
                 profile: Default::default(),
                 prompt_digest: provenant_records::CanonicalV1::file_digest(full.as_bytes()),
                 route: run::RequestedRoute::Model {
+                    extra: Default::default(),
                     provider: adapter.into(),
                     model: format!("{adapter}/fixture-model"),
                     effort: None,
@@ -3054,6 +3061,7 @@ mod tests {
         let prompt = "é".repeat(75_000);
         let review_oid = run::resolve_git_base(&git, &project, "HEAD")?;
         let task = run::TaskRequest {
+            extra: Default::default(),
             build_heavy: false,
             title: None,
             base: Some(review_oid.clone()),
@@ -3066,6 +3074,7 @@ mod tests {
             },
             prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
             route: run::RequestedRoute::Model {
+                extra: Default::default(),
                 provider: "cursor".into(),
                 model: "cursor/gpt-5.3-codex-low".into(),
                 effort: None,
@@ -3078,6 +3087,7 @@ mod tests {
             }],
             authority_digest: Digest::from_bytes([4; 32]),
             writer: Some(run::WriterRequest {
+                extra: Default::default(),
                 project: project.clone(),
                 worktree: project.join(".worktrees/writer"),
             }),
@@ -3115,6 +3125,7 @@ mod tests {
                 run_id,
                 operation_id: paths.operation_id.clone(),
                 request: run::CanonicalRequest {
+                    extra: Default::default(),
                     child_attempt_id_version: None,
                     chair: None,
                     fresh_continuation: None,
@@ -3328,6 +3339,7 @@ mod tests {
         fallback_task.prompt_digest =
             provenant_records::CanonicalV1::file_digest(fallback_prompt.as_bytes());
         fallback_task.route = run::RequestedRoute::Model {
+            extra: Default::default(),
             provider: "codex".into(),
             model: "codex/gpt-5.3-codex".into(),
             effort: None,
@@ -3455,6 +3467,7 @@ mod tests {
         // account without consulting that pool or the original account alias.
         let mut prior = store.record(attempt_id, &call)?;
         prior.requested_route = run::RequestedRoute::Named {
+            extra: Default::default(),
             name: "retired-pool".into(),
             effort: None,
         };
@@ -3725,6 +3738,7 @@ mod tests {
         };
         for adapter in ["cursor", "opencode", "codex"] {
             let route = ResolvedRoute {
+                extra: Default::default(),
                 adapter: adapter.into(),
                 model: "fixture-model".into(),
                 effort: None,
@@ -3735,10 +3749,12 @@ mod tests {
                 exclusions: Vec::new(),
                 eligibility: RouteEligibility::Eligible,
                 readiness: RouteReadiness::Ready {
+                    extra: Default::default(),
                     availability_ref: "fixture".into(),
                     expires_unix_seconds: 100,
                 },
                 confidentiality: RouteConfidentiality {
+                    extra: Default::default(),
                     evidence_ref: "fixture".into(),
                 },
                 pool_selection: None,
@@ -3835,7 +3851,9 @@ mod tests {
                 std::fs::write(candidate.join("models_cache.json"), "cache")?;
                 store.withdraw(
                     prior.attempt_id,
-                    run::AttemptState::Queued,
+                    run::AttemptState::Queued {
+                        extra: Default::default(),
+                    },
                     run::Outcome::Cancelled,
                     "fixture",
                     WallTime::from_micros(200)?,

@@ -34,7 +34,6 @@ pub fn peer_seconds(source_seconds: Option<u64>, local_limit: u64) -> u64 {
 /// Which host owns this project's chair or session. Each host keeps its own
 /// record, and both flip it to the target on a delivered hand-off.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Owner {
     pub schema_version: u64,
     pub host: HostId,
@@ -297,6 +296,7 @@ impl Launcher for Terminal {
 
 fn refused(code: &str, message: impl Into<String>) -> HandoffReceipt {
     HandoffReceipt::Refused {
+        extra: Default::default(),
         code: code.into(),
         message: message.into(),
         accounts: Vec::new(),
@@ -465,6 +465,7 @@ pub fn deliver(delivery: Delivery<'_>, launcher: &dyn Launcher) -> HandoffReceip
     };
     let script_file = path.exists().then(|| path.to_string_lossy().into_owned());
     HandoffReceipt::Delivered {
+        extra: Default::default(),
         prompt_path: prompt_path.to_string_lossy().into_owned(),
         project: delivery.project.to_string_lossy().into_owned(),
         worktrees: delivery.worktrees,
@@ -535,7 +536,9 @@ pub fn vet_receipt(
             code,
             message,
             accounts,
+            extra,
         } => HandoffReceipt::Refused {
+            extra,
             code: plain(&code),
             message: plain(&message),
             accounts: accounts
@@ -552,6 +555,7 @@ pub fn vet_receipt(
             script_path,
             launched,
             launch_error,
+            extra,
         } => {
             let mut expected = requested.to_vec();
             expected.sort();
@@ -564,11 +568,13 @@ pub fn vet_receipt(
                 });
             }
             HandoffReceipt::Delivered {
+                extra,
                 prompt_path: plain(&prompt_path),
                 project: plain(&project),
                 worktrees: worktrees
                     .into_iter()
                     .map(|t| HandoffWorktree {
+                        extra: t.extra,
                         branch: plain(&t.branch),
                         path: plain_opt(t.path),
                         head: plain_opt(t.head),
@@ -616,6 +622,7 @@ pub fn admit(
             ))
         })?
         .ok_or_else(|| HandoffReceipt::Refused {
+            extra: Default::default(),
             code: "account_unregistered".into(),
             message: format!(
                 "{} is not a registered Claude account on this host",
