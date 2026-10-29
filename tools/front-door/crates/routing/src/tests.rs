@@ -1270,14 +1270,180 @@ fn free_pool_members_require_opt_in_and_confidential_models_are_excluded()
         }
         error => panic!("unexpected pool error: {error}"),
     }
-    // Opting in passes the free gate; availability is still required.
+    // Opting in passes the free gate; availability is still required. Free
+    // routes stay out of confidential work, so this check is not confidential.
     query.allow_free = true;
+    query.confidential = false;
     let resolved = resolve(&query, &ctx)?;
-    assert_eq!(resolved.adapter, "opencode");
-    assert_eq!(
-        reason(&resolved),
-        Some(&RouteExclusionReason::UnknownAvailability)
-    );
+    let receipt = resolved.pool_selection.as_ref().ok_or("pool receipt")?;
+    let free = receipt
+        .candidates
+        .iter()
+        .find(|candidate| candidate.model == "opencode/opencode/deepseek-v4.1-flash-free")
+        .ok_or("free candidate")?;
+    assert_eq!(free.exclusion, None);
+    assert!(matches!(
+        free.readiness,
+        Some(RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::UnknownAvailability,
+            ..
+        })
+    ));
+    Ok(())
+}
+
+/// Zen serves the free OpenCode routes and Go the paid flash routes.
+fn opencode_accounts() -> [AvailabilityRecord; 2] {
+    ["zen", "go"].map(|key| AvailabilityRecord {
+        adapter: "opencode".into(),
+        account_key: Some(key.into()),
+        ..availability()
+    })
+}
+fn opencode_access() -> [AccessContext<'static>; 1] {
+    [AccessContext {
+        adapter: "opencode",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }]
+}
+/// The junior pool resolved under a range of seeds, so every member gets drawn.
+fn junior_draws(
+    query: &RouteRequest,
+    ctx: &RoutingContext<'_>,
+) -> Result<Vec<ResolvedRoute>, Box<dyn std::error::Error>> {
+    let mut routes = Vec::new();
+    for task_index in 0..16 {
+        routes.push(resolve_with_seed(query, ctx, "junior-free", task_index)?);
+    }
+    Ok(routes)
+}
+fn picked_model(route: &ResolvedRoute) -> Result<ModelId, RoutingError> {
+    ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+}
+
+#[test]
+fn junior_free_routes_are_excluded_without_allow_free() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = opencode_accounts();
+    let access = opencode_access();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    for route in junior_draws(&query, &ctx)? {
+        assert!(!catalogue.is_free_model(&picked_model(&route)?));
+        let receipt = route.pool_selection.ok_or("pool receipt")?;
+        for candidate in &receipt.candidates {
+            if catalogue.is_free_model(&ModelId::parse(&candidate.model)?) {
+                assert_eq!(candidate.exclusion.as_deref(), Some("free"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn junior_free_routes_are_selected_when_allowed() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = opencode_accounts();
+    let access = opencode_access();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    query.allow_free = true;
+    let mut free_picks = 0;
+    for route in junior_draws(&query, &ctx)? {
+        if catalogue.is_free_model(&picked_model(&route)?) {
+            free_picks += 1;
+            assert_eq!(route.account_key.as_deref(), Some("zen"));
+            assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+        }
+    }
+    assert!(free_picks > 0, "no seed selected a free junior route");
+    Ok(())
+}
+
+#[test]
+fn confidential_junior_requests_never_select_free_routes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = opencode_accounts();
+    let access = opencode_access();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    query.allow_free = true;
+    query.confidential = true;
+    for route in junior_draws(&query, &ctx)? {
+        assert!(!catalogue.is_free_model(&picked_model(&route)?));
+        let receipt = route.pool_selection.ok_or("pool receipt")?;
+        for candidate in &receipt.candidates {
+            if catalogue.is_free_model(&ModelId::parse(&candidate.model)?) {
+                assert_eq!(candidate.exclusion.as_deref(), Some("confidential"));
+            } else if candidate.model == "opencode/opencode-go/deepseek-v4.1-flash" {
+                // Paid Go routes train on nothing, so confidential work keeps them.
+                assert_eq!(candidate.exclusion, None);
+            }
+        }
+    }
+    // Naming a free route directly is refused for confidential input as well.
+    let mut direct = query.clone();
+    direct.choice = RouteChoice::Model(ModelId::parse(
+        "opencode/opencode/deepseek-v4.1-flash-free",
+    )?);
+    assert!(matches!(
+        resolve(&direct, &ctx),
+        Err(RoutingError::ConfidentialModel)
+    ));
+    Ok(())
+}
+
+#[test]
+fn cooling_free_route_falls_back_to_another_junior_member() -> Result<(), Box<dyn std::error::Error>>
+{
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = opencode_accounts();
+    let access = opencode_access();
+    let cooldowns = [provenant_quota::CapacityCooldown {
+        extra: Default::default(),
+        account: provenant_quota::AccountScope {
+            adapter: "opencode".into(),
+            account_key: "zen".into(),
+            label: "test".into(),
+        },
+        model: "opencode/deepseek-v4.1-flash-free".into(),
+        observed_unix_seconds: 90,
+        expires_unix_seconds: 110,
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.capacity_cooldowns = &cooldowns;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    query.allow_free = true;
+    let cooling = "opencode/opencode/deepseek-v4.1-flash-free";
+    for route in junior_draws(&query, &ctx)? {
+        assert_ne!(picked_model(&route)?.as_str(), cooling);
+        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+        let receipt = route.pool_selection.ok_or("pool receipt")?;
+        let skipped = receipt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == cooling)
+            .ok_or("cooling candidate")?;
+        assert_eq!(skipped.exclusion.as_deref(), Some("capacity cooldown"));
+    }
     Ok(())
 }
 
