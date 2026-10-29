@@ -399,6 +399,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             "update",
             "update_interval_seconds",
             "update_timeout_seconds",
+            "runtime_deadline_seconds",
         ] {
             origins.insert(format!("providers.{provider}.{field}"), compiled.clone());
         }

@@ -195,6 +195,13 @@ impl Registry<'_> {
     }
 }
 impl run::Providers for Registry<'_> {
+    fn runtime_cap(&self, provider: &str) -> Option<u64> {
+        provenant_config::read_with_domains(self.roots?, &crate::domains::SECTIONS)
+            .ok()?
+            .providers
+            .get(provider)?
+            .runtime_deadline_seconds
+    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         let roots = self.roots.ok_or("routing context is unavailable")?;
         let priority = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
@@ -2471,6 +2478,9 @@ struct PreparedProvider<'a> {
     ready: Option<&'a run::PreparedStart>,
 }
 impl run::Providers for PreparedProvider<'_> {
+    fn runtime_cap(&self, provider: &str) -> Option<u64> {
+        self.fallback.runtime_cap(provider)
+    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         self.fallback.priority(task)
     }
@@ -3020,6 +3030,27 @@ fn render_lanes(
                 "{}/{}/{}{title_text} {state} {route_text}{account_field}{reason_text}\n",
                 lane.run_id, lane.task_id, lane.attempt_id,
             ));
+            if lane.state == run::AttemptState::Running
+                && let Some(deadline) = lane.runtime_deadline
+            {
+                human.push_str(&format!("  runtime deadline {deadline}\n"));
+            }
+            if matches!(
+                lane.state,
+                run::AttemptState::Terminal {
+                    outcome: run::Outcome::TimedOut,
+                    ..
+                }
+            ) && lane
+                .session
+                .as_deref()
+                .is_some_and(|session| !session.is_empty())
+            {
+                human.push_str(&format!(
+                    "  continue: provenant resume {} --prompt-file PROMPT\n",
+                    lane.attempt_id
+                ));
+            }
             if matches!(
                 lane.state,
                 run::AttemptState::Terminal {
@@ -3120,6 +3151,7 @@ fn render_lanes(
                 "priority": lane.priority,
                 "finished_at": finished_at,
                 "last_output_at": lane.last_output_at,
+                "runtime_deadline": lane.runtime_deadline,
                 "delivery_id": lane.delivery_id,
                 "write_grants": lane.write_grants,
                 "read_only_writable": lane.read_only_writable,

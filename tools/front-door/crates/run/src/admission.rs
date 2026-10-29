@@ -115,6 +115,7 @@ impl RunStore {
         class: LaneClass,
         concurrency: u64,
         queue_seconds: u64,
+        runtime_seconds: u64,
         disk_floor_bytes: u64,
     ) -> Result<()> {
         let sequence: i64 = tx.query_row(
@@ -141,6 +142,7 @@ impl RunStore {
                 attempt.queued_at,
                 self.policy.admission_seconds.saturating_add(queue_seconds),
             )?,
+            runtime_seconds,
         };
         tx.execute(
             "INSERT INTO admission(attempt,project,run,active,record) VALUES (?1,?2,?3,0,?4)",
@@ -309,7 +311,16 @@ impl RunStore {
         head: Option<GitOid>,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
-        self.mark_starting_with_priority(expected, route, writable, write_grants, head, None, call)
+        self.mark_starting_with_priority(
+            expected,
+            route,
+            writable,
+            write_grants,
+            head,
+            None,
+            0,
+            call,
+        )
     }
 
     #[expect(clippy::too_many_arguments, reason = "priority is launch evidence")]
@@ -321,6 +332,7 @@ impl RunStore {
         write_grants: &AppliedWriteGrants,
         head: Option<GitOid>,
         priority: Option<u8>,
+        runtime_seconds: u64,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let id = expected.attempt_id;
@@ -369,6 +381,10 @@ impl RunStore {
                 }
             }
             ticket.generation = next.generation;
+            // The provider's host cap may tighten the allowance fixed at submission.
+            if runtime_seconds > 0 {
+                ticket.runtime_seconds = runtime_seconds;
+            }
             update_attempt(tx, &old, &next)?;
             tx.execute(
                 "UPDATE admission SET record=?1 WHERE attempt=?2",
@@ -592,6 +608,11 @@ impl RunStore {
             next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
             next.state = AttemptState::Running;
             next.started_at = Some(now);
+            // The guardian enforces the same allowance on the wall clock; the
+            // record lets `lanes` and `reconcile` see it without the guardian.
+            next.runtime_deadline = (ticket.runtime_seconds > 0)
+                .then(|| deadline(now, ticket.runtime_seconds))
+                .transpose()?;
             update_attempt(tx, &old, &next)?;
             Ok(Some(next))
         })

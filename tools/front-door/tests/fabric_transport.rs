@@ -2445,7 +2445,10 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
             &knobs,
             json!({"kind":"model","provider":"codex","model":"fixture"}),
         )?;
-        let plan = provenant_run::capture_plan(&request.tasks[0]);
+        let plan = provenant_run::capture_plan(
+            &request.tasks[0],
+            request.tasks[0].provider_timeout_seconds,
+        );
         assert_eq!(plan.silence_ms, threshold);
         assert!(!plan.silent(threshold - 1, Some(0)));
         assert!(plan.silent(threshold, Some(0)));

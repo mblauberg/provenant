@@ -166,6 +166,22 @@ report them. Activity records the old and new versions.
 Each lane's `availability.json`
 also includes its observed version and the latest update result.
 
+## Lane runtime deadline
+
+A lane's wall-clock allowance is its dispatch `--provider-timeout` (3600
+seconds, or 10800 for `worktree-write`; at most 14400). Cap it per provider with
+`runtime_deadline_seconds`; the shorter of the two applies:
+
+```toml
+[providers.codex]
+runtime_deadline_seconds = 7200
+```
+
+The deadline runs on the wall clock, so a host that sleeps through it stops the
+provider on waking. The attempt settles as `timed_out`, releases its worktree
+and lock, and `lanes` shows the deadline of each running lane and a
+`provenant resume` hint for a timed-out one.
+
 ## OpenCode Go monthly allowance floor
 
 OpenCode Go models must have a documented monthly allowance at or above the

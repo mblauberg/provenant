@@ -692,6 +692,10 @@ pub struct AdmissionTicket {
     pub run_concurrency: u64,
     pub quota_permit: Option<String>,
     pub admission_deadline: WallTime,
+    /// The provider's wall-clock allowance once it starts, in seconds. Absent
+    /// (zero) on tickets from before runtime deadlines were recorded.
+    #[serde(default)]
+    pub runtime_seconds: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

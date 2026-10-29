@@ -297,7 +297,7 @@ impl RunStore {
                 insert_event(tx, &attempt)?;
                 let waves = index as u64 / input.request.concurrency.max(1);
                 let class = if task.writer.is_some() { LaneClass::Writer } else { LaneClass::ReadOnly };
-                self.queue_ticket(tx, &attempt, class, input.request.concurrency,waves.saturating_mul(task.provider_timeout_seconds), disk_floor_bytes)?;
+                self.queue_ticket(tx, &attempt, class, input.request.concurrency,waves.saturating_mul(task.provider_timeout_seconds), task.provider_timeout_seconds, disk_floor_bytes)?;
             }
             Ok(())
         })?;

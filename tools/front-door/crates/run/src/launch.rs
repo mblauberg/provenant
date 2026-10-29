@@ -61,9 +61,17 @@ pub fn concurrency(
     })
 }
 
-pub fn capture_plan(task: &TaskRequest) -> CapturePlan {
+/// The wall-clock allowance of one lane: the task's timeout, tightened by the
+/// provider's host cap.
+pub fn runtime_seconds(task: &TaskRequest, cap: Option<u64>) -> u64 {
+    cap.map_or(task.provider_timeout_seconds, |cap| {
+        cap.min(task.provider_timeout_seconds)
+    })
+}
+
+pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64) -> CapturePlan {
     CapturePlan {
-        wall_ms: task.provider_timeout_seconds.saturating_mul(1000),
+        wall_ms: runtime_seconds.saturating_mul(1000),
         silence_ms: task
             .profile
             .knob_u64("lanes.silence_seconds")
@@ -282,6 +290,11 @@ impl RunStore {
     }
 }
 pub trait Providers {
+    /// A host cap, in seconds, on the runtime deadline of lanes on `provider`.
+    /// The task's own timeout applies when it is shorter or there is no cap.
+    fn runtime_cap(&self, _provider: &str) -> Option<u64> {
+        None
+    }
     /// Host-selected minimum nice value for this lane.
     fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
         Ok(if task.writer.is_some() { 10 } else { 5 })
@@ -1023,6 +1036,10 @@ impl RunStore {
                     continue;
                 }
             };
+            let runtime = runtime_seconds(
+                task,
+                providers.runtime_cap(plan.route.provider.as_deref().unwrap_or_default()),
+            );
             set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
             // Record the exact project-relative exceptions of the plan that launches.
             let writable = plan
@@ -1070,6 +1087,7 @@ impl RunStore {
                 &write_grants,
                 plan.observed_head,
                 Some(priority),
+                runtime,
                 call,
             ) {
                 Ok(record) => record,
@@ -1091,6 +1109,7 @@ impl RunStore {
                     context,
                     acquire_writer,
                     &record,
+                    runtime,
                     call,
                 ) {
                     Ok(()) => Started::Launched(id),
@@ -1143,6 +1162,7 @@ impl RunStore {
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
         record: &AttemptRecord,
+        runtime_seconds: u64,
         call: &Request<'_>,
     ) -> std::result::Result<(), HandOff> {
         let local = |error: &dyn std::fmt::Display| HandOff::Local(error.to_string());
@@ -1334,7 +1354,7 @@ impl RunStore {
                 .requested_priority
                 .ok_or_else(|| local(&"lane priority missing"))?,
         };
-        let capture = capture_plan(task);
+        let capture = capture_plan(task, runtime_seconds);
         // Held before launch: an unconfirmed handoff may still have a guardian.
         if let Some((held, custody)) = held {
             self.hold_child(held, custody);

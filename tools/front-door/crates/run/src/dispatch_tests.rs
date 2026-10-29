@@ -718,7 +718,7 @@ fn host_remembers_child_task_after_attempt_row_deletion() -> TestResult {
     // Make the replacement fully launchable, including its prompt and ticket.
     let directory = store.attempt_dir(nested.run_id, replacement.attempt_id, true)?;
     artifacts::seal(&directory, "prompt.txt", b"exact prompt", RECORD_LIMIT)?;
-    store.queue_ticket(&store.db, &replacement, LaneClass::ReadOnly, 1, 0, 1)?;
+    store.queue_ticket(&store.db, &replacement, LaneClass::ReadOnly, 1, 0, 0, 1)?;
     let revalidated = store.validate_child(
         nested.run_id,
         parent,
@@ -2683,6 +2683,8 @@ pub(super) struct Fake {
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
+    /// The outcome a decode reports; success when unset.
+    outcome: Option<Outcome>,
 }
 
 #[test]
@@ -2751,9 +2753,9 @@ impl Providers for Fake {
         assert_eq!(applied, &route());
         self.decoded.set(self.decoded.get() + 1);
         Ok(Decoded {
-            outcome: Outcome::Succeeded,
+            outcome: self.outcome.unwrap_or(Outcome::Succeeded),
             result: String::from_utf8_lossy(stdout).into_owned(),
-            complete: true,
+            complete: self.outcome.is_none(),
             observed_route: self.observed.clone(),
             usage: UsageRecord::default(),
             session: None,
@@ -2761,6 +2763,52 @@ impl Providers for Fake {
         })
     }
 }
+#[test]
+fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    // A hung provider's partial output, then the guardian's stop and kill.
+    artifacts::seal(&dir, "stdout.log", b"half an answer", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    observed.termination = Some(Termination::Signal(9));
+    observed.stop_reason = Some(provenant_supervisor::machine::StopReason::WallDeadline);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        outcome: Some(Outcome::Failed),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(outcome, Outcome::TimedOut);
+    assert_eq!(
+        reason.as_deref(),
+        Some("runtime deadline exceeded: provider stopped after 3600s")
+    );
+    Ok(())
+}
+
 fn two_tasks(concurrency: u64) -> PreparedRun {
     let mut run = input();
     let mut task = run.request.tasks[0].clone();

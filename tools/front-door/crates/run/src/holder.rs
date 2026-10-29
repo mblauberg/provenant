@@ -619,6 +619,21 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing from request"))?;
+        // A stop at the runtime deadline is a typed timeout, whatever partial
+        // output the provider left, and the lane stays resumable.
+        if decoded.outcome == Outcome::TimedOut && exit.stop_reason == Some(StopReason::WallDeadline)
+        {
+            let limit = format!(
+                "runtime deadline exceeded: provider stopped after {}s",
+                task.provider_timeout_seconds
+            );
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(detail) if detail != "provider output is partial" => {
+                    format!("{limit}; {detail}")
+                }
+                _ => limit,
+            });
+        }
         let mut review_required = false;
         let mut legacy_policy_note = None;
         if let Some(writer) = &task.writer {

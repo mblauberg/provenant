@@ -21,6 +21,9 @@ pub struct ProviderSettings {
     pub update: ProviderUpdate,
     pub update_interval_seconds: u64,
     pub update_timeout_seconds: u64,
+    /// A cap on any lane's runtime deadline on this provider, in seconds. A
+    /// dispatch's own `--provider-timeout` applies when it is shorter.
+    pub runtime_deadline_seconds: Option<u64>,
 }
 
 impl Default for ProviderSettings {
@@ -29,9 +32,13 @@ impl Default for ProviderSettings {
             update: ProviderUpdate::default(),
             update_interval_seconds: 24 * 60 * 60,
             update_timeout_seconds: 300,
+            runtime_deadline_seconds: None,
         }
     }
 }
+
+/// The longest runtime deadline a dispatch can request.
+const MAX_RUNTIME_DEADLINE_SECONDS: u64 = 14_400;
 
 pub(crate) fn defaults() -> BTreeMap<String, ProviderSettings> {
     provenant_records::ADAPTER_SPECS
@@ -50,6 +57,12 @@ pub(crate) fn validate(providers: &BTreeMap<String, ProviderSettings>) -> Result
         }
         if settings.update_timeout_seconds == 0 {
             return Err("update_timeout_seconds_range");
+        }
+        if settings
+            .runtime_deadline_seconds
+            .is_some_and(|seconds| !(1..=MAX_RUNTIME_DEADLINE_SECONDS).contains(&seconds))
+        {
+            return Err("runtime_deadline_seconds_range");
         }
         if let ProviderUpdate::Command { command } = &settings.update
             && (command.is_empty()
