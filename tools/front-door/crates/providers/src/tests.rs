@@ -2706,13 +2706,26 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
 }
 
 #[test]
-fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache() -> Result<(), ProviderError> {
+fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
+-> Result<(), Box<dyn std::error::Error>> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("opencode", "configured/model");
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
     let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
-    let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    let prepare = |home: &Path, plan: &_| {
+        opencode::OpenCode.prepare(PrepareInput {
+            home,
+            ..fixture_input(&route, plan, &prompt, Path::new("/fixture/repo"), None)
+        })
+    };
+    // Without Rust installed the lane keeps only the system tools.
+    let spec = prepare(&home, &plan)?;
+    assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
+    std::fs::create_dir_all(home.join(".cargo/bin"))?;
+    std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
     let cache = Path::new("/fixture/home/Library/Caches/provenant-lane-cargo/fixture");
-    let spec = opencode::OpenCode.prepare(input)?;
+    let spec = prepare(&home, &plan)?;
     let env = |key: &str| {
         spec.env
             .iter()
@@ -2721,15 +2734,19 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache() -> Result<(), Pro
     };
     let path = env("PATH").expect("PATH");
     assert!(
-        std::env::split_paths(&path).any(|dir| dir == Path::new("/fixture/home/.cargo/bin")),
+        std::env::split_paths(&path).any(|dir| dir == home.join(".cargo/bin")),
         "{path:?}"
     );
+    let cache = env("CARGO_TARGET_DIR")
+        .and_then(|target| target.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cache.to_path_buf());
     assert_eq!(env("CARGO_HOME"), Some(cache.join("cargo-home")));
     assert_eq!(env("CARGO_TARGET_DIR"), Some(cache.join("target")));
+    assert!(cache.ends_with("fixture"), "{cache:?}");
     for root in [
-        crate::launch::subtree(cache),
-        crate::launch::subtree("/fixture/home/.cargo/bin"),
-        crate::launch::subtree("/fixture/home/.rustup/toolchains"),
+        crate::launch::subtree(&cache),
+        crate::launch::subtree(home.join(".cargo/bin")),
+        crate::launch::subtree(home.join(".rustup/toolchains")),
     ] {
         assert!(
             spec.profile.spec.tool_exec_roots.contains(&root),
@@ -2738,8 +2755,7 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache() -> Result<(), Pro
     }
     // Read-only lanes deny bash, so they get no toolchain.
     let plan = fixture_access_plan(Access::ReadOnly, None, false);
-    let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
-    let spec = opencode::OpenCode.prepare(input)?;
+    let spec = prepare(&home, &plan)?;
     assert!(spec.profile.spec.tool_exec_roots.is_empty());
     assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
     Ok(())
