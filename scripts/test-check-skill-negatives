@@ -51,6 +51,39 @@ class InventoryTests(unittest.TestCase):
             self.assertNotEqual(missing.returncode, 0)
             self.assertIn("example", missing.stderr)
 
+    def test_inventories_every_root_given(self):
+        negative = {
+            "id": "q1", "relation": "negative", "prompt": "Adjacent task",
+            "tags": ["near-miss"],
+            "expected": {"primary_skill": "other", "companion_skills": []},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for name in ("skills", "library"):
+                skill = base / name / "example"
+                (skill / "evals").mkdir(parents=True)
+                (skill / "SKILL.md").write_text("# Example\n")
+            cases = {
+                "skills": [negative, dict(negative, id="q2", prompt="Another adjacent task")],
+                "library": [negative],
+            }
+
+            def check():
+                for name, selected in cases.items():
+                    (base / name / "example/evals/trigger_cases.json").write_text(json.dumps({
+                        "schema_version": 1, "target_skill": "example", "cases": selected,
+                    }))
+                return subprocess.run(
+                    [sys.executable, str(SCRIPT), str(base / "skills"), str(base / "library")],
+                    capture_output=True, text=True, check=False,
+                )
+
+            single = check()
+            self.assertNotEqual(single.returncode, 0)
+            self.assertIn("library/example", single.stderr)
+            cases["library"] = [negative, dict(negative, id="q3", prompt="Third adjacent task")]
+            self.assertEqual(check().returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

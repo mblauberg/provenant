@@ -1,68 +1,70 @@
 ---
 name: skill-craft
-description: "Use to audit, create or revise Agent Skills, including triggers, structure, examples and overlap. Default to read-only; edits need authority. Use the plugin tooling for packaging and implement for delivery."
+description: "Use to audit an Agent Skill's triggers, overlap, token cost and fixtures (read-only), or to create or materially revise one under an authority grant. Not for delivering the change (implement) or measuring model quality (evaluate)."
 ---
 
 # Skill craft
 
-A skill is a reusable, triggerable procedure. Assess four pillars:
-**Trigger** (requests and exclusions), **Structure** (contracts and disclosure),
-**Steering** (leading words and bright-line rules), and **Pruning** (sediment,
-duplication, sprawl and no-ops). Keep solved-task narratives and static
-reference elsewhere.
+A skill is a reusable, triggerable procedure. Judge it on four pillars:
+**trigger** (which requests load it, and which must not), **structure**
+(contracts and progressive disclosure), **steering** (the few bright-line rules
+a fresh agent would otherwise miss) and **pruning** (sediment, duplication,
+sprawl and no-ops).
 
-- New or materially revised skill → [references/author.md](references/author.md).
-- Assessment of an existing skill, read-only → [references/audit.md](references/audit.md).
-- **Default with no explicit authoring request: audit.** Do not cross
-  audit → edit without an authority envelope naming `implement` as
-  action-owner; surface that requirement instead of silently fixing what an
-  audit finds.
+The repository's authoring rules (budgets, catalogue cap, fixture policy,
+contract tests, promotion and retirement) live in
+[MAINTAINING.md](../../MAINTAINING.md#change-a-skill). Apply them here; do not
+copy them into the skill.
 
-## Shared doctrine
+## Pick a branch
 
-Both branches follow this without restating it in two voices:
+- **Audit (default).** Read-only assessment of an existing skill. Follow
+  [references/audit.md](references/audit.md).
+- **Author.** A new skill, or a material revision, under an authority grant
+  that names `implement` as the action owner. Follow
+  [references/author.md](references/author.md).
 
-- **Three-mode invocation:** direct audit; direct authoring under authority;
-  or composed, where audit is a companion to a primary lifecycle owner (for
-  example `implement`) that stays the action-owner.
-- **Budgets:** soft ~500-word body per branch file; the standing
-  catalogue-description lever is governed in `MAINTAINING.md`; link it,
-  don't restate the number here.
-- **Token model, three-tier:** always-loaded frontmatter, triggered branch
-  body, and entrypoint references loaded at one hop. Reference documents may
-  link to sibling references, but that depth is not recursively enforced by
-  `scripts/check-harness`.
-- **Tier placement:** keep hard rules in `SKILL.md`; references load late.
-  For repeated misses, hoist the rule and concrete banned-pattern examples
-  into the core instead of expanding the reference.
-- **Reuse boundary:** global skills express cross-project triggers, procedures
-  and gates. Convert contextual values into parameters, keep examples
-  synthetic and leave project policy local. Global promotion requires a
-  reusable trigger, artifact, fixture and ownership boundary. When evidence is
-  limited, keep it opt-in and provisional. Follow the repository gate in
-  [MAINTAINING.md](../../MAINTAINING.md).
-- **Project skills that extend a global skill** state their own hard rules, so
-  they work without the global skill installed; name each changed default
-  under `Project overrides:`; and keep harness and Fabric mechanics out of
-  everything but coordination skills. Global skills stay project-agnostic.
-- **Trigger fixtures:** positive, negative, boundary and composition cases.
-  Each skill has at least two `near-miss` negatives (`relation: negative`,
-  target excluded from both expected routes) that share its vocabulary but
-  belong elsewhere. Routing-text changes re-run the held-out set.
-- **Behaviour changes:** run the fixtures with and without the skill and record
-  decisions, differences, model/effort and omissions as reviewer evidence.
-  Scores are advisory; only inventory checks may fail CI.
-- **Contract-test boundary:** test machine-enforced invariants, never prose.
-  Without an enforcing script, add that script or no test; never assert wording.
-- **Failure taxonomy:** name the failure, don't just gesture at quality:
-  premature-completion, duplication, sediment, sprawl, no-op, negation-only.
-- **Description contract:** front-load the first 250 characters with trigger
-  words and the nearest exclusion; keep boundary-routing negation explicit
-  (name the skill to use instead); never drop it for brevity.
-- **Provenance:** when copied or closely paraphrased third-party text, code or
-  data ships, record its source URL, commit, retrieval date and licence, and
-  retain the required notices and licence text. Ideas and methods alone do not
-  require a notice.
+With no authoring request, audit. An audit that finds defects reports them. It
+does not fix them without the grant.
 
-Reference eval cases (not run by CI): [boundary traces](evals/boundary_trace_cases.yaml)
-and [behaviour cases](evals/behaviour_cases.yaml).
+## How it runs
+
+- Audit several skills with `provenant run --preset fan-out-synthesise
+  --set 'parameters.width=3' --prompt-file B.md --explain`: one read-only lane
+  per skill, then synthesis. Submit only after `--explain` looks right.
+- Rewrite several skills with `provenant run --preset big-batch --params-file
+  lanes.toml --explain`, one `lanes` entry per skill. Prepare each writer
+  worktree first; `big-batch` does not provision them.
+
+## Working rules
+
+- **Baseline first.** Run the target task without the skill, or with the
+  previous version. Keep only the lines the baseline gets wrong, and delete any
+  line it already satisfies. Record the with-and-without difference as reviewer
+  evidence. Scores are advisory.
+- **Name failures by mechanism:** premature completion, duplication, sediment,
+  sprawl, no-op or negation-only.
+- **Front-load the description.** The first 250 characters carry the trigger
+  terms and the nearest exclusion. The exclusion names the skill to use
+  instead, because a bare negation does not route.
+- **Fixtures.** `evals/trigger_cases.json` holds 8 to 12 cases, with at least
+  two `near-miss` negatives: `relation: negative`, with the target absent from
+  both expected routes. `scripts/check-skill-negatives` inventories them.
+  Re-run them after any routing-text change.
+- **Contract tests** only for invariants a script or CI gate enforces. Never
+  assert wording.
+- **Dated versions.** Version facts go in a dated reference. Frontmatter holds
+  `name` and `description` only.
+- **Hard rules in SKILL.md.** Load depth from references one hop away, and
+  load it late.
+- **Write rules** as mechanism, reason and example, phrased positively.
+- **Project skills** that only point at a global skill are redundant. A
+  project skill keeps only the repo judgement no doc holds, states its own hard
+  rules, and lists each departure under `Project overrides:`.
+- **Provenance.** Copied or closely paraphrased third-party text needs its
+  source URL, commit, retrieval date and licence, with the notice kept.
+
+## Evidence
+
+Prefer 2026 sources and mark older ones as possibly stale. The dated research
+basis is in [references/audit.md](references/audit.md#research-basis).

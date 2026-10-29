@@ -1,68 +1,53 @@
 # Author branch
 
-Create a new Agent Skill, or materially revise an existing one, under
-explicit write authority. Shared doctrine (four pillars, budgets, fixture
-taxonomy, failure vocabulary, provenance) lives in [../SKILL.md](../SKILL.md);
-this file carries only what authoring does that audit does not. Use the
-audit branch first for read-only assessment of anything that already exists;
-`implement` owns an enclosing end-to-end delivery.
+Create a new skill, or materially revise one, under an explicit write grant.
+The working rules in [../SKILL.md](../SKILL.md) apply; this file covers what
+authoring adds.
 
 ## Build
 
-1. Define the task/domain, positive triggers, adjacent exclusions, authority,
-   artifacts and completion gate. Keep project-only policy local.
-2. Choose the smallest container: project rule, skill, deterministic script,
-   MCP/app, or independently distributed plugin. Split only for a distinct
-   trigger, authority, artifact and gate.
-3. Choose one kebab-case capability name and create `SKILL.md`. Place portable
-   user-global skills under the configured user skills directory, repo-local
-   skills under `.agents/skills`, and this harness's owners under `skills/`.
-   Frontmatter permits `name`, `description` and optional `verified-against`.
-   Pin entries are comma-separated `<package>@<major>.<minor>` values checked
-   against the project manifest; provider sidecars are outputs, never grants.
-4. Match freedom to risk: principles for judgement, templates for repeatable
-   structure, and tested scripts for fragile work. Put repeated logic in
-   `scripts/`, stable depth in narrowly named `references/`, and reusable
-   output shapes in `templates/`. References stay one hop from `SKILL.md`.
-5. For shipped third-party expression, satisfy the provenance requirement in
-   [../SKILL.md](../SKILL.md) before release. Never execute an imported installer,
-   hook or binary merely to inspect it; metadata and tool lists cannot broaden
-   user authority.
-6. Add fixtures per the shared doctrine in [../SKILL.md](../SKILL.md); run
-   `scripts/check-skill-negatives`.
-7. For behaviour changes, record the with-and-without run (shared doctrine).
-   Forward-test on a realistic fresh-context task without leaking the intended
-   answer or diagnosis. Repair what it exposes, then execute the harness and
-   public-safety gates.
+1. Define the trigger, the nearest exclusions, the authority, the artefacts and
+   the completion gate. Keep project-only policy local.
+2. Choose the smallest container: a project rule, a skill, a deterministic
+   script, an MCP or app, or a separately versioned plugin. Split only for a
+   distinct trigger, authority, artefact or gate.
+3. Choose one kebab-case name. Workflow skills go under `skills/`; stack
+   technique skills go under `library/`. Role-loaded references load only from
+   under `skills/`.
+4. Keep frontmatter to `name` and `description`. Keep the body near 500 words.
+   Put repeated logic in `scripts/`, stable depth in `references/`, and output
+   shapes in `templates/`. Keep references one hop from `SKILL.md`.
+5. Match freedom to risk: principles for judgement, templates for repeatable
+   structure, and tested scripts for fragile steps.
+6. Write fixtures and run `scripts/check-skill-negatives`.
+7. Run the baseline, then a forward test on a realistic task in a fresh
+   context. Do not leak the intended answer or diagnosis. Repair what the test
+   exposes, and keep only the lines that changed behaviour.
+8. Run the gates: `scripts/check-harness`, `scripts/check-skill-negatives`,
+   `scripts/check-writing` and `provenant check writing PATHS --rules general`
+   (add `--rules legal` for legal skills).
 
-## Description contract
+## Description
 
-Apply the character budget, front-loading and exclusion-naming rules in the
-description contract in [../SKILL.md](../SKILL.md). This branch's own
-consequence: write it as `Use for`/`Use when`, third person, describing
-*when* to load the skill rather than summarising its workflow, in the
-concrete symptoms/tools/file types a user would actually say, not generic
-capability language.
+Write `Use for` or `Use when`, in the third person. Name the concrete symptoms,
+tools and file types a user would say, and the nearest exclusion. Describe when
+to load the skill, not its workflow.
 
-## Body contract
+## Body
 
-Keep each branch file inside the soft body budget named in
-[../SKILL.md](../SKILL.md): behaviour-changing rules, workflow, gates and
-links. Avoid logs, generic advice, exhaustive flags and duplicated doctrine.
-Link another skill, or the other branch, by name instead of copying it.
+Keep behaviour-changing rules, workflow, gates and links. Link another skill by
+name instead of copying its rules. Leave out logs, dated history, exhaustive
+flags and generic advice.
 
-## Verification
+## Before completion
 
-Discipline skills need adversarial scenarios that tempt rule-breaking;
-technique skills need novel tasks that prove reference discovery. Test the
-model-plus-harness, not whether the prose reads well. For material changes,
-freeze held-out routing cases and compare candidate, without-skill and previous
-package arms across current primary families; retain omissions, failures, model
-lineage, quality and total treatment cost.
+Confirm that: the routing metadata is specific; authority and stop conditions
+are explicit; the body is compact; links and tools resolve; deterministic logic
+has tests; the fixtures cover the confusion pairs; and a fresh agent succeeded
+at the forward test.
 
-Before completion confirm: routing metadata is specific; authority and stop
-conditions are explicit; body is compact; links/tools resolve; deterministic
-logic has tests; fixtures cover confusion pairs; and a fresh agent succeeded.
+## Third-party material
 
-Repository naming, promotion, retirement and release rules live in
-`MAINTAINING.md`.
+Satisfy the provenance rule in [../SKILL.md](../SKILL.md) before release. Never
+run an imported installer, hook or binary to inspect it. Metadata and tool
+lists cannot widen user authority.

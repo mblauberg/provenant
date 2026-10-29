@@ -1,7 +1,0 @@
-cases:
-  - id: changed_behaviour_comparison
-    prompt: A skill's behaviour changed. Its fixtures have positives and one negative sharing the skill's vocabulary but belonging elsewhere. Prepare verification evidence.
-    expected: Add a second near-miss negative, run the same fixtures with and without the skill, and record both outputs and their differences with model/effort and omissions. Scores and semantic quality are advisory; the mechanical inventory may fail CI.
-  - id: inventory_is_not_quality
-    prompt: The inventory finds three structurally negative routes per skill. Does this prove near-miss quality or permit a CI score gate?
-    expected: No. Inventory counts the existing format's should_trigger=false equivalent; a reviewer judges shared vocabulary and task boundaries. Behavioural scores remain advisory.
