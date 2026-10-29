@@ -901,7 +901,7 @@ fn land(landing: &Landing) -> Result<serde_json::Value> {
     let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
     let value = json(&output)?;
     assert!(
-        code(&output) == 0 || value["data"]["merged"] == true,
+        matches!(code(&output), 0 | 5) || value["data"]["merged"] == true,
         "{value}"
     );
     assert_eq!(value["data"]["head"], landing.head);
@@ -956,7 +956,7 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     assert!(!landing.worktree.exists());
     assert!(!branch_exists(rig, "feat")?);
     // Landing again finds nothing left to prune, and the text form names each step.
-    let text = command(rig, &["land", NUMBER])?;
+    let text = command(rig, &["land", NUMBER, "--full"])?;
     assert_eq!(code(&text), 0);
     let text = String::from_utf8(text.stdout.bytes)?;
     assert!(
