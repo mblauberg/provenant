@@ -15,7 +15,6 @@ use std::path::PathBuf;
 /// Inputs that re-resolve the submitting edge's state root in the guardian,
 /// whose environment is cleared.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RootSeed {
     pub home: PathBuf,
     pub checkout: PathBuf,
@@ -24,7 +23,6 @@ pub struct RootSeed {
 /// Host-only launch inputs, passed on the custody pipe rather than through
 /// lane-writable state. Provider credentials are resolved afresh on the host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HostLaunchContext {
     pub configuration_root: PathBuf,
     pub cwd: PathBuf,
@@ -43,7 +41,6 @@ pub struct HostLaunchContext {
 }
 /// Opaque to supervisor; travels on the handoff pipe only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HolderContext {
     pub schema_version: u64,
     pub roots: RootSeed,
@@ -62,7 +59,6 @@ pub struct HolderContext {
     pub sealed: Option<SealedTask>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SealedTask {
     pub request_digest: provenant_core::Digest,
     pub task_id: provenant_core::TaskId,
@@ -222,7 +218,6 @@ fn custody_error(error: RunError) -> CustodyError {
 /// A resource refusal seals the failed attempt without certifying its graph.
 /// Its writer reservation and private objects remain available for recovery.
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ObjectImportRefusal {
     schema_version: u64,
     scope: custody::Scope,
@@ -1229,7 +1224,9 @@ mod writer_recovery_tests {
         recovery.withdraw_prepared()?;
         store.withdraw(
             id,
-            AttemptState::Starting,
+            AttemptState::Starting {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture cancellation",
             clock.wall_now()?,
@@ -1237,7 +1234,12 @@ mod writer_recovery_tests {
         )?;
         // The caller holds a starting snapshot while the guardian has committed
         // cancellation and removed the reservation.
-        assert_eq!(starting.state, AttemptState::Starting);
+        assert_eq!(
+            starting.state,
+            AttemptState::Starting {
+                extra: Default::default()
+            }
+        );
         assert!(
             store
                 .recover_writer_exit(directory()?, scope, &call)?

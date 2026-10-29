@@ -21,8 +21,9 @@ pub const MODEL_LIMIT: usize = 128;
 pub const PROMPT_HEADER: &str = "# Session hand-off";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionHandoff {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     /// Names the target's state directory; a replay never launches twice.
     pub operation_id: OperationId,
     /// Registered Claude account label on the target.
@@ -36,15 +37,16 @@ pub struct SessionHandoff {
     pub launch: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Attachment {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     /// A plain file name; the target chooses the directory.
     pub name: String,
     /// Standard padded base64 of the file bytes.
     pub base64: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum HandoffReceipt {
     Delivered {
         /// Absolute path of the stored prompt on the target.
@@ -65,7 +67,6 @@ pub enum HandoffReceipt {
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HandoffWorktree {
     pub branch: String,
     pub path: Option<String>,
@@ -220,12 +221,14 @@ mod tests {
 
     fn handoff() -> SessionHandoff {
         SessionHandoff {
+            extra: Default::default(),
             operation_id: OperationId::parse("handoff-1").unwrap(),
             account: "work".into(),
             model: Some("claude-opus-4-1[1m]".into()),
             prompt: "# Session hand-off\n\nContinue the chair.".into(),
             branches: vec!["feat/x".into()],
             attachments: vec![Attachment {
+                extra: Default::default(),
                 name: "notes.md".into(),
                 base64: encode_base64(b"hello"),
             }],
@@ -291,10 +294,12 @@ mod tests {
             &|h| {
                 h.attachments = vec![
                     Attachment {
+                        extra: Default::default(),
                         name: "a".into(),
                         base64: encode_base64(&vec![0; ATTACHMENT_LIMIT]),
                     },
                     Attachment {
+                        extra: Default::default(),
                         name: "b".into(),
                         base64: encode_base64(b"x"),
                     },

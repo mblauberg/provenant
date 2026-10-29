@@ -252,7 +252,12 @@ impl ToolCall {
             Self::Inbox(InboxInput::Close { reason, .. }, _) => body(reason, "reason"),
             Self::Mail(MailInput::Send { body: value, .. }, _) => body(value, "body"),
             Self::Mail(MailInput::Read { limit, .. }, _) => page(*limit),
-            Self::Task(TaskInput::Create { objective, note }, _)
+            Self::Task(
+                TaskInput::Create {
+                    objective, note, ..
+                },
+                _,
+            )
             | Self::Task(
                 TaskInput::Update {
                     objective, note, ..
@@ -331,8 +336,8 @@ impl ToolCall {
         )
     }
 
-    /// Strict runtime serde contracts own argument validation. The catalogue
-    /// supplies a field path for serde's structural errors at the MCP edge.
+    /// MCP arguments remain strict even when shared peer records retain fields
+    /// from newer writers. The catalogue owns the argument field boundary.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
         // The shared serde record accepts peer-ingress worktree creation.
         // MCP cannot request it; reject the field (including null) at its edge.
@@ -361,6 +366,9 @@ impl ToolCall {
                 .or_insert_with(|| Value::String(operation.to_owned()));
         }
         let operation = arguments["op"].as_str().unwrap_or("").to_owned();
+        if let Some(path) = schema::invalid_path(name, &arguments) {
+            return Err(InvalidInput::Arguments { path });
+        }
         let mut detail = false;
         let mut submit_wait = 30;
         if let Some(object) = arguments.as_object_mut() {
@@ -737,6 +745,7 @@ impl ToolCall {
                     after,
                     limit,
                     wait_seconds,
+                    ..
                 },
                 _,
             ) => {
@@ -765,6 +774,7 @@ impl ToolCall {
                     } else {
                         match service.coordination.events(
                             EventsInput::Read {
+                                extra: Default::default(),
                                 after,
                                 limit,
                                 wait_seconds: None,
@@ -879,6 +889,7 @@ impl ToolCall {
                 let wait_budget = service.budget(wait_seconds)?;
                 let wait = service.facade.run(
                     RunInput::Wait {
+                        extra: Default::default(),
                         targets: targets.clone(),
                         condition: WaitCondition::All,
                         wait_seconds,
@@ -929,6 +940,7 @@ impl ToolCall {
                                 }
                                 match service.facade.output(
                                     OutputInput::Read {
+                                        extra: Default::default(),
                                         target: target.clone(),
                                         part: OutputPart::Result,
                                         offset: 0,

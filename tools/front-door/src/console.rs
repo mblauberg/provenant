@@ -45,6 +45,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             } => (
                 hosts,
                 provenant_fabric_runtime::hosts::PeerAction::ConsoleBoard {
+                    extra: Default::default(),
                     all: *all,
                     limit: *limit,
                     selected: selected.is_some(),
@@ -58,6 +59,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             } => (
                 hosts,
                 provenant_fabric_runtime::hosts::PeerAction::ConsoleTree {
+                    extra: Default::default(),
                     max_depth: *max_depth,
                     max_nodes: *max_nodes,
                     detail: *detail,

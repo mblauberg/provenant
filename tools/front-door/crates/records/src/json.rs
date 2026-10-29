@@ -40,13 +40,18 @@ impl Default for Limits {
 
 /// Header shared by schema-versioned stored records. Version one is the only
 /// supported record version in this crate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RecordHeader {
     schema_version: u64,
+    #[serde(flatten)]
+    extra: crate::ExtraFields,
 }
 
 impl RecordHeader {
-    pub const V1: Self = Self { schema_version: 1 };
+    pub const V1: Self = Self {
+        schema_version: 1,
+        extra: std::collections::BTreeMap::new(),
+    };
 
     pub const fn schema_version(&self) -> u64 {
         self.schema_version
@@ -54,7 +59,10 @@ impl RecordHeader {
 
     pub fn new(schema_version: u64) -> Result<Self, DecodeError> {
         if schema_version == Self::V1.schema_version {
-            Ok(Self { schema_version })
+            Ok(Self {
+                schema_version,
+                extra: Default::default(),
+            })
         } else {
             Err(DecodeError::UnsupportedVersion {
                 found: schema_version,
@@ -73,12 +81,15 @@ impl<'de> Deserialize<'de> for RecordHeader {
         #[derive(Deserialize)]
         struct WireHeader {
             schema_version: u64,
+            #[serde(flatten)]
+            extra: crate::ExtraFields,
         }
 
         let header = WireHeader::deserialize(deserializer)?;
         if header.schema_version == Self::V1.schema_version {
             Ok(Self {
                 schema_version: header.schema_version,
+                extra: header.extra,
             })
         } else {
             Err(D::Error::custom("unsupported schema version"))

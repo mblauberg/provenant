@@ -67,11 +67,26 @@ impl<'a> CoordinationService<'a> {
             Self::Local(service) => service.mutate(input, id, budget, cancel),
             Self::Remote(remote) => {
                 let input = match input {
-                    Mutation::Mail(v) => CoordinationInput::Mail(v),
-                    Mutation::Task(v) => CoordinationInput::Task(v),
-                    Mutation::Events(v) => CoordinationInput::Events(v),
-                    Mutation::Claim(v) => CoordinationInput::Claim(v),
-                    Mutation::Landing(v) => CoordinationInput::Landing(v),
+                    Mutation::Mail(v) => CoordinationInput::Mail {
+                        input: v,
+                        extra: Default::default(),
+                    },
+                    Mutation::Task(v) => CoordinationInput::Task {
+                        input: v,
+                        extra: Default::default(),
+                    },
+                    Mutation::Events(v) => CoordinationInput::Events {
+                        input: v,
+                        extra: Default::default(),
+                    },
+                    Mutation::Claim(v) => CoordinationInput::Claim {
+                        input: v,
+                        extra: Default::default(),
+                    },
+                    Mutation::Landing(v) => CoordinationInput::Landing {
+                        input: v,
+                        extra: Default::default(),
+                    },
                 };
                 Ok(
                     match remote.call(input, Some(id.clone()), budget, cancel)? {
@@ -107,6 +122,7 @@ impl RemoteCoordination<'_> {
         };
         let mut request = self.request.clone();
         request.action = PeerAction::Coordination {
+            extra: Default::default(),
             input,
             operation_id,
         };
@@ -135,6 +151,7 @@ impl RemoteCoordination<'_> {
                     // Recover the owning home's receipt; never resend mutation.
                     let mut recovery = request.clone();
                     recovery.action = PeerAction::Receipt {
+                        extra: Default::default(),
                         operation_id: id.clone(),
                     };
                     let response = self
@@ -308,9 +325,12 @@ macro_rules! route {
             budget: WaitBudget,
             cancel: &CancelToken,
         ) -> Result<$result, CoordinationError> {
-            if CoordinationInput::$variant(input.clone())
-                .mutation()
-                .is_some()
+            if (CoordinationInput::$variant {
+                input: input.clone(),
+                extra: Default::default(),
+            })
+            .mutation()
+            .is_some()
             {
                 return Err(CoordinationError::InvalidInput(
                     "mutation requires an operation id",
@@ -319,7 +339,15 @@ macro_rules! route {
             match self {
                 Self::Local(service) => service.$method(input, budget, cancel),
                 Self::Remote(remote) => {
-                    match remote.call(CoordinationInput::$variant(input), None, budget, cancel)? {
+                    match remote.call(
+                        CoordinationInput::$variant {
+                            input,
+                            extra: Default::default(),
+                        },
+                        None,
+                        budget,
+                        cancel,
+                    )? {
                         CoordinationResult::$variant(value) => Ok(value),
                         _ => Err(PeerError::Frame.into()),
                     }
@@ -386,7 +414,9 @@ impl<'a> CoordinationService<'a> {
                 identity.host,
                 identity.inbox.agent.clone(),
                 ProjectLocator::new(identity, home)?,
-                PeerAction::Health,
+                PeerAction::Health {
+                    extra: Default::default(),
+                },
             );
             let executable = discover_ssh_executable(config.ssh_executable.as_deref())?;
             let transport = SshTransport {
@@ -470,8 +500,12 @@ mod tests {
                 assert!(matches!(
                     &request.action,
                     PeerAction::Coordination {
-                        input: CoordinationInput::Events(EventsInput::Note { .. }),
+                        input: CoordinationInput::Events {
+                            input: EventsInput::Note { .. },
+                            extra: _
+                        },
                         operation_id: Some(_),
+                        ..
                     }
                 ));
                 // The owner may have committed the mutation, but this caller
@@ -510,8 +544,12 @@ mod tests {
                 assert!(matches!(
                     &request.action,
                     PeerAction::Coordination {
-                        input: CoordinationInput::Events(EventsInput::Note { .. }),
+                        input: CoordinationInput::Events {
+                            input: EventsInput::Note { .. },
+                            extra: _
+                        },
                         operation_id: Some(_),
+                        ..
                     }
                 ));
                 return Ok(PeerResponse {
@@ -528,8 +566,12 @@ mod tests {
             assert!(matches!(
                 &request.action,
                 PeerAction::Coordination {
-                    input: CoordinationInput::Events(EventsInput::Note { .. }),
+                    input: CoordinationInput::Events {
+                        input: EventsInput::Note { .. },
+                        extra: _
+                    },
                     operation_id: Some(_),
+                    ..
                 }
             ));
             Ok(PeerResponse {
@@ -594,6 +636,7 @@ mod tests {
 
         fn remote<'a>(&'a self, transport: Box<dyn PeerTransport + 'a>) -> RemoteCoordination<'a> {
             let request = PeerRequest {
+                extra: Default::default(),
                 version: 1,
                 protocol: PROTOCOL,
                 target_host: self.remote_host,
@@ -601,10 +644,13 @@ mod tests {
                 trace: Default::default(),
                 agent: "chair".into(),
                 project: ProjectLocator {
+                    extra: Default::default(),
                     key: self.project_key.clone(),
                     common_dir: "project/.git".into(),
                 },
-                action: PeerAction::Health,
+                action: PeerAction::Health {
+                    extra: Default::default(),
+                },
             };
             let store_request = Request {
                 clock: &self.clock,
@@ -632,10 +678,14 @@ mod tests {
     }
 
     fn note(text: &str) -> CoordinationInput {
-        CoordinationInput::Events(EventsInput::Note {
-            note: text.to_owned(),
-            dedup_key: Some("handoff-note-1".into()),
-        })
+        CoordinationInput::Events {
+            input: EventsInput::Note {
+                extra: Default::default(),
+                note: text.to_owned(),
+                dedup_key: Some("handoff-note-1".into()),
+            },
+            extra: Default::default(),
+        }
     }
 
     fn noted(result: CoordinationResult) -> i64 {
@@ -755,11 +805,15 @@ mod tests {
             let remote = fixture.remote(Box::new(ErrorPeer { error }));
             let error = remote
                 .call(
-                    CoordinationInput::Events(EventsInput::Read {
-                        after: None,
-                        limit: 1,
-                        wait_seconds: None,
-                    }),
+                    CoordinationInput::Events {
+                        input: EventsInput::Read {
+                            extra: Default::default(),
+                            after: None,
+                            limit: 1,
+                            wait_seconds: None,
+                        },
+                        extra: Default::default(),
+                    },
                     None,
                     fixture.budget,
                     &fixture.cancel,
@@ -886,7 +940,7 @@ mod tests {
         assert_eq!(actions_after_receipt.len(), 2);
         assert!(matches!(
             &actions_after_receipt[1],
-            PeerAction::Receipt { operation_id } if operation_id == &operation
+            PeerAction::Receipt { operation_id, .. } if operation_id == &operation
         ));
         let committed = remote
             .journal

@@ -2,8 +2,9 @@
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ResolvedRoute {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub adapter: String,
     /// Provider-native model identifier, retaining all segments after the adapter separator.
     pub model: String,
@@ -23,8 +24,9 @@ pub struct ResolvedRoute {
 /// Auditable outcome of a weighted pool selection. Factors use basis points,
 /// with 10,000 representing 1.0.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RouteSelectionReceipt {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub pool: String,
     pub candidates: Vec<RouteSelectionCandidate>,
     pub roll: u64,
@@ -38,8 +40,9 @@ pub struct RouteSelectionReceipt {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RouteSelectionRedraw {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub rejected_pick: String,
     pub roll: u64,
     pub total_weight: u64,
@@ -47,8 +50,9 @@ pub struct RouteSelectionRedraw {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RouteSelectionCandidate {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub model: String,
     pub weight: u8,
     pub factor_basis_points: u32,
@@ -62,8 +66,9 @@ pub struct RouteSelectionCandidate {
 /// An explicit fallback has the same access and disclosure requirements as the
 /// primary. Run receives the decision, rather than reconstructing candidates.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RouteAlternative {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub adapter: String,
     pub model: String,
     pub effort: Option<String>,
@@ -105,27 +110,33 @@ pub enum RouteEligibility {
     UnverifiedModel,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum RouteReadiness {
     Ready {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         availability_ref: String,
         expires_unix_seconds: i64,
     },
     Unavailable {
+        #[serde(flatten)]
+        extra: crate::ExtraFields,
         reason: RouteExclusionReason,
     },
 }
 /// A resolved candidate is always confidential; the resolver verifies the
 /// referenced policy evidence. Deserializing a projection never verifies it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RouteConfidentiality {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub evidence_ref: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RouteExclusion {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     pub adapter: String,
     pub model: String,
     pub reason: RouteExclusionReason,

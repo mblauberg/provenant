@@ -23,7 +23,6 @@ fn bounded_decode_accepts_v1_and_preserves_unsigned_integers() {
     assert_eq!(RecordHeader::V1.schema_version(), 1);
     assert!(RecordHeader::new(u64::MAX).is_err());
     assert!(serde_json::from_str::<RecordHeader>(r#"{"schema_version":2}"#).is_err());
-    assert!(serde_json::from_str::<RecordHeader>(r#"{"schema_version":1,"extra":0}"#).is_err());
 }
 
 #[test]

@@ -72,8 +72,9 @@ impl PeerError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectLocator {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub key: CrossHostProjectKey,
     pub common_dir: String,
 }
@@ -86,6 +87,7 @@ impl ProjectLocator {
         let relative = common.strip_prefix(home).map_err(|_| PeerError::Project)?;
         let common_dir = relative.to_str().ok_or(PeerError::Project)?.to_owned();
         let locator = Self {
+            extra: Default::default(),
             key: CrossHostProjectKey::from_home(home, &common).map_err(|_| PeerError::Project)?,
             common_dir,
         };
@@ -112,32 +114,62 @@ impl ProjectLocator {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(
-    tag = "domain",
-    content = "input",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[serde(tag = "domain", rename_all = "snake_case")]
 pub enum CoordinationInput {
-    Mail(MailInput),
-    Task(TaskInput),
-    Events(EventsInput),
-    Claim(ClaimInput),
-    Landing(LandingInput),
+    Mail {
+        input: MailInput,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Task {
+        input: TaskInput,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Events {
+        input: EventsInput,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Claim {
+        input: ClaimInput,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    Landing {
+        input: LandingInput,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
 }
 impl CoordinationInput {
     pub fn mutation(&self) -> Option<Mutation> {
         match self {
-            Self::Mail(MailInput::Read { .. })
-            | Self::Task(TaskInput::List { .. })
-            | Self::Events(EventsInput::Read { .. })
-            | Self::Claim(ClaimInput::Verify { .. } | ClaimInput::List { .. })
-            | Self::Landing(LandingInput::Verify { .. } | LandingInput::Wait { .. }) => None,
-            Self::Mail(v) => Some(Mutation::Mail(v.clone())),
-            Self::Task(v) => Some(Mutation::Task(v.clone())),
-            Self::Events(v) => Some(Mutation::Events(v.clone())),
-            Self::Claim(v) => Some(Mutation::Claim(v.clone())),
-            Self::Landing(v) => Some(Mutation::Landing(v.clone())),
+            Self::Mail {
+                input: MailInput::Read { .. },
+                ..
+            }
+            | Self::Task {
+                input: TaskInput::List { .. },
+                ..
+            }
+            | Self::Events {
+                input: EventsInput::Read { .. },
+                ..
+            }
+            | Self::Claim {
+                input: ClaimInput::Verify { .. } | ClaimInput::List { .. },
+                ..
+            }
+            | Self::Landing {
+                input: LandingInput::Verify { .. } | LandingInput::Wait { .. },
+                ..
+            } => None,
+            Self::Mail { input: v, .. } => Some(Mutation::Mail(v.clone())),
+            Self::Task { input: v, .. } => Some(Mutation::Task(v.clone())),
+            Self::Events { input: v, .. } => Some(Mutation::Events(v.clone())),
+            Self::Claim { input: v, .. } => Some(Mutation::Claim(v.clone())),
+            Self::Landing { input: v, .. } => Some(Mutation::Landing(v.clone())),
         }
     }
     pub fn execute(
@@ -159,31 +191,26 @@ impl CoordinationInput {
             ));
         }
         match self {
-            Self::Mail(v) => service
+            Self::Mail { input: v, .. } => service
                 .mail(v.clone(), budget, cancel)
                 .map(CoordinationResult::Mail),
-            Self::Task(v) => service
+            Self::Task { input: v, .. } => service
                 .task(v.clone(), budget, cancel)
                 .map(CoordinationResult::Task),
-            Self::Events(v) => service
+            Self::Events { input: v, .. } => service
                 .events(v.clone(), budget, cancel)
                 .map(CoordinationResult::Events),
-            Self::Claim(v) => service
+            Self::Claim { input: v, .. } => service
                 .claim(v.clone(), budget, cancel)
                 .map(CoordinationResult::Claim),
-            Self::Landing(v) => service
+            Self::Landing { input: v, .. } => service
                 .landing(v.clone(), budget, cancel)
                 .map(CoordinationResult::Landing),
         }
     }
 }
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(
-    tag = "domain",
-    content = "result",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[serde(tag = "domain", content = "result", rename_all = "snake_case")]
 pub enum CoordinationResult {
     Mail(MailResult),
     Task(TaskResult),
@@ -203,63 +230,94 @@ impl From<MutationResult> for CoordinationResult {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "action", rename_all = "snake_case")]
 pub enum PeerAction {
-    Health,
+    Health {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
     Inbox {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         input: crate::inbox::InboxInput,
     },
     ConsoleBoard {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         all: bool,
         limit: u64,
         selected: bool,
     },
     ConsoleTree {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         max_depth: u64,
         max_nodes: u64,
         detail: bool,
         selected: bool,
     },
     RunStatuses {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         targets: Vec<crate::coordination::facade::AttemptTarget>,
     },
     Run {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         input: crate::coordination::facade::RunInput,
     },
     Submit {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         input: crate::coordination::facade::SubmitInput,
     },
     Output {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         input: crate::coordination::facade::OutputInput,
     },
     RunEvents {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         after: u64,
         limit: u16,
     },
     Receipt {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         operation_id: OperationId,
     },
     LandingPush {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         proof: LandingProof,
         operation_id: OperationId,
         reconcile: bool,
     },
     Coordination {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         input: CoordinationInput,
         operation_id: Option<OperationId>,
     },
     /// The peer's own lanes, active only unless `all`; newest first with `all`.
     Lanes {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         all: bool,
         limit: u16,
     },
     /// What each named queued or starting lane waits for. An older peer does
     /// not know it and refuses, which a caller reads as no waits to show.
     LaneWaits {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         targets: Vec<crate::coordination::facade::AttemptTarget>,
     },
     /// Start a fresh session on the peer from a hand-off prompt.
     SessionHandoff {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         input: Box<crate::handoff::SessionHandoff>,
         /// The source's wait, so the peer finishes inside it. Absent from an
         /// older source.
@@ -268,8 +326,9 @@ pub enum PeerAction {
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PeerRequest<A = PeerAction> {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub version: u64,
     pub protocol: u64,
     pub target_host: HostId,
@@ -292,6 +351,7 @@ impl PeerRequest {
         action: PeerAction,
     ) -> Self {
         let mut request = Self {
+            extra: Default::default(),
             version: 1,
             protocol: if matches!(action, PeerAction::Inbox { .. }) {
                 INBOX_PROTOCOL
@@ -320,17 +380,19 @@ impl PeerRequest {
     }
     pub fn operation(&self) -> Option<OperationId> {
         match &self.action {
-            PeerAction::Inbox { input } => input.operation_id().cloned(),
+            PeerAction::Inbox { input, .. } => input.operation_id().cloned(),
             PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
             PeerAction::LandingPush { operation_id, .. } => Some(operation_id.clone()),
             PeerAction::SessionHandoff { input, .. } => Some(input.operation_id.clone()),
             PeerAction::Submit {
                 input: facade::SubmitInput::Submit { operation_id, .. },
+                ..
             }
             | PeerAction::Run {
                 input:
                     facade::RunInput::Cancel { operation_id, .. }
                     | facade::RunInput::Resume { operation_id, .. },
+                ..
             } => Some(operation_id.clone()),
             PeerAction::RunStatuses { .. } => None,
             _ => None,
@@ -370,7 +432,6 @@ impl PeerRequest {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HostHealth {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<u64>,
@@ -389,12 +450,7 @@ pub struct PeerHealth {
     pub execution: Option<bool>,
 }
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(
-    tag = "result",
-    content = "data",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[serde(tag = "result", content = "data", rename_all = "snake_case")]
 pub enum PeerResult {
     Inbox(crate::inbox::InboxReply),
     Run(Box<crate::runs::RunResult>),
@@ -415,7 +471,6 @@ pub enum PeerResult {
     },
 }
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PeerResponse<R = PeerResult> {
     pub version: u64,
     #[serde(default = "baseline_protocol")]
@@ -838,7 +893,6 @@ mod tests {
         for error in [
             serde_json::json!({"code": "unknown_error"}),
             serde_json::json!({"code": "launch_unknown"}),
-            serde_json::json!({"code": "launch_unknown", "operation_id": "typed-error-operation", "unexpected": true}),
         ] {
             assert!(serde_json::from_value::<facade::FacadeError>(error).is_err());
         }
@@ -866,12 +920,14 @@ mod tests {
     #[test]
     fn protocol_fence_precedes_action_decoding() {
         let request = PeerRequest {
+            extra: Default::default(),
             version: 1,
             protocol: PROTOCOL - 1,
             target_host: HostId::from_bytes([3; 16]),
             source_host: HostId::from_bytes([4; 16]),
             agent: "fixture".into(),
             project: ProjectLocator {
+                extra: Default::default(),
                 key: CrossHostProjectKey::from_home(
                     Path::new("/home/a"),
                     Path::new("/home/a/repo/.git"),
@@ -934,6 +990,7 @@ mod tests {
             );
         }
         let mut request = PeerRequest {
+            extra: Default::default(),
             version: 1,
             protocol: PROTOCOL,
             target_host: local,
@@ -941,10 +998,13 @@ mod tests {
             trace: Default::default(),
             agent: "fixture".into(),
             project: ProjectLocator {
+                extra: Default::default(),
                 key: CrossHostProjectKey::from_home(home, &home.join("repo/.git")).unwrap(),
                 common_dir: "repo/.git".into(),
             },
-            action: PeerAction::Health,
+            action: PeerAction::Health {
+                extra: Default::default(),
+            },
         };
         assert!(matches!(
             request.validate(local, &config, home),
@@ -982,6 +1042,7 @@ mod tests {
     fn new_requests_trace_the_sender_and_the_operation() {
         let (local, remote) = (HostId::from_bytes([1; 16]), HostId::from_bytes([2; 16]));
         let project = ProjectLocator {
+            extra: Default::default(),
             key: CrossHostProjectKey::from_home(Path::new("/h"), Path::new("/h/repo/.git"))
                 .unwrap(),
             common_dir: "repo/.git".into(),
@@ -997,114 +1058,18 @@ mod tests {
         assert_eq!(request.trace.host, Some(local));
         assert_eq!(request.trace.actor, Some(request.actor().unwrap()));
         assert_eq!(request.trace.operation, Some(operation));
-        let health = PeerRequest::new(remote, local, "worker".into(), project, PeerAction::Health);
+        let health = PeerRequest::new(
+            remote,
+            local,
+            "worker".into(),
+            project,
+            PeerAction::Health {
+                extra: Default::default(),
+            },
+        );
         assert_eq!(health.trace.operation, None);
         assert_eq!((health.version, health.protocol), (1, PROTOCOL));
         assert_eq!(health.target_host, remote);
-    }
-
-    #[test]
-    fn peer_responses_refuse_retired_members() {
-        use provenant_core::{MessageId, ProjectId, TaskId};
-        use provenant_fabric_store::{Delivery, Message, MessageKind, Page, Task, TaskState};
-        use provenant_records::RecordHeader;
-
-        fn old_frame(response: &PeerResponse, record: &str, member: &str, value: &str) -> Vec<u8> {
-            let old = format!(
-                "{},\"{member}\":{value}}}",
-                record.strip_suffix('}').unwrap()
-            );
-            let frame = serde_json::to_string(response).unwrap();
-            assert!(frame.contains(record));
-            frame.replace(record, &old).into_bytes()
-        }
-
-        let now = WallTime::from_micros(1).unwrap();
-        let task = Task {
-            header: RecordHeader::V1,
-            project: ProjectId::from_bytes([1; 16]),
-            id: TaskId::from_bytes([2; 16]),
-            objective: "Review".into(),
-            note: None,
-            state: TaskState::Open,
-            owner: None,
-            generation: 0,
-            expires_at: None,
-            created_at: now,
-            updated_at: now,
-        };
-        let mut response = PeerResponse {
-            version: 1,
-            protocol: PROTOCOL,
-            host: HostId::from_bytes([3; 16]),
-            project: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
-            result: PeerResult::Coordination(CoordinationResult::Task(TaskResult::Created {
-                task: task.clone(),
-            })),
-        };
-        let task_json = serde_json::to_string(&task).unwrap();
-        let frame = serde_json::to_vec(&response).unwrap();
-        let decoded =
-            provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG).unwrap();
-        assert!(matches!(
-            decoded.result,
-            PeerResult::Coordination(CoordinationResult::Task(TaskResult::Created { task: got }))
-                if got == task
-        ));
-        for value in ["null", "{}"] {
-            let frame = old_frame(&response, &task_json, "legacy", value);
-            assert!(
-                provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG)
-                    .is_err()
-            );
-        }
-
-        let message = Message {
-            header: RecordHeader::V1,
-            project: task.project,
-            id: MessageId::from_bytes([4; 16]),
-            sender: ActorId::from_bytes([5; 16]),
-            recipients: vec![ActorId::from_bytes([6; 16])],
-            conversation: None,
-            kind: MessageKind::Note,
-            body: "Review".into(),
-            artifacts: vec![],
-            reply_to: None,
-            task: None,
-            created_at: now,
-        };
-        let mail = MailResult::Read {
-            page: Page {
-                items: vec![Delivery {
-                    seq: 1,
-                    message: message.clone(),
-                }],
-                truncated: false,
-            },
-            cursor: 1,
-        };
-        response.result = PeerResult::Coordination(CoordinationResult::Mail(mail.clone()));
-        let message_json = serde_json::to_string(&message).unwrap();
-        let frame = serde_json::to_vec(&response).unwrap();
-        let decoded =
-            provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG).unwrap();
-        assert!(matches!(
-            decoded.result,
-            PeerResult::Coordination(CoordinationResult::Mail(got)) if got == mail
-        ));
-        for member in ["legacy", "legacy_output_path"] {
-            for value in ["null", "{}"] {
-                let frame = old_frame(&response, &message_json, member, value);
-                assert!(
-                    provenant_records::decode::<PeerResponse, _>(frame.as_slice(), Limits::CONFIG)
-                        .is_err()
-                );
-            }
-        }
     }
 
     struct Ssh {
@@ -1143,7 +1108,8 @@ mod tests {
                     execution: None,
                 }),
             };
-            let lose_reply = self.lose_reply && !matches!(request.action, PeerAction::Health);
+            let lose_reply =
+                self.lose_reply && !matches!(request.action, PeerAction::Health { .. });
             *self.request.lock().unwrap() = Some(request);
             Ok(ExecOutcome {
                 termination: Termination::Exit(if lose_reply { 255 } else { 0 }),
@@ -1168,6 +1134,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let operation = OperationId::parse("mail-once").unwrap();
         let project = ProjectLocator {
+            extra: Default::default(),
             key: CrossHostProjectKey::from_home(
                 Path::new("/home/a"),
                 Path::new("/home/a/repo/.git"),
@@ -1176,6 +1143,7 @@ mod tests {
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest {
+            extra: Default::default(),
             version: 1,
             protocol: PROTOCOL,
             target_host: host,
@@ -1184,10 +1152,15 @@ mod tests {
             agent: "chair".into(),
             project,
             action: PeerAction::Coordination {
-                input: CoordinationInput::Events(EventsInput::Note {
-                    note: "hello".into(),
-                    dedup_key: None,
-                }),
+                extra: Default::default(),
+                input: CoordinationInput::Events {
+                    input: EventsInput::Note {
+                        extra: Default::default(),
+                        note: "hello".into(),
+                        dedup_key: None,
+                    },
+                    extra: Default::default(),
+                },
                 operation_id: Some(operation.clone()),
             },
         };
@@ -1273,14 +1246,22 @@ mod tests {
     fn exchange_error(executor: &dyn Executor, mutation: bool) -> PeerError {
         let action = if mutation {
             PeerAction::Coordination {
-                input: CoordinationInput::Events(EventsInput::Note {
-                    note: "must not run".into(),
-                    dedup_key: None,
-                }),
+                extra: Default::default(),
+                input: CoordinationInput::Events {
+                    input: EventsInput::Note {
+                        extra: Default::default(),
+                        note: "must not run".into(),
+                        dedup_key: None,
+                    },
+                    extra: Default::default(),
+                },
                 operation_id: Some(OperationId::parse("wrong-version").unwrap()),
             }
         } else {
-            PeerAction::RunStatuses { targets: vec![] }
+            PeerAction::RunStatuses {
+                extra: Default::default(),
+                targets: vec![],
+            }
         };
         exchange_action_error(executor, action)
     }
@@ -1289,6 +1270,7 @@ mod tests {
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
         let host = HostId::from_bytes([2; 16]);
         let request = PeerRequest {
+            extra: Default::default(),
             version: 1,
             protocol: if matches!(
                 action,
@@ -1303,6 +1285,7 @@ mod tests {
             trace: Default::default(),
             agent: "chair".into(),
             project: ProjectLocator {
+                extra: Default::default(),
                 key: CrossHostProjectKey::from_home(
                     Path::new("/home/a"),
                     Path::new("/home/a/repo/.git"),
@@ -1334,11 +1317,13 @@ mod tests {
     fn console_peer_unsupported_and_unreachable() {
         for action in [
             PeerAction::ConsoleBoard {
+                extra: Default::default(),
                 all: false,
                 limit: 50,
                 selected: false,
             },
             PeerAction::ConsoleTree {
+                extra: Default::default(),
                 max_depth: 8,
                 max_nodes: 100,
                 detail: false,
@@ -1369,6 +1354,7 @@ mod tests {
     fn console_protocol_refused_before_action_decode() {
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
+            extra: Default::default(),
             key: CrossHostProjectKey::from_home(
                 Path::new("/home/a"),
                 Path::new("/home/a/repo/.git"),
@@ -1382,6 +1368,7 @@ mod tests {
             "chair".into(),
             project,
             PeerAction::ConsoleBoard {
+                extra: Default::default(),
                 all: false,
                 limit: 50,
                 selected: false,
@@ -1607,6 +1594,7 @@ mod tests {
         let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
+            extra: Default::default(),
             key: CrossHostProjectKey::from_home(
                 Path::new("/home/a"),
                 Path::new("/home/a/repo/.git"),
@@ -1615,12 +1603,20 @@ mod tests {
             common_dir: "repo/.git".into(),
         };
         for action in [
-            PeerAction::RunStatuses { targets: vec![] },
+            PeerAction::RunStatuses {
+                extra: Default::default(),
+                targets: vec![],
+            },
             PeerAction::Coordination {
-                input: CoordinationInput::Events(EventsInput::Note {
-                    note: "hello".into(),
-                    dedup_key: None,
-                }),
+                extra: Default::default(),
+                input: CoordinationInput::Events {
+                    input: EventsInput::Note {
+                        extra: Default::default(),
+                        note: "hello".into(),
+                        dedup_key: None,
+                    },
+                    extra: Default::default(),
+                },
                 operation_id: Some(OperationId::parse("note").unwrap()),
             },
         ] {
@@ -1644,6 +1640,7 @@ mod tests {
                     seconds: 30,
                 };
                 let request = PeerRequest {
+                    extra: Default::default(),
                     version: 1,
                     protocol: PROTOCOL,
                     target_host: host,
@@ -1725,6 +1722,7 @@ mod tests {
         // The largest hand-off: a full prompt of characters JSON escapes and
         // the whole attachment allowance.
         let input = SessionHandoff {
+            extra: Default::default(),
             operation_id: operation.clone(),
             account: "work".into(),
             model: None,
@@ -1734,6 +1732,7 @@ mod tests {
             ),
             branches: (0..64).map(|i| format!("feat/branch-{i}")).collect(),
             attachments: vec![Attachment {
+                extra: Default::default(),
                 name: "bundle.bin".into(),
                 base64: encode_base64(&vec![0xff; ATTACHMENT_LIMIT]),
             }],
@@ -1741,6 +1740,7 @@ mod tests {
         };
         input.validate().unwrap();
         let request = PeerRequest {
+            extra: Default::default(),
             version: 1,
             protocol: PROTOCOL,
             target_host: host,
@@ -1748,6 +1748,7 @@ mod tests {
             trace: Default::default(),
             agent: "chair".into(),
             project: ProjectLocator {
+                extra: Default::default(),
                 key: CrossHostProjectKey::from_home(
                     Path::new("/home/a"),
                     Path::new("/home/a/repo/.git"),
@@ -1756,6 +1757,7 @@ mod tests {
                 common_dir: "repo/.git".into(),
             },
             action: PeerAction::SessionHandoff {
+                extra: Default::default(),
                 input: Box::new(input.clone()),
                 budget_seconds: Some(30),
             },
@@ -1808,6 +1810,7 @@ mod tests {
         let local = HostId::from_bytes([1; 16]);
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
+            extra: Default::default(),
             key: CrossHostProjectKey::from_home(
                 Path::new("/home/a"),
                 Path::new("/home/a/repo/.git"),
@@ -1816,6 +1819,7 @@ mod tests {
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest {
+            extra: Default::default(),
             version: 1,
             protocol: PROTOCOL,
             target_host: host,
@@ -1823,7 +1827,9 @@ mod tests {
             trace: Default::default(),
             agent: "chair".into(),
             project,
-            action: PeerAction::Health,
+            action: PeerAction::Health {
+                extra: Default::default(),
+            },
         };
         let peer = Peer {
             host,
@@ -1862,6 +1868,7 @@ mod tests {
         let local = HostId::from_bytes([1; 16]);
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
+            extra: Default::default(),
             key: CrossHostProjectKey::from_home(
                 Path::new("/home/a"),
                 Path::new("/home/a/repo/.git"),
@@ -1870,6 +1877,7 @@ mod tests {
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest {
+            extra: Default::default(),
             version: 1,
             protocol: PROTOCOL,
             target_host: host,
@@ -1877,7 +1885,9 @@ mod tests {
             trace: Default::default(),
             agent: "chair".into(),
             project,
-            action: PeerAction::Health,
+            action: PeerAction::Health {
+                extra: Default::default(),
+            },
         };
         let peer = Peer {
             host,
@@ -1931,6 +1941,7 @@ mod tests {
         let local = HostId::from_bytes([1; 16]);
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
+            extra: Default::default(),
             key: CrossHostProjectKey::from_home(
                 Path::new("/home/a"),
                 Path::new("/home/a/repo/.git"),
@@ -1939,6 +1950,7 @@ mod tests {
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest {
+            extra: Default::default(),
             version: 1,
             protocol: PROTOCOL,
             target_host: host,
@@ -1946,7 +1958,9 @@ mod tests {
             trace: Default::default(),
             agent: "chair".into(),
             project,
-            action: PeerAction::Health,
+            action: PeerAction::Health {
+                extra: Default::default(),
+            },
         };
         let peer = Peer {
             host,

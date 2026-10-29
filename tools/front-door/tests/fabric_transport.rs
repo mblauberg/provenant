@@ -1101,6 +1101,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             operation_id: OperationId::parse("edge-read")?,
             created_at: clock.wall_now()?,
             request: CanonicalRequest {
+                extra: Default::default(),
                 child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
@@ -1108,6 +1109,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                 tasks: tasks
                     .iter()
                     .map(|task_id| TaskRequest {
+                        extra: Default::default(),
                         build_heavy: false,
                         title: None,
                         base: None,
@@ -1118,6 +1120,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                         task_id: *task_id,
                         prompt_digest: CanonicalV1::file_digest(b"prompt"),
                         route: RequestedRoute::Model {
+                            extra: Default::default(),
                             provider: "fixture".into(),
                             model: "fixture".into(),
                             effort: None,
@@ -1563,6 +1566,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     let receipt = SubmissionReceipt {
         operation_id: OperationId::parse("verified-submit")?,
         targets: vec![AttemptTarget {
+            extra: Default::default(),
             host: Some(remote_host),
             attempt,
         }],
@@ -1674,6 +1678,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         response.result = PeerResult::Submitted(SubmissionReceipt {
             operation_id: OperationId::parse("verified-dispatch")?,
             targets: vec![AttemptTarget {
+                extra: Default::default(),
                 host: Some(remote_host),
                 attempt,
             }],
@@ -1766,10 +1771,12 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         "00000000000000000000000000000000".into(),
     ));
     let push = provenant_fabric_store::PushOperation {
+        extra: Default::default(),
         header: provenant_records::RecordHeader::V1,
         id: OperationId::parse("landing-local")?,
         digest: Digest::from_bytes([1; 32]),
         request: provenant_fabric_store::PushRequest {
+            extra: Default::default(),
             header: provenant_records::RecordHeader::V1,
             project,
             claim: provenant_core::ClaimId::from_bytes([44; 16]),
@@ -2302,6 +2309,7 @@ fn submission_preserves_explicit_named_route_tier() -> Result {
     assert_eq!(
         request.tasks[0].route,
         provenant_records::run::RequestedRoute::Named {
+            extra: Default::default(),
             name: "senior".into(),
             effort: None,
         }
@@ -4032,11 +4040,13 @@ fn seed_attempt(
             operation_id: OperationId::parse("page-seed")?,
             created_at: clock.wall_now()?,
             request: CanonicalRequest {
+                extra: Default::default(),
                 child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![TaskRequest {
+                    extra: Default::default(),
                     build_heavy: false,
                     title: None,
                     base: None,
@@ -4047,6 +4057,7 @@ fn seed_attempt(
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(prompt.as_bytes()),
                     route: RequestedRoute::Model {
+                        extra: Default::default(),
                         provider: "fixture".into(),
                         model: "fixture".into(),
                         effort: None,

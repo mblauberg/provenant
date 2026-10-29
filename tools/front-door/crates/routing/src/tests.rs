@@ -226,7 +226,8 @@ fn exact_unknown_is_retained_but_requires_availability() -> Result<(), Box<dyn s
     assert!(matches!(
         route.readiness,
         RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::UnknownAvailability
+            reason: RouteExclusionReason::UnknownAvailability,
+            ..
         }
     ));
     assert_eq!(route.exclusions.len(), 1);
@@ -1159,7 +1160,8 @@ fn availability_gates_disclosure_and_rejects_duplicates() -> Result<(), Box<dyn 
     assert!(matches!(
         resolve(&request("codex/test")?, &context)?.readiness,
         RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::DisclosureDenied
+            reason: RouteExclusionReason::DisclosureDenied,
+            ..
         }
     ));
     // Cursor also reaches the disclosure gate with a fresh availability record.
@@ -1170,7 +1172,8 @@ fn availability_gates_disclosure_and_rejects_duplicates() -> Result<(), Box<dyn 
     assert!(matches!(
         resolve(&request("cursor/test")?, &context)?.readiness,
         RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::DisclosureDenied
+            reason: RouteExclusionReason::DisclosureDenied,
+            ..
         }
     ));
     let duplicate = [availability(), availability()];
@@ -1438,7 +1441,7 @@ fn family_requires_provider_answer_evidence_at_the_same_revision()
 
 fn reason(route: &ResolvedRoute) -> Option<&RouteExclusionReason> {
     match &route.readiness {
-        RouteReadiness::Unavailable { reason } => Some(reason),
+        RouteReadiness::Unavailable { reason, .. } => Some(reason),
         _ => None,
     }
 }
@@ -2044,14 +2047,16 @@ fn distinct_accounts_of_one_adapter_are_valid_resolution_inputs()
     assert!(matches!(
         back.readiness,
         RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::Exhausted
+            reason: RouteExclusionReason::Exhausted,
+            ..
         }
     ));
     let missing = resolve_for_account(&query, &context, Some("not-registered"))?;
     assert!(matches!(
         missing.readiness,
         RouteReadiness::Unavailable {
-            reason: RouteExclusionReason::UnknownAvailability
+            reason: RouteExclusionReason::UnknownAvailability,
+            ..
         }
     ));
     Ok(())

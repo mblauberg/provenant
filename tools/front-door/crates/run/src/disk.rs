@@ -331,7 +331,9 @@ mod tests {
         );
         writer.withdraw(
             input.attempts[0].attempt_id,
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "fixture",
             WallTime::from_micros(150)?,

@@ -49,6 +49,7 @@ pub fn resolve_delivery_target(
         })?
         .ok_or(InboxError::Conflict)?;
     Ok(AnswerTarget {
+        extra: Default::default(),
         host: registered.record.host,
         project: registered.record.project_id,
         session: registered.record.host_session_id.as_str().into(),
@@ -212,6 +213,7 @@ impl HumanCommand {
     fn input(self) -> Result<InboxInput, Error> {
         Ok(match self {
             Self::Ask(args) => InboxInput::Ask {
+                extra: Default::default(),
                 session: args.session,
                 request: provenant_records::decode(
                     read_file(&args.file)?.as_slice(),
@@ -225,6 +227,7 @@ impl HumanCommand {
                 operation_id: args.operation_id,
             },
             Self::Answer(args) => InboxInput::Answer {
+                extra: Default::default(),
                 id: args.id.id,
                 action: match args.action {
                     Action::Choose => AnswerAction::Choose,
@@ -263,6 +266,7 @@ impl HumanCommand {
                     expect_revision,
                     operation_id,
                 } => InboxInput::Close {
+                    extra: Default::default(),
                     id: id.id,
                     state: match state {
                         Closure::Withdrawn => RequestState::Withdrawn,
@@ -280,6 +284,7 @@ impl HumanCommand {
                     session,
                     operation_id,
                 } => InboxInput::Acknowledge {
+                    extra: Default::default(),
                     id: id.id,
                     answer_id: answer,
                     session,
@@ -287,6 +292,7 @@ impl HumanCommand {
                 },
             },
             Self::Inbox(args) => InboxInput::List {
+                extra: Default::default(),
                 id: args.id.map(|reference| reference.id),
                 session: args.session,
                 state: match args.state {
@@ -495,7 +501,10 @@ fn execute(
         let reply = context.peer(
             &clock,
             target,
-            provenant_fabric_runtime::hosts::PeerAction::Inbox { input },
+            provenant_fabric_runtime::hosts::PeerAction::Inbox {
+                extra: Default::default(),
+                input,
+            },
             budget,
             &provenant_core::CancelToken::new(),
         );

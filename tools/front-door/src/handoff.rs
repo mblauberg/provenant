@@ -289,6 +289,7 @@ fn read_attachments(paths: &[PathBuf]) -> Result<Vec<Attachment>, Refusal> {
             return Err(Refusal::invalid("attachments exceed 512 KiB in total"));
         }
         attachments.push(Attachment {
+            extra: Default::default(),
             name: name.to_owned(),
             base64: encode_base64(&bytes),
         });
@@ -509,6 +510,7 @@ fn execute(
         })
         .map_err(|error| Refusal::invalid(error.to_string()))?;
         let input = SessionHandoff {
+            extra: Default::default(),
             operation_id: operation_id.clone(),
             account: args.account.clone(),
             model: args.model.clone(),
@@ -684,6 +686,7 @@ fn execute(
         &clock,
         target,
         PeerAction::SessionHandoff {
+            extra: Default::default(),
             input: Box::new(input),
             budget_seconds: Some(context.config.limits.peer_seconds),
         },

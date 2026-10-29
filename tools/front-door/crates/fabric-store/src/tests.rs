@@ -88,6 +88,7 @@ fn message(f: &Fixture, n: u8) -> Message {
         kind: MessageKind::Request,
         body: "Review this".into(),
         artifacts: vec![ArtifactRef {
+            extra: Default::default(),
             path: PathWire::from_relative(
                 &provenant_core::RelativePath::parse("result.txt").unwrap(),
             )
@@ -883,7 +884,7 @@ fn store_clock_controls_fence_checks_mutation_times_and_acknowledgements() {
 
 // The TaskResult shape a coordination receipt stores, without the runtime crate.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "result", rename_all = "snake_case")]
 enum TaskReceipt {
     Created { task: Task },
 }
@@ -1290,6 +1291,7 @@ fn run_chair_migration_preserves_mail_and_rejects_older_readers() {
     drop(store);
     let store = f.open();
     let target = provenant_records::inbox::AnswerTarget {
+        extra: Default::default(),
         host: provenant_core::HostId::from_bytes([8; 16]),
         project: project(),
         actor: actor(2),

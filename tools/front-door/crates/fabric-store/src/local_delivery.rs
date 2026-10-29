@@ -212,7 +212,11 @@ impl Store {
                 invalid_answer(&key);
                 continue;
             }
-            batch.items.push(AnswerOffer { answer, delivery });
+            batch.items.push(AnswerOffer {
+                extra: Default::default(),
+                answer,
+                delivery,
+            });
             // A page can temporarily exceed the record-size limit even though
             // each stored answer is valid. Measure it without that limit.
             if CanonicalV1::bytes(&batch)?.as_bytes().len() > max_bytes {

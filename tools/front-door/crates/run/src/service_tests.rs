@@ -87,6 +87,7 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
             base: None,
             head: None,
             route: RequestedRoute::Named {
+                extra: Default::default(),
                 name: "senior".into(),
                 effort: None,
             },
@@ -201,6 +202,7 @@ fn chair_binding_replays_the_original_submission() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let mut first = submission("review this code");
     first.chair = Some(ChairBinding {
+        extra: Default::default(),
         host: provenant_core::HostId::from_bytes([4; 16]),
         actor: provenant_core::ActorId::from_bytes([5; 16]),
     });
@@ -349,6 +351,7 @@ fn model_routes_are_canonical_before_replay_comparison() -> TestResult {
     let store = RunStore::open(&context(temp.path())?, &call)?;
     let service = Service::new(&store);
     let model = |id: &str| RequestedRoute::Model {
+        extra: Default::default(),
         provider: "fixture".into(),
         model: id.into(),
         effort: None,

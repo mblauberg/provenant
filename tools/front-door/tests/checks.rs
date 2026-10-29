@@ -139,6 +139,7 @@ fn check_install_smokes_a_staged_binary_with_private_home_and_keeps_scan_status(
     let mut asset_bytes = vec![0];
     asset_bytes.extend_from_slice(skill);
     let version = VersionInfo {
+        extra: Default::default(),
         source_digest: source_digest(&[SourceInput {
             name: "src/fixture.rs",
             bytes: b"fixture source",

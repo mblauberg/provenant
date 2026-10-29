@@ -351,6 +351,7 @@ fn admission_refuses_before_it_touches_the_disk_or_the_accounts() {
     let temp = tempfile::tempdir().unwrap();
     let lease = temp.path().join("handoff/project");
     let input = SessionHandoff {
+        extra: Default::default(),
         operation_id: OperationId::parse("handoff-1").unwrap(),
         account: "work".into(),
         model: None,

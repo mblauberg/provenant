@@ -1100,6 +1100,7 @@ mod answer_delivery_tests {
         )?;
         let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
         let target = AnswerTarget {
+            extra: Default::default(),
             host: provenant_core::HostId::from_bytes([1; 16]),
             project: ProjectId::from_bytes([4; 16]),
             session: "chair".into(),
@@ -1264,6 +1265,7 @@ mod answer_delivery_tests {
         )?;
         let db = rusqlite::Connection::open(root.as_path().join("fabric/fabric.sqlite3"))?;
         let target = AnswerTarget {
+            extra: Default::default(),
             host: provenant_core::HostId::from_bytes([1; 16]),
             project: ProjectId::from_bytes([4; 16]),
             session: "chair".into(),
@@ -1450,6 +1452,7 @@ mod answer_delivery_tests {
         )?;
         let item = offer("Retain this answer", 1);
         let target = AnswerTarget {
+            extra: Default::default(),
             host: item.delivery.target_host,
             project: ProjectId::from_bytes([4; 16]),
             session: item.delivery.target_session.clone(),

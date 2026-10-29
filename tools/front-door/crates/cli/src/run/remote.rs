@@ -464,12 +464,19 @@ fn read_records(
             let targets = chunk
                 .iter()
                 .map(|i| AttemptTarget {
+                    extra: Default::default(),
                     attempt: selected[*i].1,
                     host: Some(host),
                 })
                 .collect();
-            let PeerResult::RunStatuses(page) =
-                call(host, PeerAction::RunStatuses { targets }, window.next()?)?
+            let PeerResult::RunStatuses(page) = call(
+                host,
+                PeerAction::RunStatuses {
+                    extra: Default::default(),
+                    targets,
+                },
+                window.next()?,
+            )?
             else {
                 return Err(corrupt());
             };
@@ -502,6 +509,7 @@ fn read_newest(
     let PeerResult::RunStatuses(records) = call(
         host,
         PeerAction::Lanes {
+            extra: Default::default(),
             all: true,
             limit: PEER_LANES,
         },
@@ -540,7 +548,7 @@ fn fetch_waits(
     for lane in lanes.iter().filter(|lane| {
         matches!(
             lane.state,
-            run::AttemptState::Queued | run::AttemptState::Starting
+            run::AttemptState::Queued { .. } | run::AttemptState::Starting { .. }
         )
     }) {
         if let Some((host, _)) = selected.iter().find(|(_, id)| *id == lane.attempt_id) {
@@ -553,12 +561,18 @@ fn fetch_waits(
             let targets = chunk
                 .iter()
                 .map(|attempt| AttemptTarget {
+                    extra: Default::default(),
                     attempt: *attempt,
                     host: Some(host),
                 })
                 .collect();
-            if let Ok(PeerResult::LaneWaits(found)) = call(host, PeerAction::LaneWaits { targets })
-            {
+            if let Ok(PeerResult::LaneWaits(found)) = call(
+                host,
+                PeerAction::LaneWaits {
+                    extra: Default::default(),
+                    targets,
+                },
+            ) {
                 // Only a wait for a lane that was asked about is believed.
                 waits.extend(
                     found
@@ -730,6 +744,7 @@ pub(super) fn new_worktree(command: &Dispatch) -> Result<NewWorktree, Fail> {
         ));
     }
     Ok(NewWorktree {
+        extra: Default::default(),
         base: base.clone(),
         branch: branch.clone(),
     })
@@ -741,6 +756,7 @@ fn submitted_task(
     timeout_seconds: u64,
 ) -> SubmittedTask {
     SubmittedTask {
+        extra: Default::default(),
         build_heavy: task.build_heavy,
         title: task.title,
         // A writer's base belongs to its new worktree request.
@@ -795,13 +811,21 @@ pub(super) fn dispatch(
         .transpose()
         .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "concurrency"))?;
     let input = SubmitInput::Submit {
+        extra: Default::default(),
         operation_id: batch.operation_id.clone(),
         tasks,
         concurrency,
         knobs: batch.knobs,
         host: None,
     };
-    let PeerResult::Submitted(receipt) = peer.call(host, PeerAction::Submit { input })? else {
+    let PeerResult::Submitted(receipt) = peer.call(
+        host,
+        PeerAction::Submit {
+            extra: Default::default(),
+            input,
+        },
+    )?
+    else {
         return Err(corrupt());
     };
     if receipt.operation_id != batch.operation_id
@@ -1075,6 +1099,7 @@ pub(super) fn host_lanes(
     let PeerResult::RunStatuses(records) = peer.call(
         id,
         PeerAction::Lanes {
+            extra: Default::default(),
             all: command.all,
             limit,
         },
@@ -1138,6 +1163,7 @@ pub(super) fn resolve_prefix(
     let PeerResult::RunStatuses(records) = peer.call(
         host,
         PeerAction::Lanes {
+            extra: Default::default(),
             all: true,
             limit: PEER_LANES,
         },
@@ -1204,7 +1230,9 @@ fn read_output(
         return Err(unsupported("--trace"));
     }
     let input = OutputInput::Read {
+        extra: Default::default(),
         target: AttemptTarget {
+            extra: Default::default(),
             attempt,
             host: Some(host),
         },
@@ -1212,7 +1240,14 @@ fn read_output(
         offset: command.offset,
         max_bytes: command.max_bytes,
     };
-    let PeerResult::Output(chunk) = peer.call(host, PeerAction::Output { input })? else {
+    let PeerResult::Output(chunk) = peer.call(
+        host,
+        PeerAction::Output {
+            extra: Default::default(),
+            input,
+        },
+    )?
+    else {
         return Err(corrupt());
     };
     chunk_response(attempt, host, &command.part, chunk)
@@ -1292,13 +1327,21 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                     )?
                 };
                 let input = RunInput::Cancel {
+                    extra: Default::default(),
                     target: AttemptTarget {
+                        extra: Default::default(),
                         attempt: *attempt,
                         host: Some(*host),
                     },
                     operation_id,
                 };
-                let row = match peer.call(*host, PeerAction::Run { input }) {
+                let row = match peer.call(
+                    *host,
+                    PeerAction::Run {
+                        extra: Default::default(),
+                        input,
+                    },
+                ) {
                     Ok(PeerResult::Run(result)) => match *result {
                         RunResult::Cancel { attempt: record } if record.attempt_id == *attempt => {
                             let state = state_name(&record.state);
@@ -1397,6 +1440,7 @@ fn collect(
     for (host, name) in names {
         let mut row = json!({ "host": host, "name": name, "attempts": 0 });
         let action = PeerAction::Lanes {
+            extra: Default::default(),
             all: true,
             limit: PEER_LANES,
         };
@@ -1502,6 +1546,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
         let route = run::RouteRecord {
+            extra: Default::default(),
             provider: Some("codex".into()),
             model: Some("codex/model".into()),
             effort: None,
@@ -1525,13 +1570,14 @@ mod tests {
         let lanes = [queued.clone(), starting.clone()];
         let selected: Vec<_> = lanes.iter().map(|l| (host, l.attempt_id)).collect();
         let wait = |lane: &run::AttemptRecord, text: &str| run::LaneWait {
+            extra: Default::default(),
             attempt_id: lane.attempt_id,
             lane_class: run::LaneClass::ReadOnly,
             waiting_for: text.into(),
         };
         let mut asked = Vec::new();
         let waits = fetch_waits(&lanes, &selected, |host, action| {
-            let PeerAction::LaneWaits { targets } = action else {
+            let PeerAction::LaneWaits { targets, .. } = action else {
                 return Err(corrupt());
             };
             asked.push((host, targets.iter().map(|t| t.attempt).collect::<Vec<_>>()));
@@ -1540,6 +1586,7 @@ mod tests {
                 wait(&starting, "read-only startup spacing: 1.2 s left of 2.0 s"),
                 // Not asked about, so not believed.
                 run::LaneWait {
+                    extra: Default::default(),
                     attempt_id: AttemptId::from_bytes([77; 16]),
                     lane_class: run::LaneClass::Writer,
                     waiting_for: "stray".into(),
@@ -1577,7 +1624,7 @@ mod tests {
         let mut asked = Vec::new();
         // An older peer refuses the action it does not know.
         let waits = fetch_waits(&lanes, &selected, |_, action| {
-            if let PeerAction::LaneWaits { targets } = action {
+            if let PeerAction::LaneWaits { targets, .. } = action {
                 asked.extend(targets.iter().map(|t| t.attempt));
             }
             Err(corrupt())
@@ -1594,6 +1641,7 @@ mod tests {
     #[test]
     fn peer_writer_moves_its_base_into_the_new_worktree() -> Result {
         let route = run::RequestedRoute::Model {
+            extra: Default::default(),
             provider: "fixture".into(),
             model: "fixture/model".into(),
             effort: None,
@@ -1611,12 +1659,14 @@ mod tests {
                 deliver: None,
             },
             Some(NewWorktree {
+                extra: Default::default(),
                 base: "main".into(),
                 branch: "writer/change".into(),
             }),
             600,
         );
         let actual = serde_json::to_value(SubmitInput::Submit {
+            extra: Default::default(),
             operation_id: OperationId::parse("peer-writer")?,
             tasks: vec![task],
             concurrency: Some(1),
@@ -1654,6 +1704,7 @@ mod tests {
                 head: None,
                 prompt: "review".into(),
                 route: run::RequestedRoute::Named {
+                    extra: Default::default(),
                     name: "utility".into(),
                     effort: None,
                 },
@@ -1675,6 +1726,7 @@ mod tests {
         let host = HostId::from_bytes([7; 16]);
         let chunk = OutputResult::Chunk {
             target: AttemptTarget {
+                extra: Default::default(),
                 attempt,
                 host: Some(host),
             },
@@ -2010,7 +2062,7 @@ mod tests {
     fn answer(action: PeerAction, delay: Duration) -> std::result::Result<PeerResult, Fail> {
         std::thread::sleep(delay);
         Ok(PeerResult::RunStatuses(match action {
-            PeerAction::RunStatuses { targets } => targets
+            PeerAction::RunStatuses { targets, .. } => targets
                 .iter()
                 .map(|target| running(target.attempt.as_bytes()[0]))
                 .collect(),
@@ -2146,7 +2198,7 @@ mod tests {
         ]);
         let mut asked = Vec::new();
         let (facts, hosts) = collect(&names, None, |host, action| {
-            let PeerAction::Lanes { all, limit } = action else {
+            let PeerAction::Lanes { all, limit, .. } = action else {
                 panic!("expected a lanes request");
             };
             asked.push((host, all, limit));

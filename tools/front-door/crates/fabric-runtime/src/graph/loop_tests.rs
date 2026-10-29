@@ -273,13 +273,13 @@ fn loop_body_failure_blocks_later_rounds_and_dependants() {
 fn loop_on_fail_and_inactive_paths_reuse_gate_routing() {
     for fail in [false, true] {
         let mut document = fixture("extend");
-        let mut gate = gate_node(GateCondition::Verdict {
+        let mut gate = gate_node(GateCondition::Verdict {extra: Default::default(),
             expected: "VERDICT: PASS".into(),
             threshold: VerdictThreshold::All,
         });
         gate.id = "initial".into();
         gate.depends_on = vec!["initial-review".into()];
-        gate.inputs = vec![GraphInput {
+        gate.inputs = vec![GraphInput {extra: Default::default(),
             node: "initial-review".into(),
             outputs: vec![OutputKind::Verdict],
         }];
@@ -814,7 +814,7 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
         let mut journal =
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
-            .bind(GraphExecution {
+            .bind(GraphExecution {extra: Default::default(),
                 integration_base: None,
                 directory: base.clone(),
                 document: document.clone(),
@@ -1432,7 +1432,7 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
         let mut journal =
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
-            .bind(GraphExecution {
+            .bind(GraphExecution {extra: Default::default(),
                 integration_base: None,
                 directory: base.clone(),
                 document: document.clone(),
@@ -1681,7 +1681,7 @@ fn loop_close_success_does_not_hide_another_pending_close_failure() {
         .unwrap();
     wrapper.loop_asks.insert(
         0,
-        LoopAsk {
+        LoopAsk {extra: Default::default(),
             rounds: 1,
             session: "chair-session".into(),
             resolved: true,
@@ -1733,7 +1733,7 @@ fn loop_decision_recovery_resets_pause_even_after_prior_ask_cleanup() {
         .loop_asks
         .insert(
             0,
-            LoopAsk {
+            LoopAsk {extra: Default::default(),
                 rounds: 1,
                 session: "chair-session".into(),
                 resolved: true,

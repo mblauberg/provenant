@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 /// A successful submission acknowledgement. The operation id is the
 /// idempotency key; targets identify the attempts accepted by the owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SubmissionReceipt {
     pub operation_id: OperationId,
     pub targets: Vec<AttemptTarget>,
@@ -19,7 +18,6 @@ pub struct SubmissionReceipt {
 
 /// Where a peer writer's commits stay when nothing delivers them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PeerWorktree {
     pub path: String,
     pub branch: String,
@@ -27,7 +25,6 @@ pub struct PeerWorktree {
 
 /// A compact listing row. Full execution evidence is available through status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AttemptSummary {
     pub attempt_id: provenant_core::AttemptId,
     pub run_id: provenant_core::RunId,
@@ -66,7 +63,6 @@ impl From<AttemptRecord> for AttemptSummary {
 /// A bounded page of summaries, newest queued first. `next_after` is supplied
 /// only when a caller can continue the same ordered selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AttemptPage {
     pub items: Vec<AttemptSummary>,
     pub next_after: Option<AttemptTarget>,
@@ -75,7 +71,7 @@ pub struct AttemptPage {
 
 /// Typed result for the operations in `RunInput`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum RunResult {
     List {
         page: AttemptPage,
@@ -189,7 +185,6 @@ pub(crate) mod attempts_wire {
 /// Run events are paged by their monotonic sequence. `cursor` is the sequence
 /// a caller should pass as `after` on the next read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RunEventsPage {
     pub items: Vec<RunEvent>,
     pub cursor: u64,
@@ -199,7 +194,6 @@ pub struct RunEventsPage {
 /// Reports operations the bound owner can actually serve in this context.
 /// Host configuration by itself must not make an execution capability true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RunCapabilities {
     pub submit: bool,
     pub list: bool,
@@ -245,16 +239,30 @@ mod tests {
     #[test]
     fn input_required_wakes_all_without_waiting_for_a_sibling() {
         let input = AttemptState::Terminal {
+            extra: Default::default(),
             outcome: Outcome::InputRequired,
             exit_code: None,
             finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
             reason: None,
         };
-        let states = [AttemptState::Running, input];
+        let states = [
+            AttemptState::Running {
+                extra: Default::default(),
+            },
+            input,
+        ];
         assert!(wait_satisfied(WaitCondition::All, states.iter()));
         assert!(!wait_satisfied(
             WaitCondition::All,
-            [AttemptState::Running, AttemptState::Queued].iter()
+            [
+                AttemptState::Running {
+                    extra: Default::default()
+                },
+                AttemptState::Queued {
+                    extra: Default::default()
+                }
+            ]
+            .iter()
         ));
     }
 }

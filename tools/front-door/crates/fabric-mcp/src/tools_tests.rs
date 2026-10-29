@@ -3,6 +3,37 @@ use provenant_core::OperationId;
 use serde_json::json;
 
 #[test]
+fn shared_peer_records_remain_strict_at_the_mcp_argument_boundary() {
+    let submit = json!({"op":"submit","operation_id":"submit","tasks":[{
+        "prompt":"work","route":{"kind":"named","name":"senior"},"timeout_seconds":60,
+        "deliver":{"remote":"origin","branch":"work","open_pr":true}
+    }]});
+    assert!(ToolCall::parse("fabric_run", submit.clone()).is_ok());
+    for pointer in ["", "/tasks/0", "/tasks/0/route", "/tasks/0/deliver"] {
+        let mut arguments = submit.clone();
+        arguments.pointer_mut(pointer).unwrap()["future"] = json!({"nested":true});
+        assert!(
+            matches!(
+                ToolCall::parse("fabric_run", arguments),
+                Err(InvalidInput::Arguments { .. })
+            ),
+            "{pointer}"
+        );
+    }
+    let mail = json!({"op":"send","recipients":["11111111111111111111111111111111"],"kind":"note","body":"work",
+        "artifacts":[{"path":{"encoding":"utf8","path":"out"},"digest":null}]});
+    assert!(ToolCall::parse("fabric_mail", mail.clone()).is_ok());
+    for pointer in ["/artifacts/0", "/artifacts/0/path"] {
+        let mut arguments = mail.clone();
+        arguments.pointer_mut(pointer).unwrap()["future"] = json!(true);
+        assert!(
+            ToolCall::parse("fabric_mail", arguments).is_err(),
+            "{pointer}"
+        );
+    }
+}
+
+#[test]
 fn io_error_payload_preserves_native_path_diagnostics_without_source_text() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
     let error = FacadeError::from(&provenant_fabric_store::Error::Io {

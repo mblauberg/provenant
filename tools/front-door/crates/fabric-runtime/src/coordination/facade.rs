@@ -8,8 +8,9 @@ use thiserror::Error;
 
 /// An MCP run target is an attempt ID, optionally qualified by its owning host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AttemptTarget {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub attempt: AttemptId,
     #[serde(default)]
     pub host: Option<HostId>,
@@ -18,8 +19,9 @@ pub struct AttemptTarget {
 /// One task in an MCP submission. Project, actor, authority and cwd come from
 /// the service's authenticated identity rather than request supplied paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SubmittedTask {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub build_heavy: bool,
     #[serde(default)]
@@ -49,8 +51,9 @@ pub struct SubmittedTask {
 
 /// A new branch at `base`, which the peer resolves after fetching its remotes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct NewWorktree {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub base: String,
     pub branch: String,
 }
@@ -158,7 +161,7 @@ bounded_input! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
-#[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "code", rename_all = "snake_case")]
 pub enum FacadeError {
     #[error("run execution owner is unavailable")]
     OwnerUnavailable,

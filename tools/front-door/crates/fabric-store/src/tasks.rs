@@ -46,8 +46,9 @@ pub struct TaskClaim {
 /// Store-specific task fence. Tokens are supplied by the entropy-owning edge,
 /// returned only to the claimant and never included in task lists or events.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TaskFence {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub task: TaskId,
     pub actor: ActorId,
     pub generation: u64,
@@ -215,6 +216,7 @@ impl Store {
                 None,
             )?;
             Ok(TaskFence {
+                extra: Default::default(),
                 task: task.id,
                 actor: claim.actor,
                 generation: task.generation,

@@ -40,7 +40,6 @@ impl PeerPhase {
 /// A committed `response` is the caller's own re-encoding of the owner's
 /// decoded reply, never the bytes received.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PeerOperation {
     pub project: ProjectId,
     pub actor: ActorId,
@@ -419,13 +418,16 @@ mod tests {
     }
     fn run_event(sequence: u64, revision: u64) -> RunEvent {
         RunEvent {
+            extra: Default::default(),
             schema_version: 1,
             sequence,
             project_id: ProjectId::from_bytes([9; 16]),
             run_id: provenant_core::RunId::from_bytes([3; 16]),
             attempt_id: provenant_core::AttemptId::from_bytes([4; 16]),
             revision,
-            change: AttemptState::Running,
+            change: AttemptState::Running {
+                extra: Default::default(),
+            },
             trace: Default::default(),
         }
     }

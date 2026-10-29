@@ -333,6 +333,7 @@ mod admission_tests {
     use super::*;
     fn route() -> ResolvedRoute {
         ResolvedRoute {
+            extra: Default::default(),
             adapter: "claude".into(),
             model: "exact/model".into(),
             effort: None,
@@ -343,10 +344,12 @@ mod admission_tests {
             exclusions: vec![],
             eligibility: provenant_records::RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 9999,
             },
             confidentiality: provenant_records::RouteConfidentiality {
+                extra: Default::default(),
                 evidence_ref: "fixture".into(),
             },
             pool_selection: None,
@@ -384,6 +387,7 @@ mod admission_tests {
         route.model = "opencode-go/mimo-v2.6-flash".into();
         route.account_key = Some("go".into());
         route.pool_selection = Some(provenant_records::RouteSelectionReceipt {
+            extra: Default::default(),
             pool: "senior".into(),
             candidates: vec![],
             roll: 0,
@@ -540,6 +544,7 @@ mod admission_tests {
         let account = record(QuotaStatus::Available).account;
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99_999,
         };
@@ -570,6 +575,7 @@ mod admission_tests {
         let account = record(QuotaStatus::Available).account;
         let mut route = route();
         route.readiness = RouteReadiness::Ready {
+            extra: Default::default(),
             availability_ref: "fixture".into(),
             expires_unix_seconds: 99_999,
         };
@@ -749,6 +755,7 @@ mod refusal_scope_tests {
     #[test]
     fn refusals_expire_only_for_matching_identity_pool_observation_or_reset() {
         let route = ResolvedRoute {
+            extra: Default::default(),
             adapter: "claude".into(),
             model: "exact".into(),
             effort: None,
@@ -759,10 +766,12 @@ mod refusal_scope_tests {
             exclusions: vec![],
             eligibility: provenant_records::RouteEligibility::Eligible,
             readiness: RouteReadiness::Ready {
+                extra: Default::default(),
                 availability_ref: "fixture".into(),
                 expires_unix_seconds: 5000,
             },
             confidentiality: provenant_records::RouteConfidentiality {
+                extra: Default::default(),
                 evidence_ref: "fixture".into(),
             },
             pool_selection: None,

@@ -544,8 +544,10 @@ command. The typed `PeerRequest`, `PeerAction` and `PeerResponse` in
 Requests bind source and target host IDs and a project locator. The transport
 bounds frames to 1 MiB and refuses identity or version mismatches.
 
-Tasks and messages have no `legacy` or `legacy_output_path` members. A store
-or peer reply that still carries one, even as null, is refused.
+Tasks and messages no longer use `legacy` or `legacy_output_path` members.
+Stored and peer records tolerate additional fields. Records included in a
+canonical digest retain those fields when read and written again. MCP tool
+arguments and user-authored configuration still reject unknown fields.
 
 Every request and reply envelope carries integer `protocol`, currently 6.
 Ingress refuses a different protocol before decoding or executing the action,
@@ -566,8 +568,11 @@ without a reply. This ambiguous failure remains `home_unavailable` for reads
 and `launch_unknown` for mutations, since it can also follow execution. Inspect
 the peer-agent log and upgrade both hosts before retrying.
 
-An older binary that already had the store open keeps working, but one that
-opens it after the upgrade finds a newer schema and fails with `state_corrupt`.
+Readers in this release report `upgrade_required` when a stored record,
+graph checkpoint, graph document or database uses a newer schema. The error
+names the running reader release and the schema version. The writer release
+is `unknown` where the record does not store it. A stale binary predating this
+handling may still report `state_corrupt`; restart it after upgrading.
 
 Install the same release on both hosts and restart their peer agents, MCP
 servers and running workers after upgrading. `not_terminal` and

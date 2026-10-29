@@ -583,11 +583,13 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
             run_id,
             operation_id: OperationId::parse("chair-snapshot")?,
             request: run::CanonicalRequest {
+                extra: Default::default(),
                 child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    extra: Default::default(),
                     build_heavy: false,
                     title: None,
                     base: None,
@@ -597,6 +599,7 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"existing lane"),
                     route: run::RequestedRoute::Named {
+                        extra: Default::default(),
                         name: "utility".into(),
                         effort: None,
                     },

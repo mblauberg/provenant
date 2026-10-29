@@ -23,7 +23,6 @@ pub enum EventKind {
     PushChanged,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EventRecord {
     pub header: RecordHeader,
     pub project: ProjectId,
@@ -34,7 +33,6 @@ pub struct EventRecord {
     pub at: WallTime,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Event {
     pub seq: i64,
     pub record: EventRecord,

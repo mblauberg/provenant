@@ -74,14 +74,18 @@ pub fn overview(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum InboxInput {
     Ask {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         session: String,
         request: Box<RequestDraft>,
         operation_id: Option<OperationId>,
     },
     List {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         id: Option<HumanRequestId>,
         session: Option<String>,
         #[serde(default)]
@@ -91,6 +95,8 @@ pub enum InboxInput {
         cursor: Option<InboxCursor>,
     },
     Answer {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         id: HumanRequestId,
         action: AnswerAction,
         option_id: Option<String>,
@@ -100,6 +106,8 @@ pub enum InboxInput {
         operation_id: Option<OperationId>,
     },
     Close {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         id: HumanRequestId,
         state: RequestState,
         reason: String,
@@ -107,6 +115,8 @@ pub enum InboxInput {
         operation_id: Option<OperationId>,
     },
     Acknowledge {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         id: HumanRequestId,
         answer_id: HumanAnswerId,
         session: String,
@@ -166,7 +176,6 @@ impl From<InboxCursor> for String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InboxReceipt {
     pub operation_id: OperationId,
     pub request_id: HumanRequestId,
@@ -179,7 +188,7 @@ pub struct InboxReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "result", rename_all = "snake_case")]
 pub enum InboxResult {
     Saved {
         #[serde(flatten)]
@@ -198,7 +207,7 @@ pub enum InboxResult {
 
 /// Owner response, including domain refusals without losing their stable code.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum InboxReply {
     Ok { result: Box<InboxResult> },
     Error { code: String, message: String },
@@ -657,6 +666,7 @@ impl<'a> InboxService<'a> {
             state,
             limit,
             cursor,
+            ..
         } = input
         {
             return self.list(id, session, state, limit, cursor, &request);
@@ -794,6 +804,7 @@ impl<'a> InboxService<'a> {
                 ..
             } => {
                 let value = HumanRequest {
+                    extra: Default::default(),
                     schema_version: if draft.work.is_some()
                         || draft.deadline.is_some()
                         || draft.supersedes.is_some()
@@ -851,6 +862,7 @@ impl<'a> InboxService<'a> {
                     return Err(InboxError::Invalid("option_id"));
                 }
                 let answer = HumanAnswer {
+                    extra: Default::default(),
                     schema_version: 1,
                     id: HumanAnswerId::from_bytes(entropy()?),
                     request_id: *id,
@@ -866,6 +878,7 @@ impl<'a> InboxService<'a> {
                     operation_id: operation.clone(),
                 };
                 let delivery = AnswerDelivery {
+                    extra: Default::default(),
                     schema_version: 1,
                     answer_id: answer.id,
                     target_host: value.owner_host,
@@ -886,6 +899,7 @@ impl<'a> InboxService<'a> {
                 offered.last_attempt_at = Some(timestamp);
                 let page = provenant_fabric_store::Page {
                     items: vec![AnswerOffer {
+                        extra: Default::default(),
                         answer: answer.clone(),
                         delivery: offered,
                     }],

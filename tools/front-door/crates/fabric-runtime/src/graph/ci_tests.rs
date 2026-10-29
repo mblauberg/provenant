@@ -29,6 +29,7 @@ struct Owner {
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
         Some(CiHostStamp {
+            extra: Default::default(),
             boot_identity: self.boot.clone(),
             host_monotonic_micros: self.monotonic_micros,
         })
@@ -87,6 +88,7 @@ fn document() -> GraphDocument {
 }
 fn observation(state: CiState, summary: &str) -> CiObservation {
     CiObservation {
+        extra: Default::default(),
         state,
         summary: summary.into(),
     }
@@ -382,6 +384,7 @@ fn ci_validation_rejects_bad_targets_and_timeouts() {
     ] {
         let mut doc = document();
         doc.nodes[0].condition = Some(GateCondition::Ci {
+            extra: Default::default(),
             target: target.into(),
             checks: vec![],
             timeout_seconds: timeout,

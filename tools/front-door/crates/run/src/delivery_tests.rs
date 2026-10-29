@@ -518,6 +518,7 @@ fn origin_refresh_updates_tracking_refs_and_reports_fetch_failure()
     let expected = run(&git_dir, &["rev-parse", "HEAD"])?;
     run(&git_dir, &["update-ref", "-d", "refs/remotes/origin/main"])?;
     let writer = WriterRequest {
+        extra: Default::default(),
         project: project.clone(),
         worktree: project.clone(),
     };
@@ -864,6 +865,7 @@ fn two_lanes_contend_for_integration_without_losing_either_head()
             .ok_or("destination")?;
     let first = fixture.prepare()?;
     let second_writer = WriterRequest {
+        extra: Default::default(),
         project: fixture.writer.project.clone(),
         worktree: fixture.root.join("second-lane"),
     };
@@ -1557,12 +1559,14 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         &attempt,
         &format!("delivery-{key}.json"),
         &db::bytes(&WriterDeliveryReceipt {
+            extra: Default::default(),
             schema_version: 1,
             remote: fixture.request.remote.clone(),
             branch: fixture.request.branch.clone(),
             head: Some(head),
             review_acceptance: None,
             state: WriterDeliveryState::Failed {
+                extra: Default::default(),
                 stage: WriterDeliveryStage::Interrupted,
             },
         })?,
@@ -1628,10 +1632,12 @@ impl PrepareFixture {
                 ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
             ],
             writer: WriterRequest {
+                extra: Default::default(),
                 project,
                 worktree: root.join("lane"),
             },
             request: WriterDeliveryRequest {
+                extra: Default::default(),
                 mode: Default::default(),
                 remote: "origin".into(),
                 branch: "published/lane".into(),
@@ -2318,10 +2324,12 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         ],
     )?;
     let writer = WriterRequest {
+        extra: Default::default(),
         project,
         worktree: lane.clone(),
     };
     let request = WriterDeliveryRequest {
+        extra: Default::default(),
         mode: Default::default(),
         remote: "origin".into(),
         branch: "published/lane".into(),
@@ -2382,7 +2390,10 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     assert_eq!(receipt.head, Some(head));
     assert!(matches!(
         receipt.state,
-        WriterDeliveryState::Delivered { pull_request: None }
+        WriterDeliveryState::Delivered {
+            pull_request: None,
+            ..
+        }
     ));
     assert_eq!(
         git(&lane, &["rev-parse", "refs/remotes/origin/published/lane"])?,
@@ -2425,6 +2436,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         ],
     )?;
     let idle_writer = WriterRequest {
+        extra: Default::default(),
         project: writer.project.clone(),
         worktree: idle_lane.clone(),
     };
@@ -2449,7 +2461,12 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         &idle_attempt,
         "fixture receipt",
     )?;
-    assert_eq!(idle_receipt.state, WriterDeliveryState::NoNewCommits);
+    assert_eq!(
+        idle_receipt.state,
+        WriterDeliveryState::NoNewCommits {
+            extra: Default::default()
+        }
+    );
     assert_eq!(idle_receipt.head, Some(GitOid::parse(&initial)?));
     assert!(git(&lane, &["ls-remote", "origin", "refs/heads/published/idle"])?.is_empty());
     // An interrupted delivery is recorded during terminal recovery, with no push.
@@ -2468,6 +2485,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
     let pending = WriterDeliveryReceipt {
         branch: "interrupted".into(),
         state: WriterDeliveryState::Failed {
+            extra: Default::default(),
             stage: WriterDeliveryStage::Interrupted,
         },
         ..receipt

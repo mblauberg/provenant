@@ -22,7 +22,6 @@ use std::{
 
 /// Transport-only context. Debug deliberately omits all environment values.
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HostDeliveryContext {
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     tools: Option<HostTools>,
@@ -32,7 +31,6 @@ pub struct HostDeliveryContext {
     verification: Mutex<crate::objects::VerificationCache>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct BoundDelivery {
     /// Lane head when delivery was prepared, before the writer ran.
     base_head: GitOid,
@@ -48,13 +46,11 @@ struct BoundDelivery {
     destination: WriterDeliveryRequest,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct HostTools {
     git: PathBuf,
     gh: Option<PathBuf>,
 }
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PickupReceipt {
     schema_version: u64,
     request: WriterDeliveryRequest,
@@ -115,6 +111,7 @@ impl HostDeliveryContext {
     /// A publication ref is distinct from a PR's base, which may be protected.
     pub fn check_delivery_branch(project: &Path, target: &str) -> Result<()> {
         let writer = WriterRequest {
+            extra: Default::default(),
             project: project.into(),
             worktree: project.into(),
         };
@@ -227,6 +224,7 @@ impl HostDeliveryContext {
         let request = Self::destination(crate::DeliveryMode::Pr, branch)?
             .ok_or(RunError::Validation("graph PR destination"))?;
         let writer = WriterRequest {
+            extra: Default::default(),
             project: project.into(),
             worktree: project.into(),
         };
@@ -409,6 +407,7 @@ impl HostDeliveryContext {
             },
         };
         let request = WriterDeliveryRequest {
+            extra: Default::default(),
             mode,
             remote,
             branch: destination,
@@ -1919,6 +1918,7 @@ impl crate::RunStore {
                 outcome: crate::Outcome::ReviewRequired,
                 ..
             } if accept_review => Some(crate::WriterReviewAcceptance {
+                extra: Default::default(),
                 actor: self.context.actor_id,
                 protected_paths: record.protected_paths.clone(),
             }),
@@ -1984,7 +1984,8 @@ impl crate::RunStore {
                 || matches!(
                     receipt.state,
                     WriterDeliveryState::Delivered {
-                        pull_request: Some(_)
+                        pull_request: Some(_),
+                        ..
                     }
                 ))
         {
@@ -2030,11 +2031,21 @@ impl crate::RunStore {
             )
             .and_then(|body| host.push(&writer, &request, head, &body));
         let state = match result {
-            Ok(pull_request) => WriterDeliveryState::Delivered { pull_request },
-            Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed { stage },
-            Err(_) => WriterDeliveryState::Failed { stage: Stage::Push },
+            Ok(pull_request) => WriterDeliveryState::Delivered {
+                extra: Default::default(),
+                pull_request,
+            },
+            Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed {
+                extra: Default::default(),
+                stage,
+            },
+            Err(_) => WriterDeliveryState::Failed {
+                extra: Default::default(),
+                stage: Stage::Push,
+            },
         };
         let receipt = WriterDeliveryReceipt {
+            extra: Default::default(),
             schema_version: 1,
             remote: request.remote.clone(),
             branch: request.branch.clone(),
@@ -2096,12 +2107,14 @@ pub(crate) fn deliver_once(
     let mut receipt = match &started {
         Some(raw) => crate::db::decode(raw)?,
         None => WriterDeliveryReceipt {
+            extra: Default::default(),
             schema_version: 1,
             remote: request.remote.clone(),
             branch: request.branch.clone(),
             head: host.head(writer).ok(),
             review_acceptance: None,
             state: WriterDeliveryState::Failed {
+                extra: Default::default(),
                 stage: Stage::Interrupted,
             },
         },
@@ -2118,7 +2131,9 @@ pub(crate) fn deliver_once(
             .zip(host.bound.as_ref())
             .is_some_and(|(head, bound)| head == bound.base_head);
         receipt.state = if unchanged {
-            WriterDeliveryState::NoNewCommits
+            WriterDeliveryState::NoNewCommits {
+                extra: Default::default(),
+            }
         } else {
             match receipt
                 .head
@@ -2133,9 +2148,18 @@ pub(crate) fn deliver_once(
                     )?;
                     host.push(writer, request, head, &body)
                 }) {
-                Ok(pull_request) => WriterDeliveryState::Delivered { pull_request },
-                Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed { stage },
-                Err(_) => WriterDeliveryState::Failed { stage: Stage::Push },
+                Ok(pull_request) => WriterDeliveryState::Delivered {
+                    extra: Default::default(),
+                    pull_request,
+                },
+                Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed {
+                    extra: Default::default(),
+                    stage,
+                },
+                Err(_) => WriterDeliveryState::Failed {
+                    extra: Default::default(),
+                    stage: Stage::Push,
+                },
             }
         };
     }

@@ -34,7 +34,6 @@ pub fn peer_seconds(source_seconds: Option<u64>, local_limit: u64) -> u64 {
 /// Which host owns this project's chair or session. Each host keeps its own
 /// record, and both flip it to the target on a delivered hand-off.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Owner {
     pub schema_version: u64,
     pub host: HostId,

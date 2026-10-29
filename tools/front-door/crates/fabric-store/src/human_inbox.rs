@@ -324,7 +324,11 @@ impl Store {
                     .checked_add(1)
                     .ok_or(Error::Invalid("offer attempts"))?;
                 delivery.last_attempt_at = Some(at);
-                batch.items.push(AnswerOffer { answer, delivery });
+                batch.items.push(AnswerOffer {
+                    extra: Default::default(),
+                    answer,
+                    delivery,
+                });
                 // Reserve the entire JSON envelope, including escaping and the
                 // longer `false` spelling of the final truncation flag.
                 if encode(&batch)?.len() > max_bytes {
@@ -652,6 +656,7 @@ fn item(db: &rusqlite::Connection, project: ProjectId, id: HumanRequestId) -> Re
         return Err(Error::Invalid("request history limit"));
     }
     Ok(InboxItem {
+        extra: Default::default(),
         request: value,
         answer,
         delivery,

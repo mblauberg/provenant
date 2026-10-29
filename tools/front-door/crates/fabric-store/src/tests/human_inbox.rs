@@ -9,6 +9,7 @@ fn viewer_isolation() {
     let request = f.request();
     let id = HumanRequestId::from_bytes([5; 16]);
     let original = HumanRequest {
+        extra: Default::default(),
         schema_version: 1,
         id,
         revision: 1,
@@ -21,6 +22,7 @@ fn viewer_isolation() {
         chair_session_id: "chair".into(),
         chair_actor: actor(2),
         request: RequestDraft {
+            extra: Default::default(),
             work: None,
             deadline: None,
             supersedes: None,
@@ -218,6 +220,7 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
     let f = Fixture::new();
     let store = f.open();
     let target = AnswerTarget {
+        extra: Default::default(),
         host: HostId::from_bytes([8; 16]),
         project: project(),
         actor: actor(2),
@@ -233,6 +236,7 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
         }))
         .unwrap();
         let delivery = AnswerDelivery {
+            extra: Default::default(),
             schema_version: 1,
             answer_id: id,
             target_host: target.host,
@@ -374,6 +378,7 @@ fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
     let f = Fixture::new();
     let store = f.open();
     let target = AnswerTarget {
+        extra: Default::default(),
         host: HostId::from_bytes([8; 16]),
         project: project(),
         actor: actor(2),
@@ -389,6 +394,7 @@ fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
         }))
         .unwrap();
         let delivery = AnswerDelivery {
+            extra: Default::default(),
             schema_version: 1,
             answer_id: id,
             target_host: target.host,
@@ -654,6 +660,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
     let request = f.request();
     let id = HumanRequestId::from_bytes([5; 16]);
     let original = HumanRequest {
+        extra: Default::default(),
         schema_version: 1,
         id,
         revision: 1,
@@ -666,6 +673,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
         chair_session_id: "chair-a".into(),
         chair_actor: actor(2),
         request: RequestDraft {
+            extra: Default::default(),
             work: None,
             deadline: None,
             supersedes: None,
@@ -685,6 +693,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
     store.create_human_request(&original, &request).unwrap();
     let operation = OperationId::parse("answer").unwrap();
     let answer = HumanAnswer {
+        extra: Default::default(),
         schema_version: 1,
         id: HumanAnswerId::from_bytes([6; 16]),
         request_id: id,
@@ -702,6 +711,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
     mail.kind = MessageKind::Response;
     mail.recipients = vec![actor(2)];
     let delivery = AnswerDelivery {
+        extra: Default::default(),
         schema_version: 1,
         answer_id: answer.id,
         target_host: original.owner_host,
@@ -726,6 +736,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
     assert_eq!(
         store.human_item(project(), id, &request).unwrap(),
         InboxItem {
+            extra: Default::default(),
             request: original.clone(),
             answer: None,
             delivery: None,
@@ -756,6 +767,7 @@ fn human_answer_outbox_mail_and_history_roll_back_when_receipt_fails() {
         .unwrap();
     assert_eq!(resolved.answer_id, Some(answer.id));
     let target = AnswerTarget {
+        extra: Default::default(),
         host: delivery.target_host,
         project: project(),
         session: delivery.target_session.clone(),

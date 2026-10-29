@@ -17,6 +17,9 @@ use thiserror::Error;
 #[cfg(test)]
 #[path = "graph/ci_tests.rs"]
 mod ci_tests;
+#[cfg(test)]
+#[path = "graph/forward_compatibility.rs"]
+mod forward_compatibility;
 mod loops;
 mod plans;
 pub use loops::{LoopAsk, LoopDecision, LoopRound, LoopScope, LoopSpec, close_resolved_loop_asks};
@@ -26,8 +29,9 @@ const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
 const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphDocument {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,8 +47,9 @@ pub struct GraphDocument {
 /// Legacy Fabric route wire shape. Exactly one of `model` and `alias` is
 /// required. `adapter` is required for a model and optional for an alias.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphRoute {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,8 +64,9 @@ pub struct GraphRoute {
 
 /// Host-only inputs retained for advancement after the submitting process exits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphExecution {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     /// Integration head pinned before the graph's first node is admitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_base: Option<provenant_core::GitOid>,
@@ -71,8 +77,9 @@ pub struct GraphExecution {
 /// `route` remains the one-route form. A node may instead provide ordered
 /// `routes`; supplying both is invalid.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphNode {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     /// Internal completion edges accept handled gates and inactive paths.
     #[serde(skip)]
     after_expansion: Vec<String>,
@@ -146,15 +153,22 @@ pub enum NodeKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum GateCondition {
     Verdict {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         expected: String,
         threshold: VerdictThreshold,
     },
     /// Check the effective host graph budget, including saved extensions.
-    Budget,
+    Budget {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
     Ci {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
         target: String,
         #[serde(default)]
         checks: Vec<String>,
@@ -181,22 +195,25 @@ pub enum CiState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CiObservation {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub state: CiState,
     pub summary: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CiHostStamp {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub boot_identity: String,
     pub host_monotonic_micros: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CiEvidence {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_observed_stamp: Option<CiHostStamp>,
     #[serde(default, skip_serializing_if = "is_zero_u8")]
@@ -208,7 +225,7 @@ pub struct CiEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum VerdictThreshold {
     All,
     Any,
@@ -217,8 +234,9 @@ pub enum VerdictThreshold {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GateResult {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub passed: bool,
     pub reason: Option<String>,
     pub on_fail: Option<String>,
@@ -226,8 +244,9 @@ pub struct GateResult {
 
 /// Select outputs from a direct dependency for inclusion in this node's brief.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphInput {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub node: String,
     pub outputs: Vec<OutputKind>,
 }
@@ -244,8 +263,9 @@ pub enum OutputKind {
 
 /// Compact, versioned settlement record. No provider transcript is retained.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct NodeOutputs {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict_error: Option<String>,
     pub schema_version: u64,
@@ -258,8 +278,9 @@ pub struct NodeOutputs {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ResultOutput {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub digest: String,
     pub excerpt: String,
     pub truncated: bool,
@@ -267,8 +288,9 @@ pub struct ResultOutput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Finding {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub id: String,
     pub severity: String,
     pub file: String,
@@ -278,7 +300,6 @@ pub struct Finding {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct FindingsBlock {
     schema_version: u64,
     findings: Vec<Finding>,
@@ -294,8 +315,9 @@ pub enum AccessMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphCheckpoint {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expansions: Vec<Expansion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -337,8 +359,9 @@ fn not_delivered(delivered: &bool) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct NodeProgress {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     /// Bounded planner JSON retained until admission succeeds, including across resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
@@ -376,8 +399,9 @@ pub struct NodeProgress {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GraphAttempt {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub launched: bool,
     pub key: AttemptKey,
     pub route: GraphRoute,
@@ -396,6 +420,8 @@ pub struct GraphAttempt {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptUsage {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub tokens: Option<u64>,
     pub cost_micro_usd: Option<u64>,
     pub wall_time_seconds: Option<u64>,
@@ -408,8 +434,9 @@ pub struct AttemptUsage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct UnknownUsageEvent {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub node_id: String,
     pub route_index: u16,
     pub metric: String,
@@ -418,8 +445,9 @@ pub struct UnknownUsageEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AttemptKey {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub graph_id: String,
     pub node_id: String,
     /// Zero-based position in that node's ordered route list.
@@ -690,6 +718,7 @@ pub enum JournalError {
 /// Safe, atomic checkpoint file journal. The held owner lock fences concurrent
 /// graph writers; all filesystem access after open is descriptor-relative.
 pub struct FileJournal {
+    extra: provenant_records::ExtraFields,
     graph_id: String,
     directory: Directory,
     execution: Option<GraphExecution>,
@@ -796,8 +825,13 @@ impl FileJournal {
             cancel,
             clock,
         )?;
-        let execution = load_checkpoint(&graphs_dir, graph_id)?.map(|stored| stored.execution);
+        let stored = load_checkpoint(&graphs_dir, graph_id)?;
+        let (extra, execution) = stored.map_or_else(
+            || (Default::default(), None),
+            |stored| (stored.extra, Some(stored.execution)),
+        );
         Ok(Self {
+            extra,
             graph_id: graph_id.to_owned(),
             directory: graphs_dir,
             execution,
@@ -976,6 +1010,7 @@ impl GraphJournal for FileJournal {
         }
         let execution = self.execution.as_ref().ok_or(JournalError::BadEnvelope)?;
         let stored = StoredCheckpoint {
+            extra: self.extra.clone(),
             schema_version: 1,
             digest: CanonicalV1::record_digest(
                 "fabric-graph-checkpoint",
@@ -1039,6 +1074,19 @@ fn load_checkpoint(
     if stored.schema_version != 1 {
         return Err(JournalError::BadEnvelope);
     }
+    for found in [
+        stored.checkpoint.schema_version,
+        stored.execution.document.schema_version,
+    ] {
+        if found > 1 {
+            return Err(DecodeError::UnsupportedVersion {
+                found,
+                line: 1,
+                column: 1,
+            }
+            .into());
+        }
+    }
     let digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",
         2,
@@ -1057,8 +1105,9 @@ fn load_checkpoint(
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct StoredCheckpoint {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     schema_version: u64,
     digest: String,
     checkpoint: GraphCheckpoint,
@@ -1102,6 +1151,8 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedGraph {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     #[serde(skip_serializing_if = "Option::is_none")]
     integration_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1113,6 +1164,8 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    #[serde(flatten)]
+    extra: provenant_records::ExtraFields,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     after_expansion: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1253,6 +1306,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
         None => {
             let checkpoint = GraphCheckpoint {
+                extra: Default::default(),
                 expansions: Vec::new(),
                 remaining: None,
                 instance_id: if plan.nodes.iter().any(|n| n.loop_body.is_some()) {
@@ -1279,6 +1333,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .nodes
                     .iter()
                     .map(|node| NodeProgress {
+                        extra: Default::default(),
                         fragment: None,
                         handoff: None,
                         expansion_pause: None,
@@ -1548,6 +1603,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     target,
                     timeout_seconds,
                     checks,
+                    ..
                 } = condition
                 {
                     let mut host = owner.ci_status();
@@ -1605,6 +1661,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     } else {
                         let observation = host.as_mut().filter(|_| sampled.is_some()).map_or_else(
                             || CiObservation {
+                                extra: Default::default(),
                                 state: CiState::Unavailable,
                                 summary: "CI status or host clock unavailable".into(),
                             },
@@ -1612,6 +1669,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         );
                         let state = observation.state;
                         checkpoint.nodes[node_index].ci = Some(CiEvidence {
+                            extra: Default::default(),
                             first_observed_stamp: anchor,
                             clock_reanchors: reanchors,
                             clock_reanchor_reason: reanchor_reason,
@@ -1639,6 +1697,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     NodeState::Failed
                 };
                 progress.gate = Some(GateResult {
+                    extra: Default::default(),
                     passed: reason.is_none(),
                     reason,
                     on_fail: node.on_fail.clone(),
@@ -1669,6 +1728,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .ok_or(GraphError::BadCheckpoint)?
                     .clone();
                 let key = AttemptKey {
+                    extra: Default::default(),
                     graph_id: plan.graph_id.clone(),
                     node_id: node.id.clone(),
                     route_index: u16::try_from(route_index)
@@ -1740,6 +1800,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         break;
                     }
                     checkpoint.nodes[node_index].attempts.push(GraphAttempt {
+                        extra: Default::default(),
                         key: key.clone(),
                         route: route.clone(),
                         state: AttemptState::Starting,
@@ -1897,6 +1958,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 };
                 if let Some(reason) = usage_error {
                     checkpoint.usage_events.push(UnknownUsageEvent {
+                        extra: Default::default(),
                         node_id: node.id.clone(),
                         route_index: key.route_index,
                         metric: "telemetry".to_owned(),
@@ -1905,6 +1967,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 }
                 if let Some(reason) = cost_error {
                     checkpoint.usage_events.push(UnknownUsageEvent {
+                        extra: Default::default(),
                         node_id: node.id.clone(),
                         route_index: key.route_index,
                         metric: "cost_usd".to_owned(),
@@ -2037,6 +2100,7 @@ fn dependency_state(
 
 fn gate_outputs(passed: bool) -> NodeOutputs {
     NodeOutputs {
+        extra: Default::default(),
         verdict_error: None,
         schema_version: 2,
         result: None,
@@ -2059,6 +2123,7 @@ fn gate_failure(
         GateCondition::Verdict {
             expected,
             threshold,
+            ..
         } => {
             for input in &node.inputs {
                 if let Some(error) = checkpoint.nodes[positions[&input.node]]
@@ -2090,7 +2155,7 @@ fn gate_failure(
             (!passed).then(|| format!("verdict threshold not met: {matched}/{total} matched"))
         }
         GateCondition::Ci { .. } => unreachable!("CI is observed by the host"),
-        GateCondition::Budget => {
+        GateCondition::Budget { .. } => {
             // An explicit check must fail closed even if admission only warns.
             let mut budget = budget.clone();
             budget.unknown_usage = crate::config::UnknownUsage::Pause;
@@ -2333,6 +2398,7 @@ fn update_usage_warnings(checkpoint: &mut GraphCheckpoint, _budget: &crate::conf
                         node.id, attempt.key.route_index
                     ));
                     events.push(UnknownUsageEvent {
+                        extra: Default::default(),
                         node_id: node.id.clone(),
                         route_index: attempt.key.route_index,
                         metric: name.to_owned(),
@@ -2505,6 +2571,7 @@ fn validate_flat_plan(
             Some(GateCondition::Verdict {
                 expected,
                 threshold,
+                ..
             }) => {
                 if expected.trim().is_empty()
                     || expected.trim() != expected
@@ -2524,6 +2591,7 @@ fn validate_flat_plan(
                 target,
                 timeout_seconds,
                 checks,
+                ..
             }) => {
                 let mut seen = std::collections::HashSet::new();
                 if checks.iter().any(|name| {
@@ -2546,7 +2614,7 @@ fn validate_flat_plan(
                     return Err("invalid CI gate target or timeout");
                 }
             }
-            Some(GateCondition::Budget) if !node.inputs.is_empty() => {
+            Some(GateCondition::Budget { .. }) if !node.inputs.is_empty() => {
                 return Err("budget gate has no selected inputs");
             }
             _ => {}
@@ -2648,6 +2716,7 @@ fn validate_flat_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            extra: node.extra.clone(),
             after_expansion: node.after_expansion.clone(),
             plan: node.plan.clone(),
             write_scope: node.write_scope.clone(),
@@ -2752,6 +2821,7 @@ fn validate_flat_plan(
         .collect();
     Ok((
         PlannedGraph {
+            extra: document.extra.clone(),
             integration_branch: document.integration_branch.clone(),
             delivery: document.delivery.clone(),
             schema_version: 1,
@@ -2866,11 +2936,13 @@ fn make_outputs(
         valid
     });
     NodeOutputs {
+        extra: Default::default(),
         verdict_error: result
             .filter(|capture| capture.verdict_invalid)
             .map(|_| "verdict malformed, repeated or not final".to_owned()),
         schema_version: 2,
         result: result.map(|capture| ResultOutput {
+            extra: Default::default(),
             digest: capture.digest.clone(),
             excerpt: capture.excerpt.clone(),
             truncated: capture.truncated || capture.source_truncated,
@@ -3227,6 +3299,7 @@ mod tests {
 
     fn route(adapter: &str) -> GraphRoute {
         GraphRoute {
+            extra: Default::default(),
             account: None,
             adapter: Some(adapter.to_owned()),
             model: Some(format!("{adapter}/model")),
@@ -3237,6 +3310,7 @@ mod tests {
 
     fn node(id: &str, route: GraphRoute) -> GraphNode {
         GraphNode {
+            extra: Default::default(),
             after_expansion: Vec::new(),
             plan: None,
             write_scope: Vec::new(),
@@ -3262,6 +3336,7 @@ mod tests {
 
     fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         GraphDocument {
+            extra: Default::default(),
             integration_branch: None,
             delivery: None,
             limits: None,
@@ -3374,6 +3449,7 @@ mod tests {
         verdicts: &[Option<&str>],
     ) -> (GraphDocument, FakeOwner) {
         let mut gate = gate_node(GateCondition::Verdict {
+            extra: Default::default(),
             expected: "VERDICT: PASS".into(),
             threshold,
         });
@@ -3383,6 +3459,7 @@ mod tests {
             let review = node(&format!("review-{i}"), route("fixture"));
             gate.depends_on.push(review.id.clone());
             gate.inputs.push(GraphInput {
+                extra: Default::default(),
                 node: review.id.clone(),
                 outputs: vec![OutputKind::Verdict],
             });
@@ -3463,7 +3540,9 @@ mod tests {
             (None, false, 10, false),
             (Some(1), true, 10, false),
         ] {
-            let mut gate = gate_node(GateCondition::Budget);
+            let mut gate = gate_node(GateCondition::Budget {
+                extra: Default::default(),
+            });
             gate.depends_on.push("review".into());
             let document = graph(vec![node("review", route("fixture")), gate]);
             let mut observation = terminal(AttemptOutcome::Succeeded);
@@ -3523,7 +3602,9 @@ mod tests {
                 (Some(9), Some(10), true),
                 (None, None, true),
             ] {
-                let mut gate = gate_node(GateCondition::Budget);
+                let mut gate = gate_node(GateCondition::Budget {
+                    extra: Default::default(),
+                });
                 gate.depends_on.push("review".into());
                 let document = graph(vec![node("review", route("fixture")), gate]);
                 let mut observation = terminal(AttemptOutcome::Succeeded);
@@ -3596,7 +3677,9 @@ mod tests {
                 self.current.save(checkpoint)
             }
         }
-        let mut gate = gate_node(GateCondition::Budget);
+        let mut gate = gate_node(GateCondition::Budget {
+            extra: Default::default(),
+        });
         gate.on_fail = Some("recovery".into());
         let mut nodes = vec![gate];
         for (id, parent) in [
@@ -3641,7 +3724,9 @@ mod tests {
     fn gate_reachability_handles_two_gates_and_deep_paths() {
         let mut nodes = Vec::new();
         for id in ["first", "second"] {
-            let mut gate = gate_node(GateCondition::Budget);
+            let mut gate = gate_node(GateCondition::Budget {
+                extra: Default::default(),
+            });
             gate.id = id.into();
             gate.on_fail = Some(format!("{id}-recovery"));
             nodes.push(gate);
@@ -3683,7 +3768,9 @@ mod tests {
         let limits = crate::config::GraphLimits::default();
         let mut nodes = Vec::new();
         for index in 0..limits.nodes / 2 {
-            let mut gate = gate_node(GateCondition::Budget);
+            let mut gate = gate_node(GateCondition::Budget {
+                extra: Default::default(),
+            });
             gate.id = format!("gate-{index}");
             let mut recovery = node(&format!("recovery-{index}"), route("fixture"));
             recovery.depends_on.push(gate.id.clone());
@@ -3853,10 +3940,14 @@ mod tests {
     #[test]
     fn gate_only_graph_obeys_structural_limits_before_evaluating() {
         let document = graph(vec![
-            gate_node(GateCondition::Budget),
+            gate_node(GateCondition::Budget {
+                extra: Default::default(),
+            }),
             GraphNode {
                 id: "second".into(),
-                ..gate_node(GateCondition::Budget)
+                ..gate_node(GateCondition::Budget {
+                    extra: Default::default(),
+                })
             },
         ]);
         let limits = crate::config::GraphLimits {
@@ -3910,6 +4001,7 @@ mod tests {
                 }
                 1 => {
                     document.nodes[1].condition = Some(GateCondition::Verdict {
+                        extra: Default::default(),
                         expected: "PASS".into(),
                         threshold: VerdictThreshold::Count(0),
                     });
@@ -3925,7 +4017,9 @@ mod tests {
                     "dependency cycle"
                 }
                 4 => {
-                    document.nodes[0].condition = Some(GateCondition::Budget);
+                    document.nodes[0].condition = Some(GateCondition::Budget {
+                        extra: Default::default(),
+                    });
                     "gate requires a condition and no agent configuration"
                 }
                 _ => {
@@ -4675,6 +4769,7 @@ mod tests {
             route("fourth"),
         ];
         let document = graph(vec![GraphNode {
+            extra: Default::default(),
             after_expansion: Vec::new(),
             plan: None,
             write_scope: Vec::new(),
@@ -4833,6 +4928,7 @@ mod tests {
         ] {
             let routes = vec![route("first"), route("second")];
             let document = graph(vec![GraphNode {
+                extra: Default::default(),
                 after_expansion: Vec::new(),
                 plan: None,
                 write_scope: Vec::new(),
@@ -5084,6 +5180,7 @@ mod tests {
     #[test]
     fn terminal_task_failure_does_not_try_a_fallback_route() {
         let document = graph(vec![GraphNode {
+            extra: Default::default(),
             after_expansion: Vec::new(),
             plan: None,
             write_scope: Vec::new(),
@@ -5200,6 +5297,7 @@ mod tests {
         let mut child = node("child", route("fixture"));
         child.depends_on.push("parent".into());
         child.inputs.push(GraphInput {
+            extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Result, OutputKind::Findings],
         });
@@ -5244,6 +5342,7 @@ mod tests {
         let mut child = node("child", route("fixture"));
         child.depends_on.push("parent".into());
         child.inputs.push(GraphInput {
+            extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Result],
         });
@@ -5298,6 +5397,7 @@ mod tests {
         let mut child = node("child", route("fixture"));
         child.depends_on.push("parent".into());
         child.inputs.push(GraphInput {
+            extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Result],
         });
@@ -5335,6 +5435,7 @@ mod tests {
         synthesis.inputs = ["one", "two", "three"]
             .iter()
             .map(|id| GraphInput {
+                extra: Default::default(),
                 node: (*id).into(),
                 outputs: vec![OutputKind::Findings],
             })
@@ -5385,7 +5486,7 @@ mod tests {
     }
 
     #[test]
-    fn synthesise_json_preserves_purpose_and_rejects_unknown_configuration() {
+    fn synthesise_json_preserves_purpose_and_rejects_unknown_kinds() {
         let wire = serde_json::json!({"schema_version": 1, "graph_id": "g-test", "nodes": [
             {"id": "review", "access": "read_only", "prompt": "Review", "route": {"alias": "senior"}},
             {"id": "synthesis", "kind": "synthesise", "access": "read_only", "prompt": "Rank and deduplicate findings", "route": {"alias": "senior"},
@@ -5405,23 +5506,14 @@ mod tests {
         };
         advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert!(owner.prompts[1].starts_with("Rank and deduplicate findings"));
-        for (field, value, error) in [
-            ("kind", serde_json::json!("synthesis"), "unknown variant"),
-            (
-                "config",
-                serde_json::json!({"purpose": "rank"}),
-                "unknown field",
-            ),
-        ] {
-            let mut invalid = wire.clone();
-            invalid["nodes"][1][field] = value;
-            assert!(
-                serde_json::from_value::<GraphDocument>(invalid)
-                    .unwrap_err()
-                    .to_string()
-                    .contains(error)
-            );
-        }
+        let mut invalid = wire;
+        invalid["nodes"][1]["kind"] = serde_json::json!("synthesis");
+        assert!(
+            serde_json::from_value::<GraphDocument>(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown variant")
+        );
     }
 
     #[test]
@@ -5429,6 +5521,7 @@ mod tests {
         let mut child = node("child", route("fixture"));
         child.depends_on.push("parent".into());
         child.inputs.push(GraphInput {
+            extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Result],
         });
@@ -5463,6 +5556,7 @@ mod tests {
         child.prompt = "x".repeat(90);
         child.depends_on.push("parent".into());
         child.inputs.push(GraphInput {
+            extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Result],
         });
@@ -5511,6 +5605,7 @@ mod tests {
         child.prompt = "x".repeat(300);
         child.depends_on.push("parent".into());
         child.inputs.push(GraphInput {
+            extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Result],
         });
@@ -5667,6 +5762,7 @@ mod tests {
         child.routes = Some(vec![route("first"), route("second")]);
         child.depends_on.push("parent".into());
         child.inputs.push(GraphInput {
+            extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Result],
         });
@@ -5783,6 +5879,7 @@ mod tests {
         let mut child = node("child", route("fixture"));
         child.depends_on.push("parent".into());
         child.inputs.push(GraphInput {
+            extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Result],
         });
@@ -5829,6 +5926,7 @@ mod tests {
     fn inputs_require_unique_direct_dependencies() {
         let mut child = node("child", route("fixture"));
         child.inputs.push(GraphInput {
+            extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Result],
         });
@@ -6072,6 +6170,7 @@ mod file_tests {
         for directory in [base.clone(), base.join("state")] {
             journal
                 .bind(GraphExecution {
+                    extra: Default::default(),
                     integration_base: None,
                     directory,
                     document: document.clone(),
@@ -6118,6 +6217,7 @@ mod file_tests {
                 FileJournal::open(&root, project, "reopen", budget, &cancel, &clock).unwrap();
             journal
                 .bind(GraphExecution {
+                    extra: Default::default(),
                     integration_base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
                     directory: base.clone(),
                     document: document.clone(),
@@ -6140,6 +6240,7 @@ mod file_tests {
         assert_eq!(
             FileJournal::pending_execution(&root, project, "reopen").unwrap(),
             Some(GraphExecution {
+                extra: Default::default(),
                 integration_base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
                 directory: base.clone(),
                 document: document.clone()
@@ -6155,6 +6256,7 @@ mod file_tests {
             );
             assert!(matches!(
                 journal.bind(GraphExecution {
+                    extra: Default::default(),
                     integration_base: None,
                     directory: base.clone(),
                     document: document.clone()

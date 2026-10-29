@@ -8,20 +8,35 @@ use provenant_records::RecordHeader;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkScope {
-    Issue { key: String },
-    Paths { paths: Vec<PathBuf> },
-    Worktree { path: PathBuf },
+    Issue {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        key: String,
+    },
+    Paths {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        paths: Vec<PathBuf>,
+    },
+    Worktree {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        path: PathBuf,
+    },
 }
 impl WorkScope {
     fn canonical(&self) -> Result<Self> {
         Ok(match self {
-            Self::Issue { key } => {
+            Self::Issue { key, extra } => {
                 text(key, "issue key")?;
-                Self::Issue { key: key.clone() }
+                Self::Issue {
+                    extra: extra.clone(),
+                    key: key.clone(),
+                }
             }
-            Self::Paths { paths } => {
+            Self::Paths { paths, extra } => {
                 if paths.is_empty() || paths.len() > 100 {
                     return Err(Error::Invalid("claim paths"));
                 }
@@ -31,9 +46,13 @@ impl WorkScope {
                     .collect::<Result<Vec<_>>>()?;
                 paths.sort();
                 paths.dedup();
-                Self::Paths { paths }
+                Self::Paths {
+                    extra: extra.clone(),
+                    paths,
+                }
             }
-            Self::Worktree { path } => Self::Worktree {
+            Self::Worktree { path, extra } => Self::Worktree {
+                extra: extra.clone(),
                 path: canonical_path(path)?,
             },
         })
@@ -41,8 +60,8 @@ impl WorkScope {
     fn paths(&self) -> &[PathBuf] {
         match self {
             Self::Issue { .. } => &[],
-            Self::Paths { paths } => paths,
-            Self::Worktree { path } => std::slice::from_ref(path),
+            Self::Paths { paths, .. } => paths,
+            Self::Worktree { path, .. } => std::slice::from_ref(path),
         }
     }
 }
@@ -67,8 +86,9 @@ fn canonical_path(path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ClaimRequest {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub id: ClaimId,
     pub project: ProjectId,
     pub actor: ActorId,
@@ -77,8 +97,9 @@ pub struct ClaimRequest {
     pub scope: WorkScope,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ClaimFence {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub id: ClaimId,
     pub actor: ActorId,
     pub generation: u64,
@@ -94,7 +115,6 @@ impl std::fmt::Debug for ClaimFence {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WorkClaim {
     pub header: RecordHeader,
     pub project: ProjectId,
@@ -313,6 +333,7 @@ impl Store {
                     && row.token.as_deref() == Some(claim.token.as_slice())
                 {
                     return Ok(ClaimFence {
+                        extra: Default::default(),
                         id: row.id,
                         actor: claim.actor,
                         generation: row.generation,
@@ -330,6 +351,7 @@ impl Store {
             let id = previous.as_ref().map_or(claim.id, |r| r.id);
             let generation = next_generation(previous.as_ref())?;
             let fence = ClaimFence {
+                extra: Default::default(),
                 id,
                 actor: claim.actor,
                 generation,

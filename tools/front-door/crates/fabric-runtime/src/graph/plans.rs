@@ -2,8 +2,9 @@
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PlanSpec {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub kinds: Vec<NodeKind>,
     pub max_nodes: usize,
 }
@@ -11,30 +12,30 @@ pub struct PlanSpec {
 /// Only validated, normalised additions enter the checkpoint. The original
 /// document remains the digest authority, just as it does for loop rounds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Expansion {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub source: String,
     pub continuation: bool,
     pub nodes: Vec<GraphNode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RemainingBudgets {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
     pub nodes: usize,
     pub edges: usize,
     pub continuations: usize,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Fragment {
     schema_version: u64,
     nodes: Vec<GraphNode>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Handoff {
     schema_version: u64,
     status: String,
@@ -262,6 +263,7 @@ fn fragment(
             ));
             if child.route.is_none() && child.routes.is_none() {
                 child.route = Some(GraphRoute {
+                    extra: Default::default(),
                     alias: Some("senior".into()),
                     adapter: None,
                     model: None,
@@ -288,6 +290,7 @@ fn fragment(
         }
     }
     let local = GraphDocument {
+        extra: Default::default(),
         schema_version: 1,
         graph_id: "fragment".into(),
         nodes: fragment.nodes,
@@ -351,6 +354,7 @@ fn fragment(
     }
     coordinate(&mut nodes, document, checkpoint)?;
     Ok(Expansion {
+        extra: Default::default(),
         source: node.id.clone(),
         continuation: false,
         nodes,
@@ -469,6 +473,7 @@ fn continuation(
     }
     child.round = None;
     Ok(Expansion {
+        extra: Default::default(),
         source: node.id.clone(),
         continuation: true,
         nodes: vec![child],
@@ -487,6 +492,7 @@ pub(super) fn remaining(
         .any(|n| n.plan.is_some() || n.access == AccessMode::WorktreeWrite)
     {
         checkpoint.remaining = Some(RemainingBudgets {
+            extra: Default::default(),
             nodes: limits.nodes.saturating_sub(document.nodes.len()),
             edges: limits.edges.saturating_sub(
                 document

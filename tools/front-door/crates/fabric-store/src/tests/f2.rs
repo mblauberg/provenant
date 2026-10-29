@@ -2,12 +2,14 @@ use super::*;
 
 fn work(f: &Fixture, who: u8) -> ClaimRequest {
     ClaimRequest {
+        extra: Default::default(),
         id: provenant_core::ClaimId::from_bytes([9; 16]),
         project: project(),
         actor: actor(who),
         token: [who; 16],
         lease: DurationMicros::from_seconds(1).unwrap(),
         scope: WorkScope::Paths {
+            extra: Default::default(),
             paths: vec![f.temp.path().to_path_buf()],
         },
     }
@@ -45,6 +47,7 @@ fn canonical_overlap_expiry_release_and_generation() {
 
 fn landing(who: u8) -> LandingRequest {
     LandingRequest {
+        extra: Default::default(),
         id: provenant_core::ClaimId::from_bytes([10; 16]),
         project: project(),
         actor: actor(who),
@@ -121,12 +124,19 @@ fn path_prefix_boundaries_symlinks_worktrees_and_issue_scopes() {
     std::fs::create_dir(&ab).unwrap();
     std::fs::create_dir(a.join("child")).unwrap();
     let mut input = work(&f, 3);
-    input.scope = WorkScope::Worktree { path: a.clone() };
+    input.scope = WorkScope::Worktree {
+        extra: Default::default(),
+        path: a.clone(),
+    };
     let fence = store.acquire_claim(&input, &f.request()).unwrap();
     input.id = provenant_core::ClaimId::from_bytes([11; 16]);
-    input.scope = WorkScope::Paths { paths: vec![ab] };
+    input.scope = WorkScope::Paths {
+        extra: Default::default(),
+        paths: vec![ab],
+    };
     store.acquire_claim(&input, &f.request()).unwrap();
     input.scope = WorkScope::Paths {
+        extra: Default::default(),
         paths: vec![a.join("child")],
     };
     assert!(matches!(
@@ -135,12 +145,16 @@ fn path_prefix_boundaries_symlinks_worktrees_and_issue_scopes() {
     ));
     let link = f.temp.path().join("alias");
     std::os::unix::fs::symlink(&a, &link).unwrap();
-    input.scope = WorkScope::Paths { paths: vec![link] };
+    input.scope = WorkScope::Paths {
+        extra: Default::default(),
+        paths: vec![link],
+    };
     assert!(matches!(
         store.acquire_claim(&input, &f.request()),
         Err(Error::Overlap { .. })
     ));
     input.scope = WorkScope::Paths {
+        extra: Default::default(),
         paths: vec![f.temp.path().into()],
     };
     assert!(matches!(
@@ -166,6 +180,7 @@ fn path_prefix_boundaries_symlinks_worktrees_and_issue_scopes() {
         .unwrap();
     input.id = provenant_core::ClaimId::from_bytes([12; 16]);
     input.scope = WorkScope::Issue {
+        extra: Default::default(),
         key: "issue-42".into(),
     };
     let issue = store.acquire_claim(&input, &f.request()).unwrap();
@@ -749,11 +764,18 @@ fn invalid_inputs_tokens_generations_and_cancellation_leave_no_mutation() {
         ));
     }
     for scope in [
-        WorkScope::Paths { paths: vec![] },
         WorkScope::Paths {
+            extra: Default::default(),
+            paths: vec![],
+        },
+        WorkScope::Paths {
+            extra: Default::default(),
             paths: vec!["relative".into()],
         },
-        WorkScope::Issue { key: String::new() },
+        WorkScope::Issue {
+            extra: Default::default(),
+            key: String::new(),
+        },
     ] {
         let mut input = work(&f, 3);
         input.scope = scope;
@@ -956,7 +978,10 @@ fn non_utf8_paths_and_exhausted_generations_return_typed_errors() {
     let store = f.open();
     let path = f.temp.path().join(std::ffi::OsString::from_vec(vec![255]));
     let mut input = work(&f, 3);
-    input.scope = WorkScope::Paths { paths: vec![path] };
+    input.scope = WorkScope::Paths {
+        extra: Default::default(),
+        paths: vec![path],
+    };
     assert!(matches!(
         store.acquire_claim(&input, &f.request()),
         Err(Error::PathEncoding)
@@ -1103,6 +1128,7 @@ fn acquire_prunes_only_bounded_released_unreferenced_rows_and_keeps_counters() {
     for n in 0..105_u128 {
         input.id = provenant_core::ClaimId::from_bytes(n.to_be_bytes());
         input.scope = WorkScope::Issue {
+            extra: Default::default(),
             key: format!("prune-{n}"),
         };
         released.push((
@@ -1114,7 +1140,10 @@ fn acquire_prunes_only_bounded_released_unreferenced_rows_and_keeps_counters() {
         store.release_claim(project(), fence, &f.request()).unwrap();
     }
     input.id = provenant_core::ClaimId::from_bytes([80; 16]);
-    input.scope = WorkScope::Issue { key: "live".into() };
+    input.scope = WorkScope::Issue {
+        extra: Default::default(),
+        key: "live".into(),
+    };
     let live = store.acquire_claim(&input, &f.request()).unwrap();
     let count: i64 = store
         .db
@@ -1186,6 +1215,7 @@ fn migration_four_preserves_all_claim_rows_and_pruning_retains_referenced_and_he
     f.clock.advance(input.lease).unwrap();
     input.id = provenant_core::ClaimId::from_bytes([20; 16]);
     input.scope = WorkScope::Issue {
+        extra: Default::default(),
         key: "trigger-prune".into(),
     };
     let live = store.acquire_claim(&input, &f.request()).unwrap();
@@ -1234,11 +1264,17 @@ fn case_aliases_on_case_insensitive_volume_follow_canonical_paths() {
     eprintln!("case-insensitive volume: canonical paths equal = {same}");
     let store = f.open();
     let mut input = work(&f, 3);
-    input.scope = WorkScope::Paths { paths: vec![upper] };
+    input.scope = WorkScope::Paths {
+        extra: Default::default(),
+        paths: vec![upper],
+    };
     store.acquire_claim(&input, &f.request()).unwrap();
     input.id = provenant_core::ClaimId::from_bytes([14; 16]);
     input.actor = actor(4);
-    input.scope = WorkScope::Paths { paths: vec![lower] };
+    input.scope = WorkScope::Paths {
+        extra: Default::default(),
+        paths: vec![lower],
+    };
     let result = store.acquire_claim(&input, &f.request());
     if same {
         assert!(matches!(result, Err(Error::Overlap { .. })));
@@ -1285,6 +1321,7 @@ fn overlap_queries_search_the_path_index_and_root_covers_every_path() {
     input.actor = actor(4);
     input.id = provenant_core::ClaimId::from_bytes([21; 16]);
     input.scope = WorkScope::Paths {
+        extra: Default::default(),
         paths: vec!["/".into()],
     };
     assert!(matches!(
@@ -1315,6 +1352,7 @@ fn pruned_paths_and_counters_roll_back_if_acquire_event_fails() {
     let mut input = old_input.clone();
     input.id = provenant_core::ClaimId::from_bytes([22; 16]);
     input.scope = WorkScope::Issue {
+        extra: Default::default(),
         key: "prune-trigger".into(),
     };
     store.db.execute_batch("CREATE TRIGGER refuse_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'event failure'); END;").unwrap();
@@ -1332,6 +1370,7 @@ fn pruned_paths_and_counters_roll_back_if_acquire_event_fails() {
     assert_eq!(paths, 0);
     let mut collision = old_input.clone();
     collision.scope = WorkScope::Issue {
+        extra: Default::default(),
         key: "cannot-reuse-pruned-id".into(),
     };
     assert!(matches!(

@@ -51,7 +51,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
         let mut owner = fixture_owner(&[&output]);
         {
             let mut journal = FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
-            journal.bind(GraphExecution { integration_base: None, directory: base.clone(), document: doc.clone() }).unwrap();
+            journal.bind(GraphExecution {extra: Default::default(),  integration_base: None, directory: base.clone(), document: doc.clone() }).unwrap();
             let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
             assert_eq!(run.status, GraphStatus::Paused);
             assert!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().result.as_ref().unwrap().truncated);
@@ -71,7 +71,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
 
 #[test]
 fn malformed_optional_handoff_warns_and_still_delivers() {
-    for output in ["```handoff\n{}\n```".to_owned(), format!("{STOP}\n{STOP}"), STOP.replace("stopped_early", "done"), STOP.replace("\"note\":", "\"extra\":true,\"note\":"), STOP.trim_end_matches("\n```").to_owned(), format!("```handoff\n{}\n```", json!({"schema_version":1,"status":"stopped_early","note":"x".repeat(4097)}))] {
+    for output in ["```handoff\n{}\n```".to_owned(), format!("{STOP}\n{STOP}"), STOP.replace("stopped_early", "done"), STOP.trim_end_matches("\n```").to_owned(), format!("```handoff\n{}\n```", json!({"schema_version":1,"status":"stopped_early","note":"x".repeat(4097)}))] {
         let mut doc = writer_graph();
         doc.nodes[0].required_verdict = None;
         doc.delivery = Some(provenant_records::run::DeliveryMode::Pr);
@@ -275,7 +275,7 @@ fn writer_graph() -> GraphDocument {
 #[test]
 fn honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract() {
     let mut doc = writer_graph();
-    doc.nodes[1].inputs = vec![GraphInput { node: "write".into(), outputs: vec![OutputKind::Result] }];
+    doc.nodes[1].inputs = vec![GraphInput {extra: Default::default(),  node: "write".into(), outputs: vec![OutputKind::Result] }];
     let mut owner = fixture_owner(&[STOP, "VERDICT: PASS", "checked"]);
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();

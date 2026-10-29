@@ -32,6 +32,8 @@ pub struct FetchFile {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchManifest {
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
     pub version: u8,
     pub files: Vec<FetchFile>,
     pub digest: Digest,
@@ -39,6 +41,8 @@ pub struct FetchManifest {
 
 #[derive(Serialize)]
 struct ManifestBody<'a> {
+    #[serde(flatten)]
+    extra: &'a BTreeMap<String, serde_json::Value>,
     version: u8,
     files: &'a [FetchFile],
 }
@@ -88,8 +92,10 @@ impl FetchManifest {
     /// Build a canonical version 1 manifest. Entries are ordered by path.
     pub fn new(mut files: Vec<FetchFile>) -> Result<Self> {
         files.sort_by(|left, right| left.path.cmp(&right.path));
-        let digest = manifest_digest(FETCH_VERSION, &files)?;
+        let extra = BTreeMap::new();
+        let digest = manifest_digest(FETCH_VERSION, &files, &extra)?;
         let manifest = Self {
+            extra,
             version: FETCH_VERSION,
             files,
             digest,
@@ -140,18 +146,26 @@ impl FetchManifest {
         }
         // A later path can be the prefix of an earlier one only if ordering is
         // malformed, which the strict-order check above already rejects.
-        if manifest_digest(self.version, &self.files)? != self.digest {
+        if manifest_digest(self.version, &self.files, &self.extra)? != self.digest {
             return Err(FetchError::Invalid("manifest digest"));
         }
         Ok(())
     }
 }
 
-fn manifest_digest(version: u8, files: &[FetchFile]) -> Result<Digest> {
+fn manifest_digest(
+    version: u8,
+    files: &[FetchFile],
+    extra: &BTreeMap<String, serde_json::Value>,
+) -> Result<Digest> {
     Ok(CanonicalV1::record_digest(
         "fabric-fetch-manifest",
         1,
-        &ManifestBody { version, files },
+        &ManifestBody {
+            version,
+            files,
+            extra,
+        },
     )?)
 }
 
@@ -415,6 +429,31 @@ mod tests {
     }
 
     #[test]
+    fn manifest_preserves_digest_with_future_manifest_fields() {
+        let manifest = FetchManifest::new(vec![file("output", b"payload")]).unwrap();
+        let mut newer = serde_json::to_value(manifest).unwrap();
+        newer["future"] = serde_json::json!({"nested":[null,u64::MAX]});
+        let mut body = newer.clone();
+        body.as_object_mut().unwrap().remove("digest");
+        let digest = CanonicalV1::record_digest("fabric-fetch-manifest", 1, &body).unwrap();
+        newer["digest"] = serde_json::json!(digest.to_string());
+        let decoded = FetchManifest::decode(&serde_json::to_vec(&newer).unwrap()).unwrap();
+        assert_eq!(decoded.digest, digest);
+        assert_eq!(
+            CanonicalV1::bytes(&decoded).unwrap(),
+            CanonicalV1::bytes(&newer).unwrap()
+        );
+        let encoded = decoded.encode().unwrap();
+        assert_eq!(FetchManifest::decode(&encoded).unwrap(), decoded);
+        let mut tampered = newer;
+        tampered["future"]["nested"] = serde_json::json!([1]);
+        assert!(matches!(
+            FetchManifest::decode(&serde_json::to_vec(&tampered).unwrap()),
+            Err(FetchError::Invalid("manifest digest"))
+        ));
+    }
+
+    #[test]
     fn manifest_depth_fits_cleanup_limit() {
         let deepest = format!("{}file", "d/".repeat(MAX_CLEANUP_DEPTH - 1));
         assert!(FetchManifest::new(vec![file(&deepest, b"payload")]).is_ok());
@@ -541,8 +580,9 @@ mod tests {
             "a//b",
         ] {
             let files = vec![file(path, b"x")];
-            let digest = manifest_digest(FETCH_VERSION, &files).unwrap();
+            let digest = manifest_digest(FETCH_VERSION, &files, &BTreeMap::new()).unwrap();
             let manifest = FetchManifest {
+                extra: Default::default(),
                 version: FETCH_VERSION,
                 files,
                 digest,

@@ -99,11 +99,13 @@ fn create_lane(rig: &TestRig) -> Result<String> {
             run_id,
             operation_id: OperationId::parse("hook-lane")?,
             request: run::CanonicalRequest {
+                extra: Default::default(),
                 child_attempt_id_version: None,
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    extra: Default::default(),
                     build_heavy: false,
                     title: None,
                     base: None,
@@ -113,6 +115,7 @@ fn create_lane(rig: &TestRig) -> Result<String> {
                     task_id,
                     prompt_digest: CanonicalV1::file_digest(b"existing lane"),
                     route: run::RequestedRoute::Named {
+                        extra: Default::default(),
                         name: "utility".into(),
                         effort: None,
                     },

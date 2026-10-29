@@ -41,7 +41,6 @@ pub(crate) const MAX_PAGE_BYTES: usize = 1_048_576;
 
 /// Bounded reads expose byte-cap truncation; resume after the last item's cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Page<T> {
     pub items: Vec<T>,
     pub truncated: bool,

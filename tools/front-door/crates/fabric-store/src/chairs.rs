@@ -4,7 +4,6 @@ use provenant_core::{Digest, RunId};
 use provenant_records::run::ChairBinding;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RunChair {
     pub request_digest: Digest,
     pub chair: Option<ChairBinding>,

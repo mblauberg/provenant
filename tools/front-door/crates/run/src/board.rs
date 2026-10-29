@@ -174,7 +174,9 @@ mod tests {
         )?;
         store.withdraw(
             AttemptId::from_bytes([1; 16]),
-            AttemptState::Queued,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
             Outcome::Cancelled,
             "test",
             call.clock.wall_now()?,
@@ -193,6 +195,7 @@ mod tests {
             result.path = crate::artifacts::artifact_path(history.attempt_id, "result.md")?;
         }
         let event = RunEvent {
+            extra: Default::default(),
             schema_version: 1,
             sequence: 1,
             project_id: history.project_id,
