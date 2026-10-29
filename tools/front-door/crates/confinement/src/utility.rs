@@ -1,16 +1,18 @@
 //! Closed, bounded Git reads and separately typed Git custody mutations.
 use crate::repo::{
     GitRefName, GitRevision, ReadOnlyRepo, RepoError, RepoObjectFormat, RepoPath, RepoPathError,
-    RepoProbeData, VerifiedRepo,
+    RepoProbeData, VerifiedRepo, VerifiedWorktree,
 };
+use crate::transport::{self, ConfigEntry, LaneRoots, TransportError};
 use provenant_core::{CancelToken, GitOid};
 use provenant_os::{
     exec::{ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
     fs::{Directory, FileKind, FsError, Metadata, canonicalize, effective_uid},
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -21,6 +23,7 @@ const DEFAULT_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_UTILITY_TIMEOUT: Duration = Duration::from_secs(14_400);
 const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 const MAX_GIT_LOG: u64 = 1000;
+const MAX_LANE_CONFIG_FILES: usize = 32;
 const MAX_FETCH_STDERR: usize = 1024;
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
@@ -61,6 +64,10 @@ pub enum UtilityError {
     InvalidOperationValue,
     #[error("repository Git configuration could not be read")]
     UnreadableGitConfiguration,
+    #[error(
+        "Git configuration key {key} comes from {file}, a location lanes can write, and cannot be neutralised; remove that include or move the file out of the project"
+    )]
+    LaneConfiguration { file: String, key: String },
     #[error("pinned Git does not support a verified attribute source")]
     AttributeSourceUnsupported,
     #[error("verified repository was not opened with its required Git probes")]
@@ -77,6 +84,8 @@ pub enum UtilityError {
     Incomplete,
     #[error("fetching remote branch failed with exit status {status}: {stderr}")]
     FetchFailed { status: i64, stderr: String },
+    #[error(transparent)]
+    Transport(#[from] TransportError),
     #[error(transparent)]
     Repo(#[from] RepoError),
     #[error(transparent)]
@@ -270,6 +279,9 @@ pub(crate) enum GitMutation {
 pub struct UtilityRuntime {
     git: ExecutablePin,
     home: PrivateHome,
+    /// Lane-writable locations beyond those derived from the repository, such
+    /// as the run state directory that holds lane scratch.
+    lane_roots: LaneRoots,
 }
 
 /// Canonical project location and its verified Git origin, when present.
@@ -288,13 +300,34 @@ impl UtilityRuntime {
                 path: PathBuf::from("/dev/null"),
                 identity: None,
             },
+            lane_roots: LaneRoots::default(),
         })
     }
     pub fn new(git: impl AsRef<Path>, home: impl AsRef<Path>) -> Result<Self, UtilityError> {
         Ok(Self {
             git: ExecutablePin::new(git.as_ref(), "git")?,
             home: PrivateHome::new(home.as_ref())?,
+            lane_roots: LaneRoots::default(),
         })
+    }
+
+    /// Add locations that lanes can write, beyond the worktrees and scratch
+    /// that follow from the repository itself.
+    #[must_use]
+    pub fn with_lane_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.lane_roots = LaneRoots::new(roots);
+        self
+    }
+
+    /// Everything a lane can write that matters to `repo`: its own linked
+    /// worktree, the project's worktree and scratch areas, and any extra roots.
+    pub(crate) fn lane_roots(&self, repo: &VerifiedRepo) -> LaneRoots {
+        LaneRoots::for_repository(
+            repo.root_path(),
+            repo.private_git_dir(),
+            repo.common_git_dir(),
+            &self.lane_roots,
+        )
     }
 
     pub fn open_repo(
@@ -309,22 +342,31 @@ impl UtilityRuntime {
         }
         self.revalidate()?;
         VerifiedRepo::open(path, |repo| {
-            verify_repo_binding(repo)?;
-            let config_overrides =
-                disabled_program_overrides(executor, repo, self, budget, cancel)?;
-            let attribute_source =
-                empty_attribute_source(executor, repo, self, budget, cancel, &config_overrides)?;
-            let object_format = match attribute_source.len() {
-                40 => RepoObjectFormat::Sha1,
-                64 => RepoObjectFormat::Sha256,
-                _ => return Err(UtilityError::AttributeSourceUnsupported),
-            };
-            Ok(RepoProbeData {
-                object_format,
-                attribute_source,
-                config_overrides,
-            })
+            probe_repository(executor, repo, self, None, budget, cancel)
         })
+    }
+
+    /// Probe a linked worktree's own effective configuration. Its branch
+    /// decides which `onbranch:` includes apply and its private directory can
+    /// hold `config.worktree`, so the primary checkout's probe cannot stand in.
+    /// Fails for that worktree when it includes a lane-writable file whose
+    /// settings cannot be neutralised.
+    pub fn probe_worktree(
+        &self,
+        executor: &dyn Executor,
+        worktree: &mut VerifiedWorktree,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<(), UtilityError> {
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        self.revalidate()?;
+        let repo = worktree.repo_mut();
+        let inherited = repo.probe_data().cloned();
+        let data = probe_repository(executor, repo, self, inherited.as_ref(), budget, cancel)?;
+        repo.set_probe_data(data)?;
+        Ok(())
     }
 
     /// Read-only evidence supports native object alternates without granting
@@ -341,21 +383,7 @@ impl UtilityRuntime {
         }
         self.revalidate()?;
         VerifiedRepo::open_mode(path, true, |repo| {
-            verify_repo_binding(repo)?;
-            let config_overrides =
-                disabled_program_overrides(executor, repo, self, budget, cancel)?;
-            let attribute_source =
-                empty_attribute_source(executor, repo, self, budget, cancel, &config_overrides)?;
-            let object_format = match attribute_source.len() {
-                40 => RepoObjectFormat::Sha1,
-                64 => RepoObjectFormat::Sha256,
-                _ => return Err(UtilityError::AttributeSourceUnsupported),
-            };
-            Ok(RepoProbeData {
-                object_format,
-                attribute_source,
-                config_overrides,
-            })
+            probe_repository(executor, repo, self, None, budget, cancel)
         })
         .map(ReadOnlyRepo)
     }
@@ -401,18 +429,41 @@ impl UtilityRuntime {
     }
 }
 
-/// The Git executable, resolved once. Later swaps (such as `brew upgrade git`
-/// replacing the file) are not tracked, so long-lived processes keep working.
+/// The Git executable. The pin keeps the caller's stable locator (such as
+/// `/opt/homebrew/bin/git`, a symlink that `brew upgrade` repoints) and runs
+/// that, so a long-lived process survives an upgrade. The locator's canonical
+/// target is validated once, then re-validated only when a cheap `stat`
+/// through the locator shows that the target changed, or a spawn reports
+/// ENOENT.
 struct ExecutablePin {
-    path: PathBuf,
+    locator: PathBuf,
+    tool: &'static str,
+    state: Mutex<PinState>,
+}
+
+struct PinState {
+    /// Identity, owner and mode of the canonical target when it was validated.
+    target: Metadata,
 }
 
 impl ExecutablePin {
-    /// Resolve symlinks and require a regular file named `tool` that is owned
-    /// by the current user or root and is not world-writable, in a directory
-    /// that is not world-writable. Group-writable directories such as Intel
-    /// Homebrew's `/usr/local/bin` are accepted.
     fn new(input: &Path, tool: &'static str) -> Result<Self, UtilityError> {
+        let target = Self::validate(input, tool)?;
+        Ok(Self {
+            locator: input.to_path_buf(),
+            tool,
+            state: Mutex::new(PinState { target }),
+        })
+    }
+
+    /// Resolve symlinks and require a regular file named `tool`, owned by the
+    /// current user or root, that is not group- or world-writable. Every
+    /// ancestor directory of the locator and of the canonical target must be
+    /// free of world-write without the sticky bit. A group-writable ancestor
+    /// owned by root or the current user is accepted: Intel Homebrew's
+    /// `/usr/local/bin` is group-writable by `admin`, and only that owner or
+    /// its group can replace the file.
+    fn validate(input: &Path, tool: &'static str) -> Result<Metadata, UtilityError> {
         let invalid = || UtilityError::InvalidExecutable { tool };
         // Canonicalisation would silently anchor a relative path at the cwd.
         if !input.is_absolute() {
@@ -422,23 +473,86 @@ impl ExecutablePin {
         if path.file_name().and_then(OsStr::to_str) != Some(tool) {
             return Err(invalid());
         }
-        let parent_path = path.parent().ok_or_else(invalid)?;
-        let parent = Directory::open_anchor(parent_path).map_err(|_| invalid())?;
-        let parent_identity = parent.metadata()?;
-        if parent_identity.kind != FileKind::Directory || parent_identity.mode & 0o002 != 0 {
-            return Err(invalid());
+        for ancestor in input.ancestors().skip(1).chain(path.ancestors().skip(1)) {
+            let directory = Directory::open_anchor(ancestor).map_err(|_| invalid())?;
+            let identity = directory.metadata().map_err(|_| invalid())?;
+            let sticky = identity.mode & 0o1000 != 0;
+            let trusted_owner = identity.uid == effective_uid() || identity.uid == 0;
+            if identity.kind != FileKind::Directory
+                || (identity.mode & 0o002 != 0 && !sticky)
+                || (identity.mode & 0o020 != 0 && !trusted_owner)
+            {
+                return Err(invalid());
+            }
         }
+        let parent =
+            Directory::open_anchor(path.parent().ok_or_else(invalid)?).map_err(|_| invalid())?;
         let file = parent
             .metadata_at(path.file_name().ok_or_else(invalid)?, false)
             .map_err(|_| invalid())?;
-        if file.kind != FileKind::Regular
-            || file.mode & 0o111 == 0
-            || file.mode & 0o002 != 0
-            || (file.uid != effective_uid() && file.uid != 0)
-        {
+        if !Self::acceptable_file(&file) {
             return Err(invalid());
         }
-        Ok(Self { path })
+        Ok(file)
+    }
+
+    fn acceptable_file(file: &Metadata) -> bool {
+        file.kind == FileKind::Regular
+            && file.mode & 0o111 != 0
+            && file.mode & 0o022 == 0
+            && (file.uid == effective_uid() || file.uid == 0)
+    }
+
+    /// Stat through the locator: one `fstatat` that follows the symlink chain.
+    fn observe(&self) -> Option<Metadata> {
+        let parent = Directory::open_anchor(self.locator.parent()?).ok()?;
+        parent.metadata_at(self.locator.file_name()?, true).ok()
+    }
+
+    /// The program to execute. When the stat shows the same file, owner and
+    /// mode as the validated target, that is all the checking needed. When
+    /// anything differs (an upgrade repointed the link, or the file was
+    /// replaced or chmodded), validate the new target in full before use.
+    fn program(&self) -> Result<PathBuf, UtilityError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| UtilityError::InvalidExecutable { tool: self.tool })?;
+        match self.observe() {
+            Some(current)
+                if current.same_identity(&state.target)
+                    && current.uid == state.target.uid
+                    && current.mode == state.target.mode => {}
+            _ => state.target = Self::validate(&self.locator, self.tool)?,
+        }
+        Ok(self.locator.clone())
+    }
+
+    /// Re-validate unconditionally, after a spawn reported ENOENT.
+    fn revalidate(&self) -> Result<(), UtilityError> {
+        let target = Self::validate(&self.locator, self.tool)?;
+        self.state
+            .lock()
+            .map_err(|_| UtilityError::InvalidExecutable { tool: self.tool })?
+            .target = target;
+        Ok(())
+    }
+
+    /// Run a Git process built by `options`. If the spawn fails with ENOENT
+    /// (for example while a package manager relinks the locator), re-validate
+    /// the target and try once more.
+    fn execute<'a>(
+        &self,
+        executor: &dyn Executor,
+        options: impl Fn() -> ExecOptions<'a>,
+    ) -> Result<ExecOutcome, UtilityError> {
+        match executor.execute(options()) {
+            Err(ExecError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                self.revalidate()?;
+                Ok(executor.execute(options())?)
+            }
+            result => Ok(result?),
+        }
     }
 }
 
@@ -507,6 +621,90 @@ pub fn run_utility(
     )
 }
 
+/// The one hardened way host code runs Git against a remote: no hooks, no
+/// fsmonitor, only the transports delivery uses, the host's own credentials
+/// and SSH configuration, and a refusal to proceed when the effective
+/// configuration or a transport program lives where a lane can write.
+struct HostGit<'a> {
+    executor: &'a dyn Executor,
+    repo: &'a VerifiedRepo,
+    runtime: &'a UtilityRuntime,
+    env: Vec<(OsString, OsString)>,
+    budget: UtilityBudget,
+    cancel: &'a CancelToken,
+}
+
+impl<'a> HostGit<'a> {
+    /// `home` replaces the host's `HOME` so isolated callers and fixtures keep
+    /// their own configuration.
+    fn new(
+        executor: &'a dyn Executor,
+        repo: &'a VerifiedRepo,
+        runtime: &'a UtilityRuntime,
+        home: Option<&Path>,
+        budget: UtilityBudget,
+        cancel: &'a CancelToken,
+    ) -> Result<Self, UtilityError> {
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        runtime.revalidate()?;
+        repo.revalidate()?;
+        verify_repo_binding(repo)?;
+        let env = transport::environment(
+            std::env::vars_os(),
+            home.map(|home| ("HOME".into(), home.as_os_str().to_owned())),
+        );
+        let host = Self {
+            executor,
+            repo,
+            runtime,
+            env,
+            budget,
+            cancel,
+        };
+        let roots = runtime.lane_roots(repo);
+        transport::check_environment(&host.env, repo.root_path(), &roots)?;
+        let listing = host.run(
+            &transport::LISTING_ARGS
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>(),
+        )?;
+        if listing.termination != Termination::Exit(0) {
+            return Err(UtilityError::UnreadableGitConfiguration);
+        }
+        let entries = transport::parse_listing(&listing.stdout.bytes)?;
+        transport::check_listing(&entries, repo.root_path(), &roots)?;
+        Ok(host)
+    }
+
+    fn run(&self, args: &[OsString]) -> Result<ExecOutcome, UtilityError> {
+        if self.cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        let mut argv = vec![
+            self.runtime.git.program()?.into_os_string(),
+            "--git-dir".into(),
+            self.repo.private_git_dir().as_os_str().to_owned(),
+            "--work-tree".into(),
+            self.repo.root_path().as_os_str().to_owned(),
+        ];
+        argv.extend(transport::config_args());
+        argv.extend_from_slice(args);
+        validate_outcome(self.runtime.git.execute(self.executor, || {
+            exec_options(
+                &argv,
+                self.repo.root_path(),
+                self.budget,
+                &self.env,
+                Some(b""),
+                Some(self.cancel),
+            )
+        })?)
+    }
+}
+
 /// What the remote advertises for a base such as `origin/main`.
 #[derive(Debug)]
 pub(crate) enum RemoteBase {
@@ -534,54 +732,8 @@ pub(crate) fn fetch_missing_remote_branch(
     if remote.is_empty() || remote.starts_with('-') {
         return Ok(RemoteBase::NotRemote);
     }
-    runtime.revalidate()?;
-    repo.revalidate()?;
-    verify_repo_binding(repo)?;
-    let run = |args: &[OsString]| -> Result<ExecOutcome, UtilityError> {
-        if cancel.is_cancelled() {
-            return Err(UtilityError::Cancelled);
-        }
-        let mut argv = vec![
-            runtime.git.path.as_os_str().to_owned(),
-            "--git-dir".into(),
-            repo.private_git_dir().as_os_str().to_owned(),
-            "--work-tree".into(),
-            repo.root_path().as_os_str().to_owned(),
-            "-c".into(),
-            "core.hooksPath=/dev/null".into(),
-        ];
-        argv.extend_from_slice(args);
-        let mut options = exec_options(
-            &argv,
-            repo.root_path(),
-            budget,
-            &[],
-            Some(b""),
-            Some(cancel),
-        );
-        // Inherit the host environment for SSH and credential helpers; override
-        // HOME so isolated callers and fixtures retain their own configuration.
-        let mut env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| {
-                !matches!(
-                    key.to_str(),
-                    Some(
-                        "HOME"
-                            | "GIT_TERMINAL_PROMPT"
-                            | "GIT_DIR"
-                            | "GIT_WORK_TREE"
-                            | "GIT_COMMON_DIR"
-                    )
-                )
-            })
-            .collect();
-        env.extend([
-            ("HOME".into(), home.as_os_str().to_owned()),
-            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-        ]);
-        options.env = Some(&env);
-        validate_outcome(executor.execute(options)?)
-    };
+    let host = HostGit::new(executor, repo, runtime, Some(home), budget, cancel)?;
+    let run = |args: &[OsString]| host.run(args);
     let remotes = run(&["remote".into()])?;
     if remotes.termination != Termination::Exit(0)
         || !remotes
@@ -786,44 +938,14 @@ pub(crate) fn advertised_remote_head(
     {
         return Err(UtilityError::InvalidOperationValue);
     }
-    if cancel.is_cancelled() {
-        return Err(UtilityError::Cancelled);
-    }
-    runtime.revalidate()?;
-    repo.0.revalidate()?;
-    verify_repo_binding(&repo.0)?;
-    let argv: Vec<OsString> = vec![
-        runtime.git.path.as_os_str().to_owned(),
-        "--git-dir".into(),
-        repo.0.private_git_dir().as_os_str().to_owned(),
-        "--work-tree".into(),
-        repo.0.root_path().as_os_str().to_owned(),
-        "-c".into(),
-        "core.hooksPath=/dev/null".into(),
+    let host = HostGit::new(executor, &repo.0, runtime, None, budget, cancel)?;
+    host.run(&[
         "ls-remote".into(),
         "--symref".into(),
         "--".into(),
         remote.into(),
         "HEAD".into(),
-    ];
-    let mut env: Vec<_> = std::env::vars_os()
-        .filter(|(key, _)| {
-            !matches!(
-                key.to_str(),
-                Some("GIT_TERMINAL_PROMPT" | "GIT_DIR" | "GIT_WORK_TREE" | "GIT_COMMON_DIR")
-            )
-        })
-        .collect();
-    env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
-    let options = exec_options(
-        &argv,
-        repo.0.root_path(),
-        budget,
-        &env,
-        Some(b""),
-        Some(cancel),
-    );
-    validate_outcome(executor.execute(options)?)
+    ])
 }
 
 /// Same closed reads and execution boundary, with no mutation capability.
@@ -862,22 +984,23 @@ fn execute_git(
         .as_str();
     let (args, stdin) = command(attribute_source)?;
     let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push(runtime.git.path.as_os_str().to_owned());
+    argv.push(runtime.git.program()?.into_os_string());
     argv.extend(args);
     let mut env = environment(runtime, repo);
     if release_scan {
         env.push(("GIT_SHALLOW_FILE".into(), "/dev/null".into()));
     }
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
-    let options = exec_options(
-        &argv,
-        repo.root_path(),
-        budget,
-        &env,
-        stdin.as_deref(),
-        Some(cancel),
-    );
-    validate_outcome(executor.execute(options)?)
+    validate_outcome(runtime.git.execute(executor, || {
+        exec_options(
+            &argv,
+            repo.root_path(),
+            budget,
+            &env,
+            stdin.as_deref(),
+            Some(cancel),
+        )
+    })?)
 }
 
 pub(crate) fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, UtilityError> {
@@ -1366,48 +1489,331 @@ pub fn set_lane_upstream_key(
     Ok(())
 }
 
-/// Read the effective Git config key names, following includes but exposing no
-/// values, and disable every configured filter driver. Attributes (including
-/// `info/attributes`, which `--attr-source` does not suppress) can select a
-/// driver whose clean, smudge or process command Git would then run. Overrides
-/// are applied last, so they win over values from any included file.
-fn disabled_program_overrides(
+/// What the effective configuration of one repository or worktree contains
+/// that lanes can influence, and the overrides that neutralise it.
+#[derive(PartialEq, Eq)]
+struct ConfigScan {
+    entries: Vec<ConfigEntry>,
+    overrides: Vec<(String, String)>,
+    files: Vec<PathBuf>,
+    head_sensitive: bool,
+}
+
+/// Keys that cannot affect a utility command. Its argv is fixed, with
+/// `--no-textconv`, `--no-ext-diff`, no pager, no merge, no network and no
+/// signing, so these settings (transport programs and credentials, editors,
+/// merge and diff tools, identity and display) are inert there. Transport
+/// operations apply their own, stricter refusal in `HostGit`.
+fn is_inert_for_utility(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    [
+        "user.",
+        "color.",
+        "advice.",
+        "alias.",
+        "pager.",
+        "credential.",
+        "http.",
+        "url.",
+        "gpg.",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+        || matches!(
+            lower.as_str(),
+            "core.sshcommand"
+                | "core.gitproxy"
+                | "core.askpass"
+                | "core.pager"
+                | "core.editor"
+                | "sequence.editor"
+                | "uploadpack.packobjectshook"
+        )
+        || (lower.starts_with("remote.")
+            && (lower.ends_with(".uploadpack") || lower.ends_with(".receivepack")))
+        || (lower.starts_with("diff.")
+            && (lower.ends_with(".textconv") || lower.ends_with(".command")))
+        || ["merge.", "mergetool.", "difftool."]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+}
+
+fn is_include_directive(key: &str) -> bool {
+    key == "include.path" || (key.starts_with("includeif.") && key.ends_with(".path"))
+}
+
+/// Where an include directive in `from` points. Git resolves a relative path
+/// against the including file's directory and expands a leading `~/`.
+fn include_target(from: &Path, value: &str, home: &Path) -> PathBuf {
+    if let Some(rest) = value.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        from.parent().unwrap_or(Path::new("/")).join(path)
+    }
+}
+
+/// Enumerate the configuration Git would read (includes followed, `onbranch:`
+/// and `gitdir:` conditions evaluated for this repository's HEAD), find every
+/// file lanes can write, and neutralise what such a file sets:
+///
+/// - every configured filter driver is disabled, whatever its origin, because
+///   attributes can select one;
+/// - a key set by a lane-writable file is pinned to the value the rest of the
+///   configuration gives it, left alone when no utility command can reach it,
+///   and otherwise cannot be neutralised, which fails the operation.
+///
+/// A lane-writable include target that Git did not read for this HEAD (another
+/// branch's `onbranch:` condition) is not scanned; instead the handle is tied
+/// to HEAD, so a branch change makes it stale and the next probe sees the file.
+fn scan_configuration(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
     runtime: &UtilityRuntime,
     budget: UtilityBudget,
     cancel: &CancelToken,
-) -> Result<Vec<(String, String)>, UtilityError> {
-    let command = ["config", "--includes", "--name-only", "--null", "--list"].map(OsString::from);
-    let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &command)?;
-    if outcome.termination != Termination::Exit(0)
-        || (!outcome.stdout.bytes.is_empty() && !outcome.stdout.bytes.ends_with(&[0]))
-    {
+) -> Result<ConfigScan, UtilityError> {
+    let listing_args = transport::LISTING_ARGS.map(OsString::from);
+    let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &listing_args)?;
+    if outcome.termination != Termination::Exit(0) {
         return Err(UtilityError::UnreadableGitConfiguration);
     }
-    let mut drivers = BTreeSet::new();
-    for key in outcome.stdout.bytes.split(|byte| *byte == 0) {
-        let key = String::from_utf8_lossy(key);
-        // Section and variable names are lowercase; the driver name is not.
-        let Some(rest) = key.strip_prefix("filter.") else {
-            continue;
-        };
-        if let Some((driver, _)) = rest.rsplit_once('.') {
-            drivers.insert(driver.to_owned());
+    let entries = transport::parse_listing(&outcome.stdout.bytes)
+        .map_err(|_| UtilityError::UnreadableGitConfiguration)?;
+    let base = repo.root_path();
+    let home = runtime.home.path.as_path();
+    let roots = runtime.lane_roots(repo);
+    let own: Vec<PathBuf> = [repo.private_git_dir(), repo.common_git_dir()]
+        .iter()
+        .flat_map(|dir| ["config", "config.worktree"].map(|name| dir.join(name)))
+        .collect();
+
+    // Files read through includes, and every declared target, present or not.
+    let mut files = BTreeSet::new();
+    let mut read = BTreeSet::new();
+    let mut declared = Vec::new();
+    for entry in &entries {
+        let file = entry.file(base);
+        if let Some(file) = &file
+            && !own.contains(file)
+            && file != Path::new("/dev/null")
+        {
+            files.insert(file.clone());
+            read.insert(file.clone());
+        }
+        if let (Some(file), Some(value)) = (&file, &entry.value)
+            && is_include_directive(&entry.key)
+        {
+            let target = include_target(file, value, home);
+            files.insert(target.clone());
+            declared.push((file.clone(), target));
         }
     }
-    Ok(drivers
-        .into_iter()
-        .flat_map(|driver| {
-            [
-                ("clean", ""),
-                ("smudge", ""),
-                ("process", ""),
-                ("required", "false"),
-            ]
-            .map(|(variable, value)| (format!("filter.{driver}.{variable}"), value.to_owned()))
+    // A read file is lane-writable when it lies in a lane area, or when a
+    // lane-writable file included it.
+    let mut lane_files: BTreeSet<PathBuf> = read
+        .iter()
+        .filter(|file| roots.contains(file))
+        .cloned()
+        .collect();
+    loop {
+        let before = lane_files.len();
+        for (from, target) in &declared {
+            if lane_files.contains(from) && read.contains(target) {
+                lane_files.insert(target.clone());
+            }
+        }
+        if lane_files.len() == before {
+            break;
+        }
+    }
+    // Declared lane-writable targets that Git did not read for this HEAD can
+    // still apply to a worktree on another branch, so read them directly.
+    // What they set is neutralised where possible; what cannot be is left to
+    // the probe of the worktree that matches.
+    let mut pending: Vec<PathBuf> = declared
+        .iter()
+        .filter(|(from, target)| {
+            !read.contains(target) && (roots.contains(target) || lane_files.contains(from))
         })
-        .collect())
+        .map(|(_, target)| target.clone())
+        .collect();
+    let head_sensitive = !pending.is_empty();
+    let mut unread: Vec<ConfigEntry> = Vec::new();
+    let mut visited = BTreeSet::new();
+    while let Some(target) = pending.pop() {
+        if !visited.insert(target.clone()) {
+            continue;
+        }
+        if visited.len() > MAX_LANE_CONFIG_FILES {
+            return Err(UtilityError::LaneConfiguration {
+                file: target.display().to_string(),
+                key: "include.path".into(),
+            });
+        }
+        let Some(entries) = read_config_file(executor, repo, runtime, budget, cancel, &target)?
+        else {
+            continue;
+        };
+        for entry in &entries {
+            if let (Some(value), true) = (&entry.value, is_include_directive(&entry.key)) {
+                let nested = include_target(&target, value, home);
+                files.insert(nested.clone());
+                pending.push(nested);
+            }
+        }
+        unread.extend(entries);
+    }
+
+    let mut overrides = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let lane_entries = entries
+        .iter()
+        .filter_map(|entry| {
+            let file = entry.file(base).filter(|file| lane_files.contains(file))?;
+            Some((entry.key.as_str(), Some(file)))
+        })
+        .chain(unread.iter().map(|entry| (entry.key.as_str(), None)));
+    for (key, file) in lane_entries {
+        if !seen.insert(key.to_owned()) || is_include_directive(key) {
+            continue;
+        }
+        if key.starts_with("filter.")
+            || GIT_CONFIG_OVERRIDES
+                .iter()
+                .any(|(forced, _)| forced.eq_ignore_ascii_case(key))
+            || is_inert_for_utility(key)
+        {
+            continue;
+        }
+        let good: Vec<&str> = entries
+            .iter()
+            .filter(|other| {
+                other.key == key
+                    && other
+                        .file(base)
+                        .is_none_or(|file| !lane_files.contains(&file))
+            })
+            .filter_map(|other| other.value.as_deref())
+            .collect();
+        match (good.as_slice(), file) {
+            ([value], _) => {
+                overrides.insert(key.to_owned(), (*value).to_owned());
+            }
+            // Not active for this HEAD: the matching worktree's probe decides.
+            (_, None) => {}
+            (_, Some(file)) => {
+                return Err(UtilityError::LaneConfiguration {
+                    file: file.display().to_string(),
+                    key: key.to_owned(),
+                });
+            }
+        }
+    }
+
+    // Disable every filter driver. Section and variable names are lowercase;
+    // the driver name is not.
+    let drivers: BTreeSet<&str> = entries
+        .iter()
+        .chain(&unread)
+        .filter_map(|entry| entry.key.strip_prefix("filter.")?.rsplit_once('.'))
+        .map(|(driver, _)| driver)
+        .collect();
+    for driver in drivers {
+        for (variable, value) in [
+            ("clean", ""),
+            ("smudge", ""),
+            ("process", ""),
+            ("required", "false"),
+        ] {
+            overrides.insert(format!("filter.{driver}.{variable}"), value.to_owned());
+        }
+    }
+    Ok(ConfigScan {
+        entries,
+        overrides: overrides.into_iter().collect(),
+        files: files.into_iter().collect(),
+        head_sensitive,
+    })
+}
+
+/// Read one config file directly, without following its includes. `None` when
+/// it does not exist.
+fn read_config_file(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+    path: &Path,
+) -> Result<Option<Vec<ConfigEntry>>, UtilityError> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let args: Vec<OsString> = vec![
+        "config".into(),
+        "--file".into(),
+        path.as_os_str().to_owned(),
+        "--no-includes".into(),
+        "--show-origin".into(),
+        "-z".into(),
+        "--list".into(),
+    ];
+    let outcome = run_git_probe(executor, repo, runtime, budget, cancel, &[], &args)?;
+    if outcome.termination != Termination::Exit(0) {
+        return Err(UtilityError::UnreadableGitConfiguration);
+    }
+    transport::parse_listing(&outcome.stdout.bytes)
+        .map(Some)
+        .map_err(|_| UtilityError::UnreadableGitConfiguration)
+}
+
+/// Probe one repository or worktree: neutralise lane-influenced configuration,
+/// resolve its object format and prove the attribute-source option works.
+/// `inherited` is the primary checkout's probe, whose object format and
+/// attribute source a linked worktree shares.
+fn probe_repository(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    inherited: Option<&RepoProbeData>,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<RepoProbeData, UtilityError> {
+    verify_repo_binding(repo)?;
+    let scan = scan_configuration(executor, repo, runtime, budget, cancel)?;
+    let files_digest = repo.included_digest(&scan.files, scan.head_sensitive)?;
+    let attribute_source = match inherited {
+        Some(data) => data.attribute_source.clone(),
+        None => empty_attribute_source(executor, repo, runtime, budget, cancel, &scan.overrides)?,
+    };
+    let object_format = match attribute_source.len() {
+        40 => RepoObjectFormat::Sha1,
+        64 => RepoObjectFormat::Sha256,
+        _ => return Err(UtilityError::AttributeSourceUnsupported),
+    };
+    // A lane could change an included file between Git reading it and the
+    // digest above. Read again: the same view and the same bytes mean the
+    // overrides describe what later commands will see, and any later edit
+    // makes the handle stale.
+    if !scan.files.is_empty() {
+        let again = scan_configuration(executor, repo, runtime, budget, cancel)?;
+        if again != scan || repo.included_digest(&scan.files, scan.head_sensitive)? != files_digest
+        {
+            return Err(RepoError::IdentityChanged.into());
+        }
+    }
+    Ok(RepoProbeData {
+        object_format,
+        attribute_source,
+        config_overrides: scan.overrides,
+        config_files: scan.files,
+        config_files_digest: files_digest,
+        config_head_sensitive: scan.head_sensitive,
+    })
 }
 
 /// Resolve the repository object format once without writing an object, then
@@ -1471,7 +1877,7 @@ fn run_git_probe(
     command: &[OsString],
 ) -> Result<ExecOutcome, UtilityError> {
     let mut argv = vec![
-        runtime.git.path.as_os_str().to_owned(),
+        runtime.git.program()?.into_os_string(),
         OsString::from("--git-dir"),
         repo.private_git_dir().as_os_str().to_owned(),
         OsString::from("--work-tree"),
@@ -1480,8 +1886,9 @@ fn run_git_probe(
     argv.extend(GIT_COMMON.iter().map(OsString::from));
     argv.extend(command.iter().cloned());
     let env = environment_with(runtime, repo, overrides);
-    let options = exec_options(&argv, repo.root_path(), budget, &env, None, Some(cancel));
-    validate_outcome(executor.execute(options)?)
+    validate_outcome(runtime.git.execute(executor, || {
+        exec_options(&argv, repo.root_path(), budget, &env, None, Some(cancel))
+    })?)
 }
 
 fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>>), UtilityError> {
@@ -1559,7 +1966,7 @@ fn validate_absolute_mutation_path(path: &Path) -> Result<PathBuf, UtilityError>
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::repo::verify_worktree;
+    use crate::repo::{VerifiedWorktree, verify_worktree};
     use crate::test_support::{Fixture, add_poisoned_gitlink, assert_raw_git_runs_poison_filter};
     use provenant_os::exec::{ExecError, ExecOptions, Executor, SystemExecutor};
     use std::error::Error;
@@ -1567,19 +1974,141 @@ pub(crate) mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
+    fn executable(path: &Path, mode: u32) -> Result<(), Box<dyn Error>> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, b"executable")?;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        Ok(())
+    }
+
+    /// Point `link` at `target` atomically, as a package manager relinks.
+    fn relink(link: &Path, target: &Path) -> Result<(), Box<dyn Error>> {
+        let staged = link.with_extension("new");
+        std::os::unix::fs::symlink(target, &staged)?;
+        fs::rename(staged, link)?;
+        Ok(())
+    }
+
     #[test]
-    fn executable_pin_resolves_symlink_once() -> Result<(), Box<dyn Error>> {
+    fn executable_pin_keeps_the_locator_and_follows_a_swapped_target() -> Result<(), Box<dyn Error>>
+    {
         let temp = tempfile::tempdir()?;
-        let target_dir = temp.path().join("target");
-        fs::create_dir(&target_dir)?;
-        let target = target_dir.join("git");
-        fs::write(&target, b"first")?;
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))?;
+        let (first, second) = (temp.path().join("v1/git"), temp.path().join("v2/git"));
+        executable(&first, 0o755)?;
+        executable(&second, 0o755)?;
+        let link = temp.path().join("bin/git");
+        fs::create_dir(temp.path().join("bin"))?;
+        std::os::unix::fs::symlink(&first, &link)?;
+
+        // The locator is what runs; it is never replaced by the canonical path.
+        let pin = ExecutablePin::new(&link, "git")?;
+        assert_eq!(pin.program()?, link);
+
+        // `brew upgrade`: the link moves to a new version and the old one is
+        // removed. The pin follows without the old target existing.
+        relink(&link, &second)?;
+        fs::remove_dir_all(temp.path().join("v1"))?;
+        assert_eq!(pin.program()?, link);
+        let pinned = pin.state.lock().map_err(|_| "pin poisoned")?.target;
+        assert!(
+            pinned.same_identity(
+                &Directory::open_anchor(&temp.path().join("v2"))?
+                    .metadata_at(OsStr::new("git"), false)?
+            )
+        );
+
+        // Removing the target leaves nothing to run.
+        fs::remove_file(&second)?;
+        assert!(matches!(
+            pin.program(),
+            Err(UtilityError::InvalidExecutable { tool: "git" })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn executable_pin_revalidates_a_replaced_or_loosened_target() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("target/git");
+        executable(&target, 0o755)?;
         let link = temp.path().join("git");
         std::os::unix::fs::symlink(&target, &link)?;
-
         let pin = ExecutablePin::new(&link, "git")?;
-        assert_eq!(pin.path, fs::canonicalize(&target)?);
+        pin.program()?;
+
+        // A sound replacement is accepted.
+        let replacement = temp.path().join("target/replacement");
+        executable(&replacement, 0o755)?;
+        fs::rename(&replacement, &target)?;
+        pin.program()?;
+
+        // A world-writable replacement is not.
+        executable(&replacement, 0o757)?;
+        fs::rename(&replacement, &target)?;
+        assert!(matches!(
+            pin.program(),
+            Err(UtilityError::InvalidExecutable { tool: "git" })
+        ));
+
+        // Nor is a chmod in place to group-write.
+        executable(&replacement, 0o755)?;
+        fs::rename(&replacement, &target)?;
+        pin.program()?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o775))?;
+        assert!(matches!(
+            pin.program(),
+            Err(UtilityError::InvalidExecutable { tool: "git" })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn executable_pin_retries_one_spawn_after_enoent_when_the_target_is_sound()
+    -> Result<(), Box<dyn Error>> {
+        struct VanishesOnce(std::sync::atomic::AtomicUsize);
+        impl Executor for VanishesOnce {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    return Err(ExecError::Io {
+                        operation: "spawn",
+                        source: std::io::ErrorKind::NotFound.into(),
+                    });
+                }
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 1,
+                })
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let target = temp.path().join("target/git");
+        executable(&target, 0o755)?;
+        let link = temp.path().join("git");
+        std::os::unix::fs::symlink(&target, &link)?;
+        let pin = ExecutablePin::new(&link, "git")?;
+        let argv = [link.as_os_str().to_owned()];
+        let options = || ExecOptions::new(&argv, temp.path(), Duration::from_secs(1));
+
+        let executor = VanishesOnce(Default::default());
+        pin.execute(&executor, options)?;
+        assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // With the target gone, revalidation fails and the spawn is not retried.
+        let executor = VanishesOnce(Default::default());
+        fs::remove_file(&target)?;
+        assert!(matches!(
+            pin.execute(&executor, options),
+            Err(UtilityError::InvalidExecutable { tool: "git" })
+        ));
+        assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 1);
         Ok(())
     }
 
@@ -1613,29 +2142,52 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn executable_pin_refuses_world_writable_but_allows_group_writable()
-    -> Result<(), Box<dyn Error>> {
+    fn executable_pin_refuses_a_writable_file_and_a_loose_ancestor() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let target_dir = temp.path().join("target");
-        fs::create_dir(&target_dir)?;
         let target = target_dir.join("git");
-        fs::write(&target, b"executable")?;
+        executable(&target, 0o755)?;
         let link = temp.path().join("git");
         std::os::unix::fs::symlink(&target, &link)?;
-        let mode = |file: u32, directory: u32| -> Result<(), Box<dyn Error>> {
-            fs::set_permissions(&target, fs::Permissions::from_mode(file))?;
-            fs::set_permissions(&target_dir, fs::Permissions::from_mode(directory))?;
-            Ok(())
+        let pin = |file: u32, directory: u32| -> Result<ExecutablePin, UtilityError> {
+            fs::set_permissions(&target, fs::Permissions::from_mode(file))
+                .and_then(|()| {
+                    fs::set_permissions(&target_dir, fs::Permissions::from_mode(directory))
+                })
+                .map_err(|_| UtilityError::InvalidExecutable { tool: "git" })?;
+            ExecutablePin::new(&link, "git")
         };
-        mode(0o775, 0o775)?;
-        ExecutablePin::new(&link, "git")?;
-        for (file, directory) in [(0o757, 0o755), (0o755, 0o757), (0o644, 0o755)] {
-            mode(file, directory)?;
-            assert!(matches!(
-                ExecutablePin::new(&link, "git"),
-                Err(UtilityError::InvalidExecutable { tool: "git" })
-            ));
+        // Group- or world-write on the file itself lets that group replace it.
+        for file in [0o775, 0o757, 0o777, 0o770] {
+            assert!(
+                matches!(
+                    pin(file, 0o755),
+                    Err(UtilityError::InvalidExecutable { tool: "git" })
+                ),
+                "file mode {file:o}"
+            );
         }
+        // A world-writable directory without the sticky bit lets anyone swap
+        // the file; with it, only the owner can.
+        assert!(matches!(
+            pin(0o755, 0o777),
+            Err(UtilityError::InvalidExecutable { tool: "git" })
+        ));
+        pin(0o755, 0o1777)?;
+        // A group-writable directory owned by the current user (or root) is
+        // accepted: Intel Homebrew's /usr/local/bin is group-writable by admin.
+        pin(0o755, 0o775)?;
+        // The rule covers every ancestor, not only the parent.
+        let nested = target_dir.join("nested/git");
+        executable(&nested, 0o755)?;
+        let nested_link = temp.path().join("nested-git");
+        std::os::unix::fs::symlink(&nested, &nested_link)?;
+        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o777))?;
+        assert!(matches!(
+            ExecutablePin::new(&nested_link, "git"),
+            Err(UtilityError::InvalidExecutable { tool: "git" })
+        ));
+        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o755))?;
         Ok(())
     }
 
@@ -2117,23 +2669,52 @@ pub(crate) mod tests {
         assert!(marker.exists(), "control: raw Git should run the filter");
         fs::remove_file(&marker)?;
 
-        // The config changed, so the old handle is stale; a fresh open succeeds
-        // and neutralises both drivers.
-        let repo = fixture.runtime.open_repo(
-            &fixture.executor,
-            &fixture.root,
-            fixture.budget()?,
-            &CancelToken::new(),
-        )?;
-        let status = run_utility(
-            &fixture.executor,
-            GitRead::Status,
-            &repo,
-            &fixture.runtime,
-            fixture.budget()?,
-            &CancelToken::new(),
-        )?;
-        assert_eq!(status.termination, Termination::Exit(0));
+        // The config changed after the handle was probed, so the handle is
+        // stale and runs nothing.
+        let status = |repo: &VerifiedRepo| {
+            run_utility(
+                &fixture.executor,
+                GitRead::Status,
+                repo,
+                &fixture.runtime,
+                fixture.budget()?,
+                &CancelToken::new(),
+            )
+        };
+        assert!(matches!(
+            status(&fixture.repo),
+            Err(UtilityError::Repo(RepoError::IdentityChanged))
+        ));
+        assert!(!marker.exists());
+        let open = || {
+            fixture.runtime.open_repo(
+                &fixture.executor,
+                &fixture.root,
+                fixture.budget()?,
+                &CancelToken::new(),
+            )
+        };
+        // A fresh open neutralises both drivers instead of refusing the repo.
+        let repo = open()?;
+        assert_eq!(status(&repo)?.termination, Termination::Exit(0));
+        assert!(!marker.exists());
+
+        // A process filter in the worktree config is covered the same way, and
+        // makes the previous handle stale in turn.
+        fixture.run(&["config", "extensions.worktreeConfig", "true"])?;
+        fixture.run(&[
+            "config",
+            "--worktree",
+            "filter.poison.process",
+            filter.as_str(),
+        ])?;
+        assert!(matches!(
+            status(&repo),
+            Err(UtilityError::Repo(RepoError::IdentityChanged))
+        ));
+        assert!(!marker.exists());
+        let repo = open()?;
+        assert_eq!(status(&repo)?.termination, Termination::Exit(0));
         assert!(!marker.exists());
         Ok(())
     }
@@ -2187,6 +2768,253 @@ pub(crate) mod tests {
             &CancelToken::new(),
         )?;
         assert_eq!(removed.termination, Termination::Exit(0));
+        Ok(())
+    }
+
+    /// A user config that includes a file for lane branches only:
+    /// `includeIf "onbranch:lane/*"`. The target is where lanes can write.
+    struct LaneInclude {
+        marker: PathBuf,
+        filter: String,
+    }
+
+    impl LaneInclude {
+        fn new(fixture: &Fixture) -> Result<Self, Box<dyn Error>> {
+            let tracked = fixture.root.join("tracked.txt");
+            fs::write(&tracked, "baseline\n")?;
+            fixture.run(&["add", "--", "tracked.txt"])?;
+            fixture.run(&["commit", "-m", "tracked fixture"])?;
+            let marker = fixture._temp.path().join("filter-executed");
+            let filter = format!("touch {}; cat", marker.display());
+            let info = fixture.repo.common_git_dir().join("info");
+            fs::create_dir_all(&info)?;
+            fs::write(info.join("attributes"), "tracked.txt filter=lane\n")?;
+            Ok(Self { marker, filter })
+        }
+
+        fn include(&self, fixture: &Fixture, target: &Path) -> Result<(), Box<dyn Error>> {
+            let target = target.to_str().ok_or("non-UTF8 include")?;
+            fixture.run(&["config", "includeIf.onbranch:lane/*.path", target])?;
+            Ok(())
+        }
+
+        fn write(&self, target: &Path, extra: &str) -> Result<(), Box<dyn Error>> {
+            fs::create_dir_all(target.parent().ok_or("no parent")?)?;
+            fs::write(
+                target,
+                format!(
+                    "[filter \"lane\"]\n\tclean = {0}\n\tsmudge = {0}\n{extra}",
+                    self.filter
+                ),
+            )?;
+            Ok(())
+        }
+    }
+
+    fn open(fixture: &Fixture) -> Result<VerifiedRepo, Box<dyn Error>> {
+        Ok(fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?)
+    }
+
+    fn add_lane_worktree(
+        fixture: &Fixture,
+        repo: &VerifiedRepo,
+        branch: &str,
+        path: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        let head = run_utility(
+            &fixture.executor,
+            GitRead::RevParseHead,
+            repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        let head = GitOid::parse(std::str::from_utf8(&head.stdout.bytes)?.trim())?;
+        let added = execute_git_mutation(
+            &fixture.executor,
+            repo,
+            &fixture.runtime,
+            GitMutation::WorktreeAdd {
+                branch: GitRefName::branch(branch)?,
+                base: Some(head),
+                path: path.to_path_buf(),
+                create_branch: true,
+            },
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(added.termination, Termination::Exit(0));
+        Ok(())
+    }
+
+    fn probe(
+        fixture: &Fixture,
+        repo: &VerifiedRepo,
+        path: &Path,
+    ) -> Result<VerifiedWorktree, Box<dyn Error>> {
+        let mut tree = verify_worktree(repo, path)?;
+        fixture.runtime.probe_worktree(
+            &fixture.executor,
+            &mut tree,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        Ok(tree)
+    }
+
+    fn status(fixture: &Fixture, repo: &VerifiedRepo) -> Result<ExecOutcome, UtilityError> {
+        run_utility(
+            &fixture.executor,
+            GitRead::Status,
+            repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )
+    }
+
+    #[test]
+    fn onbranch_include_of_a_lane_writable_file_is_neutralised_for_its_worktree()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let lane = LaneInclude::new(&fixture)?;
+        // The project's worktree area is where lanes write.
+        let target = fixture.root.join(".worktrees/lane.cfg");
+        lane.write(&target, "[core]\n\tfilemode = false\n")?;
+        lane.include(&fixture, &target)?;
+
+        // The primary checkout is not on a lane branch, so Git does not read
+        // the file, but the handle is tied to HEAD and already neutralises it:
+        // creating a lane worktree checks files out under that include.
+        let repo = open(&fixture)?;
+        let data = repo.probe_data().ok_or("unprobed")?;
+        assert!(data.config_head_sensitive);
+        assert!(data.config_files.contains(&fs::canonicalize(&target)?));
+        let overrides = &data.config_overrides;
+        assert!(overrides.contains(&("filter.lane.clean".into(), String::new())));
+        assert!(overrides.contains(&("core.filemode".into(), "true".into())));
+        let linked = fixture._temp.path().join("linked");
+        add_lane_worktree(&fixture, &repo, "lane/one", &linked)?;
+        assert!(!lane.marker.exists());
+
+        // On the lane branch Git reads the file. Control: raw Git runs the
+        // filter there; the utility does not.
+        let tree = probe(&fixture, &repo, &linked)?;
+        assert!(
+            tree.repo()
+                .probe_data()
+                .ok_or("unprobed")?
+                .config_overrides
+                .contains(&("filter.lane.clean".into(), String::new()))
+        );
+        fs::write(linked.join("tracked.txt"), "modified\n")?;
+        let linked_text = linked.to_str().ok_or("non-UTF8 worktree")?;
+        fixture.run(&["-C", linked_text, "status", "--porcelain=v2"])?;
+        assert!(
+            lane.marker.exists(),
+            "control: raw Git runs the lane filter"
+        );
+        fs::remove_file(&lane.marker)?;
+        assert_eq!(
+            status(&fixture, tree.repo())?.termination,
+            Termination::Exit(0)
+        );
+        assert!(!lane.marker.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_lane_include_that_cannot_be_neutralised_fails_only_its_worktree()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let lane = LaneInclude::new(&fixture)?;
+        let linked = fixture._temp.path().join("linked");
+        let other = fixture._temp.path().join("other");
+        let target = linked.join("lane.cfg");
+        lane.include(&fixture, &target)?;
+        let repo = open(&fixture)?;
+        add_lane_worktree(&fixture, &repo, "lane/one", &linked)?;
+        add_lane_worktree(&fixture, &repo, "other/two", &other)?;
+        // The lane writes into its own worktree. The setting changes which
+        // files Git reports, and nothing else in the configuration gives it a
+        // value to pin, so it cannot be neutralised.
+        lane.write(&target, "[status]\n\tshowUntrackedFiles = no\n")?;
+        let repo = open(&fixture)?;
+
+        let mut tree = verify_worktree(&repo, &linked)?;
+        let error = fixture
+            .runtime
+            .probe_worktree(
+                &fixture.executor,
+                &mut tree,
+                fixture.budget()?,
+                &CancelToken::new(),
+            )
+            .err()
+            .ok_or("the lane worktree must fail")?;
+        assert!(
+            matches!(&error, UtilityError::LaneConfiguration { key, .. } if key == "status.showuntrackedfiles"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("cannot be neutralised"));
+        // The primary checkout and a worktree on another branch are unaffected.
+        assert_eq!(status(&fixture, &repo)?.termination, Termination::Exit(0));
+        let tree = probe(&fixture, &repo, &other)?;
+        assert_eq!(
+            status(&fixture, tree.repo())?.termination,
+            Termination::Exit(0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn editing_an_included_lane_file_makes_the_handle_stale() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let lane = LaneInclude::new(&fixture)?;
+        let target = fixture.root.join(".worktrees/lane.cfg");
+        lane.write(&target, "")?;
+        lane.include(&fixture, &target)?;
+        let repo = open(&fixture)?;
+        let linked = fixture._temp.path().join("linked");
+        add_lane_worktree(&fixture, &repo, "lane/one", &linked)?;
+        let tree = probe(&fixture, &repo, &linked)?;
+        assert_eq!(
+            status(&fixture, tree.repo())?.termination,
+            Termination::Exit(0)
+        );
+
+        // Neither handle may be used once the included bytes change.
+        lane.write(&target, "[core]\n\tfilemode = false\n")?;
+        for handle in [&repo, tree.repo()] {
+            assert!(matches!(
+                status(&fixture, handle),
+                Err(UtilityError::Repo(RepoError::IdentityChanged))
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_head_change_makes_a_handle_with_unread_lane_includes_stale() -> Result<(), Box<dyn Error>>
+    {
+        let fixture = Fixture::new()?;
+        let lane = LaneInclude::new(&fixture)?;
+        let target = fixture.root.join(".worktrees/lane.cfg");
+        lane.write(&target, "")?;
+        lane.include(&fixture, &target)?;
+        let repo = open(&fixture)?;
+        assert_eq!(status(&fixture, &repo)?.termination, Termination::Exit(0));
+        // Switching to a lane branch would activate the include.
+        fixture.run(&["checkout", "-q", "-b", "lane/primary"])?;
+        assert!(matches!(
+            status(&fixture, &repo),
+            Err(UtilityError::Repo(RepoError::IdentityChanged))
+        ));
         Ok(())
     }
 

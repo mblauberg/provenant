@@ -17,6 +17,7 @@ mod stable_read;
 mod status;
 #[cfg(test)]
 mod test_support;
+pub mod transport;
 pub mod utility;
 pub mod worktrees;
 pub use git_evidence::Git;
