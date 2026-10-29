@@ -17,6 +17,8 @@ const DIRECTORY_BYTES: usize = 6 * 4096;
 const LOOP_PAUSE_TEXT_BYTES: usize = 256;
 /// Fixed text and route index in an unknown-usage line, beside the node ID.
 const UNKNOWN_USAGE_TEXT_BYTES: usize = 64;
+/// Space for each runtime-owned refusal code, including future causes.
+pub(super) const REFUSAL_CODE_BYTES: usize = 64;
 
 pub(super) fn reason(
     document: &GraphDocument,
@@ -49,6 +51,7 @@ fn ask_bound(mut ask: NodeAsk, variable: usize) -> usize {
         actor: Some(String::new()),
         at: Some(latest()),
         rejected: Some(String::new()),
+        rejection_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
     });
     ask.inbox_error = Some(String::new());
     canonical_len(&ask)
@@ -86,6 +89,7 @@ pub(super) fn checkpoint_bound(
         integration_pin: Some(String::new()),
         cancelled: true,
         pause_reason: Some(String::new()),
+        pause_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         unknown_usage: Vec::new(),
         unknown_usage_omitted: usize::MAX,
         usage_events: Vec::new(),
@@ -189,6 +193,10 @@ fn node_bound(
         handoff: plans::writer(node).then(String::new),
         expansion_pause: expands.then(String::new),
         loop_pause: node.loop_body.as_ref().map(|_| String::new()),
+        loop_pause_code: node
+            .loop_body
+            .as_ref()
+            .map(|_| "c".repeat(REFUSAL_CODE_BYTES)),
         round: node.round.clone(),
         gate: gate.then(|| GateResult {
             extra: Default::default(),
@@ -228,6 +236,7 @@ fn node_bound(
         id: node.id.clone(),
         state: NodeState::Succeeded,
         advance_error: Some(String::new()),
+        advance_error_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         outputs: Some(if boundary {
             gate_outputs(false)
         } else {

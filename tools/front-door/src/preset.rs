@@ -2277,6 +2277,7 @@ pub(crate) fn bind_run_context(
     directory: &Path,
     policy: &ReadRoots,
     selection_source: &str,
+    experiment: Option<&crate::experiment::Assignment>,
 ) -> Result<(), String> {
     if let Some(concurrency) = request.concurrency {
         if expansion.document.get("limits").is_none() {
@@ -2367,6 +2368,25 @@ pub(crate) fn bind_run_context(
     // adds graph and node identity to each submitted task.
     expansion.document["context"]["preset"] = expansion.document["provenance"]["preset"].clone();
     expansion.document["context"]["selection_source"] = json!(selection_source);
+    // The CLI rejects --preset with --task-id and automatic selection refused
+    // --task-id before this change, so no existing graph carries a work item.
+    if let Some(work_item) = request.task_id.as_ref() {
+        expansion.document["context"]["work_item"] = json!(work_item.to_string());
+    }
+    if let Some(experiment) = experiment {
+        // The pattern and arm name what executed. A shadow candidate is only
+        // recorded in `shadow_of`, never as the outcome's arm.
+        expansion.document["context"]["pattern"] = json!(format!(
+            "experiment:{}:{}",
+            experiment.experiment, experiment.arm
+        ));
+        expansion.document["context"]["experiment_id"] = json!(experiment.experiment);
+        expansion.document["context"]["experiment_seed"] = json!(experiment.seed);
+        expansion.document["context"]["experiment_arm"] = json!(experiment.arm);
+        if let Some(candidate) = &experiment.shadow_of {
+            expansion.document["context"]["shadow_of"] = json!(candidate);
+        }
+    }
     expansion.document["graph_id"] = json!("");
     // An integration source resolves at run time, so fold the current head into
     // the identity: a moved branch must never reuse a completed graph.
@@ -2621,7 +2641,7 @@ pub fn command(command: provenant_cli::Preset, globals: &provenant_cli::Globals)
                         crate::preset_select::PresetSelectionSource::Default => "no selector rule matched; the bundled or repo default applies",
                         crate::preset_select::PresetSelectionSource::Override => "an explicit preset override was used",
                         crate::preset_select::PresetSelectionSource::Triage => "the future triage source selected this preset",
-                        crate::preset_select::PresetSelectionSource::Experiment => "the future experiment source selected this preset",
+                        crate::preset_select::PresetSelectionSource::Experiment => "a pipeline experiment assigned this preset",
                     }
                 }))
             }
@@ -2725,31 +2745,15 @@ pub fn run(
             _ => "large",
         };
         let ready = prompt_ready(prompt);
-        let selection = crate::preset_select::select(
-            Some(&rules_path),
-            &crate::preset_select::SelectionContext {
-                risk: request.risk_tier.clone(),
-                kind: request.task_kind.clone(),
-                paths: request.selection_paths.clone(),
-                size: Some(size.into()),
-                ready: Some(ready),
-            },
-            request.preset.as_deref(),
-        )?;
-        let name = selection.choice.preset.as_str();
-        let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
-        match &request.preset_params_file {
-            Some(path) => params_file(path)?,
-            None => Vec::new(),
-        }
-        .into_iter()
-        .for_each(|(key, value)| {
-            if let Some(existing) = params.iter_mut().find(|(name, _)| name == &key) {
-                existing.1 = value;
-            } else {
-                params.push((key, value));
-            }
-        });
+        let context = crate::preset_select::SelectionContext {
+            risk: request.risk_tier.clone(),
+            kind: request.task_kind.clone(),
+            paths: request.selection_paths.clone(),
+            size: Some(size.into()),
+            ready: Some(ready),
+        };
+        let mut selection =
+            crate::preset_select::select(Some(&rules_path), &context, request.preset.as_deref())?;
         let roots = crate::roots::resolve(
             globals,
             crate::roots::Workspace::Project,
@@ -2759,6 +2763,10 @@ pub fn run(
         let config =
             provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
                 .map_err(|e| e.to_string())?;
+        let file_params = match &request.preset_params_file {
+            Some(path) => params_file(path)?,
+            None => Vec::new(),
+        };
         let mut layers = configured(globals)?;
         layers.known_routes = Some(config.domains.routing.routes.keys().cloned().collect());
         let review = config.domains.routing.review.clone();
@@ -2778,7 +2786,100 @@ pub fn run(
             }
             Ok(hint)
         }));
+        // Experiments apply only to work items and never beside an explicit
+        // preset. A malformed entry warns and is skipped; the others still apply.
+        let placement = match (request.preset.is_none(), request.task_id.as_ref()) {
+            (true, Some(work_item)) => {
+                let settings: provenant_config::experiment::FabricExperiments =
+                    provenant_config::read_domain(roots.roots.state.as_path(), "fabric").map_err(
+                        |error| format!("cannot read experiment configuration: {error}"),
+                    )?;
+                let experiments = settings.pipelines.parsed();
+                use provenant_core::Clock;
+                let now = provenant_os::clock::SystemClock::new()
+                    .wall_now()
+                    .map_err(|error| error.to_string())?
+                    .as_timestamp();
+                let work_item = work_item.to_string();
+                let task = crate::experiment::Task {
+                    work_item: &work_item,
+                    risk_tier: request.risk_tier.as_deref(),
+                    rule_preset: selection.choice.preset.as_str(),
+                    now,
+                };
+                let preset_check = |preset: &str| layers.resolve(preset).map(|_| ());
+                // An arm is accepted only when the normal selection and expansion accept it.
+                let arm_check = |preset: &str| {
+                    let chosen =
+                        crate::preset_select::select(Some(&rules_path), &context, Some(preset))?;
+                    expand_with(
+                        &layers,
+                        &chosen.choice.preset,
+                        prompt,
+                        &file_params,
+                        &request.preset_set,
+                    )
+                    .map(|_| ())
+                };
+                // Outcome rows are read once per run, and only when a budget or ratio needs them.
+                let observed = || {
+                    let stats = provenant_cli::Stats {
+                        outcomes: true,
+                        suggest: false,
+                        pipeline: provenant_cli::PipelineOptions {
+                            main_ref: "main".into(),
+                            ci_file: None,
+                            outcome_days: 14,
+                            min_samples: 1,
+                            expiry_days: 14,
+                        },
+                        claude_subagents: None,
+                        usage: false,
+                        since: None,
+                        until: None,
+                        run_id: None,
+                        by: None,
+                        detail: false,
+                    };
+                    let report = provenant_cli::run::stats(
+                        stats,
+                        &provenant_cli::run::Edge {
+                            roots: &roots.roots,
+                            home: &roots.home,
+                            assets: &roots.assets,
+                            cwd: &directory,
+                        },
+                    );
+                    crate::experiment::observed_rows(&report.result.data)
+                };
+                crate::experiment::place(&experiments, &task, &preset_check, &arm_check, &observed)
+            }
+            _ => crate::experiment::Placement::default(),
+        };
+        {
+            use std::io::Write;
+            for warning in &placement.warnings {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            }
+        }
+        if let Some(assignment) = &placement.assignment {
+            // Parameters stay only when the executed preset is the rule's preset.
+            selection.choice = selection.choice.for_preset(&assignment.preset);
+            selection.source = crate::preset_select::PresetSelectionSource::Experiment;
+        }
+        let name = selection.choice.preset.as_str();
+        let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
+        file_params.into_iter().for_each(|(key, value)| {
+            if let Some(existing) = params.iter_mut().find(|(name, _)| name == &key) {
+                existing.1 = value;
+            } else {
+                params.push((key, value));
+            }
+        });
         let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
+        if !placement.skipped.is_empty() {
+            expansion.document["provenance"]["experiments"] = json!(placement.skipped);
+        }
         let skills = roots.assets.join("skills");
         let mut policy_roots = vec![];
         if skills.is_dir() {
@@ -2813,6 +2914,7 @@ pub fn run(
             &directory,
             &policy,
             selection.source.as_str(),
+            placement.assignment.as_ref(),
         )?;
         Ok(expansion)
     })();

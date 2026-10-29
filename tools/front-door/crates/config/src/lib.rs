@@ -8,6 +8,7 @@
 mod account_sync;
 mod domains;
 mod edit;
+pub mod experiment;
 mod gc;
 mod github_policy;
 mod history;

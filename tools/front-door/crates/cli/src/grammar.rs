@@ -986,6 +986,21 @@ pub enum Telemetry {
     Ingest(Ingest),
     /// Report quota mileage and effective token rates from quota history and ingested usage
     Mileage(Mileage),
+    /// Compare experiment arms using offline pipeline outcomes
+    #[command(subcommand)]
+    Experiments(Experiments),
+}
+#[derive(Debug, Subcommand)]
+pub enum Experiments {
+    /// Show one experiment's stratified arm comparison
+    Show(ExperimentShow),
+}
+#[derive(Debug, Args)]
+pub struct ExperimentShow {
+    /// Experiment name from domains.fabric.pipelines.experiment
+    pub id: String,
+    #[command(flatten)]
+    pub pipeline: PipelineOptions,
 }
 #[derive(Debug, Subcommand)]
 pub enum Prices {

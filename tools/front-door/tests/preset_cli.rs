@@ -851,3 +851,214 @@ fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
     assert_eq!(submitted, [serde_json::json!("provider")], "{result}");
     Ok(())
 }
+
+/// A project whose automatic selection picks `gate-only`, with `config` as the
+/// state's `domains.fabric` settings. Gate presets finish without a provider.
+struct ExperimentProject {
+    temp: tempfile::TempDir,
+    project: PathBuf,
+    state: PathBuf,
+    prompt: PathBuf,
+}
+
+impl ExperimentProject {
+    fn new(config: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project)?;
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "seed",
+            ],
+        ] {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .output()?;
+            assert!(output.status.success());
+        }
+        let presets = project.join(".provenant/presets");
+        std::fs::create_dir_all(&presets)?;
+        std::fs::write(
+            project.join(".provenant/preset-rules.toml"),
+            "[select]\ndefault = { preset = 'gate-only' }\n",
+        )?;
+        std::fs::write(
+            presets.join("gate-only.toml"),
+            "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n",
+        )?;
+        std::fs::write(
+            presets.join("gate-alt.toml"),
+            "stages = [{ id = 'review', kind = 'gate', condition = { type = 'budget' } }]\n",
+        )?;
+        let state = temp.path().join("state");
+        std::fs::create_dir(&state)?;
+        std::fs::write(
+            state.join("config.toml"),
+            format!("schema_version = 1\n{config}"),
+        )?;
+        // Underspecified work takes the readiness route, so the brief states its criteria.
+        let prompt = project.join("ready.md");
+        std::fs::write(
+            &prompt,
+            "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. \
+             Verification uses cargo test. Design decision is settled.\n",
+        )?;
+        Ok(Self {
+            temp,
+            project,
+            state,
+            prompt,
+        })
+    }
+
+    fn run(&self, extra: &[&str]) -> std::io::Result<std::process::Output> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        Command::new(env!("CARGO_BIN_EXE_provenant"))
+            .current_dir(&self.project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&self.state)
+            .args(["run", "--prompt-file"])
+            .arg(&self.prompt)
+            .args(["--wait", "1s"])
+            .args(extra)
+            .output()
+    }
+
+    /// The graph the run would submit, plus its stderr. `--explain` stops after
+    /// placement and binding, so these tests need no provider or graph state.
+    fn document(
+        &self,
+        extra: &[&str],
+    ) -> Result<(serde_json::Value, String), Box<dyn std::error::Error>> {
+        let mut args = vec!["--explain"];
+        args.extend_from_slice(extra);
+        let output = self.run(&args)?;
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "{}\n{stderr}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        Ok((result["data"]["graph"].clone(), stderr))
+    }
+}
+
+const WORK_ITEM: &str = "0123456789abcdef0123456789abcdef";
+
+#[test]
+fn task_id_assigns_the_candidate_arm_and_labels_the_run() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = ExperimentProject::new(
+        "[domains.fabric.pipelines.experiment.trial]\ncontrol = 'gate-only'\narms = { candidate = 'gate-alt' }\nassign = 'epsilon'\nepsilon = 1.0\n",
+    )?;
+    let (document, stderr) =
+        fixture.document(&["--task-id", WORK_ITEM, "--risk-tier", "routine"])?;
+    assert!(!stderr.contains("experiment"), "{stderr}");
+    assert_eq!(document["context"]["experiment_id"], "trial", "{document}");
+    assert_eq!(
+        document["context"]["experiment_arm"], "candidate",
+        "{document}"
+    );
+    assert_eq!(
+        document["context"]["pattern"], "experiment:trial:candidate",
+        "{document}"
+    );
+    assert_eq!(document["context"]["work_item"], WORK_ITEM, "{document}");
+    Ok(())
+}
+
+#[test]
+fn shadow_executes_the_control_graph_and_records_the_candidate()
+-> Result<(), Box<dyn std::error::Error>> {
+    let shadowed = ExperimentProject::new(
+        "[domains.fabric.pipelines.experiment.trial]\ncontrol = 'gate-only'\narms = { candidate = 'gate-alt' }\nassign = 'epsilon'\nepsilon = 1.0\nshadow = true\n",
+    )?;
+    let plain = ExperimentProject::new("")?;
+    let (shadow, _) = shadowed.document(&["--task-id", WORK_ITEM, "--risk-tier", "routine"])?;
+    let (control, _) = plain.document(&["--task-id", WORK_ITEM, "--risk-tier", "routine"])?;
+    assert_eq!(shadow["context"]["experiment_arm"], "control", "{shadow}");
+    assert_eq!(shadow["context"]["shadow_of"], "candidate", "{shadow}");
+    assert!(
+        control["context"].get("experiment_arm").is_none(),
+        "{control}"
+    );
+    // Shadow labels differ, but the executed graph is the control graph.
+    assert_eq!(shadow["nodes"], control["nodes"], "{shadow}");
+    Ok(())
+}
+
+#[test]
+fn invalid_entry_warns_by_name_and_the_valid_one_still_applies()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = ExperimentProject::new(
+        "[domains.fabric.pipelines.experiment.broken]\ncontrol = 'gate-only'\n\n[domains.fabric.pipelines.experiment.trial]\ncontrol = 'gate-only'\narms = { candidate = 'gate-alt' }\nassign = 'epsilon'\nepsilon = 1.0\n",
+    )?;
+    let (document, stderr) =
+        fixture.document(&["--task-id", WORK_ITEM, "--risk-tier", "routine"])?;
+    assert!(stderr.contains("broken"), "{stderr}");
+    assert_eq!(document["context"]["experiment_id"], "trial", "{document}");
+    Ok(())
+}
+
+#[test]
+fn unknown_arm_preset_and_unlisted_tier_are_named_in_the_run()
+-> Result<(), Box<dyn std::error::Error>> {
+    let unknown = ExperimentProject::new(
+        "[domains.fabric.pipelines.experiment.trial]\ncontrol = 'gate-only'\narms = { candidate = 'no-such-preset' }\nassign = 'epsilon'\nepsilon = 1.0\n",
+    )?;
+    let (document, stderr) =
+        unknown.document(&["--task-id", WORK_ITEM, "--risk-tier", "routine"])?;
+    assert!(stderr.contains("no-such-preset"), "{stderr}");
+    assert!(
+        document["context"].get("experiment_arm").is_none(),
+        "{document}"
+    );
+
+    let tiered = ExperimentProject::new(
+        "[domains.fabric.pipelines.experiment.trial]\ncontrol = 'gate-only'\narms = { candidate = 'gate-alt' }\nassign = 'epsilon'\nepsilon = 1.0\ntiers = ['crucial']\n",
+    )?;
+    let (document, _) = tiered.document(&["--task-id", WORK_ITEM, "--risk-tier", "routine"])?;
+    assert!(
+        document["context"].get("experiment_arm").is_none(),
+        "{document}"
+    );
+    assert!(
+        document["provenance"]["experiments"]
+            .as_array()
+            .is_some_and(|skips| skips
+                .iter()
+                .any(|skip| skip.as_str().is_some_and(|s| s.contains("trial")))),
+        "{document}"
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_preset_and_no_task_id_never_read_experiments() -> Result<(), Box<dyn std::error::Error>>
+{
+    // The table is invalid, so any read of it would produce a warning.
+    let fixture = ExperimentProject::new(
+        "[domains.fabric.pipelines.experiment.broken]\ncontrol = 'gate-only'\n",
+    )?;
+    let (document, stderr) = fixture.document(&[])?;
+    assert!(!stderr.contains("broken"), "{stderr}");
+    assert!(
+        document["context"].get("experiment_arm").is_none(),
+        "{document}"
+    );
+    let output = fixture.run(&["--preset", "gate-only", "--task-id", WORK_ITEM])?;
+    assert!(!output.status.success());
+    Ok(())
+}

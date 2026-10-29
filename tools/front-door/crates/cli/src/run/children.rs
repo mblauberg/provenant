@@ -613,6 +613,7 @@ mod tests {
         let (roots, session, child, parent) = chair_fixture(temp.path(), &call)?;
         session.store.create(&child, &call)?;
         let digest = parent_digest(&roots, session.context.project_id, parent, &call)?;
+        let mut refusal = None;
         let scan = scan_queued(
             &session.store,
             vec![child.run_id],
@@ -625,6 +626,11 @@ mod tests {
             &Arc::new(Mutex::new(None)),
             &call,
             |id, validated| {
+                let result = check_chair_run_id(&session, &roots, id, validated, &call);
+                if matches!(result, Err(ChairRunError::Unauthorised(_))) {
+                    refusal = Some(());
+                }
+                result.map_err(Fail::from)?;
                 inherit_child_chair(&session, &roots, (parent, digest), id, validated, &call)?;
                 Ok(vec![])
             },
@@ -639,10 +645,17 @@ mod tests {
             Ok(())
         })
         .map_err(|f| f.message)?;
+        assert_eq!(refusal, Some(()));
         assert!(matches!(
-            session.store.record(child.attempts[0].attempt_id, &call)?.state,
-            run::AttemptState::Terminal { outcome: run::Outcome::Rejected, reason: Some(reason), .. }
-                if reason.contains("host-derived")
+            session
+                .store
+                .record(child.attempts[0].attempt_id, &call)?
+                .state,
+            run::AttemptState::Terminal {
+                outcome: run::Outcome::Rejected,
+                reason: Some(_),
+                ..
+            }
         ));
         // Retained legacy host rows remain readable and replayable. A different
         // request cannot shadow that row or repair it to another digest.
@@ -1150,7 +1163,10 @@ mod tests {
             .map_err(|f| f.message)?;
             let failure = result.unwrap_err();
             assert_eq!(failure.status, Status::Refused);
-            assert!(failure.message.contains("source identity"), "{failure:?}");
+            assert!(matches!(
+                check_chair_source(&session.store, &canonical, &prior),
+                Err(ChairSourceError)
+            ));
         }
         Ok(())
     }
@@ -1255,7 +1271,11 @@ mod tests {
         .map_err(|f| f.message)?;
         let failure = result.unwrap_err();
         assert_eq!(failure.status, Status::Refused);
-        assert!(failure.message.contains("host-derived"), "{failure:?}");
+        let child_request = session.store.request(child.run_id, &call)?;
+        assert!(matches!(
+            check_chair_run_id(&session, &roots, child.run_id, &child_request, &call),
+            Err(ChairRunError::Unauthorised(_))
+        ));
         assert_eq!(
             session
                 .store

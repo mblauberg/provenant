@@ -410,8 +410,17 @@ pub(crate) enum EdgeError {
     Pacing(&'static str),
     #[error("{0}")]
     GoAllowance(String),
-    #[error("{0}")]
-    AccountProfile(String),
+    #[error("{message}")]
+    AccountProfile {
+        kind: AccountProfileError,
+        message: String,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccountProfileError {
+    Unknown,
+    Ambiguous,
+    Duplicate,
 }
 impl From<provenant_config::ConfigError> for EdgeError {
     fn from(error: provenant_config::ConfigError) -> Self {
@@ -749,25 +758,31 @@ fn resolve_account_reference(
     }
     match matches.as_slice() {
         [(_, entry)] => Ok(format!("{}/{}", entry.adapter, entry.key)),
-        [] => Err(EdgeError::AccountProfile(format!(
-            "{field}: unknown account `{name}`; valid accounts: {}",
-            if valid.is_empty() {
-                "(none registered)"
-            } else {
-                &valid
-            }
-        ))),
-        _ => Err(EdgeError::AccountProfile(format!(
-            "{field}: account `{name}` is ambiguous: {}; use adapter/key or a unique label",
-            matches
-                .iter()
-                .map(|(id, entry)| format!(
-                    "{}/{} (label: {}, entry: {})",
-                    entry.adapter, entry.key, entry.label, id
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+        [] => Err(EdgeError::AccountProfile {
+            kind: AccountProfileError::Unknown,
+            message: format!(
+                "{field}: unknown account `{name}`; valid accounts: {}",
+                if valid.is_empty() {
+                    "(none registered)"
+                } else {
+                    &valid
+                }
+            ),
+        }),
+        _ => Err(EdgeError::AccountProfile {
+            kind: AccountProfileError::Ambiguous,
+            message: format!(
+                "{field}: account `{name}` is ambiguous: {}; use adapter/key or a unique label",
+                matches
+                    .iter()
+                    .map(|(id, entry)| format!(
+                        "{}/{} (label: {}, entry: {})",
+                        entry.adapter, entry.key, entry.label, id
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }),
     }
 }
 
@@ -787,9 +802,10 @@ fn resolve_pacing_accounts(
             )?;
         }
         if accounts.insert(key.clone(), profile).is_some() {
-            return Err(EdgeError::AccountProfile(format!(
-                "multiple pacing profiles resolve to account key `{key}`"
-            )));
+            return Err(EdgeError::AccountProfile {
+                kind: AccountProfileError::Duplicate,
+                message: format!("multiple pacing profiles resolve to account key `{key}`"),
+            });
         }
     }
     config.pacing.accounts = accounts;
@@ -875,6 +891,22 @@ fn with_context<T>(
 }
 /// Resolve one production dispatch against fresh provider facts and validated
 /// task access. Account aliases must already have been mapped to registered keys.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DispatchError {
+    #[error("no route outside model families {} and family separation is required", .0.join(", "))]
+    FamilySeparation(Vec<String>),
+    #[error(transparent)]
+    Edge(Box<EdgeError>),
+    #[error(transparent)]
+    Catalogue(#[from] RoutingError),
+}
+
+impl From<EdgeError> for DispatchError {
+    fn from(error: EdgeError) -> Self {
+        Self::Edge(Box::new(error))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_dispatch(
     request: &provenant_routing::RouteRequest,
@@ -885,8 +917,8 @@ pub(crate) fn resolve_dispatch(
     access: &[AccessContext<'_>],
     host: &str,
     excluded_families: Option<(&[String], bool)>,
-) -> Result<provenant_records::ResolvedRoute, String> {
-    let catalogue = Catalogue::bundled().map_err(|error| error.to_string())?;
+) -> Result<provenant_records::ResolvedRoute, DispatchError> {
+    let catalogue = Catalogue::bundled()?;
     let (excluded_families, required) = match excluded_families {
         Some((families, required)) => (Some(families), required),
         None => (None, false),
@@ -910,12 +942,10 @@ pub(crate) fn resolve_dispatch(
         host,
         &excluded,
     );
-    let exhausted =
-        matches!(&selected, Err(error) if error.starts_with("no eligible pool member:"));
+    let exhausted = matches!(&selected, Err(EdgeError::Routing(error)) if error.code() == "no_eligible_pool_member");
     if required && exhausted {
-        Err(format!(
-            "no route outside model families {} and family separation is required",
-            excluded_families.unwrap_or_default().join(", ")
+        Err(DispatchError::FamilySeparation(
+            excluded_families.unwrap_or_default().to_vec(),
         ))
     } else if !excluded.is_empty() && exhausted {
         resolve_dispatch_excluding(
@@ -928,8 +958,9 @@ pub(crate) fn resolve_dispatch(
             host,
             &[],
         )
+        .map_err(DispatchError::from)
     } else {
-        selected
+        selected.map_err(DispatchError::from)
     }
 }
 
@@ -947,7 +978,7 @@ fn resolve_dispatch_excluding(
     access: &[AccessContext<'_>],
     host: &str,
     initial_exclusions: &[ModelId],
-) -> Result<provenant_records::ResolvedRoute, String> {
+) -> Result<provenant_records::ResolvedRoute, EdgeError> {
     let mut requested_models = Vec::new();
     if let RouteChoice::Model(model) = &request.choice {
         requested_models.push(model.clone());
@@ -1090,7 +1121,6 @@ fn resolve_dispatch_excluding(
             Ok(resolved)
         },
     )
-    .map_err(|error| error.to_string())
 }
 
 fn record_pool_redraw(
@@ -1810,9 +1840,12 @@ pub fn run(
                 EdgeError::Routing(_) | EdgeError::Unresolved { .. } | EdgeError::Pacing(_) => {
                     (Outcome::Invalid, "INVALID")
                 }
-                EdgeError::Config(_)
-                | EdgeError::PacingConfig(_)
-                | EdgeError::AccountProfile(_) => (Outcome::Invalid, "CONFIG"),
+                EdgeError::Config(_) | EdgeError::PacingConfig(_) => (Outcome::Invalid, "CONFIG"),
+                EdgeError::AccountProfile { kind, .. } => match kind {
+                    AccountProfileError::Unknown
+                    | AccountProfileError::Ambiguous
+                    | AccountProfileError::Duplicate => (Outcome::Invalid, "CONFIG"),
+                },
                 _ => (Outcome::Error, "IO"),
             };
             let mut result = CommandResult::new(name, status, None);
@@ -2182,16 +2215,16 @@ mod route_tests {
             serde_json::json!({"pacing":{"free":{"codex":{"deadline":{"reset_of":"shared"}}}}}),
         ] {
             let mut config: RoutingConfig = serde_json::from_value(config).unwrap();
-            let error = super::resolve_pacing_accounts(&mut config, &settings)
-                .unwrap_err()
-                .to_string();
-            for expected in [
-                "ambiguous",
-                "claude/shared",
-                "codex/other",
-                "agy/shared",
-                "adapter/key",
-            ] {
+            let error = super::resolve_pacing_accounts(&mut config, &settings).unwrap_err();
+            assert!(matches!(
+                error,
+                super::EdgeError::AccountProfile {
+                    kind: super::AccountProfileError::Ambiguous,
+                    ..
+                }
+            ));
+            let error = error.to_string();
+            for expected in ["claude/shared", "codex/other", "agy/shared", "adapter/key"] {
                 assert!(error.contains(expected), "{error}");
             }
         }
@@ -2223,12 +2256,13 @@ mod route_tests {
             super::resolve_account_reference("opencode/zen", "test", &settings).unwrap(),
             "opencode/zen"
         );
-        assert!(
-            super::resolve_account_reference("shared", "test", &settings)
-                .unwrap_err()
-                .to_string()
-                .contains("ambiguous")
-        );
+        assert!(matches!(
+            super::resolve_account_reference("shared", "test", &settings),
+            Err(super::EdgeError::AccountProfile {
+                kind: super::AccountProfileError::Ambiguous,
+                ..
+            })
+        ));
         for (input, expected) in [
             ("office", "claude/shared"),
             ("claude/shared", "claude/shared"),
@@ -2392,8 +2426,10 @@ mod route_tests {
             None,
         )?)
         .unwrap_err();
+        let error = error.to_string();
         assert!(error.contains("minimax-m3.1-flash") && error.contains("$20"));
         let error = resolve(&request(Some("opencode/opencode-go/unlisted"), None)?).unwrap_err();
+        let error = error.to_string();
         assert!(error.contains("opencode-go/unlisted") && error.contains("unknown"));
         let fallback = |model: Option<&str>, route: Option<&str>| -> Result<(), Box<dyn Error>> {
             let request = super::RouteRequest {
@@ -2423,7 +2459,9 @@ mod route_tests {
             &path,
             "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n",
         )?;
-        let error = resolve(&request(None, Some("test"))?).unwrap_err();
+        let error = resolve(&request(None, Some("test"))?)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("minimax-m3.1-flash") && error.contains("glm-5.3-flash"),
             "{error}"
@@ -2925,10 +2963,7 @@ mod route_tests {
         )
         .err()
         .ok_or("a required separation must not substitute")?;
-        assert!(
-            refused.contains("family separation is required"),
-            "{refused}"
-        );
+        assert!(matches!(refused, super::DispatchError::FamilySeparation(_)));
         let fallback = resolve(&[family, other])?;
         assert!(matches!(
             fallback.readiness,

@@ -430,6 +430,29 @@ authority.
 - Merging, syncing or conflict-free replication of checkpoint revisions; the
   history is one writer's bounded chain.
 
+## Pipeline experiments
+
+Projects may opt into named experiments at
+`domains.fabric.pipelines.experiment.NAME`. Each experiment names a control,
+candidate preset arms and a `hash` or `epsilon` assignment strategy. Experiments
+apply only to automatic selection with `--task-id`, because `--preset` cannot
+be combined with `--task-id`. The control must be the rule-selected preset, and
+each arm must pass the same selection and expansion as an ordinary run. Assignment
+is skipped for work without a risk tier and for terminal-tier work. It stops at
+expiry, and at the configured spend budget or cost ratio, using outcome rows from
+the last 14 days read once per run. Unreadable spend skips the experiment.
+
+Graph context retains the experiment ID, assignment seed, executed arm and, in
+shadow mode, the candidate as `shadow_of`. The executed arm is the outcome label
+in ordinary work-context telemetry.
+
+Shadow mode assigns the candidate for comparison but expands and runs the
+control graph, so candidate work cannot gate acceptance. The shadow graph is
+the same as a plain control run, and its outcomes are recorded as control.
+`telemetry experiments show ID` uses the offline pipeline outcomes and ranking
+inputs; arm comparisons remain advisory and are stratified by risk tier and
+task kind. It cannot yet pair shadow runs with their candidate.
+
 ## Lane delivery evidence
 
 Lane delivery modes and later `lane deliver` pickup use the run owner's sealed

@@ -1315,11 +1315,14 @@ fn candidate(
         },
     })
 }
+/// Confidential work needs a model that does not train on prompts. Free routes
+/// are excluded as well: their terms are promotional and can change without notice.
 fn privacy_allowed(model: &ModelId, confidential: bool, catalogue: &Catalogue) -> bool {
     !confidential
-        || catalogue
-            .model(model)
-            .is_some_and(|row| row.trains_on_prompts == Some(false))
+        || (!catalogue.is_free_model(model)
+            && catalogue
+                .model(model)
+                .is_some_and(|row| row.trains_on_prompts == Some(false)))
 }
 /// Resolve a route with a dispatch seed. The operation ID and task index make
 /// retries repeat the same weighted choice without storing rotation state.
@@ -1635,11 +1638,10 @@ fn classify_pool(
             classified.routes.push(None);
             continue;
         }
-        let exclusion = if !privacy_allowed(&member.model, request.confidential, context.catalogue)
-        {
-            Some(("confidential", "confidential model"))
-        } else if context.catalogue.is_free_model(&member.model) && !request.allow_free {
+        let exclusion = if context.catalogue.is_free_model(&member.model) && !request.allow_free {
             Some(("free", "free model disabled"))
+        } else if !privacy_allowed(&member.model, request.confidential, context.catalogue) {
+            Some(("confidential", "confidential model"))
         } else if effort
             .as_deref()
             .is_some_and(|value| !member.efforts.iter().any(|allowed| allowed == value))

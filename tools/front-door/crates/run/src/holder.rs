@@ -1417,8 +1417,9 @@ mod writer_recovery_tests {
                     "{result:?}"
                 );
             } else {
+                let refusal = object_import_refused(&attempt, scope)?.ok_or("refusal evidence")?;
                 assert!(
-                    matches!(result?.state, AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. } if reason.contains("three attempts"))
+                    matches!(result?.state, AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. } if reason == refusal)
                 );
             }
             let journal: serde_json::Value = crate::db::decode(

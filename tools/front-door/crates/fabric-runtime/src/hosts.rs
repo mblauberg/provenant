@@ -624,6 +624,13 @@ pub struct PeerResultError {
     pub extra: provenant_records::ExtraFields,
 }
 
+impl PeerResultError {
+    /// Preserve the refusal code supplied by the peer.
+    pub fn code(&self) -> &'static str {
+        self.error.code()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PeerResponse<R = PeerResult> {
     #[serde(flatten)]
@@ -1141,6 +1148,7 @@ mod tests {
             peers: Default::default(),
             graph: Default::default(),
             lanes: Default::default(),
+            pipelines: Default::default(),
             limits: crate::config::Limits {
                 body_bytes: 65536,
                 input_frame_bytes: 1048576,

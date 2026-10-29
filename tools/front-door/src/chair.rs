@@ -939,6 +939,10 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("a lane cannot append a chair log")]
+struct LaneAppend;
+
 fn log_run(command: ChairLog, globals: &Globals) -> u8 {
     use provenant_workflow::log::{Append, LogStore, Retention};
     let read_only = matches!(command, ChairLog::List { .. });
@@ -978,7 +982,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                     &resolved.project,
                 )?;
                 if context.in_lane {
-                    return Err("a lane cannot append a chair log".into());
+                    return Err(LaneAppend.into());
                 }
                 let (input, warnings) = log_request(&file)?;
                 let config = provenant_config::read_with_domains(
@@ -1073,10 +1077,14 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
             )
         }
         Err(error) => {
-            let code = match error.downcast_ref::<provenant_workflow::log::Error>() {
-                Some(provenant_workflow::log::Error::Expired) => "CHAIR_LOG_EXPIRED",
-                Some(provenant_workflow::log::Error::Future) => "CHAIR_LOG_FUTURE",
-                _ => "CHAIR_LOG",
+            let code = if error.is::<LaneAppend>() {
+                "IN_LANE"
+            } else {
+                match error.downcast_ref::<provenant_workflow::log::Error>() {
+                    Some(provenant_workflow::log::Error::Expired) => "CHAIR_LOG_EXPIRED",
+                    Some(provenant_workflow::log::Error::Future) => "CHAIR_LOG_FUTURE",
+                    _ => "CHAIR_LOG",
+                }
             };
             crate::fail(path, Outcome::Refused, code, &error.to_string(), globals)
         }

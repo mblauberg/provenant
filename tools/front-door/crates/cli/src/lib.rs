@@ -1632,7 +1632,7 @@ mod tests {
             let result = run::check_flag_capabilities(&request, None);
             assert_eq!(result.is_err(), refused, "{model}");
             if let Err(fail) = result {
-                assert!(fail.message.contains("does not support effort"), "{model}");
+                assert_eq!(fail.kind.code(), "UNSUPPORTED", "{model}");
             }
         }
     }
@@ -1655,7 +1655,7 @@ mod tests {
             panic!("run")
         };
         let fail = run::check_flag_capabilities(&request, None).unwrap_err();
-        assert!(fail.message.contains("cursor does not support effort"));
+        assert_eq!(fail.kind.code(), "UNSUPPORTED");
     }
     #[test]
     fn pool_effort_is_refused_only_when_no_member_takes_it() {
@@ -1992,6 +1992,24 @@ mod tests {
             };
             assert!(stats.by.is_some(), "{dimension}");
         }
+    }
+    #[test]
+    fn experiment_show_parses_the_experiment_id_and_comparison_options() {
+        let invocation = valid(&[
+            "telemetry",
+            "experiments",
+            "show",
+            "retry-shape",
+            "--min-samples",
+            "5",
+        ]);
+        let Command::Telemetry(Telemetry::Experiments(Experiments::Show(show))) =
+            invocation.command
+        else {
+            panic!("telemetry experiments show");
+        };
+        assert_eq!(show.id, "retry-shape");
+        assert_eq!(show.pipeline.min_samples, 5);
     }
     #[test]
     fn paging_recovery_and_removal_require_explicit_scopes() {
