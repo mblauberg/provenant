@@ -198,6 +198,11 @@ fn node_bound(
             clock_reanchor_reason: Some(String::new()),
             state: CiState::Unavailable,
             summary: String::new(),
+            head_sha: Some(String::new()),
+            failed_checks: Vec::new(),
+            check_names: Vec::new(),
+            truncated: true,
+            elapsed_seconds: u64::MAX,
         }),
         title: Some(node.title.clone().unwrap_or_else(|| node.id.clone())),
         worktree: node.worktree.clone(),
@@ -269,6 +274,24 @@ fn node_bound(
     }
     if ci {
         bytes += HOST_ID_BYTES + 64 + OUTPUT_FIELD_BYTES;
+        if let Some(GateCondition::Ci {
+            failed_checks_max_bytes,
+            max_failed_checks,
+            ..
+        }) = &node.condition
+        {
+            // Evidence array and its findings projection, including per-finding keys.
+            // A failed-check object costs at least 32 bytes, even with no text.
+            let max_bytes =
+                failed_checks_max_bytes.unwrap_or_else(ci::default_failed_checks_max_bytes);
+            let count = max_failed_checks
+                .unwrap_or_else(ci::default_max_failed_checks)
+                .min(max_bytes / 32);
+            bytes = bytes
+                .saturating_add(max_bytes.saturating_mul(2))
+                .saturating_add(count.saturating_mul(256))
+                .saturating_add(OUTPUT_FIELD_BYTES + 512);
+        }
     }
     if !boundary {
         let excerpt = if node.composite.is_some() {

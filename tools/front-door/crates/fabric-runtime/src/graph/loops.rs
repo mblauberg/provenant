@@ -298,6 +298,16 @@ fn expand_loops(
                 }
             }
             child.inputs.retain(|i| !i.node.starts_with("previous."));
+            // External CI subjects are checked against the expanded graph.
+            // The isolated body check below has only the local namespace.
+            if let Some(GateCondition::Ci { target, .. }) = &mut child.condition
+                && let CiTarget::Node {
+                    node: target_node, ..
+                } = target
+                && !spec.body.iter().any(|node| &node.id == target_node)
+            {
+                *target = CiTarget::Ref(target_node.clone());
+            }
         }
         let body_document = GraphDocument {
             nodes: body,
@@ -377,6 +387,22 @@ fn expand_loops(
                     if !child.depends_on.contains(source) {
                         child.depends_on.push(source.clone());
                     }
+                }
+                if let Some(GateCondition::Ci {
+                    target: CiTarget::Node { node: target, .. },
+                    ..
+                }) = &mut child.condition
+                {
+                    *target = if let Some(previous) = target.strip_prefix("previous.") {
+                        if round == 1 {
+                            return Err("previous CI target requires an initial node binding");
+                        }
+                        id(&node.id, round - 1, previous)
+                    } else if spec.body.iter().any(|node| &node.id == target) {
+                        id(&node.id, round, target)
+                    } else {
+                        target.clone()
+                    };
                 }
                 if child.depends_on.is_empty() {
                     if round == 1 {

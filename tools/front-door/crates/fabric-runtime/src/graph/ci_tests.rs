@@ -28,6 +28,9 @@ struct Owner {
     tick: bool,
     backoff: CiPollBackoff,
     policies: std::collections::BTreeMap<String, CiPollBackoff>,
+    branch: Option<String>,
+    commit: Option<String>,
+    prompts: Vec<String>,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -37,7 +40,7 @@ impl CiStatus for Owner {
             host_monotonic_micros: self.monotonic_micros,
         })
     }
-    fn observe_ci(&mut self, target: &str, checks: &[String]) -> CiObservation {
+    fn observe_ci(&mut self, target: &str, checks: &[String], _: usize, _: usize) -> CiObservation {
         self.targets.push(target.into());
         self.checks.push(checks.to_vec());
         self.observations
@@ -73,13 +76,14 @@ impl AttemptOwner for Owner {
     fn observe_or_start(
         &mut self,
         _: &AttemptKey,
-        _: NodeInput<'_>,
+        input: NodeInput<'_>,
         _: &GraphRoute,
         _: AccessMode,
         _: Option<&str>,
         _: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
         self.attempts += 1;
+        self.prompts.push(input.prompt.into());
         Ok(AttemptObservation::Terminal {
             attempt_ref: None,
             outcome: AttemptOutcome::Succeeded,
@@ -87,8 +91,8 @@ impl AttemptOwner for Owner {
             result: None,
             result_warning: None,
             result_path: None,
-            branch: None,
-            commit: None,
+            branch: self.branch.clone(),
+            commit: self.commit.clone(),
         })
     }
 }
@@ -103,6 +107,10 @@ fn observation(state: CiState, summary: &str) -> CiObservation {
         extra: Default::default(),
         state,
         summary: summary.into(),
+        head_sha: Some("a".repeat(40)),
+        failed_checks: Vec::new(),
+        check_names: Vec::new(),
+        truncated: false,
     }
 }
 
@@ -356,7 +364,10 @@ fn ci_backoff_never_delays_the_gate_timeout() {
             initial_seconds: u64::MAX,
             max_seconds: u64::MAX,
         },
-        observations: VecDeque::from([observation(CiState::Pending, "waiting")]),
+        observations: VecDeque::from([
+            observation(CiState::Pending, "waiting"),
+            observation(CiState::Pending, "still waiting"),
+        ]),
         ..Default::default()
     };
     let mut journal = Journal::default();
@@ -366,8 +377,18 @@ fn ci_backoff_never_delays_the_gate_timeout() {
     owner.monotonic_micros = 120_000_000;
     let done = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(done.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(
+        done.checkpoint.nodes[0]
+            .gate
+            .as_ref()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("timeout")
+    );
     assert!(done.checkpoint.wake_at.is_none());
-    assert_eq!(owner.targets.len(), 1);
+    // The deadline poll observes once more so a newer head could restart it.
+    assert_eq!(owner.targets.len(), 2);
 }
 
 #[test]
@@ -394,8 +415,8 @@ fn ci_pending_times_out_using_original_observation_time() {
         node.gate.as_ref().unwrap().reason.as_deref(),
         Some("timeout")
     );
-    assert_eq!(node.ci.as_ref().unwrap().summary, "waiting");
-    assert_eq!(owner.targets.len(), 1);
+    assert_eq!(node.ci.as_ref().unwrap().summary, "still waiting");
+    assert_eq!(owner.targets.len(), 2);
 }
 
 #[test]
@@ -406,6 +427,7 @@ fn ci_timeout_ignores_wall_clock_steps_and_reanchors_after_boot() {
             observation(CiState::Pending, "forward wall step"),
             observation(CiState::Pending, "backward wall step"),
             observation(CiState::Pending, "new boot"),
+            observation(CiState::Pending, "timeout"),
         ]),
         boot: "boot-a".into(),
         ..Default::default()
@@ -476,7 +498,7 @@ fn ci_document_checks_reach_host_query() {
 #[test]
 fn ci_backwards_clock_reanchors_are_bounded() {
     let mut owner = Owner {
-        observations: VecDeque::from(vec![observation(CiState::Pending, "waiting"); 4]),
+        observations: VecDeque::from(vec![observation(CiState::Pending, "waiting"); 5]),
         monotonic_micros: 100,
         ..Default::default()
     };
@@ -511,7 +533,7 @@ fn ci_backwards_clock_reanchors_are_bounded() {
         evidence.clock_reanchor_reason.as_deref(),
         Some("host monotonic clock moved backwards")
     );
-    assert_eq!(owner.targets.len(), 4);
+    assert_eq!(owner.targets.len(), 5);
 }
 
 #[test]
@@ -592,6 +614,8 @@ fn ci_validation_rejects_bad_targets_and_timeouts() {
             target: target.into(),
             checks: vec![],
             timeout_seconds: timeout,
+            failed_checks_max_bytes: None,
+            max_failed_checks: None,
         });
         assert_eq!(
             validate_plan(&doc).err(),
@@ -606,5 +630,373 @@ fn ci_validation_rejects_bad_targets_and_timeouts() {
             ..
         })
     ));
+    assert!(validate_plan(&doc).is_ok());
+}
+
+fn node_target_document() -> GraphDocument {
+    serde_json::from_value(serde_json::json!({
+        "schema_version":1, "graph_id":"node-ci", "nodes":[
+            {"id":"write","access":"worktree_write","worktree":"lane","prompt":"write",
+             "delivery":"pr","route":{"adapter":"fixture","model":"fixture/model"}},
+            {"id":"ci","kind":"gate","access":"read_only","depends_on":["write"],
+             "condition":{"type":"ci","target":{"node":"write"}}}
+        ]
+    }))
+    .unwrap()
+}
+
+#[test]
+fn ci_node_target_resolves_delivered_branch_and_records_head() {
+    let mut owner = Owner {
+        branch: Some("delivered/topic".into()),
+        commit: Some("a".repeat(40)),
+        observations: VecDeque::from([observation(CiState::Passed, "green")]),
+        ..Default::default()
+    };
+    let doc = node_target_document();
+    let mut journal = Journal::default();
+    let result = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.targets, ["refs/heads/delivered/topic"]);
+    assert_eq!(owner.attempts, 1);
+    let ci = &result.checkpoint.nodes[1];
+    assert_eq!(
+        ci.ci.as_ref().unwrap().head_sha.as_deref(),
+        Some("a".repeat(40).as_str())
+    );
+    assert!(ci.attempts.is_empty());
+    assert!(ci.outputs.as_ref().unwrap().findings.is_empty());
+    assert_eq!(
+        advance(&doc, &mut owner, &mut journal).unwrap().checkpoint,
+        result.checkpoint
+    );
+}
+
+#[test]
+fn ci_node_target_requires_a_delivered_branch_and_upstream_dependency() {
+    let doc = node_target_document();
+    let mut owner = Owner::default();
+    let result = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+    assert_eq!(result.checkpoint.nodes[1].state, NodeState::Failed);
+    assert!(
+        result.checkpoint.nodes[1]
+            .ci
+            .as_ref()
+            .unwrap()
+            .summary
+            .contains("no delivered branch")
+    );
+    assert!(owner.targets.is_empty());
+    let mut doc = doc;
+    doc.nodes[1].depends_on.clear();
+    assert_eq!(
+        validate_plan(&doc).err(),
+        Some("CI target node must be an upstream dependency")
+    );
+}
+
+#[test]
+fn ci_new_head_supersedes_pin_and_restarts_timeout() {
+    let mut next = observation(CiState::Pending, "new push");
+    next.head_sha = Some("b".repeat(40));
+    let mut green = observation(CiState::Passed, "new head green");
+    green.head_sha = next.head_sha.clone();
+    let mut owner = Owner {
+        branch: Some("delivered/topic".into()),
+        commit: Some("a".repeat(40)),
+        observations: VecDeque::from([observation(CiState::Pending, "old push"), next, green]),
+        ..Default::default()
+    };
+    let doc = node_target_document();
+    let mut journal = Journal::default();
+    advance(&doc, &mut owner, &mut journal).unwrap();
+    owner.monotonic_micros = 7_200_000_000;
+    let next = advance(&doc, &mut owner, &mut journal).unwrap();
+    let ci = next.checkpoint.nodes[1].ci.as_ref().unwrap();
+    assert_eq!(ci.head_sha.as_deref(), Some("b".repeat(40).as_str()));
+    assert_eq!(ci.elapsed_seconds, 0);
+    assert_eq!(next.checkpoint.nodes[1].state, NodeState::Running);
+    owner.monotonic_micros += 10_000_000;
+    let done = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(done.checkpoint.nodes[1].state, NodeState::Succeeded);
+    assert_eq!(
+        done.checkpoint.nodes[1]
+            .ci
+            .as_ref()
+            .unwrap()
+            .elapsed_seconds,
+        10
+    );
+    assert_eq!(owner.attempts, 1);
+}
+
+#[test]
+fn ci_tick_gates_node_target_and_new_head_resets_backoff() {
+    let mut next = observation(CiState::Pending, "new push");
+    next.head_sha = Some("b".repeat(40));
+    let mut owner = Owner {
+        tick: true,
+        backoff: CiPollBackoff {
+            initial_seconds: 60,
+            max_seconds: 240,
+        },
+        branch: Some("delivered/topic".into()),
+        commit: Some("a".repeat(40)),
+        observations: VecDeque::from([
+            observation(CiState::Pending, "old push"),
+            observation(CiState::Pending, "old push still"),
+            next,
+        ]),
+        ..Default::default()
+    };
+    let doc = node_target_document();
+    let mut journal = Journal::default();
+    let first = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.wake_at.unwrap().as_micros(), 60_000_000);
+    owner.wall_seconds = 59;
+    advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.targets.len(), 1);
+    owner.wall_seconds = 60;
+    owner.monotonic_micros = 60_000_000;
+    let second = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(second.checkpoint.wake_at.unwrap().as_micros(), 180_000_000);
+    assert_eq!(
+        second.checkpoint.nodes[1]
+            .ci
+            .as_ref()
+            .unwrap()
+            .pending_observations,
+        2
+    );
+    owner.wall_seconds = 180;
+    owner.monotonic_micros = 180_000_000;
+    let third = advance(&doc, &mut owner, &mut journal).unwrap();
+    let ci = third.checkpoint.nodes[1].ci.as_ref().unwrap();
+    assert_eq!(ci.head_sha.as_deref(), Some("b".repeat(40).as_str()));
+    assert_eq!(ci.elapsed_seconds, 0);
+    assert_eq!(ci.pending_observations, 1);
+    assert_eq!(
+        ci.first_observed_stamp
+            .as_ref()
+            .unwrap()
+            .host_monotonic_micros,
+        180_000_000
+    );
+    assert_eq!(third.checkpoint.wake_at.unwrap().as_micros(), 240_000_000);
+    assert_eq!(owner.targets, ["refs/heads/delivered/topic"; 3]);
+}
+
+fn failed_check() -> CiFailedCheck {
+    CiFailedCheck {
+        extra: Default::default(),
+        name: "test".into(),
+        url: Some("https://checks/1".into()),
+        excerpt: "assertion failed".into(),
+    }
+}
+
+#[test]
+fn ci_failure_findings_reach_repair_input_and_survive_resume() {
+    let mut doc = document();
+    doc.nodes[0].on_fail = Some("repair".into());
+    doc.nodes.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"repair","access":"read_only","prompt":"repair","depends_on":["ci"],
+            "inputs":[{"node":"ci","outputs":["findings"]}],
+            "route":{"adapter":"fixture","model":"fixture/model"}
+        }))
+        .unwrap(),
+    );
+    let mut failure = observation(CiState::Failed, "failed");
+    failure.failed_checks.push(failed_check());
+    let mut owner = Owner {
+        observations: VecDeque::from([failure]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    let outputs = run.checkpoint.nodes[0].outputs.as_ref().unwrap();
+    assert_eq!(outputs.findings[0].summary, "test: assertion failed");
+    assert_eq!(outputs.findings[0].extra["url"], "https://checks/1");
+    assert!(owner.prompts[0].contains("assertion failed"));
+    assert!(owner.prompts[0].contains("https://checks/1"));
+    assert_eq!(
+        advance(&doc, &mut owner, &mut journal).unwrap().checkpoint,
+        run.checkpoint
+    );
+}
+
+#[test]
+fn ci_failed_checks_obey_count_and_canonical_byte_caps_with_unicode_and_escapes() {
+    let mut check = failed_check();
+    check.name = "é\"\\\n".repeat(20);
+    check.url = Some("https://checks/\"é".repeat(20));
+    check.excerpt = "assert\n\"🦀\\".repeat(300);
+    for cap in 2..512 {
+        for count in 0..=3 {
+            let mut failure = observation(CiState::Failed, "failed");
+            failure.failed_checks = vec![check.clone(); 4];
+            failure.bound_failed_checks(cap, count);
+            assert!(
+                canonical_len(&failure.failed_checks) <= cap,
+                "cap={cap}, count={count}"
+            );
+            assert!(failure.failed_checks.len() <= count);
+            assert!(failure.truncated);
+        }
+    }
+}
+
+#[test]
+fn ci_configured_evidence_caps_apply_before_checkpoint_and_findings() {
+    let mut doc = document();
+    let Some(GateCondition::Ci {
+        failed_checks_max_bytes,
+        max_failed_checks,
+        ..
+    }) = &mut doc.nodes[0].condition
+    else {
+        unreachable!()
+    };
+    *failed_checks_max_bytes = Some(150);
+    *max_failed_checks = Some(1);
+    let mut failure = observation(CiState::Failed, "failed");
+    failure.failed_checks = vec![failed_check(); 10];
+    let mut owner = Owner {
+        observations: VecDeque::from([failure]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    let ci = run.checkpoint.nodes[0].ci.as_ref().unwrap();
+    assert_eq!(ci.failed_checks.len(), 1);
+    assert_eq!(ci.extra["failed_checks_policy"]["max_bytes"], 150);
+    assert_eq!(
+        ci.extra["failed_checks_policy"]["max_bytes_source"],
+        "condition"
+    );
+    assert!(canonical_len(&ci.failed_checks) <= 150);
+    assert!(ci.truncated);
+    assert!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings[0].contains("truncated"));
+    assert_eq!(
+        advance(&doc, &mut owner, &mut journal).unwrap().checkpoint,
+        run.checkpoint
+    );
+}
+
+#[test]
+fn ci_node_targets_follow_composite_and_loop_namespaces() {
+    let doc = node_target_document();
+    let nested: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"nested","nodes":[{
+            "id":"bundle","kind":"composite","access":"read_only",
+            "composite":{"nodes":doc.nodes,"exports":[{"node":"ci","outputs":["verdict"]}]}
+        }]
+    }))
+    .unwrap();
+    let expanded = nested.expanded(&Default::default()).unwrap();
+    let ci = expanded
+        .nodes
+        .iter()
+        .find(|n| n.id == "bundle--ci")
+        .unwrap();
+    assert!(
+        matches!(&ci.condition, Some(GateCondition::Ci { target:CiTarget::Node { node,.. },.. }) if node=="bundle--write")
+    );
+    for target in ["write", "repair"] {
+        let mut doc = node_target_document();
+        doc.nodes.pop();
+        doc.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"repairs","kind":"loop","access":"read_only","depends_on":["write"],
+                "loop":{"max_rounds":2,"until":"ci","body":[
+                    {"id":"repair","access":"worktree_write","worktree":"lane","prompt":"repair",
+                     "route":{"adapter":"fixture","model":"fixture/model"}},
+                    {"id":"ci","kind":"gate","access":"read_only","depends_on":["repair"],
+                     "condition":{"type":"ci","target":{"node":target}}}
+                ]}
+            }))
+            .unwrap(),
+        );
+        let expanded = doc.expanded(&Default::default()).unwrap();
+        for round in 1..=2 {
+            let ci = expanded
+                .nodes
+                .iter()
+                .find(|n| n.id == format!("repairs--r{round}--ci"))
+                .unwrap();
+            let expected = if target == "write" {
+                "write".into()
+            } else {
+                format!("repairs--r{round}--repair")
+            };
+            assert!(
+                matches!(&ci.condition, Some(GateCondition::Ci { target:CiTarget::Node { node,.. },.. }) if node==&expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn ci_evidence_configuration_cannot_outgrow_the_checkpoint_envelope() {
+    let mut doc = document();
+    let Some(GateCondition::Ci {
+        failed_checks_max_bytes,
+        ..
+    }) = &mut doc.nodes[0].condition
+    else {
+        unreachable!()
+    };
+    *failed_checks_max_bytes = Some(usize::MAX);
+    assert!(
+        doc.expanded(&Default::default())
+            .unwrap_err()
+            .contains("checkpoint could reach")
+    );
+}
+
+#[test]
+fn ci_cannot_pass_without_a_head_sha() {
+    let mut green = observation(CiState::Passed, "green");
+    green.head_sha = None;
+    let mut owner = Owner {
+        observations: VecDeque::from([green]),
+        ..Default::default()
+    };
+    let run = advance(&document(), &mut owner, &mut Journal::default()).unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(
+        run.checkpoint.nodes[0].ci.as_ref().unwrap().state,
+        CiState::Unavailable
+    );
+}
+
+#[test]
+fn ci_composite_target_resolves_a_transitive_external_ancestor() {
+    let mut doc = node_target_document();
+    let mut gate = doc.nodes.pop().unwrap();
+    gate.depends_on.clear();
+    doc.nodes.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"bridge","access":"read_only","prompt":"bridge","depends_on":["write"],
+            "route":{"adapter":"fixture","model":"fixture/model"}
+        }))
+        .unwrap(),
+    );
+    doc.nodes.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"bundle","kind":"composite","access":"read_only","depends_on":["bridge"],
+            "composite":{"nodes":[gate],"exports":[{"node":"ci","outputs":["verdict"]}]}
+        }))
+        .unwrap(),
+    );
+    let expanded = doc.expanded(&Default::default()).unwrap();
+    let gate = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "bundle--ci")
+        .unwrap();
+    assert!(
+        matches!(&gate.condition,Some(GateCondition::Ci {target:CiTarget::Node {node,..},..}) if node=="write")
+    );
     assert!(validate_plan(&doc).is_ok());
 }

@@ -19,6 +19,7 @@ pub(super) fn expand(
     expanded.nodes = children(
         &document.nodes,
         "",
+        &BTreeMap::new(),
         &[],
         &[],
         None,
@@ -68,6 +69,7 @@ fn reference(
 fn children(
     nodes: &[GraphNode],
     prefix: &str,
+    inherited_names: &BTreeMap<String, String>,
     incoming: &[String],
     inputs: &[GraphInput],
     source: Option<&SourceBinding>,
@@ -83,6 +85,12 @@ fn children(
     if locals.len() != nodes.len() {
         return Err("node id".into());
     }
+    let mut visible_names = inherited_names.clone();
+    visible_names.extend(
+        nodes
+            .iter()
+            .map(|node| (node.id.clone(), scoped(prefix, &node.id))),
+    );
     let composite_bound = depth > 0 || nodes.iter().any(|node| node.composite.is_some());
     let mut expanded = Vec::new();
     for original in nodes {
@@ -108,6 +116,17 @@ fn children(
         {
             *source = reference(prefix, source, &locals, incoming)
                 .unwrap_or_else(|| scoped(prefix, source));
+        }
+        if let Some(GateCondition::Ci {
+            target: CiTarget::Node { node: target, .. },
+            ..
+        }) = &mut node.condition
+            && !target.starts_with("previous.")
+        {
+            *target = visible_names
+                .get(target)
+                .cloned()
+                .unwrap_or_else(|| target.clone());
         }
         if original
             .depends_on
@@ -160,6 +179,7 @@ fn children(
             spec.body = children(
                 &spec.body,
                 "",
+                &visible_names,
                 &[],
                 &[],
                 None,
@@ -221,6 +241,7 @@ fn children(
             let body = children(
                 &spec.nodes,
                 &node.id,
+                &visible_names,
                 &node.depends_on,
                 &node.inputs,
                 node.source.as_ref(),
