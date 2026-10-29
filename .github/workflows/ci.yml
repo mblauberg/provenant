@@ -105,8 +105,11 @@ jobs:
           cat "$RUNNER_TEMP/doc-truth.txt"
           cat "$RUNNER_TEMP/doc-truth.txt" >> "$GITHUB_STEP_SUMMARY"
 
-  rust:
-    name: Rust front door
+  # Lint and test run as separate jobs so they overlap; the tests are further
+  # split into two hash partitions. `ci-status` gates on both jobs, and a
+  # matrix job reports success only when every partition succeeds.
+  rust-lint:
+    name: Rust lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -131,7 +134,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: tools/front-door
-          shared-key: front-door-ci
+          shared-key: front-door-ci-lint
           add-job-id-key: false
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
       - name: Check formatting
@@ -139,8 +142,6 @@ jobs:
         run: cargo fmt --all --check
       - name: Check isolated test features
         working-directory: tools/front-door
-        env:
-          CARGO_BUILD_JOBS: "2"
         run: |
           # Separate invocations prevent workspace feature unification from hiding missing dependencies.
           for crate in provenant-cli provenant-run provenant-supervisor provenant-os; do
@@ -154,15 +155,50 @@ jobs:
       - name: Lint
         working-directory: tools/front-door
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  rust:
+    name: Rust front door (${{ matrix.partition }}/2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
+      CARGO_INCREMENTAL: "0"
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: front-door-ci
+          add-job-id-key: false
+          save-if: ${{ matrix.partition == 1 && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request') }}
       - name: Install nextest
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-nextest@0.9.149
+      # Hash partitioning is stable per test, and each runner keeps its own
+      # serial-process group, so the serial worktree suites split across both.
       - name: Run workspace tests
         working-directory: tools/front-door
-        run: cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording
+        run: cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2
       # Cargo does not include example tests in the default nextest selection.
       - name: Run provider recording example test
+        if: matrix.partition == 1
         working-directory: tools/front-door
         run: |
           cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
@@ -170,7 +206,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rust-nextest-junit
+          name: rust-nextest-junit-${{ matrix.partition }}
           path: tools/front-door/target/nextest/ci/junit.xml
           if-no-files-found: warn
 
@@ -222,7 +258,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+        run: rustup toolchain install 1.99.1 --profile minimal
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -230,9 +266,6 @@ jobs:
           shared-key: front-door-ci-macos
           add-job-id-key: false
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
-      - name: Lint Rust workspace
-        working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Install nextest
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -276,9 +309,6 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-providers) & test(claude_network_on)'
-      - name: Run menu bar tests
-        working-directory: apps/quota-menubar
-        run: swift test
 
   # #1339: stripping proc-macro dylibs broke macOS release builds at install
   # time. Exercise the front door's release build without LTO for speed; the
@@ -301,7 +331,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
       # Use a separate uncached target: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.
       - name: Build release front door
@@ -342,6 +372,22 @@ jobs:
               exit 1
             fi
           fi
+      # Lint and the menu bar tests live here, not in the macOS test job, to
+      # balance the two macOS jobs. Clippy uses its own cached target, apart
+      # from the uncached release target above.
+      - name: Cache Rust lint artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: tools/front-door
+          shared-key: front-door-ci-macos-lint
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
+      - name: Lint Rust workspace
+        working-directory: tools/front-door
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Run menu bar tests
+        working-directory: apps/quota-menubar
+        run: swift test
 
   generic-checks:
     name: Spelling, workflows and Markdown links
@@ -435,6 +481,7 @@ jobs:
     needs:
       - macos-scope
       - generated-reference
+      - rust-lint
       - rust
       - rust-macos-tests
       - rust-macos-release
