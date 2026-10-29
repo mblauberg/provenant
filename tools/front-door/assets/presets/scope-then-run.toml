@@ -1,6 +1,6 @@
 stages = [
-  { id = "scout", preset = "scout-swarm", parameters = { width = "${width}", read_roots = "${read_roots}" } },
-  { id = "scope", role = "scoper" },
+  { id = "scout", preset = "scout-swarm", parameters = { width = "${width}", external = "${external}", read_roots = "${read_roots}" } },
+  { id = "scope", role = "plan.scope" },
   { id = "ready", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "scope", outputs = ["verdict"] }] },
   { id = "run", preset = "generator-evaluator", depends_on = ["scope"], inputs = [{ node = "scope", outputs = ["result"] }], parameters = { worktree = "${worktree}", scope = "${write_scope}", base = "${base}", spec = "${spec}", delivery = "${delivery}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
 ]
@@ -16,6 +16,7 @@ tags = ["research", "write", "review"]
 
 [parameters]
 width = { type = "integer", default = 3, min = 1, max = 32, doc = "Number of parallel scouts." }
+external = { type = "integer", default = 1, min = 0, max = 8, doc = "External scouts that research outward; 0 opts out." }
 read_roots = { type = "list", default = [], doc = "Extra read roots for the scouts." }
 worktree = { type = "string", default = "", doc = "Registered writer worktree for the run stage." }
 write_scope = { type = "list", default = ["."], doc = "Literal relative paths the writer may change." }
@@ -24,13 +25,3 @@ spec = { type = "string", default = "", doc = "Issue number or file holding any 
 delivery = { type = "string", default = "none", doc = "Delivery mode for the writer commit." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
-
-[roles.scoper]
-tier = "senior"
-prompt = """
-Turn the scouts' evidence into one approved slice for: ${prompt}
-State the acceptance criteria, the literal write scope, the checks that prove
-completion and any open question the user must answer. If a question blocks
-the work, say so under NEEDS-USER and finish with VERDICT: FAIL; otherwise
-finish with VERDICT: PASS.
-"""

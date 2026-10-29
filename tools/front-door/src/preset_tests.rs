@@ -1,6 +1,6 @@
-use super::preset::{Layers, expand};
+use super::preset::{Expansion, Layers, expand};
 use provenant_fabric_runtime::read_roots::ReadRoots;
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn nodes(name: &str) -> serde_json::Value {
     expand(&Layers::empty(), name, "brief", &[])
@@ -198,7 +198,15 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
-        let limits = config.limits.clone();
+        let mut limits = config.limits.clone();
+        // A preset may raise the expansion depth for its own graph.
+        if let Some(depth) = document
+            .limits
+            .as_ref()
+            .and_then(|limits| limits["expansion_depth"].as_u64())
+        {
+            limits.expansion_depth = depth as usize;
+        }
         let inspection = document
             .inspect(&limits)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -321,7 +329,15 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
     ] {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
-        let limits = config.limits.clone();
+        let mut limits = config.limits.clone();
+        // A preset may raise the expansion depth for its own graph.
+        if let Some(depth) = document
+            .limits
+            .as_ref()
+            .and_then(|limits| limits["expansion_depth"].as_u64())
+        {
+            limits.expansion_depth = depth as usize;
+        }
         let mut owner = PresetOwner::default();
         let mut journal = PresetJournal::default();
         let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &config.budget)
@@ -1083,26 +1099,316 @@ fn child_stage_errors_name_the_stage_path_and_origin() {
     assert_eq!(result.origins["expanded.child.parameters.width"], "--set");
 }
 
+fn council_with_roles(roles: &str) -> Result<Expansion, String> {
+    let mut layers = Layers::empty();
+    layers.roles.add("repo roles.toml", roles)?;
+    expand(
+        &layers,
+        "review-council",
+        "the change",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.lenses=[{name='x',tier='senior',when=''}]".into(),
+        ],
+    )
+}
+
 #[test]
 fn unknown_prompt_files_and_foreign_distinct_from_values_are_refused() {
-    let error = council(
-        &[
-            "parameters.worktree='/repo/lane'",
-            "parameters.lenses=[{name='x',tier='senior',prompt_file='code-review/lenses/nope',distinct_from='',when=''}]",
-        ],
-        false,
+    let error = council_with_roles(
+        "[roles.\"lens.x\"]\nextends = 'lens'\nprompt_file = 'code-review/lenses/nope'\n",
     )
     .unwrap_err();
-    assert!(error.contains("prompt_file"), "{error}");
-    let error = council(
-        &[
-            "parameters.worktree='/repo/lane'",
-            "parameters.lenses=[{name='x',tier='senior',prompt_file='code-review/lenses/tests',distinct_from='reviewer',when=''}]",
-        ],
-        false,
-    )
-    .unwrap_err();
+    assert!(error.contains("unknown reference"), "{error}");
+    let error =
+        council_with_roles("[roles.\"lens.x\"]\nextends = 'lens'\ndistinct_from = 'reviewer'\n")
+            .unwrap_err();
     assert!(error.contains("distinct_from"), "{error}");
+}
+
+fn node<'a>(document: &'a Value, id: &str) -> &'a Value {
+    fn find<'a>(nodes: &'a [Value], id: &str) -> Option<&'a Value> {
+        for node in nodes {
+            if node["id"] == id {
+                return Some(node);
+            }
+            for path in ["/composite/nodes", "/loop/body"] {
+                if let Some(found) = node
+                    .pointer(path)
+                    .and_then(Value::as_array)
+                    .and_then(|children| find(children, id))
+                {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    find(document["nodes"].as_array().unwrap(), id).unwrap_or_else(|| panic!("no node {id}"))
+}
+
+#[test]
+fn a_repository_role_extends_a_library_role_and_reports_its_origin() {
+    let expanded = council_with_roles(
+        "[roles.\"lens.x\"]\nextends = 'lens.tests'\ncard = 'House lens for x.'\n",
+    )
+    .unwrap();
+    let lens = node(&expanded.document, "lens-x");
+    assert_eq!(lens["role"], "lens.x");
+    let prompt = lens["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with("House lens for x."), "{prompt}");
+    // The parent's references carry over.
+    assert!(prompt.contains("# Reviewer context"));
+    assert_eq!(expanded.origins["roles.lens.x"], "repo roles.toml");
+    assert_eq!(expanded.origins["roles.review.synthesis"], "bundled");
+    assert_eq!(
+        expanded.roles["lens.x"]["extends"],
+        json!(["lens.x", "lens.tests", "lens"])
+    );
+}
+
+#[test]
+fn an_unknown_dotted_role_falls_back_to_its_family_and_an_unknown_role_is_refused() {
+    let expanded = council_with_roles("").unwrap();
+    // `lens.x` is not in the library, so it uses the generic `lens` role.
+    assert_eq!(node(&expanded.document, "lens-x")["role"], "lens.x");
+    let mut layers = Layers::empty();
+    layers
+        .insert("test", "bad", "stages = [{ id = 'a', role = 'nope' }]\n")
+        .unwrap();
+    let error = expand(&layers, "bad", "brief", &[]).unwrap_err();
+    assert!(error.contains("unknown preset role: nope"), "{error}");
+}
+
+fn skill_root(files: &[(&str, &str)]) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "provenant-skill-root-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    for (path, text) in files {
+        let path = root.join("skills").join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    root
+}
+
+#[test]
+fn editing_a_skill_reference_changes_the_recorded_digest() {
+    let root = skill_root(&[
+        ("scope/references/researcher.md", "Look outward.\n"),
+        ("scope/references/scout-areas.md", "Areas.\n"),
+    ]);
+    let roles = "[roles.\"scout.external\"]\ncard = 'x'\n";
+    let digest = |text: &str| {
+        std::fs::write(root.join("skills/scope/references/researcher.md"), text).unwrap();
+        let mut layers = Layers::empty();
+        layers.roles.skill_root = Some(root.clone());
+        layers.roles.add("repo", roles).unwrap();
+        let expanded = expand(&layers, "scout-swarm", "brief", &[]).unwrap();
+        let used = expanded.roles["scout.external"].clone();
+        let reference = used["references"][0].clone();
+        assert_eq!(reference["ref"], "skill:scope/references/researcher.md");
+        (
+            reference["digest"].clone(),
+            used["digest"].clone(),
+            expanded,
+        )
+    };
+    let (first, role_first, _) = digest("Look outward.\n");
+    let (second, role_second, expanded) = digest("Look outward, then inward.\n");
+    assert_ne!(first, second);
+    assert_ne!(role_first, role_second);
+    // The disk text, not the compiled copy, reaches the brief.
+    assert!(
+        node(&expanded.document, "external")["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("then inward")
+    );
+}
+
+#[test]
+fn unknown_and_out_of_root_references_are_refused() {
+    let root = skill_root(&[("scope/references/real.md", "real\n")]);
+    std::fs::write(root.join("outside.md"), "secret\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        root.join("outside.md"),
+        root.join("skills/scope/references/link.md"),
+    )
+    .unwrap();
+    let mut library = crate::preset_roles::RoleLibrary::bundled();
+    library.skill_root = Some(root);
+    assert!(library.reference("skill:scope/references/real.md").is_ok());
+    for bad in [
+        "skill:scope/references/missing.md",
+        "skill:scope/../../outside.md",
+        "skill:/etc/passwd",
+        "skill:scope",
+        "scope/references/real.md",
+        "skill:scope/references/link.md",
+    ] {
+        assert!(library.reference(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn the_external_scout_falls_back_and_records_a_substitution_without_a_web_route() {
+    let mut layers = Layers::empty();
+    layers.known_routes = Some(["senior".to_owned()].into());
+    let expanded = expand(&layers, "scout-swarm", "brief", &[]).unwrap();
+    let scout = node(&expanded.document, "external");
+    assert_eq!(scout["route"]["alias"], "junior");
+    assert_eq!(expanded.substitutions.len(), 1);
+    assert_eq!(expanded.substitutions[0]["requested"], "web");
+    layers.known_routes = Some(["web".to_owned()].into());
+    let expanded = expand(&layers, "scout-swarm", "brief", &[]).unwrap();
+    assert_eq!(
+        node(&expanded.document, "external")["route"]["alias"],
+        "web"
+    );
+    assert!(expanded.substitutions.is_empty());
+    let prompt = node(&expanded.document, "external")["prompt"]
+        .as_str()
+        .unwrap();
+    assert!(prompt.contains("URL"));
+}
+
+#[test]
+fn opting_out_of_external_scouts_is_an_explicit_recorded_parameter() {
+    let layers = Layers::empty();
+    let default = expand(&layers, "scout-swarm", "brief", &[]).unwrap();
+    assert_eq!(default.origins.get("parameters.external"), None);
+    let opted = expand(
+        &layers,
+        "scout-swarm",
+        "brief",
+        &["parameters.external=0".into()],
+    )
+    .unwrap();
+    assert_eq!(opted.origins["parameters.external"], "--set");
+    assert!(!opted.document.to_string().contains("\"id\":\"external\""));
+    // The synthesis still follows the codebase scouts.
+    assert!(opted.document.to_string().contains("scouts"));
+}
+
+#[test]
+fn review_council_verifies_between_the_lenses_and_the_synthesis() {
+    let expanded = expand(
+        &Layers::empty(),
+        "review-council",
+        "the change",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    let ids: Vec<&str> = expanded.document["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["subject", "lenses", "verify", "synthesis"]);
+    let verify = node(&expanded.document, "verify");
+    assert_eq!(verify["family"], "cross");
+    assert_eq!(verify["route"]["alias"], "verifier");
+    assert_eq!(verify["depends_on"], json!(["lenses"]));
+    let synthesis = node(&expanded.document, "synthesis");
+    assert_eq!(synthesis["depends_on"], json!(["verify", "subject"]));
+    assert!(
+        synthesis["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("disposition")
+    );
+    let skipped = expand(
+        &Layers::empty(),
+        "review-council",
+        "the change",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.verifiers=0".into(),
+        ],
+    )
+    .unwrap();
+    let synthesis = node(&skipped.document, "synthesis");
+    assert_eq!(synthesis["depends_on"], json!(["lenses", "subject"]));
+    assert!(!skipped.document.to_string().contains("\"id\":\"verify\""));
+}
+
+#[test]
+fn the_verifier_route_falls_back_to_senior_when_undefined() {
+    let mut layers = Layers::empty();
+    layers.known_routes = Some(["senior".to_owned()].into());
+    let expanded = expand(
+        &layers,
+        "review-council",
+        "the change",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        node(&expanded.document, "verify")["route"]["alias"],
+        "senior"
+    );
+    assert_eq!(expanded.substitutions[0]["node"], "verify");
+}
+
+#[test]
+fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
+    let expanded = expand(
+        &Layers::empty(),
+        "generator-evaluator",
+        "the slice",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.evaluator='principal'".into(),
+        ],
+    )
+    .unwrap();
+    let evaluate = node(&expanded.document, "evaluate");
+    assert_eq!(evaluate["kind"], "synthesise");
+    assert_eq!(evaluate["route"]["alias"], "principal");
+    assert_eq!(evaluate["source"]["node"], "implement");
+    assert!(
+        evaluate["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("accepted, rejected or deferred")
+    );
+}
+
+#[test]
+fn roles_view_lists_the_library_and_one_role() {
+    let layers = Layers::empty();
+    let all = layers.roles_view(None).unwrap();
+    let names: Vec<&str> = all["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|role| role["name"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "plan.scope",
+        "plan.slices",
+        "scout.codebase",
+        "scout.external",
+        "lens.tests",
+        "review.verify",
+    ] {
+        assert!(names.contains(&expected), "{expected}");
+    }
+    let one = layers.roles_view(Some("plan.scope")).unwrap();
+    assert_eq!(one["extends"], json!(["plan"]));
+    assert_eq!(one["origin"], "bundled");
+    assert!(
+        one["references"][0]["digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
 }
 
 #[test]

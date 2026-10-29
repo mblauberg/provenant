@@ -45,9 +45,9 @@ all role briefs and defaults.
 
 | Preset | Main parameters | Default work |
 | --- | --- | --- |
-| `scout-swarm` | `width = 4`, `read_roots = []` | Junior scouts, then senior synthesis |
-| `generator-evaluator` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `delivery = "none"` | Senior writer, then the lens list over the commit it wrote |
-| `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `risk_tier`, `review_shape`, `risk_tags` | One lens role fanned out over `lenses`, then senior synthesis |
+| `scout-swarm` | `width = 4`, `external = 1`, `read_roots = []` | Junior codebase scouts and external scouts that research outward, then senior synthesis |
+| `generator-evaluator` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `evaluator = "senior"`, `delivery = "none"` | Senior writer, the lens list over the commit it wrote, then an evaluator that gives each finding a disposition |
+| `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `verifiers = 1`, `verifier_tier = "verifier"`, `risk_tier`, `review_shape`, `risk_tags` | One `lens.NAME` role per lens, a cross-family verifier that tries to falsify the findings, then senior synthesis with a disposition per finding |
 | `scope-then-run` | `width = 3`, `worktree`, `write_scope = ["."]`, `base`, `spec`, `delivery = "none"` | Scouts, a senior scoping stage, a verdict gate (a blocked scope launches no writer), then `generator-evaluator` |
 | `big-batch` | `lanes`, `batch_worktree`, `base`, `spec`, `integration_branch = "batch/graph"`, `width = 4`, `read_roots = []` | Scout, one writer lane per `lanes` entry, council, principal refactor, two-round repair and review |
 
@@ -142,9 +142,47 @@ cycles, more than eight levels and more than 512 nodes including children.
 `single`, `chain`, `fan-out` and `fan-out-synthesise` are ordinary stage
 presets, so any stage of your own can run them.
 
+## Role library
+
+A stage names a role with `role = "NAME"`. Roles come from three layers, later
+layers winning: the bundled `assets/roles.toml`, the user's
+`$XDG_CONFIG_HOME/provenant/roles.toml` and the repository's
+`.provenant/roles.toml`. A preset's own `[roles.NAME]` table wins over all of
+them, and an inline role may `extends` a library role (even one of its own
+name). A role is a profile: `extends` copies the parent and the child's keys
+replace it. List the library with origins and reference digests using
+`provenant preset show --roles`, or one role with `preset show --roles NAME`.
+
+A dotted name is a variant, so an undefined `lens.house` uses `lens`.
+`plan` takes a purpose through its variants `plan.scope`, `plan.slices`,
+`plan.review` and `plan.research`; scouts are `scout.codebase` and
+`scout.external`; lenses are `lens.NAME`; `review.verify`, `review.synthesis`,
+`review.evaluator` and `write.implement` cover the rest.
+
+| Role field | Effect |
+| --- | --- |
+| `card` | Short text placed first in the brief |
+| `references` | `{ ref = "skill:SKILL/PATH", when = "HINT", inline = false }`. The compiler resolves the reference against the release `skills/` directory, records its content digest in the graph and lists it in the brief with its `when` hint. `inline = true` puts the text in the brief. An unknown reference, a `..` part or a link leaving `skills/` is refused. |
+| `family` | `any`, `distinct_from_writer` (see below) or `cross`, which records on the node that its route should serve another model family. |
+| `fallback_tier` | Used, and recorded as a substitution, when `tier` names a route the routing configuration does not define. |
+
+Each node carries `role` and `role_digest`, and `run --explain` lists every
+reference with its digest, so editing a reference changes the digest. A node
+that uses references may read the release `skills/` directory, read-only. A
+role grants no authority: access, write scope and routing come from the stage.
+
+`scout.external` looks outward: it asks for primary sources with URLs and
+dates. It needs a web-capable route; define a routing route named `web`.
+Without one the compiler falls back to `junior` and `run --explain` prints the
+substitution. `--set parameters.external=0` opts out of external scouts, which
+the origins record. The same applies to `verifier_tier` in `review-council`:
+define a route named `verifier` in another model family. The graph's
+`distinct_from` separates only a node from its writer, so cross-family review
+is a routing property for now.
+
 ## Review and source subjects
 
-`review-council` runs one `lens` role over the `lenses` list: correctness
+`review-council` runs one `lens.NAME` role per entry of the `lenses` list: correctness
 against the spec, design fit and reuse, simplicity, conventions and
 readability, and tests. `security-privacy` and `concurrency-data-errors` join
 when `risk_tags` names `security` or `concurrency`, and `adversarial` joins
@@ -155,7 +193,10 @@ repository, treats the diff stat and slices as navigation aids rather than the
 scope, reads callers, existing utilities and architecture, and reviews against
 the `spec` (an issue number or file) and the `base` (the diff reference). The
 subject node states both. Prompts live in
-`skills/code-review/references/lenses/`.
+`skills/code-review/references/lenses/`. After the lenses a verifier tries to
+falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
+finding one disposition: accepted, rejected or deferred, with a reason. The
+`generator-evaluator` evaluator does the same over its lens findings.
 
 The routing review shapes are canonical for who reviews. A lens whose `tier`
 is empty takes its pool from the shape that `routing.review.select_shape`

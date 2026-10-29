@@ -1,6 +1,6 @@
 integration_branch = "${integration_branch}"
 stages = [
-  { id = "scout", preset = "scout-swarm", parameters = { width = "${width}", read_roots = "${read_roots}" } },
+  { id = "scout", preset = "scout-swarm", parameters = { width = "${width}", external = "${external}", read_roots = "${read_roots}" } },
   { id = "lanes", parallel = [
     { id = "lane", for_each = "${lanes}", preset = "generator-evaluator", parameters = { worktree = "${item.worktree}", scope = "${item.scope}", spec = "${item.spec}", base = "${base}", delivery = "integrate:${integration_branch}" } },
   ] },
@@ -26,6 +26,7 @@ tags = ["write", "review", "batch"]
 
 [parameters]
 width = { type = "integer", default = 4, min = 1, max = 32, doc = "Scouts in the opening swarm." }
+external = { type = "integer", default = 1, min = 0, max = 8, doc = "External scouts that research outward; 0 opts out." }
 read_roots = { type = "list", default = [], doc = "Extra read roots for the scouts." }
 integration_branch = { type = "string", default = "batch/graph", doc = "Branch that lane heads integrate into." }
 batch_worktree = { type = "string", default = "", doc = "Registered worktree for the serial refactor and repair." }

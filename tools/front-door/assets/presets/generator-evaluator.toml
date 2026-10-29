@@ -1,19 +1,20 @@
 stages = [
-  { id = "implement", role = "implementer" },
+  { id = "implement", role = "write.implement" },
   { id = "lens", parallel = [
-    { id = "lens", for_each = "${lenses}", role = "lane-lens" },
+    { id = "lens", for_each = "${lenses}", role = "lens.${item.name}", outputs = ["result", "commit"] },
   ], source = { type = "node", node = "implement" } },
+  { id = "evaluate", role = "review.evaluator", source = { type = "node", node = "implement" } },
 ]
 exports = [
   { node = "implement", outputs = ["branch", "commit"] },
-  { node = "lens", outputs = ["result", "findings", "verdict"] },
+  { node = "evaluate", outputs = ["result", "findings", "verdict"] },
 ]
 
 [pattern]
 level = "default"
-summary = "A senior writer implements one bounded slice; independent lenses evaluate the commit it wrote."
+summary = "A senior writer implements one bounded slice; independent lenses and an evaluator judge the commit it wrote, with a disposition for each finding."
 citations = ["Anthropic, harness design for long-running applications (generator and evaluator roles)"]
-cost = "1 writer attempt + one attempt per lens"
+cost = "1 writer attempt + one attempt per lens + 1 evaluator"
 select_when = "An approved slice has a spec and a registered writer worktree."
 tags = ["write", "review"]
 
@@ -26,35 +27,9 @@ base = { type = "string", default = "", doc = "Diff reference the slice is measu
 spec = { type = "string", default = "", doc = "Issue number or file holding the acceptance criteria." }
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
+evaluator = { type = "string", default = "senior", doc = "Routing tier for the evaluator that reconciles the lens findings." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 lenses = [
-  { name = "correctness-spec", tier = "", prompt_file = "code-review/lenses/correctness-spec", distinct_from = "writer", when = "" },
-  { name = "simplicity", tier = "", prompt_file = "code-review/lenses/simplicity", distinct_from = "", when = "" },
+  { name = "correctness-spec", tier = "", when = "" },
+  { name = "simplicity", tier = "", when = "" },
 ]
-
-[roles.implementer]
-tier = "senior"
-access = "worktree_write"
-worktree = "${worktree}"
-write_scope = "${scope}"
-source = "${subject}"
-delivery = "${delivery}"
-acceptance_checks = ["Run targeted tests and required static checks", "Commit the completed slice"]
-prompt = """
-Implement one bounded approved slice: ${prompt}
-Spec (acceptance criteria): ${spec}
-Keep changes within the supplied write scope. Run targeted checks and commit.
-"""
-
-[roles.lane-lens]
-tier = "${item.tier}"
-worktree = "${worktree}"
-distinct_from = "${item.distinct_from}"
-outputs = ["result", "commit"]
-prompt_file = ["code-review/reviewer-context", "${item.prompt_file}"]
-prompt = """
-Lens: ${item.name}. Subject: the implementation of ${prompt}
-Base (diff reference): ${base}
-Spec (acceptance criteria): ${spec}
-Check correctness against the spec as well as this lens.
-"""

@@ -1,0 +1,264 @@
+# The bundled role library. A role is a reusable profile a preset stage names
+# with `role = "..."`. Roles grant no authority: access, routing and write
+# scope are still set by the stage that uses the role.
+#
+# Fields:
+#   extends        parent role; the child's keys replace the parent's.
+#   kind, tier, access, outputs, inputs   copied onto the node.
+#   family         "any", "distinct_from_writer" (route away from the model
+#                  family that served the stage's writer) or "cross" (recorded
+#                  on the node; the stage's route selects another family).
+#   card           short text always placed at the head of the brief.
+#   references     [{ ref = "skill:<skill>/<path>", when = "<hint>", inline = bool }]
+#                  The compiler resolves each against the release root, records
+#                  its content digest in the graph and lists it in the brief.
+#                  inline = true places the file text in the brief.
+#   fallback_tier  tier used (and recorded as a substitution) when `tier`
+#                  names a route the configuration does not define.
+# A dotted name is a variant: an unknown `lens.mine` falls back to `lens`.
+# Repository (.provenant/roles.toml) and user (XDG config provenant/roles.toml)
+# files add or replace roles; list them with `provenant preset show --roles`.
+
+[roles.scout]
+tier = "junior"
+access = "read_only"
+title = "Scout ${index}"
+
+[roles."scout.codebase"]
+extends = "scout"
+card = "You are a codebase scout. Read, map and cite; never edit."
+read_roots = "${read_roots}"
+references = [{ ref = "skill:scope/references/scout-areas.md", when = "before choosing your area", inline = true }]
+prompt = """
+Scout assignment ${index}. Research read-only: ${prompt}
+Use judgement to choose a distinct useful scope. Map call sites, constraints,
+risks and tests. Cite files and evidence, state uncertainties, and preserve your
+findings for the senior synthesis. Do not edit files or take Git writer locks.
+"""
+
+[roles."scout.external"]
+extends = "scout"
+title = "External scout ${index}"
+# Needs a web-capable route. Define a route named `web` in the routing
+# configuration; without one the compiler falls back and records a substitution.
+tier = "web"
+fallback_tier = "junior"
+card = "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date."
+references = [{ ref = "skill:scope/references/researcher.md", when = "always", inline = true }]
+prompt = """
+External scout ${index}. Research outward for: ${prompt}
+Prefer primary sources and current documentation over memory, even when
+confident. Report each finding with its source URL and publication or
+retrieval date, mark vendor-reported figures, and state where sources
+disagree. Do not edit files.
+"""
+
+[roles.plan]
+tier = "senior"
+access = "read_only"
+purpose = "plan"
+card = "You plan. Produce a decision-ready result, not a narrative."
+
+[roles."plan.research"]
+extends = "plan"
+kind = "synthesise"
+purpose = "research"
+card = "You reconcile research evidence into next steps."
+prompt = """
+Reconcile the scouts' evidence for: ${prompt}
+Preserve useful scope partitions, file references, dated external sources and
+unresolved uncertainty. Choose next implementation steps using judgement;
+retain every child's evidence.
+"""
+
+[roles."plan.scope"]
+extends = "plan"
+purpose = "scope"
+card = "You turn evidence into one approved slice with testable acceptance."
+references = [
+  { ref = "skill:scope/references/architect.md", when = "when the design is not obvious" },
+  { ref = "skill:scope/references/acceptance-writer.md", when = "when writing acceptance criteria", inline = true },
+  { ref = "skill:scope/references/critic.md", when = "before declaring the scope ready" },
+]
+prompt = """
+Turn the scouts' evidence into one approved slice for: ${prompt}
+State the acceptance criteria, the literal write scope, the checks that prove
+completion and any open question the user must answer. If a question blocks
+the work, say so under NEEDS-USER and finish with VERDICT: FAIL; otherwise
+finish with VERDICT: PASS.
+"""
+
+[roles."plan.slices"]
+extends = "plan"
+purpose = "slices"
+card = "You split approved scope into independent, bounded slices."
+references = [{ ref = "skill:scope/references/architect.md", when = "when slices share an interface" }]
+prompt = """
+Split the approved scope for ${prompt} into bounded slices. Give each slice a
+name, a literal write scope, acceptance criteria and its dependencies. Prefer
+slices that can land independently.
+"""
+
+[roles."plan.review"]
+extends = "plan"
+purpose = "review"
+worktree = "${worktree}"
+source = "${subject}"
+card = "You frame an immutable review subject. Do not edit files."
+prompt = """
+Frame the immutable review subject for: ${prompt}
+Base (diff reference): ${base}
+Spec (acceptance criteria): ${spec}
+Identify acceptance criteria and risk areas from the pinned source commit,
+reading the spec where one is named. Do not edit files. Subsequent independent
+lenses review this exact commit against the base and the spec.
+"""
+
+[roles.lens]
+tier = "${item.tier}"
+access = "read_only"
+worktree = "${worktree}"
+card = "You are one independent review lens. Review the pinned commit only through your lens."
+references = [{ ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true }]
+prompt = """
+Lens: ${item.name}. Subject: ${prompt}
+Base (diff reference): ${base}
+Spec (acceptance criteria): ${spec}
+Check correctness against the spec as well as this lens.
+"""
+
+[roles."lens.correctness-spec"]
+extends = "lens"
+family = "distinct_from_writer"
+card = "Lens correctness-spec. Check the change against the spec and for logic errors."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/correctness-spec.md", when = "always", inline = true },
+]
+
+[roles."lens.design-fit-reuse"]
+extends = "lens"
+family = "any"
+card = "Lens design-fit-reuse. Check design fit and reuse of existing code."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/design-fit-reuse.md", when = "always", inline = true },
+]
+
+[roles."lens.simplicity"]
+extends = "lens"
+family = "any"
+card = "Lens simplicity. Look for unnecessary machinery and simpler designs."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/simplicity.md", when = "always", inline = true },
+]
+
+[roles."lens.conventions-readability"]
+extends = "lens"
+family = "any"
+card = "Lens conventions-readability. Check repository conventions and readability."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/conventions-readability.md", when = "always", inline = true },
+]
+
+[roles."lens.tests"]
+extends = "lens"
+family = "any"
+card = "Lens tests. Check that tests prove the behaviour and would fail without it."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/tests.md", when = "always", inline = true },
+]
+
+[roles."lens.security-privacy"]
+extends = "lens"
+family = "any"
+card = "Lens security-privacy. Check security, privacy and credential handling."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/security-privacy.md", when = "always", inline = true },
+]
+
+[roles."lens.concurrency-data-errors"]
+extends = "lens"
+family = "any"
+card = "Lens concurrency-data-errors. Check concurrency, data integrity and error paths."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/concurrency-data-errors.md", when = "always", inline = true },
+]
+
+[roles."lens.adversarial"]
+extends = "lens"
+family = "any"
+card = "Lens adversarial. Try to break the change with hostile inputs and states."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/adversarial.md", when = "always", inline = true },
+]
+
+[roles."review.verify"]
+tier = "${verifier_tier}"
+fallback_tier = "senior"
+access = "read_only"
+# Cross-family is a routing property: the graph's distinct_from only separates
+# a node from its writer, so point this route at another model family.
+family = "cross"
+worktree = "${worktree}"
+card = "You falsify review findings. A finding stands only if you cannot break it."
+prompt = """
+Verify the lens findings for: ${prompt}
+Try to falsify every finding against the pinned commit: reproduce it, look for
+the code or test that contradicts it, and check it against the spec. Re-emit
+every finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your
+evidence. Add any finding the lenses missed and mark it NEW. Do not edit files.
+"""
+
+[roles."review.synthesis"]
+tier = "senior"
+kind = "synthesise"
+access = "read_only"
+worktree = "${worktree}"
+source = { type = "node", node = "subject" }
+card = "You reconcile review findings into one verdict with a disposition for each."
+prompt = """
+Reconcile independent review findings against evidence for: ${prompt}
+Do not take a majority vote. Weigh each finding by its evidence and, where a
+verifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one
+disposition with a one-line reason: accepted (must be fixed), rejected
+(evidence refutes it) or deferred (valid, not for this change). Emit one exact
+VERDICT: PASS only when no accepted finding remains and acceptance evidence is
+satisfied, otherwise VERDICT: FAIL.
+"""
+
+[roles."review.evaluator"]
+tier = "${evaluator}"
+kind = "synthesise"
+access = "read_only"
+worktree = "${worktree}"
+card = "You evaluate a writer's commit from its lens findings and decide whether it is accepted."
+prompt = """
+Evaluate the implementation of: ${prompt}
+Spec (acceptance criteria): ${spec}
+Weigh the lens findings against the evidence. Give every finding exactly one
+disposition with a one-line reason: accepted, rejected or deferred. Emit one
+exact VERDICT: PASS only when no accepted finding remains, otherwise
+VERDICT: FAIL.
+"""
+
+[roles."write.implement"]
+tier = "senior"
+access = "worktree_write"
+worktree = "${worktree}"
+write_scope = "${scope}"
+source = "${subject}"
+delivery = "${delivery}"
+card = "You implement one bounded approved slice inside the write scope."
+acceptance_checks = ["Run targeted tests and required static checks", "Commit the completed slice"]
+prompt = """
+Implement one bounded approved slice: ${prompt}
+Spec (acceptance criteria): ${spec}
+Keep changes within the supplied write scope. Run targeted checks and commit.
+"""
