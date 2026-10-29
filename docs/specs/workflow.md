@@ -103,11 +103,21 @@ A checkpoint is UTF-8 Markdown, bounded to 256 KiB, under an explicit project an
 session key, saved atomically with its bytes preserved. Session IDs are 1 to
 128 ASCII letters, digits, `.`, `_` and `-`, starting alphanumeric, with no
 `..`, so the injected save command is safe to copy. Symlinks are refused.
+CLI saves resolve the Git project from the working directory or `--project PATH`.
+A non-checkout directory needs the explicit flag; it never becomes a new
+project implicitly. When both paths resolve, their Git common directories must
+match, including across linked worktrees. Without an explicit flag, a session
+already registered on this host in another project refuses with that project's
+identity and the `--project` recovery command. Explicit selection permits an
+intentional session ID reuse. Successful saves name the selected project ID.
 - Why: restoring the wrong checkpoint misdirects an agent.
 - Test: `crates/workflow/src/session.rs::refuses_traversal_and_command_injection_in_host_keys`;
   `::refuses_symlinked_directories_checkpoints_and_locks`;
+  `tests/workflow.rs::session_save_outside_checkout_requires_project`;
+  `::session_save_refuses_conflicting_explicit_project`;
+  `::session_save_refuses_another_registered_project`;
   `tests/workflow.rs::long_checkpoints_save_up_to_the_documented_bound`
-- Owner: `crates/workflow/src/session.rs`
+- Owner: `crates/workflow/src/session.rs`, `crates/cli/src/workflow.rs`, `src/roots.rs`
 
 ### Earlier checkpoints are bounded revisions
 

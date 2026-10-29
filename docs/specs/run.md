@@ -814,6 +814,10 @@ and the Git backlink, acquires repository and writer locks, refuses live or
 reserved writers and publishes the ordinary custody identity plus an adopted
 owner. Ownership never grants deletion authority by itself. Existing explicit
 `--worktree` dispatches keep their existing lifecycle.
+Adoption does not mistake an incomplete native census for a live writer. As
+with ordinary mutations, an exclusive writer lock and absent reservation prove
+custody; an observed live process still refuses, and callers requiring a
+complete census still refuse unknown observations.
 
 Owned lane settlement may prune its own clean checkout only after success
 without requested delivery, or after successful delivery, and when its exact

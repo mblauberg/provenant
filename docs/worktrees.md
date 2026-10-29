@@ -68,6 +68,14 @@ unmerged branch is kept and reported as `not_merged`; `--discard` deletes it
 too and returns its head, which recovers it with `git branch NAME HEAD` while
 Git still holds the objects.
 
+A registered checkout with a detached HEAD can be removed by its directory
+name. The same custody and dirty checks apply, and no branch is deleted.
+If its HEAD is not contained in the integration branch, removal names the
+commit and refuses unless `--discard` is explicit. Preserve that commit with
+`git -C PATH branch NAME HEAD` before retrying with `--discard`, or use `--discard`
+when the detached work is no longer needed. A detached primary checkout needs
+an explicit `--integration BRANCH`.
+
 Confinement validates repository identity and refuses primary, dirty
 and live writers. `worktree list` reports a tree whose only changes are
 ignored files as `ignored`; removal refuses it like a dirty tree, and a
@@ -90,6 +98,9 @@ and a repair. `worktree adopt PATH --owner NAME`, run from outside the tree,
 replaces a stale registration. It still refuses a held writer lock, a
 reservation and a live process, and names the process by pid and command, as
 `pr land` does.
+An incomplete native process census alone does not identify a live writer:
+ordinary adoption, like removal, can proceed while holding the exclusive writer
+lock with no reservation. A positive live-process observation still refuses.
 
 When a filesystem renumbers its device, a registered tree can refresh that
 number under the worktree registry lock. Its recorded root inode, path, branch

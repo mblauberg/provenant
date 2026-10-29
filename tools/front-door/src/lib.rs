@@ -858,7 +858,15 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             provenant_cli::workflow::Session::Handoff(args),
         )) => handoff::run(*args, globals, process.workers()),
         Command::Workflow(cmd) => {
-            match roots::resolve(globals, Workspace::Project, Product::Required) {
+            let workspace = if matches!(
+                cmd,
+                provenant_cli::Workflow::Session(provenant_cli::workflow::Session::Save { .. })
+            ) {
+                Workspace::SessionSave
+            } else {
+                Workspace::Project
+            };
+            match roots::resolve(globals, workspace, Product::Required) {
                 Ok(resolved) => {
                     let state = resolved.roots.state.as_path().to_owned();
                     let home = resolved.home.clone();
@@ -876,13 +884,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         },
                     )
                 }
-                Err(error) => fail(
-                    &inv.leaf,
-                    Outcome::Error,
-                    "ROOT",
-                    &error.to_string(),
-                    globals,
-                ),
+                Err(error) => {
+                    let outcome = match error {
+                        roots::RootError::SessionProjectMissing
+                        | roots::RootError::SessionProjectMismatch { .. } => Outcome::Refused,
+                        _ => Outcome::Error,
+                    };
+                    fail(&inv.leaf, outcome, "ROOT", &error.to_string(), globals)
+                }
             }
         }
         Command::Worktree(worktree) => worktrees::run(worktree, globals, process.workers()),
