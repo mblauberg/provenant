@@ -43,7 +43,8 @@
       "relation": "negative",
       "prompt": "Find the root cause of the intermittent crash behind this page's failed render.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "diagnose",
@@ -55,7 +56,8 @@
       "relation": "negative",
       "prompt": "Review this backend API patch; it has no interface surface.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "code-review",
@@ -126,19 +128,6 @@
       ],
       "expected": {
         "primary_skill": "code-review",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q176137",
-      "relation": "negative",
-      "prompt": "Diagnose the cause of this server-side checkout crash.",
-      "tags": [
-        "near-miss",
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "diagnose",
         "companion_skills": []
       }
     }

@@ -43,7 +43,8 @@
       "relation": "negative",
       "prompt": "Create a bolder visual system and better spacing for this React dashboard.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "ui-ux-design",
@@ -55,7 +56,8 @@
       "relation": "negative",
       "prompt": "Fix the staleTime and invalidation policy for this TanStack Query mutation.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "tanstack",

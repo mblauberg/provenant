@@ -1,0 +1,3 @@
+# Release notes
+
+Checked: 30 October 2026. The [release list](https://blog.rust-lang.org/releases/) identifies 1.99.1 as the latest stable release. Confirm the project's toolchain and minimum supported version. Read the edition guide on [opaque lifetime capture](https://doc.rust-lang.org/edition-guide/rust-2024/rpit-lifetime-capture.html) and [temporary scope](https://doc.rust-lang.org/edition-guide/rust-2024/temporary-tail-expr-scope.html), the [Cargo lint issue](https://github.com/rust-lang/cargo/issues/13157) and [panic profiles](https://doc.rust-lang.org/cargo/reference/profiles.html#panic).

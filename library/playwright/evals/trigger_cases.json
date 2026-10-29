@@ -43,10 +43,11 @@
       "relation": "negative",
       "prompt": "Write a maintained Playwright end-to-end test for this new user behaviour.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
-        "primary_skill": "tdd",
+        "primary_skill": "test-design",
         "companion_skills": [
           "implement"
         ]
@@ -57,7 +58,8 @@
       "relation": "negative",
       "prompt": "Redesign the landing page and implement its new visual hierarchy.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "implement",

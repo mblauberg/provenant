@@ -10,33 +10,10 @@ installed versions, so confirm them first. Project conventions win over this fil
 
 ## Version-matched API first
 
-1. Read the installed versions from the lockfile or `node_modules`.
-2. Load matching skills read-only from the project root, which must have
-   `node_modules` installed: `DO_NOT_TRACK=1 TANSTACK_CLI_TELEMETRY_DISABLED=1
-   npx -y @tanstack/intent@0.5.6 list`, then `... load <package>#<skill>`.
-   Intent reads local packages, so its skills match what is installed.
-3. For gaps, use the read-only CLI (network needed, docs follow the major
-   version, not the patch): `npx -y @tanstack/cli@0.72.0 search-docs "<q>"
-   --library <id> --framework react`, and `... doc <id> <path>` with the same
-   env vars. Use `libraries` to list ids.
-4. Forbidden: writes to the project tree, agent instruction files
-   (AGENTS.md, CLAUDE.md) and package manifests, and telemetry. So never run
-   `intent install`, `intent hooks`, `intent setup`, or CLI `create`, `add`,
-   `pin-versions`, `clean-demos` or `telemetry`. `npx` itself caches packages
-   in the user's npm cache, outside the project; that is allowed.
-
-Details and limits: [version-matched](references/version-matched.md).
-
-## API newer than most training data
-
-- **Imperative calls:** Query 5.10x deprecates fetch/prefetch/ensure methods.
-  Read [migration mappings](references/imperative-queries.md) first. Flag
-  existing sites rather than migrating them inside unrelated changes.
-- **`staleTime: 'static'` overrides invalidation** for active observers. Keep
-  it to one-off imperative calls, never a hook a mutation must refresh.
-- **Table v9 is not v8:** read [references/table.md](references/table.md).
-- **Store and Form:** `useStore` is deprecated for `useSelector`. See
-  [store](references/store.md) and [form](references/form.md).
+Read the lockfile and installed declarations before using an API. Consult the
+[dated version notes](references/releases-2026.md) and
+[version-matched documentation](references/version-matched.md). Flag unrelated
+migration sites for implement or refactor.
 
 ## Where agents slip
 
@@ -75,6 +52,9 @@ Details and limits: [version-matched](references/version-matched.md).
   Charts: use version-matched docs; no reference here.
 
 ## Verification
+
+Support cache freshness and invalidation claims with a request trace or a focused component test. Record the evidence path.
+
 
 Test public hooks/components with a fresh `QueryClient` and `retry: false`.
 Suggest missing Query ESLint rules; never add them unasked. See

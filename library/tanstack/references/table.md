@@ -1,5 +1,7 @@
 # TanStack Table v9 reference
 
+Version-sensitive guidance last checked 22 October 2026; verify against the installed package.
+
 Read when writing or reviewing `useTable` code. Checked against
 `@tanstack/react-table` 9.3.1.
 

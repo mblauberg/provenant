@@ -1,5 +1,7 @@
 # Imperative query migration
 
+Version-sensitive guidance last checked 22 October 2026; verify against the installed package.
+
 Query 5.10x deprecates `fetchQuery`, `prefetchQuery`, `ensureQueryData` and
 their infinite-query versions, ahead of removal in the next major. Use
 `queryClient.query(opts)` and `queryClient.infiniteQuery(opts)`:

@@ -43,7 +43,8 @@
       "relation": "negative",
       "prompt": "Rename and extract this stable JavaScript helper without any type-boundary change.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "refactor",
@@ -57,7 +58,8 @@
       "relation": "negative",
       "prompt": "Profile and fix the React page's rendering bottleneck.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "react-performance",
@@ -100,7 +102,7 @@
       "expected": {
         "primary_skill": "implement",
         "companion_skills": [
-          "tdd",
+          "test-design",
           "typescript-clean-code"
         ]
       }

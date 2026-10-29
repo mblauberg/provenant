@@ -1,5 +1,7 @@
 # TanStack Form
 
+Version-sensitive guidance last checked 22 October 2026; verify against the installed package.
+
 Checked against `@tanstack/react-form` 1.33.5 declarations and the Form docs.
 No Intent skill shipped for it in that version.
 
