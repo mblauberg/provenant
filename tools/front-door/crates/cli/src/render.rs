@@ -217,6 +217,7 @@ pub fn exit_status(outcome: &Outcome) -> u8 {
         Outcome::Error => 3,
         Outcome::Unavailable => 4,
         Outcome::Pending => 5,
+        Outcome::Waiting => 0,
         Outcome::Timeout => 124,
         Outcome::Cancelled => 130,
     }
@@ -660,6 +661,7 @@ mod tests {
             (Outcome::Error, 3),
             (Outcome::Unavailable, 4),
             (Outcome::Pending, 5),
+            (Outcome::Waiting, 0),
             (Outcome::Timeout, 124),
             (Outcome::Cancelled, 130),
         ] {

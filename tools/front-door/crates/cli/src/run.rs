@@ -1316,7 +1316,7 @@ pub fn requested(
                 Fail::new(
                     Status::Invalid,
                     ErrorKind::Invalid,
-                    "model must be ADAPTER/ID",
+                    crate::route::model_form_message(model),
                 )
             })?;
             Ok(run::RequestedRoute::Model {
@@ -1980,6 +1980,7 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     }
     let timed_out = result.result.status == Status::Timeout;
     let mut next = None;
+    let mut wait = None;
     for row in rows {
         let Some(id) = row["attempt_id"].as_str() else {
             continue;
@@ -2034,6 +2035,13 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                 ));
             }
         }
+        // The first lane still in flight when the wait ends names the wait to keep.
+        if timed_out
+            && wait.is_none()
+            && matches!(state, "queued" | "starting" | "running" | "settling")
+        {
+            wait = Some(format!("provenant lanes --id {id} --wait 4m"));
+        }
         // One typed next step: the first lane that needs one.
         if next.is_none() {
             if timed_out && matches!(state, "queued" | "starting" | "running" | "settling") {
@@ -2049,6 +2057,16 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
             && !matches!(state, "succeeded" | "review_required" | "input_required")
         {
             result.result.status = Status::Failed;
+        }
+    }
+    if timed_out {
+        // The wait ended before the run settled. Its lanes keep running, so
+        // this is not a failure: exit 0, and name the command that keeps waiting.
+        result.result.status = Status::Waiting;
+        if let Some(command) = &wait {
+            human.push_str(&format!(
+                "run is still running; keep waiting with `{command}`\n"
+            ));
         }
     }
     result.summary = Some(crate::Summary::verbatim(&human, next));
@@ -2489,6 +2507,10 @@ fn operation_reply(reply: &mut Reply, id: &OperationId) {
     reply.result.data["operation_id"] = json!(id);
     if let Some(error) = &mut reply.result.error {
         error.message.push_str(&format!("; operation {id}"));
+        // The same operation replays its request, so a retry cannot admit twice.
+        if error.code == ErrorKind::Contention.code() {
+            error.repair = Some(format!("retry the same command with --operation-id {id}"));
+        }
     } else {
         reply.human = format!("operation {id}\n{}", reply.human);
     }
@@ -2529,6 +2551,44 @@ pub(crate) fn pool_effort_refusal(
         .flatten()
 }
 
+/// Refuse a model the catalogue does not record, or an effort its recorded
+/// model does not take, before any run record exists. A typo gets the nearest
+/// recorded IDs. Routing applies the same rules, but only after launch prep.
+fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> {
+    let Ok(id) = ModelId::parse(model) else {
+        return Ok(());
+    };
+    let catalogue = provenant_routing::Catalogue::bundled()
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+    let Some(entry) = catalogue.model(&id) else {
+        let nearest = catalogue.nearest_models(&id);
+        let hint = if nearest.is_empty() {
+            String::new()
+        } else {
+            format!("; nearest catalogued IDs: {}", nearest.join(", "))
+        };
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            format!("model {model} is not in the catalogue{hint}"),
+        ));
+    };
+    match effort {
+        Some(effort) if !entry.efforts.iter().any(|supported| supported == effort) => {
+            let support = if entry.efforts.is_empty() {
+                "this model takes no effort".to_owned()
+            } else {
+                format!("supported efforts: {}", entry.efforts.join(", "))
+            };
+            Err(Fail::new(
+                Status::Refused,
+                ErrorKind::Unsupported,
+                format!("model {model} does not take effort {effort}; {support}"),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
 pub(crate) fn check_flag_capabilities(
     command: &Dispatch,
     roots: Option<&Roots>,
@@ -2572,7 +2632,10 @@ pub(crate) fn check_flag_capabilities(
                     model,
                     effort,
                     ..
-                }) => check(&provider, Some(&model), effort.as_deref(), network)?,
+                }) => {
+                    check(&provider, Some(&model), effort.as_deref(), network)?;
+                    catalogued(&model, effort.as_deref())?;
+                }
                 // A pool whose every member's adapter takes no effort cannot serve one.
                 Ok(run::RequestedRoute::Named {
                     name,
@@ -2598,6 +2661,7 @@ pub(crate) fn check_flag_capabilities(
                           effort: Option<&str>,
                           network: Option<run::NetworkAccess>|
      -> Result<(), Fail> {
+        catalogued(model, None)?;
         match model.split_once('/') {
             Some((provider, _)) => check(provider, Some(model), effort, network),
             None => Ok(()),
@@ -3004,16 +3068,32 @@ fn dispatch_inner(
         Some(json!({"path": info.path, "branch": owned.branch, "owned": true}))
     } else if let Some(path) = &command.access.worktree {
         let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
+        // A replayed operation returns the run it already started, even while
+        // that run holds the writer; only a new admission is refused.
+        let replay = session
+            .store
+            .operation(&command.operation_id, &call)?
+            .is_some();
         Some(provenant_confinement::worktrees::with_context(
             edge.roots, edge.home, &writer.project, &clock, &cancel, |context| {
                 use provenant_confinement::worktrees;
                 let info = worktrees::list(context, &cancel)?.into_iter()
                     .find(|tree| tree.path == writer.worktree)
-                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-                let branch = info.branch.ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                    .ok_or(worktrees::WorktreeError::NotFound)?;
+                let branch = info.branch.ok_or(worktrees::WorktreeError::DetachedWorktree { head: info.head })?;
+                if !replay && matches!(info.writer, worktrees::WriterState::Busy | worktrees::WriterState::Live) {
+                    let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                    let holder = worktrees::load_owner(&tree)?.and_then(|owner| owner.attempt_id);
+                    return Err(worktrees::WorktreeError::WriterBusy { holder });
+                }
                 Ok(json!({"path": info.path, "branch": branch.trim_start_matches("refs/heads/"), "owned": false}))
             },
-        ).map_err(run::RunError::from)?)
+        ).map_err(|error| match error {
+            provenant_confinement::worktrees::WorktreeError::NotFound => {
+                run::RunError::WorktreeUnregistered(writer.worktree.clone())
+            }
+            other => run::RunError::from(other),
+        })?)
     } else {
         None
     };
@@ -3152,14 +3232,27 @@ fn own_worktree(
             let (info, pinned) = match existing {
                 Some(info) => {
                     let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-                    if worktrees::load_owner(&tree)?
+                    let owner = worktrees::load_owner(&tree)?;
+                    if owner
+                        .as_ref()
                         .is_some_and(|owner| owner.origin != WorktreeOrigin::Lane)
                     {
                         owner_refused = true;
                         return Err(worktrees::WorktreeError::UnknownWriter);
                     }
-                    if info.dirty != WorktreeCondition::Clean || info.writer != WriterState::Free {
-                        return Err(worktrees::WorktreeError::InvalidRequest);
+                    if info.dirty != WorktreeCondition::Clean {
+                        return Err(worktrees::WorktreeError::Dirty);
+                    }
+                    match info.writer {
+                        WriterState::Free => {}
+                        WriterState::Busy | WriterState::Live => {
+                            return Err(worktrees::WorktreeError::WriterBusy {
+                                holder: owner.and_then(|owner| owner.attempt_id),
+                            });
+                        }
+                        WriterState::Unknown => {
+                            return Err(worktrees::WorktreeError::UnknownWriter);
+                        }
                     }
                     (info, None)
                 }
@@ -9679,7 +9772,14 @@ mod tests {
                 .human
                 .contains("codex/test (effort: high, network: open)")
         );
-        assert_eq!(report.result.status, Status::Timeout);
+        assert_eq!(report.result.status, Status::Waiting);
+        assert!(
+            report.human.contains(
+                "run is still running; keep waiting with `provenant lanes --id 01010101010101010101010101010101 --wait 4m`"
+            ),
+            "{}",
+            report.human
+        );
         let next = |reply: &super::Reply| {
             reply
                 .summary
@@ -9718,6 +9818,79 @@ mod tests {
             history,
             "[history unavailable: prior worktree is missing or reassigned]"
         );
+    }
+
+    #[test]
+    fn submit_names_the_fix_for_a_bare_word_model_and_unsupported_effort()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Err(bare) = super::requested(Some("junior"), None, None) else {
+            panic!("bare-word model accepted");
+        };
+        assert_eq!(bare.status, Status::Invalid);
+        assert!(
+            bare.message.ends_with("did you mean --route junior?"),
+            "{}",
+            bare.message
+        );
+        let Err(unknown) = super::catalogued("codex/gpt-6-lunaa", None) else {
+            panic!("uncatalogued model accepted");
+        };
+        assert_eq!(unknown.status, Status::Invalid);
+        assert!(
+            unknown
+                .message
+                .starts_with("model codex/gpt-6-lunaa is not in the catalogue"),
+            "{}",
+            unknown.message
+        );
+        let Err(effort) = super::catalogued("claude/claude-sonnet-5-5", Some("low")) else {
+            panic!("unsupported effort accepted");
+        };
+        assert_eq!(effort.status, Status::Refused);
+        assert_eq!(effort.kind.code(), "UNSUPPORTED");
+        assert!(
+            effort
+                .message
+                .ends_with("supported efforts: medium, high, xhigh"),
+            "{}",
+            effort.message
+        );
+        let Err(none) =
+            super::catalogued("opencode/opencode/deepseek-v4.1-flash-free", Some("high"))
+        else {
+            panic!("effort accepted for a model that takes none");
+        };
+        assert!(
+            none.message.ends_with("this model takes no effort"),
+            "{}",
+            none.message
+        );
+        assert!(super::catalogued("codex/gpt-6-luna", Some("xhigh")).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn contention_reply_names_the_operation_to_retry() -> Result<(), Box<dyn std::error::Error>> {
+        let id = OperationId::parse("retry-lane")?;
+        let mut reply = super::reply(
+            "run",
+            Err(Fail::new(
+                Status::Refused,
+                ErrorKind::Contention,
+                "the lane is being admitted",
+            )),
+        );
+        super::operation_reply(&mut reply, &id);
+        let repair = reply
+            .result
+            .error
+            .as_ref()
+            .and_then(|error| error.repair.as_deref());
+        assert_eq!(
+            repair,
+            Some("retry the same command with --operation-id retry-lane")
+        );
+        Ok(())
     }
 
     #[test]

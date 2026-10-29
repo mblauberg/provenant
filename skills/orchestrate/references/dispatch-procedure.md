@@ -16,9 +16,10 @@ provenant quota
 
 `run` submits, waits up to 240 seconds and prints one state line and the result
 tail, with a footer for reading more. Set `--wait 30m` or `--wait 3600s` for a
-longer budget and run that wait in the background. A timeout leaves the lane
-running and prints the attempt ID and exact command to keep waiting. Follow
-that command rather than submitting again. For a writer, add
+longer budget and run that wait in the background. A wait that ends before the
+run settles returns status `waiting` with exit 0; the lane keeps running, and
+the output prints the exact command to keep waiting. Follow that command rather
+than submitting again. For a writer, add
 `--mode worktree-write --branch feat/name --base main` to create its registered checkout;
 `--worktree PATH` can select an existing one or create a new checkout.
 Choose `--route NAME` for a weighted pool or `--model ADAPTER/ID` for an exact

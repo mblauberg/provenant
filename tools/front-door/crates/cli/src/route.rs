@@ -186,10 +186,19 @@ pub struct RouteRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Model(pub String);
 impl FromStr for Model {
-    type Err = &'static str;
+    type Err = String;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        ModelId::parse(text).map_err(|_| "model must be ADAPTER/ID")?;
+        ModelId::parse(text).map_err(|_| model_form_message(text))?;
         Ok(Self(text.into()))
+    }
+}
+/// A bare word given as `--model` is usually a route name, such as a tier, so
+/// the refusal names the flag it probably meant.
+pub(crate) fn model_form_message(text: &str) -> String {
+    if text.contains('/') {
+        "model must be ADAPTER/ID".into()
+    } else {
+        format!("model must be ADAPTER/ID; did you mean --route {text}?")
     }
 }
 
