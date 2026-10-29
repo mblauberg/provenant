@@ -32,7 +32,7 @@ fn default_free_routes_sit_only_in_the_junior_pool() -> Result<(), Box<dyn std::
 fn model_policy_config_accepts_layered_rules() -> Result<(), Box<dyn std::error::Error>> {
     let config = serde_json::from_value::<RoutingConfig>(serde_json::json!({
         "model_policy": {"rules": [{"model": "codex/gpt-6.1-terra", "account": "work",
-            "schedule": {"expires": 200}, "policy": {"lane": {"stop_early_ok": false}}}]}
+            "schedule": {"expires":"1970-01-01T00:03:20Z"}, "policy": {"lane": {"stop_early_ok": false}}}]}
     }));
     assert!(
         config.is_ok(),
@@ -367,7 +367,7 @@ fn pacing_override_schedules_validate_at_load_and_need_no_expiry()
             {"provider":"codex", "policy":"spend", "schedule":{"windows":[{"weekdays":[0,1,2,3,4],"start_hour":23,"end_hour":7}]}},
             {"provider":"claude", "policy":"max"},
             {"provider":"agy", "policy":"off", "schedule":{"tz":"Mars/Olympus_Mons"}},
-            {"provider":"cursor", "policy":"pace", "schedule":{"starts":5,"expires":5}}
+            {"provider":"cursor", "policy":"pace", "schedule":{"starts":"1970-01-01T00:00:05Z","expires":"1970-01-01T00:00:05Z"}}
         ]
     }))?;
     let errors: Vec<_> = config
@@ -1695,7 +1695,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     let roots = inputs.resolve(&Resolver)?;
     let model_policy_config = provenant_config::load_with_domains(
         &roots,
-        Some("schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.schedule]\nexpires=200\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n".as_bytes()),
+        Some("schema_version=1\n[domains.routing.model_policy.defaults.cache]\nread_share_target=0.95\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.schedule]\nexpires='1970-01-01T00:03:20Z'\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=40\n".as_bytes()),
         &sections,
     )?;
     assert_eq!(
@@ -1834,7 +1834,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nread_only='yes'\n",
         "schema_version=1\n[domains.routing.model_policy.defaults]\nlane='read_only'\n",
         "schema_version=1\n[[domains.routing.model_policy.rules]]\nadapter='codex'\nmodel='claude/claude-opus-5-5'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\n",
-        "schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts=10, expires=5 }\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=4\n",
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=4\n",
     ] {
         let error = provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
             .err()
@@ -1847,7 +1847,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     // A malformed rule that restricts nothing is dropped whole, with a warning.
     let config = provenant_config::load_with_domains(
         &roots,
-        Some("schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts=10, expires=5 }\n[domains.routing.model_policy.rules.policy.cache]\nprice_multiplier=2.0\n".as_bytes()),
+        Some("schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts='1970-01-01T00:00:10Z', expires='1970-01-01T00:00:05Z' }\n[domains.routing.model_policy.rules.policy.cache]\nprice_multiplier=2.0\n".as_bytes()),
         &sections,
     )?;
     assert!(config.domains.routing.model_policy.rules.is_empty());
@@ -2084,17 +2084,17 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
         ("spend", serde_json::json!([]), false),
         (
             "pace",
-            serde_json::json!([{"account":"codex/opaque-account", "policy":"spend", "schedule":{"expires":101}}]),
+            serde_json::json!([{"account":"codex/opaque-account", "policy":"spend", "schedule":{"expires":"1970-01-01T00:01:41Z"}}]),
             false,
         ),
         (
             "pace",
-            serde_json::json!([{"account":"claude/opaque-account", "policy":"spend", "schedule":{"expires":101}}]),
+            serde_json::json!([{"account":"claude/opaque-account", "policy":"spend", "schedule":{"expires":"1970-01-01T00:01:41Z"}}]),
             true,
         ),
         (
             "pace",
-            serde_json::json!([{"account":"opaque-account", "policy":"spend", "schedule":{"expires":100}}]),
+            serde_json::json!([{"account":"opaque-account", "policy":"spend", "schedule":{"expires":"1970-01-01T00:01:40Z"}}]),
             true,
         ),
     ] {
@@ -3207,7 +3207,7 @@ fn account_profile_and_overrides_govern_free_models() -> Result<(), Box<dyn std:
     assert!(!blocked(serde_json::json!({"pacing":{
         "accounts":{"zen":{"policy":"max"}}, "free":{"opencode":{"policy":"off"}}}}))?);
     // An active override outranks the account profile; an expired one does not.
-    let override_row = |expires| serde_json::json!([{"account":"zen", "policy":"spend", "schedule":{"expires":expires}}]);
+    let override_row = |expires: i64| serde_json::json!([{"account":"zen", "policy":"spend", "schedule":{"expires":provenant_core::WallTime::from_unix_seconds(expires).map(|at| at.to_string()).ok()}}]);
     assert!(!blocked(serde_json::json!({
         "pacing":{"accounts":{"zen":{"policy":"off"}}}, "pacing_overrides": override_row(1_000_000)
     }))?);
@@ -3431,7 +3431,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
             five_hour: Some(43),
             seven_day: Some(17),
             thirty_day: Some(59),
-            expires: "1970-01-01T00:01:41Z".into(), // timebomb: allow fixed epoch fixture, not the live clock
+            expires: provenant_core::WallTime::from_unix_seconds(101)?,
         },
     );
     let apply = |observation: &QuotaObservation| {
@@ -3461,7 +3461,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
                 five_hour,
                 seven_day,
                 thirty_day: Some(59),
-                expires: "1970-01-01T00:01:41Z".into(), // timebomb: allow fixed epoch fixture, not the live clock
+                expires: provenant_core::WallTime::from_unix_seconds(101)?,
             },
         );
         let mut record = AccountRecord::empty(raw.snapshot.account.clone());
@@ -4113,7 +4113,10 @@ fn malformed_scope_types_drop_or_refuse_the_whole_record() -> Result<(), Box<dyn
 #[test]
 fn invalid_override_schedules_drop_their_override_at_load() -> Result<(), Box<dyn std::error::Error>>
 {
-    for schedule in ["{starts=20,expires=10}", "{tz='Mars/Olympus_Mons'}"] {
+    for schedule in [
+        "{starts='1970-01-01T00:00:20Z',expires='1970-01-01T00:00:10Z'}",
+        "{tz='Mars/Olympus_Mons'}",
+    ] {
         let text = format!(
             "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='off'\nschedule={schedule}\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n"
         );

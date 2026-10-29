@@ -1549,7 +1549,7 @@ mod tests {
         );
         config.model_policy.rules.push(crate::ModelPolicyRule {
             schedule: crate::Schedule {
-                expires: Some(1),
+                expires: Some(provenant_core::WallTime::from_unix_seconds(1)?),
                 ..Default::default()
             },
             policy: crate::ModelPolicy {

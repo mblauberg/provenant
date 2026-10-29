@@ -469,7 +469,7 @@ pub struct OverrideRow {
     pub remaining_seconds: Option<i64>,
 }
 impl OverrideRow {
-    fn pacing(row: &provenant_routing::PacingOverride, now: i64) -> Self {
+    fn pacing(row: &provenant_routing::PacingOverride, now: WallTime) -> Self {
         Self {
             kind: "pacing",
             scope: match (&row.account, &row.provider) {
@@ -486,14 +486,14 @@ impl OverrideRow {
     fn line(&self) -> String {
         let expiry = match (self.schedule.expires, self.remaining_seconds) {
             (Some(expiry), Some(remaining)) => {
-                format!("until {} ({remaining}s remaining)", expiry_text(expiry))
+                format!("until {expiry} ({remaining}s remaining)")
             }
             _ => "no expiry".to_owned(),
         };
         let starts = self
             .schedule
             .starts
-            .map(|starts| format!(" from {}", expiry_text(starts)))
+            .map(|starts| format!(" from {starts}"))
             .unwrap_or_default();
         format!(
             "{} {} {} {}{starts} {expiry}; {}",
@@ -518,10 +518,6 @@ fn policy_name(policy: PacingPolicy) -> &'static str {
         PacingPolicy::Max => "max",
         PacingPolicy::Off => "off",
     }
-}
-fn expiry_text(unix_seconds: i64) -> String {
-    jiff::Timestamp::from_second(unix_seconds)
-        .map_or_else(|_| unix_seconds.to_string(), |at| at.to_string())
 }
 fn schedule_windows(schedule: &provenant_routing::Schedule) -> String {
     if schedule.windows.is_empty() {
@@ -601,10 +597,10 @@ fn override_value(row: &provenant_routing::PacingOverride) -> toml_edit::Value {
     table.insert("policy", policy_name(row.policy).into());
     let mut schedule = toml_edit::InlineTable::new();
     if let Some(starts) = row.schedule.starts {
-        schedule.insert("starts", starts.into());
+        schedule.insert("starts", starts.to_string().into());
     }
     if let Some(expires) = row.schedule.expires {
-        schedule.insert("expires", expires.into());
+        schedule.insert("expires", expires.to_string().into());
     }
     if let Some(tz) = &row.schedule.tz {
         schedule.insert("tz", tz.as_str().into());
@@ -1437,9 +1433,9 @@ fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<String, EdgeError>
 }
 
 /// An RFC 3339 timestamp, or a positive duration (s, m, h or d) from `now`.
-fn instant(value: &str, now: i64) -> Option<i64> {
-    if let Ok(timestamp) = value.parse::<jiff::Timestamp>() {
-        return Some(timestamp.as_second());
+fn instant(value: &str, now: WallTime) -> Option<WallTime> {
+    if let Ok(at) = WallTime::parse_rfc3339(value) {
+        return Some(at);
     }
     let (digits, multiplier) = match value.as_bytes().last()? {
         b's' => (&value[..value.len() - 1], 1),
@@ -1448,8 +1444,12 @@ fn instant(value: &str, now: i64) -> Option<i64> {
         b'd' => (&value[..value.len() - 1], 86_400),
         _ => return None,
     };
-    let seconds = digits.parse::<i64>().ok()?.checked_mul(multiplier)?;
-    (seconds > 0).then(|| now.checked_add(seconds)).flatten()
+    let seconds = digits.parse::<u64>().ok()?.checked_mul(multiplier)?;
+    if seconds == 0 {
+        return None;
+    }
+    now.checked_add(provenant_core::DurationMicros::from_seconds(seconds).ok()?)
+        .ok()
 }
 
 /// Take the recorded pacing override rows as inline tables, whichever TOML
@@ -1478,7 +1478,7 @@ fn take_override_rows(
 /// expired one, then appending `append`. Returns the removed rows.
 fn rewrite_overrides(
     roots: &Roots,
-    now: i64,
+    now: WallTime,
     remove: impl Fn(&provenant_routing::PacingOverride) -> bool,
     append: Option<&provenant_routing::PacingOverride>,
 ) -> Result<Vec<provenant_routing::PacingOverride>, EdgeError> {
@@ -1529,7 +1529,7 @@ fn same_scope(
     recorded.as_deref() == account && row.provider.as_deref() == provider
 }
 
-fn set_override(roots: &Roots, request: &OverrideSet, now: i64) -> Result<Data, EdgeError> {
+fn set_override(roots: &Roots, request: &OverrideSet, now: WallTime) -> Result<Data, EdgeError> {
     if let Some(provider) = &request.provider {
         known_provider(provider)?;
     }
@@ -1609,7 +1609,11 @@ fn set_override(roots: &Roots, request: &OverrideSet, now: i64) -> Result<Data, 
     })))
 }
 
-fn clear_override(roots: &Roots, request: &OverrideClear, now: i64) -> Result<Data, EdgeError> {
+fn clear_override(
+    roots: &Roots,
+    request: &OverrideClear,
+    now: WallTime,
+) -> Result<Data, EdgeError> {
     let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
         .domains
         .accounts;
@@ -1644,7 +1648,7 @@ fn clear_override(roots: &Roots, request: &OverrideClear, now: i64) -> Result<Da
 }
 
 /// Every recorded pacing override, then every scheduled model policy rule.
-fn list_overrides(roots: &Roots, now: i64) -> Result<Vec<OverrideRow>, EdgeError> {
+fn list_overrides(roots: &Roots, now: WallTime) -> Result<Vec<OverrideRow>, EdgeError> {
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
         .domains
         .routing;
@@ -1679,7 +1683,7 @@ fn list_overrides(roots: &Roots, now: i64) -> Result<Vec<OverrideRow>, EdgeError
     Ok(overrides)
 }
 
-fn execute(command: &Route, roots: &Roots, now: i64) -> Result<Data, EdgeError> {
+fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeError> {
     match command {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
         Route::Resolve(query) => with_context(
@@ -1820,13 +1824,10 @@ pub fn run(
         },
     };
     let now = SystemClock::new().wall_now();
-    let now_seconds = now
-        .as_ref()
-        .map(|time| time.as_timestamp().as_second())
-        .unwrap_or_default();
+    let at = now.as_ref().ok().copied();
     let result = match now
         .map_err(EdgeError::from)
-        .and_then(|_| execute(&command, roots, now_seconds))
+        .and_then(|now| execute(&command, roots, now))
     {
         Ok(data) => CommandResult::new(name, Outcome::Ok, Some(data)),
         Err(error) => {
@@ -1889,7 +1890,7 @@ pub fn run(
                         entry.policy,
                         entry.source,
                         entry.profile,
-                        entry.expires_unix_seconds,
+                        entry.expires.map(|at| at.to_string()),
                     )
                 }));
                 lines.extend(list.configured_accounts.iter().map(|(account, profile)| {
@@ -2002,7 +2003,8 @@ pub fn run(
                     report
                         .active_overrides
                         .iter()
-                        .map(|row| OverrideRow::pacing(row, now_seconds).line()),
+                        .zip(at)
+                        .map(|(row, now)| OverrideRow::pacing(row, now).line()),
                 );
                 format!("{}\n", lines.join("\n"))
             }
@@ -2129,10 +2131,12 @@ mod route_tests {
     fn override_instants_and_windows_parse_relative_to_the_supplied_instant() {
         use super::{instant, parse_window};
 
-        assert_eq!(instant("1s", 99), Some(100));
-        assert_eq!(instant("2h", 0), Some(7200));
-        assert_eq!(instant("0h", 0), None);
-        assert_eq!(instant("1970-01-01T00:01:00Z", 0), Some(60)); // timebomb: allow parse-only fixture with an injected instant
+        let at = |seconds| provenant_core::WallTime::from_unix_seconds(seconds).ok();
+        let epoch = provenant_core::WallTime::from_micros(0).expect("epoch");
+        assert_eq!(instant("1s", at(99).expect("instant")), at(100));
+        assert_eq!(instant("2h", epoch), at(7200));
+        assert_eq!(instant("0h", epoch), None);
+        assert_eq!(instant("1970-01-01T00:01:00Z", epoch), at(60)); // timebomb: allow parse-only fixture with an injected instant
         let weekdays = parse_window("mon-wed,fri,6@23-2").expect("window");
         assert_eq!(weekdays.weekdays, [0, 1, 2, 4, 6]);
         assert_eq!((weekdays.start_hour, weekdays.end_hour), (23, 2));
@@ -2165,7 +2169,7 @@ mod route_tests {
         let path = roots.state.as_path().join("config.toml");
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing]\npacing_overrides=[{account='codex/removed',policy='pace',schedule={expires=1}},{provider='codex',policy='off'},{provider='claude',policy='off'}]\n",
+            "schema_version=1\n[domains.routing]\npacing_overrides=[{account='codex/removed',policy='pace',schedule={expires='1970-01-01T00:00:01Z'}},{provider='codex',policy='off'},{provider='claude',policy='off'}]\n", // timebomb: allow fixed epoch fixture, not the live clock
         )?;
 
         let data = super::set_override(
@@ -2180,7 +2184,7 @@ mod route_tests {
                 window: vec!["mon-fri@23-7".into()],
                 tz: Some("Australia/Sydney".into()),
             },
-            2,
+            provenant_core::WallTime::from_unix_seconds(2)?,
         )?;
 
         let report = serde_json::to_value(&data)?;
@@ -2194,7 +2198,7 @@ mod route_tests {
         assert!(!saved.contains("provider='codex'"), "{saved}");
         assert!(saved.contains("provider='claude'"), "{saved}");
         assert!(
-            saved.contains("schedule = { expires = 3602, tz = \"Australia/Sydney\", windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 23, end_hour = 7 }] }"),
+            saved.contains("schedule = { expires = \"1970-01-01T01:00:02.000000Z\", tz = \"Australia/Sydney\", windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 23, end_hour = 7 }] }"), // timebomb: allow fixed epoch fixture, not the live clock
             "{saved}"
         );
         Ok(())
@@ -2417,7 +2421,7 @@ mod route_tests {
                 fallback: vec![],
             },
         });
-        match super::execute(&preview, &roots, 0) {
+        match super::execute(&preview, &roots, provenant_core::WallTime::from_micros(0)?) {
             Err(error) => assert!(error.to_string().contains("$20")),
             Ok(_) => panic!("preview must refuse the model"),
         }

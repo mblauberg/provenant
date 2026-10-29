@@ -64,9 +64,62 @@ impl UtcMicros {
         }
         Ok(value)
     }
+    /// Any RFC 3339 spelling of a whole-microsecond instant, in any offset,
+    /// for hand-written configuration. [`Self::parse`] takes only the
+    /// canonical spelling that [`Display`](std::fmt::Display) writes.
+    pub fn parse_rfc3339(text: &str) -> Result<Self, TimeError> {
+        let timestamp: jiff::Timestamp = text.parse().map_err(|_| TimeError::WallSpelling)?;
+        if timestamp.subsec_nanosecond() % 1000 != 0 {
+            return Err(TimeError::WallRange);
+        }
+        Self::from_micros(timestamp.as_microsecond())
+    }
     pub fn checked_add(self, duration: DurationMicros) -> Result<Self, TimeError> {
         let sum = i128::from(self.as_micros()) + i128::from(duration.0);
         Self::from_micros(i64::try_from(sum).map_err(|_| TimeError::Overflow)?)
+    }
+}
+
+/// Serde for a configured instant, such as an expiry: reads any RFC 3339
+/// spelling and writes the canonical one. Use with
+/// `#[serde(with = "provenant_core::rfc3339")]`, or `rfc3339::option` for an
+/// optional field.
+pub mod rfc3339 {
+    use super::WallTime;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(value: &WallTime, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(value)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<WallTime, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        WallTime::parse_rfc3339(&text).map_err(|_| {
+            D::Error::custom(format_args!(
+                "expected an RFC 3339 timestamp of whole microseconds, not {text:?}"
+            ))
+        })
+    }
+
+    pub mod option {
+        use super::WallTime;
+        use serde::{Deserialize, Deserializer, Serializer};
+
+        pub fn serialize<S: Serializer>(
+            value: &Option<WallTime>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match value {
+                Some(value) => serializer.collect_str(value),
+                None => serializer.serialize_none(),
+            }
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<WallTime>, D::Error> {
+            #[derive(Deserialize)]
+            struct Wrapped(#[serde(with = "super")] WallTime);
+            Ok(Option::<Wrapped>::deserialize(deserializer)?.map(|Wrapped(value)| value))
+        }
     }
 }
 impl std::fmt::Display for UtcMicros {
@@ -428,6 +481,49 @@ mod tests {
             wait.remaining(MonoTime::from_micros(1_000_011)),
             DurationMicros::ZERO
         );
+    }
+    #[test]
+    fn configured_instants_read_any_rfc3339_spelling_and_write_one() {
+        let canonical = UtcMicros::from_unix_seconds(1_793_491_200).unwrap();
+        for input in [
+            "2026-11-01T00:00:00Z",
+            "2026-11-01T00:00:00.000000Z",
+            "2026-11-01T10:00:00+10:00",
+        ] {
+            assert_eq!(UtcMicros::parse_rfc3339(input).unwrap(), canonical);
+        }
+        for input in ["2026-11-01T00:00:00.000000001Z", "2026-11-01", "1793491200"] {
+            assert!(UtcMicros::parse_rfc3339(input).is_err(), "{input}");
+        }
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Configured {
+            #[serde(with = "rfc3339")]
+            at: WallTime,
+            #[serde(default, with = "rfc3339::option")]
+            expires: Option<WallTime>,
+        }
+        let read: Configured =
+            serde_json::from_str(r#"{"at":"2026-11-01T10:00:00+10:00","expires":null}"#).unwrap();
+        assert_eq!(
+            read,
+            Configured {
+                at: canonical,
+                expires: None
+            }
+        );
+        let read: Configured = serde_json::from_str(r#"{"at":"2026-11-01T00:00:00Z"}"#).unwrap();
+        assert_eq!(read.expires, None);
+        let written = Configured {
+            at: canonical,
+            expires: Some(canonical),
+        };
+        assert_eq!(
+            serde_json::to_string(&written).unwrap(),
+            r#"{"at":"2026-11-01T00:00:00.000000Z","expires":"2026-11-01T00:00:00.000000Z"}"#
+        );
+        assert!(serde_json::from_str::<Configured>(r#"{"at":1793491200}"#).is_err());
+        let error = serde_json::from_str::<Configured>(r#"{"at":"next year"}"#).unwrap_err();
+        assert!(error.to_string().contains("RFC 3339"), "{error}");
     }
     #[test]
     fn wall_time_converts_whole_unix_seconds_and_millis() {
