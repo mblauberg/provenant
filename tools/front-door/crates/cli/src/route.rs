@@ -25,10 +25,10 @@ pub enum Route {
     Remove(RouteRemove),
     /// Restore one bundled pool and clear its override.
     Reset(RouteReset),
-    /// Set a provider policy or manage a temporary pacing override. Without a
-    /// value, `override` lists the active overrides.
+    /// Set a provider's default pacing policy.
     Pacing(RoutePacing),
-    /// Inspect scheduled policy and pacing overrides.
+    /// Record, list or clear scheduled pacing overrides; the list also shows
+    /// scheduled model policy rules.
     Override(RouteOverride),
 }
 #[derive(Debug, Args)]
@@ -38,8 +38,51 @@ pub struct RouteOverride {
 }
 #[derive(Debug, Subcommand)]
 pub enum RouteOverrideCommand {
+    /// Record a pacing override for one scope and echo the recorded rule.
+    Set(OverrideSet),
     /// List recorded schedules, their current activity and remaining time.
     List,
+    /// Remove pacing overrides: one scope's, or every one without a selector.
+    Clear(OverrideClear),
+}
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("scope").required(true).args(["account", "provider", "all"])))]
+pub struct OverrideSet {
+    /// Apply the override to this account (label, entry or adapter/key).
+    #[arg(long)]
+    pub account: Option<String>,
+    /// Apply the override to this provider.
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Apply the override to all accounts.
+    #[arg(long)]
+    pub all: bool,
+    /// Pacing policy while the override is active.
+    #[arg(long)]
+    pub policy: PacingChoice,
+    /// First active instant: an RFC 3339 timestamp or a duration from now (e.g. 30m).
+    #[arg(long)]
+    pub starts: Option<String>,
+    /// Expiry: a future RFC 3339 timestamp or a duration from now (e.g. 2h, 1d).
+    /// Without it the override stays until cleared.
+    #[arg(long)]
+    pub until: Option<String>,
+    /// Hour window as [DAYS@]START-END, repeatable; DAYS lists weekdays
+    /// (mon..sun or 0..6, Monday = 0) or ranges, such as mon-fri@9-17 or 23-2.
+    #[arg(long, value_name = "WINDOW")]
+    pub window: Vec<String>,
+    /// IANA time zone for the windows. Missing means UTC.
+    #[arg(long)]
+    pub tz: Option<String>,
+}
+#[derive(Debug, Args)]
+pub struct OverrideClear {
+    /// Clear only this account's override.
+    #[arg(long, conflicts_with = "provider")]
+    pub account: Option<String>,
+    /// Clear only this provider's override.
+    #[arg(long, conflicts_with = "account")]
+    pub provider: Option<String>,
 }
 #[derive(Debug, Args)]
 pub struct RouteListRequest {
@@ -100,26 +143,10 @@ impl From<PacingChoice> for PacingPolicy {
 }
 #[derive(Debug, Args)]
 pub struct RoutePacing {
-    /// Registered provider ID, or `override` to manage an override.
-    pub target: String,
-    /// Provider policy, or `clear` after `override`. `override` alone lists
-    /// the active overrides.
-    pub value: Option<String>,
-    /// Apply an override to this account key.
-    #[arg(long, conflicts_with_all = ["provider", "all"])]
-    pub account: Option<String>,
-    /// Apply an override to this provider.
-    #[arg(long, conflicts_with_all = ["account", "all"])]
-    pub provider: Option<String>,
-    /// Apply an override to all accounts.
-    #[arg(long, conflicts_with_all = ["account", "provider"])]
-    pub all: bool,
-    /// Override policy.
-    #[arg(long)]
-    pub policy: Option<PacingChoice>,
-    /// Override expiry as an RFC 3339 timestamp or duration (e.g. 2h, 1d).
-    #[arg(long)]
-    pub until: Option<String>,
+    /// Registered provider ID.
+    pub provider: String,
+    /// Default pacing policy for the provider.
+    pub policy: PacingChoice,
 }
 #[derive(Debug, Args)]
 pub struct RouteResolve {
@@ -391,7 +418,8 @@ impl From<provenant_config::ConfigError> for EdgeError {
         let is_pacing = match &error {
             provenant_config::ConfigError::Schema { location, .. }
             | provenant_config::ConfigError::Domain { location, .. } => {
-                location.key_path.starts_with("domains.routing.pacing")
+                location.key_path == "domains.routing.pacing"
+                    || location.key_path.starts_with("domains.routing.pacing.")
             }
             _ => false,
         };
@@ -410,24 +438,68 @@ pub enum Data {
     Pacing(Box<PacingReport>),
     Overrides(Box<OverrideReport>),
 }
+/// What a `route override` command recorded or cleared, and every scheduled
+/// override afterwards. Fields are always present; `recorded` is null and
+/// `cleared` empty when the command did neither.
 #[derive(Serialize)]
 pub struct OverrideReport {
+    pub recorded: Option<OverrideRow>,
+    pub cleared: Vec<OverrideRow>,
     pub overrides: Vec<OverrideRow>,
 }
 #[derive(Serialize)]
 pub struct OverrideRow {
+    /// `pacing` or `model_policy`.
     pub kind: &'static str,
     pub scope: String,
+    /// The pacing policy, or the model policy rule's index.
     pub value: String,
     pub schedule: provenant_routing::Schedule,
     pub active: bool,
+    /// Seconds until expiry, zero once expired, null without an expiry.
     pub remaining_seconds: Option<i64>,
 }
-/// What a `route pacing` command recorded, if anything, and the overrides now
-/// in force.
+impl OverrideRow {
+    fn pacing(row: &provenant_routing::PacingOverride, now: i64) -> Self {
+        Self {
+            kind: "pacing",
+            scope: match (&row.account, &row.provider) {
+                (Some(account), _) => format!("account {account}"),
+                (None, Some(provider)) => format!("provider {provider}"),
+                (None, None) => "all accounts".to_owned(),
+            },
+            value: policy_name(row.policy).into(),
+            schedule: row.schedule.clone(),
+            active: row.schedule.active(now),
+            remaining_seconds: row.schedule.remaining(now),
+        }
+    }
+    fn line(&self) -> String {
+        let expiry = match (self.schedule.expires, self.remaining_seconds) {
+            (Some(expiry), Some(remaining)) => {
+                format!("until {} ({remaining}s remaining)", expiry_text(expiry))
+            }
+            _ => "no expiry".to_owned(),
+        };
+        let starts = self
+            .schedule
+            .starts
+            .map(|starts| format!(" from {}", expiry_text(starts)))
+            .unwrap_or_default();
+        format!(
+            "{} {} {} {}{starts} {expiry}; {}",
+            self.kind,
+            self.scope,
+            self.value,
+            if self.active { "active" } else { "inactive" },
+            schedule_windows(&self.schedule)
+        )
+    }
+}
+/// What `route pacing` recorded and the pacing overrides now in force.
 #[derive(Serialize)]
 pub struct PacingReport {
-    pub recorded: Option<String>,
+    pub recorded: String,
     pub active_overrides: Vec<provenant_routing::PacingOverride>,
 }
 fn policy_name(policy: PacingPolicy) -> &'static str {
@@ -438,14 +510,15 @@ fn policy_name(policy: PacingPolicy) -> &'static str {
         PacingPolicy::Off => "off",
     }
 }
-fn expiry_text(expires_unix_seconds: i64) -> String {
-    jiff::Timestamp::from_second(expires_unix_seconds)
-        .map_or_else(|_| expires_unix_seconds.to_string(), |at| at.to_string())
+fn expiry_text(unix_seconds: i64) -> String {
+    jiff::Timestamp::from_second(unix_seconds)
+        .map_or_else(|_| unix_seconds.to_string(), |at| at.to_string())
 }
 fn schedule_windows(schedule: &provenant_routing::Schedule) -> String {
     if schedule.windows.is_empty() {
         return "all hours".into();
     }
+    const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
     schedule
         .windows
         .iter()
@@ -453,15 +526,12 @@ fn schedule_windows(schedule: &provenant_routing::Schedule) -> String {
             let days = if window.weekdays.is_empty() {
                 "every day".to_owned()
             } else {
-                format!(
-                    "days {}",
-                    window
-                        .weekdays
-                        .iter()
-                        .map(u8::to_string)
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
+                window
+                    .weekdays
+                    .iter()
+                    .map(|day| DAYS.get(usize::from(*day)).copied().unwrap_or("?"))
+                    .collect::<Vec<_>>()
+                    .join(",")
             };
             format!(
                 "{days} {:02}-{:02} {}",
@@ -473,54 +543,88 @@ fn schedule_windows(schedule: &provenant_routing::Schedule) -> String {
         .collect::<Vec<_>>()
         .join("; ")
 }
-fn migrate_pacing_override_value(value: toml_edit::Value, now: i64) -> Option<toml_edit::Value> {
-    let toml_edit::Value::InlineTable(mut row) = value else {
-        return Some(value);
+/// Parse `[DAYS@]START-END`, where DAYS is a comma list of weekday names,
+/// Monday-based indexes or ranges of either.
+fn parse_window(spec: &str) -> Option<provenant_routing::ScheduleWindow> {
+    const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    let day = |text: &str| -> Option<u8> {
+        let text = text.trim().to_ascii_lowercase();
+        match text.parse::<u8>() {
+            Ok(index) => (index <= 6).then_some(index),
+            Err(_) => DAYS
+                .iter()
+                .position(|name| *name == text)
+                .and_then(|index| u8::try_from(index).ok()),
+        }
     };
-    let legacy = ["starts_unix_seconds", "expires_unix_seconds", "windows"]
-        .iter()
-        .any(|key| row.contains_key(key));
-    let mut schedule = row
-        .get("schedule")
-        .and_then(toml_edit::Value::as_inline_table)
-        .cloned()
-        .unwrap_or_default();
-    for (old, new) in [
-        ("starts_unix_seconds", "starts"),
-        ("expires_unix_seconds", "expires"),
-        ("windows", "windows"),
-    ] {
-        if let Some(value) = row.remove(old) {
-            schedule.insert(new, value);
+    let (days, hours) = spec
+        .rsplit_once('@')
+        .map_or((None, spec), |(d, h)| (Some(d), h));
+    let mut weekdays = Vec::new();
+    for item in days.into_iter().flat_map(|days| days.split(',')) {
+        let (first, last) = item.split_once('-').unwrap_or((item, item));
+        let (first, last) = (day(first)?, day(last)?);
+        if first > last {
+            return None;
+        }
+        for index in first..=last {
+            if !weekdays.contains(&index) {
+                weekdays.push(index);
+            }
         }
     }
-    if legacy
-        && schedule
-            .get("expires")
-            .and_then(toml_edit::Value::as_integer)
-            .is_some_and(|expiry| expiry <= now)
-    {
-        return None;
+    let (start, end) = hours.split_once('-')?;
+    Some(provenant_routing::ScheduleWindow {
+        weekdays,
+        start_hour: start.trim().parse().ok()?,
+        end_hour: end.trim().parse().ok()?,
+    })
+}
+/// The inline TOML form of a pacing override, with only the keys it sets.
+fn override_value(row: &provenant_routing::PacingOverride) -> toml_edit::Value {
+    let mut table = toml_edit::InlineTable::new();
+    if let Some(account) = &row.account {
+        table.insert("account", account.as_str().into());
+    }
+    if let Some(provider) = &row.provider {
+        table.insert("provider", provider.as_str().into());
+    }
+    table.insert("policy", policy_name(row.policy).into());
+    let mut schedule = toml_edit::InlineTable::new();
+    if let Some(starts) = row.schedule.starts {
+        schedule.insert("starts", starts.into());
+    }
+    if let Some(expires) = row.schedule.expires {
+        schedule.insert("expires", expires.into());
+    }
+    if let Some(tz) = &row.schedule.tz {
+        schedule.insert("tz", tz.as_str().into());
+    }
+    if !row.schedule.windows.is_empty() {
+        let mut windows = toml_edit::Array::new();
+        for window in &row.schedule.windows {
+            let mut value = toml_edit::InlineTable::new();
+            if !window.weekdays.is_empty() {
+                value.insert(
+                    "weekdays",
+                    window
+                        .weekdays
+                        .iter()
+                        .map(|day| i64::from(*day))
+                        .collect::<toml_edit::Array>()
+                        .into(),
+                );
+            }
+            value.insert("start_hour", i64::from(window.start_hour).into());
+            value.insert("end_hour", i64::from(window.end_hour).into());
+            windows.push(value);
+        }
+        schedule.insert("windows", windows.into());
     }
     if !schedule.is_empty() {
-        row.insert("schedule", toml_edit::Value::InlineTable(schedule));
+        table.insert("schedule", schedule.into());
     }
-    Some(toml_edit::Value::InlineTable(row))
-}
-fn override_line(row: &provenant_routing::PacingOverride, now: i64) -> String {
-    let scope = match (&row.account, &row.provider) {
-        (Some(account), _) => format!("account {account}"),
-        (None, Some(provider)) => format!("provider {provider}"),
-        (None, None) => "all accounts".to_owned(),
-    };
-    let until = row.schedule.expires.map_or_else(
-        || "no expiry".into(),
-        |expiry| {
-            let remaining = expiry.saturating_sub(now).max(0);
-            format!("until {} ({remaining}s remaining)", expiry_text(expiry))
-        },
-    );
-    format!("{scope} {} {until}", policy_name(row.policy))
+    table.into()
 }
 #[derive(Serialize)]
 pub struct RoutePreview {
@@ -1263,51 +1367,33 @@ fn reset_pool(roots: &Roots, request: &RouteReset) -> Result<(), EdgeError> {
     })
 }
 
-/// Record the request and describe what was recorded; `None` only lists.
-fn set_pacing(roots: &Roots, request: &RoutePacing, now: i64) -> Result<Option<String>, EdgeError> {
-    if request.target == "override" {
-        return set_pacing_override(roots, request, now);
+/// Refuse a provider the registry does not know before anything is written.
+fn known_provider(id: &str) -> Result<(), EdgeError> {
+    if REGISTRY.iter().any(|provider| provider.adapter.id() == id) {
+        Ok(())
+    } else {
+        Err(RoutingError::UnknownAdapter.into())
     }
-    if request.account.is_some()
-        || request.provider.is_some()
-        || request.all
-        || request.policy.is_some()
-        || request.until.is_some()
-    {
-        return Err(EdgeError::Pacing(
-            "override options require `route pacing override`",
-        ));
-    }
-    let policy = match request.value.as_deref() {
-        Some("pace") => "pace",
-        Some("spend") => "spend",
-        Some("max") => "max",
-        Some("off") => "off",
-        _ => {
-            return Err(EdgeError::Pacing(
-                "expected a pacing policy: pace, spend, max or off",
-            ));
-        }
-    };
-    if !REGISTRY
-        .iter()
-        .any(|provider| provider.adapter.id() == request.target)
-    {
-        return Err(RoutingError::UnknownAdapter.into());
-    }
+}
+
+/// Record a provider's default pacing policy and describe what was recorded.
+fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<String, EdgeError> {
+    let policy = policy_name(request.policy.into());
+    known_provider(&request.provider)?;
     edit_config(roots, |document| {
         let routing = routing_table(document)?;
         let pacing = routing
             .entry("pacing")
             .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
         let pacing = config_table(pacing).ok_or("domains.routing.pacing must be a table")?;
-        pacing.insert(&request.target, toml_edit::value(policy));
+        pacing.insert(&request.provider, toml_edit::value(policy));
         Ok(())
     })?;
-    Ok(Some(format!("provider {} pacing {policy}", request.target)))
+    Ok(format!("provider {} pacing {policy}", request.provider))
 }
 
-fn override_expiry(value: &str, now: i64) -> Option<i64> {
+/// An RFC 3339 timestamp, or a positive duration (s, m, h or d) from `now`.
+fn instant(value: &str, now: i64) -> Option<i64> {
     if let Ok(timestamp) = value.parse::<jiff::Timestamp>() {
         return Some(timestamp.as_second());
     }
@@ -1322,65 +1408,126 @@ fn override_expiry(value: &str, now: i64) -> Option<i64> {
     (seconds > 0).then(|| now.checked_add(seconds)).flatten()
 }
 
-fn expiry_is_future(expiry: i64, now: i64) -> bool {
-    expiry > now
+/// Take the recorded pacing override rows as inline tables, whichever TOML
+/// array form the file used.
+fn take_override_rows(
+    routing: &mut toml_edit::Table,
+) -> Result<Vec<toml_edit::InlineTable>, &'static str> {
+    match routing.remove("pacing_overrides") {
+        None => Ok(Vec::new()),
+        Some(toml_edit::Item::Value(toml_edit::Value::Array(values))) => values
+            .into_iter()
+            .map(|value| match value {
+                toml_edit::Value::InlineTable(row) => Ok(row),
+                _ => Err("domains.routing.pacing_overrides must be an array of tables"),
+            })
+            .collect(),
+        Some(toml_edit::Item::ArrayOfTables(tables)) => Ok(tables
+            .into_iter()
+            .map(toml_edit::Table::into_inline_table)
+            .collect()),
+        _ => Err("domains.routing.pacing_overrides must be an array of tables"),
+    }
 }
 
-fn set_pacing_override(
+/// Rewrite the pacing overrides, removing each row `remove` selects and every
+/// expired one, then appending `append`. Returns the removed rows.
+fn rewrite_overrides(
     roots: &Roots,
-    request: &RoutePacing,
     now: i64,
-) -> Result<Option<String>, EdgeError> {
-    let options = request.account.is_some()
-        || request.provider.is_some()
-        || request.all
-        || request.policy.is_some()
-        || request.until.is_some();
-    if request.value.is_none() && !options {
-        return Ok(None);
-    }
-    if request.value.as_deref() == Some("clear") {
-        if request.account.is_some()
-            || request.provider.is_some()
-            || request.all
-            || request.policy.is_some()
-            || request.until.is_some()
-        {
-            return Err(EdgeError::Pacing("override clear takes no options"));
+    remove: impl Fn(&provenant_routing::PacingOverride) -> bool,
+    append: Option<&provenant_routing::PacingOverride>,
+) -> Result<Vec<provenant_routing::PacingOverride>, EdgeError> {
+    let mut removed = Vec::new();
+    edit_config(roots, |document| {
+        let routing = routing_table(document)?;
+        let mut kept = toml_edit::Array::new();
+        for row in take_override_rows(routing)? {
+            let decoded = toml_edit::de::from_document::<provenant_routing::PacingOverride>(
+                toml_edit::DocumentMut::from(row.clone().into_table()),
+            )
+            .ok();
+            match decoded {
+                Some(decoded)
+                    if remove(&decoded)
+                        || decoded.schedule.expires.is_some_and(|end| end <= now) =>
+                {
+                    removed.push(decoded);
+                }
+                _ => kept.push(row),
+            }
         }
-        edit_config(roots, |document| {
-            routing_table(document)?.remove("pacing_overrides");
-            Ok(())
-        })?;
-        return Ok(Some("cleared every pacing override".to_owned()));
+        if let Some(row) = append {
+            kept.push(override_value(row));
+        }
+        if !kept.is_empty() {
+            routing.insert(
+                "pacing_overrides",
+                toml_edit::Item::Value(toml_edit::Value::Array(kept)),
+            );
+        }
+        Ok(())
+    })?;
+    Ok(removed)
+}
+
+/// Whether a recorded row has the scope given by a resolved account and a
+/// provider. Recorded account names resolve the same way as the request's.
+fn same_scope(
+    row: &provenant_routing::PacingOverride,
+    account: Option<&str>,
+    provider: Option<&str>,
+    settings: &provenant_providers::accounts::Settings,
+) -> bool {
+    let recorded = row.account.as_deref().map(|name| {
+        resolve_account_reference(name, "account", settings).unwrap_or_else(|_| name.to_owned())
+    });
+    recorded.as_deref() == account && row.provider.as_deref() == provider
+}
+
+fn set_override(roots: &Roots, request: &OverrideSet, now: i64) -> Result<Data, EdgeError> {
+    if let Some(provider) = &request.provider {
+        known_provider(provider)?;
     }
-    if request.value.is_some()
-        || usize::from(request.account.is_some())
-            + usize::from(request.provider.is_some())
-            + usize::from(request.all)
-            != 1
-    {
-        return Err(EdgeError::Pacing(
-            "select exactly one of --account, --provider or --all",
-        ));
-    }
-    let policy = match request
-        .policy
-        .ok_or(EdgeError::Pacing("override requires --policy"))?
-    {
-        PacingChoice::Pace => "pace",
-        PacingChoice::Spend => "spend",
-        PacingChoice::Max => "max",
-        PacingChoice::Off => "off",
-    };
-    let expiry = request
+    let starts = request
+        .starts
+        .as_deref()
+        .map(|value| {
+            instant(value, now).ok_or(EdgeError::Pacing(
+                "--starts must be an RFC 3339 timestamp or positive duration",
+            ))
+        })
+        .transpose()?;
+    let expires = request
         .until
         .as_deref()
-        .and_then(|value| override_expiry(value, now))
-        .filter(|expiry| expiry_is_future(*expiry, now))
+        .map(|value| {
+            instant(value, now)
+                .filter(|end| *end > now)
+                .ok_or(EdgeError::Pacing(
+                    "--until must be a future RFC 3339 timestamp or positive duration",
+                ))
+        })
+        .transpose()?;
+    let windows = request
+        .window
+        .iter()
+        .map(|spec| parse_window(spec))
+        .collect::<Option<Vec<_>>>()
         .ok_or(EdgeError::Pacing(
-            "--until must be a future RFC 3339 timestamp or positive duration",
+            "--window must be [DAYS@]START-END, such as mon-fri@9-17 or 23-2",
         ))?;
+    let schedule = provenant_routing::Schedule {
+        starts,
+        expires,
+        tz: request.tz.clone(),
+        windows,
+    };
+    if !schedule.valid() {
+        return Err(EdgeError::Pacing(
+            "invalid schedule: --starts must precede --until, --tz must be an IANA time zone, windows need distinct start and end hours from 0 to 24, and at most 16 windows",
+        ));
+    }
     let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
         .domains
         .accounts;
@@ -1389,74 +1536,103 @@ fn set_pacing_override(
         .as_deref()
         .map(|name| resolve_account_reference(name, "--account", &settings))
         .transpose()?;
-    edit_config(roots, |document| {
-        let routing = routing_table(document)?;
-        let mut values = match routing.remove("pacing_overrides") {
-            None => toml_edit::Array::new(),
-            Some(toml_edit::Item::Value(toml_edit::Value::Array(values))) => values,
-            Some(toml_edit::Item::ArrayOfTables(tables)) => {
-                let mut values = toml_edit::Array::new();
-                for table in tables.iter() {
-                    values.push(toml_edit::Value::InlineTable(
-                        table.clone().into_inline_table(),
-                    ));
-                }
-                values
-            }
-            _ => return Err("domains.routing.pacing_overrides must be an array of tables"),
-        };
-        let mut migrated_values = toml_edit::Array::new();
-        for value in values.iter() {
-            if let Some(value) = migrate_pacing_override_value(value.clone(), now) {
-                migrated_values.push(value);
-            }
-        }
-        values = migrated_values;
-        values.retain(|value| {
-            let Some(row) = value.as_inline_table() else {
-                return true;
-            };
-            let existing = row
-                .get("account")
-                .and_then(toml_edit::Value::as_str)
-                .map(|name| {
-                    resolve_account_reference(name, "account", &settings)
-                        .unwrap_or_else(|_| name.to_owned())
-                });
-            existing.as_deref() != account.as_deref()
-                || row.get("provider").and_then(toml_edit::Value::as_str)
-                    != request.provider.as_deref()
-        });
-        let mut row = toml_edit::InlineTable::new();
-        if let Some(account) = &account {
-            row.insert("account", toml_edit::Value::from(account.as_str()));
-        }
-        if let Some(provider) = &request.provider {
-            row.insert("provider", toml_edit::Value::from(provider.as_str()));
-        }
-        row.insert("policy", toml_edit::Value::from(policy));
-        let mut schedule = toml_edit::InlineTable::new();
-        schedule.insert("expires", toml_edit::Value::from(expiry));
-        row.insert("schedule", toml_edit::Value::InlineTable(schedule));
-        values.push(toml_edit::Value::InlineTable(row));
-        routing.insert(
-            "pacing_overrides",
-            toml_edit::Item::Value(toml_edit::Value::Array(values)),
-        );
-        Ok(())
-    })?;
     let recorded = provenant_routing::PacingOverride {
         account,
         provider: request.provider.clone(),
-        policy: request.policy.map_or(PacingPolicy::Pace, Into::into),
-        schedule: provenant_routing::Schedule {
-            starts: None,
-            expires: Some(expiry),
-            tz: None,
-            windows: Vec::new(),
-        },
+        policy: request.policy.into(),
+        schedule,
     };
-    Ok(Some(format!("override {}", override_line(&recorded, now))))
+    let removed = rewrite_overrides(
+        roots,
+        now,
+        |row| {
+            same_scope(
+                row,
+                recorded.account.as_deref(),
+                recorded.provider.as_deref(),
+                &settings,
+            )
+        },
+        Some(&recorded),
+    )?;
+    Ok(Data::Overrides(Box::new(OverrideReport {
+        recorded: Some(OverrideRow::pacing(&recorded, now)),
+        cleared: removed
+            .iter()
+            .map(|row| OverrideRow::pacing(row, now))
+            .collect(),
+        overrides: list_overrides(roots, now)?,
+    })))
+}
+
+fn clear_override(roots: &Roots, request: &OverrideClear, now: i64) -> Result<Data, EdgeError> {
+    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+        .domains
+        .accounts;
+    let account = request
+        .account
+        .as_deref()
+        .map(|name| resolve_account_reference(name, "--account", &settings))
+        .transpose()?;
+    let every = account.is_none() && request.provider.is_none();
+    let removed = rewrite_overrides(
+        roots,
+        now,
+        |row| {
+            every
+                || same_scope(
+                    row,
+                    account.as_deref(),
+                    request.provider.as_deref(),
+                    &settings,
+                )
+        },
+        None,
+    )?;
+    Ok(Data::Overrides(Box::new(OverrideReport {
+        recorded: None,
+        cleared: removed
+            .iter()
+            .map(|row| OverrideRow::pacing(row, now))
+            .collect(),
+        overrides: list_overrides(roots, now)?,
+    })))
+}
+
+/// Every recorded pacing override, then every scheduled model policy rule.
+fn list_overrides(roots: &Roots, now: i64) -> Result<Vec<OverrideRow>, EdgeError> {
+    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+        .domains
+        .routing;
+    let mut overrides: Vec<OverrideRow> = config
+        .pacing_overrides
+        .iter()
+        .map(|row| OverrideRow::pacing(row, now))
+        .collect();
+    for (index, row) in config.model_policy.rules.iter().enumerate() {
+        let scope = [
+            row.adapter.as_deref().map(|v| format!("adapter {v}")),
+            row.model.as_ref().map(|v| format!("model {}", v.as_str())),
+            row.account.as_deref().map(|v| format!("account {v}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ");
+        overrides.push(OverrideRow {
+            kind: "model_policy",
+            scope: if scope.is_empty() {
+                "all routes".into()
+            } else {
+                scope
+            },
+            value: format!("rules[{index}]"),
+            schedule: row.schedule.clone(),
+            active: row.schedule.active(now),
+            remaining_seconds: row.schedule.remaining(now),
+        });
+    }
+    Ok(overrides)
 }
 
 fn execute(command: &Route, roots: &Roots, now: i64) -> Result<Data, EdgeError> {
@@ -1550,7 +1726,7 @@ fn execute(command: &Route, roots: &Roots, now: i64) -> Result<Data, EdgeError> 
             )?))
         }
         Route::Pacing(request) => {
-            let recorded = set_pacing(roots, request, now)?;
+            let recorded = set_pacing(roots, request)?;
             let list = list_data(
                 roots,
                 &RouteListRequest {
@@ -1564,59 +1740,15 @@ fn execute(command: &Route, roots: &Roots, now: i64) -> Result<Data, EdgeError> 
                 active_overrides: list.active_overrides,
             })))
         }
-        Route::Override(_) => {
-            let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
-                .domains
-                .routing;
-            let mut overrides = Vec::new();
-            for row in &config.pacing_overrides {
-                overrides.push(OverrideRow {
-                    kind: "pacing",
-                    scope: row.account.as_ref().map_or_else(
-                        || {
-                            row.provider
-                                .as_ref()
-                                .map_or_else(|| "all accounts".into(), |p| format!("provider {p}"))
-                        },
-                        |a| format!("account {a}"),
-                    ),
-                    value: policy_name(row.policy).into(),
-                    schedule: row.schedule.clone(),
-                    active: row.schedule.active(now),
-                    remaining_seconds: row
-                        .schedule
-                        .expires
-                        .map(|end| end.saturating_sub(now).max(0)),
-                });
-            }
-            for (index, row) in config.model_policy.rules.iter().enumerate() {
-                let scope = [
-                    row.adapter.as_deref().map(|v| format!("adapter {v}")),
-                    row.model.as_ref().map(|v| format!("model {}", v.as_str())),
-                    row.account.as_deref().map(|v| format!("account {v}")),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(", ");
-                overrides.push(OverrideRow {
-                    kind: "model_policy",
-                    scope: if scope.is_empty() {
-                        "all routes".into()
-                    } else {
-                        scope
-                    },
-                    value: format!("rules[{index}]"),
-                    schedule: row.schedule.clone(),
-                    active: row.schedule.active(now),
-                    remaining_seconds: row
-                        .schedule
-                        .expires
-                        .map(|end| end.saturating_sub(now).max(0)),
-                });
-            }
-            Ok(Data::Overrides(Box::new(OverrideReport { overrides })))
-        }
+        Route::Override(request) => match &request.command {
+            RouteOverrideCommand::Set(set) => set_override(roots, set, now),
+            RouteOverrideCommand::List => Ok(Data::Overrides(Box::new(OverrideReport {
+                recorded: None,
+                cleared: Vec::new(),
+                overrides: list_overrides(roots, now)?,
+            }))),
+            RouteOverrideCommand::Clear(clear) => clear_override(roots, clear, now),
+        },
     }
 }
 pub fn run(
@@ -1632,7 +1764,11 @@ pub fn run(
         Route::Remove(_) => "route remove",
         Route::Reset(_) => "route reset",
         Route::Pacing(_) => "route pacing",
-        Route::Override(_) => "route override list",
+        Route::Override(request) => match request.command {
+            RouteOverrideCommand::Set(_) => "route override set",
+            RouteOverrideCommand::List => "route override list",
+            RouteOverrideCommand::Clear(_) => "route override clear",
+        },
     };
     let now = SystemClock::new().wall_now();
     let now_seconds = now
@@ -1806,48 +1942,31 @@ pub fn run(
                 text
             }
             Some(Data::Pacing(report)) => {
-                let mut lines = Vec::new();
-                if let Some(recorded) = &report.recorded {
-                    lines.push(format!("recorded: {recorded}"));
-                }
-                lines.push(format!(
-                    "active overrides: {}",
-                    report.active_overrides.len()
-                ));
+                let mut lines = vec![
+                    format!("recorded: {}", report.recorded),
+                    format!("active overrides: {}", report.active_overrides.len()),
+                ];
                 lines.extend(
                     report
                         .active_overrides
                         .iter()
-                        .map(|row| format!("override {}", override_line(row, now_seconds))),
+                        .map(|row| OverrideRow::pacing(row, now_seconds).line()),
                 );
                 format!("{}\n", lines.join("\n"))
             }
             Some(Data::Overrides(report)) => {
-                let mut lines = vec![format!("overrides: {}", report.overrides.len())];
-                lines.extend(report.overrides.iter().map(|row| {
-                    let starts = row
-                        .schedule
-                        .starts
-                        .map_or_else(|| "open".into(), expiry_text);
-                    let expiry = row
-                        .schedule
-                        .expires
-                        .map_or_else(|| "no expiry".into(), expiry_text);
-                    let remaining = row
-                        .remaining_seconds
-                        .map_or_else(String::new, |s| format!(" ({s}s remaining)"));
-                    format!(
-                        "{} {} {} active={} starts={} expires={} windows={}{}",
-                        row.kind,
-                        row.scope,
-                        row.value,
-                        row.active,
-                        starts,
-                        expiry,
-                        schedule_windows(&row.schedule),
-                        remaining
-                    )
-                }));
+                let mut lines = Vec::new();
+                if let Some(row) = &report.recorded {
+                    lines.push(format!("recorded: {}", row.line()));
+                }
+                lines.extend(
+                    report
+                        .cleared
+                        .iter()
+                        .map(|row| format!("removed: {}", row.line())),
+                );
+                lines.push(format!("overrides: {}", report.overrides.len()));
+                lines.extend(report.overrides.iter().map(OverrideRow::line));
                 format!("{}\n", lines.join("\n"))
             }
             None => String::new(),
@@ -1878,47 +1997,59 @@ pub fn run(
                 Some("provenant route resolve MODEL".to_owned()),
             ))
         }
-        Some(Data::Pacing(report)) => {
-            let active = format!("{} active pacing overrides", report.active_overrides.len());
-            let headline = report.recorded.as_ref().map_or_else(
-                || active.clone(),
-                |recorded| format!("recorded {recorded}; {active}"),
+        Some(Data::Pacing(report)) => Some(crate::Summary::new(
+            format!(
+                "recorded {}; {} active pacing overrides",
+                report.recorded,
+                report.active_overrides.len()
+            ),
+            Vec::new(),
+            Some("provenant route override list".to_owned()),
+        )),
+        Some(Data::Overrides(report)) => {
+            let active = report.overrides.iter().filter(|row| row.active).count();
+            let tally = format!(
+                "{} scheduled overrides, {active} active",
+                report.overrides.len()
             );
-            let next = if report.recorded.is_some() {
-                "provenant route pacing override"
-            } else if report.active_overrides.is_empty() {
-                "provenant route pacing override --account ACCOUNT --policy POLICY --until 2h"
+            let headline = match (&report.recorded, report.cleared.len()) {
+                (Some(row), 0) => format!("recorded {}; {tally}", row.line()),
+                (Some(row), cleared) => {
+                    format!("recorded {}; removed {cleared}; {tally}", row.line())
+                }
+                (None, _)
+                    if matches!(
+                        command,
+                        Route::Override(RouteOverride {
+                            command: RouteOverrideCommand::Clear(_)
+                        })
+                    ) =>
+                {
+                    format!("cleared {} pacing overrides; {tally}", report.cleared.len())
+                }
+                (None, _) => tally,
+            };
+            let next = if report.overrides.is_empty() {
+                "provenant route override set --account ACCOUNT --policy POLICY --until 2h"
+            } else if report.recorded.is_some() {
+                "provenant route override list"
             } else {
-                "provenant route pacing override clear"
+                "provenant route override clear"
             };
             Some(crate::Summary::new(
                 headline,
-                report
-                    .active_overrides
-                    .iter()
-                    .map(|row| format!("override {}", override_line(row, now_seconds)))
-                    .collect(),
+                report.overrides.iter().map(OverrideRow::line).collect(),
                 Some(next.to_owned()),
             ))
         }
-        Some(Data::Overrides(report)) => Some(crate::Summary::new(
-            format!("{} scheduled overrides", report.overrides.len()),
-            report
-                .overrides
-                .iter()
-                .map(|row| {
-                    format!(
-                        "{} {} {} active={}",
-                        row.kind, row.scope, row.value, row.active
-                    )
-                })
-                .collect(),
-            Some("provenant route override list".to_owned()),
-        )),
         _ => None,
     };
-    let listing = matches!(&result.data, Some(Data::Pacing(report)) if report.recorded.is_none())
-        || matches!(&result.data, Some(Data::Overrides(_)));
+    let listing = matches!(
+        command,
+        Route::Override(RouteOverride {
+            command: RouteOverrideCommand::List
+        })
+    );
     let mode = globals.render_mode(
         &human,
         listing || matches!(command, Route::List(_) | Route::Resolve(_)),
@@ -1943,20 +2074,26 @@ mod route_tests {
     use std::error::Error;
 
     #[test]
-    fn pacing_override_expiry_uses_the_supplied_instant() {
-        use super::{expiry_is_future, override_expiry};
+    fn override_instants_and_windows_parse_relative_to_the_supplied_instant() {
+        use super::{instant, parse_window};
 
-        let expiry = override_expiry("1s", 99).expect("positive duration should resolve");
-        assert_eq!(expiry, 100);
-        assert!(expiry_is_future(expiry, 99));
-        assert!(!expiry_is_future(expiry, 100));
-        assert!(!expiry_is_future(expiry, 101));
+        assert_eq!(instant("1s", 99), Some(100));
+        assert_eq!(instant("2h", 0), Some(7200));
+        assert_eq!(instant("0h", 0), None);
+        assert_eq!(instant("1970-01-01T00:01:00Z", 0), Some(60));
+        let weekdays = parse_window("mon-wed,fri,6@23-2").expect("window");
+        assert_eq!(weekdays.weekdays, [0, 1, 2, 4, 6]);
+        assert_eq!((weekdays.start_hour, weekdays.end_hour), (23, 2));
+        let every_day = parse_window("9-17").expect("window");
+        assert!(every_day.weekdays.is_empty());
+        for invalid in ["fri-mon@9-17", "funday@9-17", "7@9-17", "9", "a-b"] {
+            assert!(parse_window(invalid).is_none(), "{invalid}");
+        }
     }
 
     #[test]
-    fn pacing_override_write_drops_expired_legacy_removed_account_rows()
-    -> Result<(), Box<dyn Error>> {
-        use super::{PacingChoice, RoutePacing};
+    fn override_set_replaces_its_scope_and_prunes_expired_rows() -> Result<(), Box<dyn Error>> {
+        use super::{OverrideSet, PacingChoice};
         use std::path::Path;
         struct Resolver;
         impl provenant_core::PathResolver for Resolver {
@@ -1976,27 +2113,38 @@ mod route_tests {
         let path = roots.state.as_path().join("config.toml");
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing]\npacing_overrides=[{account='codex/removed',policy='pace',expires_unix_seconds=1}]\n",
+            "schema_version=1\n[domains.routing]\npacing_overrides=[{account='codex/removed',policy='pace',schedule={expires=1}},{provider='codex',policy='off'},{provider='claude',policy='off'}]\n",
         )?;
 
-        super::set_pacing_override(
+        let data = super::set_override(
             &roots,
-            &RoutePacing {
-                target: "override".into(),
-                value: None,
+            &OverrideSet {
                 account: None,
                 provider: Some("codex".into()),
                 all: false,
-                policy: Some(PacingChoice::Max),
+                policy: PacingChoice::Max,
+                starts: None,
                 until: Some("1h".into()),
+                window: vec!["mon-fri@23-7".into()],
+                tz: Some("Australia/Sydney".into()),
             },
             2,
         )?;
 
+        let report = serde_json::to_value(&data)?;
+        assert_eq!(report["recorded"]["scope"], "provider codex");
+        assert_eq!(report["recorded"]["value"], "max");
+        assert_eq!(report["recorded"]["remaining_seconds"], 3600);
+        assert_eq!(report["cleared"].as_array().map(Vec::len), Some(2));
+        assert_eq!(report["overrides"].as_array().map(Vec::len), Some(2));
         let saved = std::fs::read_to_string(path)?;
         assert!(!saved.contains("codex/removed"), "{saved}");
-        assert!(!saved.contains("expires_unix_seconds"), "{saved}");
-        assert!(saved.contains("provider = \"codex\""), "{saved}");
+        assert!(!saved.contains("provider='codex'"), "{saved}");
+        assert!(saved.contains("provider='claude'"), "{saved}");
+        assert!(
+            saved.contains("schedule = { expires = 3602, tz = \"Australia/Sydney\", windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 23, end_hour = 7 }] }"),
+            "{saved}"
+        );
         Ok(())
     }
 

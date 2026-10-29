@@ -20,14 +20,17 @@ The header requires `schema_version = 1`. `profile` selects `balanced`,
 and invalid optional values warn and use defaults; invalid optional rows are
 isolated so valid rows still apply. Effective values retain their source in
 `config show`. Each warning names the offending key, so an invalid value
-inside a table drops only that value and its valid siblings still apply.
+inside a table drops only that value and its valid siblings still apply. A
+model policy rule or pacing override whose selector or schedule is malformed
+is dropped whole, since without it the record would apply more widely.
 Syntax, file size and schema-version errors remain hard failures, as do
 invalid known credentials, authority, confinement and Git-boundary settings.
 Recovery never widens an enforced restriction, so these also refuse the file:
 
 - knobs marked `strict` in the registry (`lanes.publish`,
   `fabric.accept_handoff`, `chair.auto_switch`, `chair.switch_accounts` and
-  `lanes.max_depth`), whose defaults could grant what the user withheld;
+  `lanes.max_depth`), whose defaults could grant what the user withheld, and a
+  `knobs` or `domains` value that is not a table;
 - enforced model policy (`lane.read_only`, `lane.max_context`,
   `lane.max_turns`), and a malformed rule that carries one;
 - Fabric protocol caps (`limits.*`, which may only be lowered), graph limits

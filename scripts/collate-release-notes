@@ -121,8 +121,9 @@ section_part() {
     [ "$(area_of "$f")" = "$2" ] || continue
     skip=0
     [ -z "$(sed -n 2p "$f" | sed -n '/^### /p')" ] || skip=2
-    # Drop the heading, the area line and any blank lines around the bullets.
-    awk -v skip="$skip" 'NR > 1 && NR != skip { if ($0 == "") { held = held "\n"; next } if (started) printf "%s", held; held = ""; started = 1; print }' "$f"
+    # Drop the heading, the area line, any later section heading (ignored, as
+    # --check warns) and any blank lines around the bullets.
+    awk -v skip="$skip" 'NR > 1 && NR != skip && !/^## / { if ($0 == "") { held = held "\n"; next } if (started) printf "%s", held; held = ""; started = 1; print }' "$f"
   done
 }
 

@@ -1,3 +1,4 @@
+use crate::policy::Scoped;
 use crate::{
     ModelId, RoutingError,
     request::{effort_valid, identifier},
@@ -5,7 +6,6 @@ use crate::{
 use provenant_config::{DomainConfig, DomainSection, Profile, SectionError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -61,62 +61,50 @@ pub struct PacingProfile {
     pub after_deadline: AfterDeadline,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PacingOverride {
     pub account: Option<String>,
     pub provider: Option<String>,
     pub policy: PacingPolicy,
+    #[serde(default)]
     pub schedule: crate::Schedule,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PacingOverrideInput {
-    account: Option<String>,
-    provider: Option<String>,
-    policy: PacingPolicy,
-    schedule: Option<crate::Schedule>,
-    starts_unix_seconds: Option<i64>,
-    expires_unix_seconds: Option<i64>,
-    windows: Option<Vec<crate::ScheduleWindow>>,
-}
-fn deserialize_pacing_overrides<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<PacingOverride>, D::Error> {
-    let inputs = Vec::<PacingOverrideInput>::deserialize(deserializer)?;
-    let now = jiff::Timestamp::now().as_second();
-    let mut migrated = false;
-    let overrides = inputs
-        .into_iter()
-        .filter_map(|input| {
-            let legacy = input.starts_unix_seconds.is_some()
-                || input.expires_unix_seconds.is_some()
-                || input.windows.is_some();
-            migrated |= legacy;
-            let schedule = input.schedule.unwrap_or_else(|| crate::Schedule {
-                starts: input.starts_unix_seconds,
-                expires: input.expires_unix_seconds,
-                windows: input.windows.unwrap_or_default(),
-                ..Default::default()
-            });
-            if legacy && schedule.expires.is_some_and(|expiry| expiry <= now) {
-                return None;
-            }
-            Some(PacingOverride {
-                account: input.account,
-                provider: input.provider,
-                policy: input.policy,
-                schedule,
-            })
+impl<'de> Deserialize<'de> for PacingOverride {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Retired timing keys decode so validation can name their
+        /// replacement; their values are never read.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            account: Option<Scoped<String>>,
+            provider: Option<Scoped<String>>,
+            policy: PacingPolicy,
+            #[serde(default)]
+            schedule: Option<Scoped<crate::Schedule>>,
+            #[serde(rename = "starts_unix_seconds")]
+            _starts: Option<serde::de::IgnoredAny>,
+            #[serde(rename = "expires_unix_seconds")]
+            _expires: Option<serde::de::IgnoredAny>,
+            #[serde(rename = "windows")]
+            _windows: Option<serde::de::IgnoredAny>,
+        }
+        let input = Input::deserialize(deserializer)?;
+        let mut malformed = false;
+        let account = Scoped::take(input.account, &mut malformed);
+        let provider = Scoped::take(input.provider, &mut malformed);
+        let schedule = Scoped::take(input.schedule, &mut malformed).unwrap_or_default();
+        Ok(Self {
+            account,
+            provider,
+            policy: input.policy,
+            schedule: if malformed {
+                crate::Schedule::malformed()
+            } else {
+                schedule
+            },
         })
-        .collect();
-    if migrated {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "note: legacy routing schedules were converted; rewrite the configuration file"
-        );
     }
-    Ok(overrides)
 }
 
 /// Fixed deadlines use host-local time. Reset references use fresh quota facts.
@@ -253,7 +241,6 @@ pub struct RoutingConfig {
     pub pools: BTreeMap<String, Vec<RoutePoolMember>>,
     pub pacing: PacingSettings,
     pub pacing_reserve: BTreeMap<String, PacingReserve>,
-    #[serde(deserialize_with = "deserialize_pacing_overrides")]
     pub pacing_overrides: Vec<PacingOverride>,
     pub opencode_go: OpenCodeGoSettings,
 }
@@ -651,34 +638,17 @@ impl DomainConfig for RoutingConfig {
                         .iter()
                         .any(|r| r.adapter.id() == p)
                 })
-                || override_
-                    .schedule
-                    .expires
-                    .is_none_or(|expires| expires <= 0)
-                || override_
-                    .schedule
-                    .starts
-                    .zip(override_.schedule.expires)
-                    .is_some_and(|(starts, expires)| starts >= expires)
-                || override_.schedule.windows.len() > 16
-                || override_.schedule.windows.iter().any(|window| {
-                    window.start_hour >= 24
-                        || window.end_hour > 24
-                        || window.start_hour == window.end_hour
-                        || window.weekdays.len() > 7
-                        || window.weekdays.iter().any(|day| *day > 6)
-                        || window
-                            .weekdays
-                            .iter()
-                            .copied()
-                            .collect::<BTreeSet<_>>()
-                            .len()
-                            != window.weekdays.len()
-                })
             {
                 errors.push(SectionError {
-                    field: format!("pacing_overrides[{index}]"),
+                    field: format!("pacing_overrides.{index}"),
                     code: "selector",
+                });
+            } else if !override_.schedule.valid() {
+                // Reported at the override, so recovery drops the override
+                // rather than its schedule, which would make it permanent.
+                errors.push(SectionError {
+                    field: format!("pacing_overrides.{index}"),
+                    code: "schedule",
                 });
             }
         }
@@ -872,9 +842,26 @@ mod pacing_profile_tests {
 fn defaults(_: Profile) -> &'static str {
     include_str!("../assets/review-defaults.toml")
 }
-/// Enforced model policy restrictions are a boundary; other routing input recovers.
-pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing", defaults)
-    .with_boundary_check(crate::policy::boundary);
+/// Enforced model policy restrictions, including a retired schedule key in a
+/// restricting rule, are a boundary; other routing input recovers.
+pub const SECTION: DomainSection = DomainSection {
+    validate: validate_section,
+    ..DomainSection::new::<RoutingConfig>("routing", defaults)
+        .with_boundary_check(crate::policy::boundary)
+};
+/// Retired timing keys are named first; serde never reads their values.
+fn validate_section(table: &toml_edit::Table) -> Vec<SectionError> {
+    let mut errors = Vec::new();
+    crate::policy::retired_schedule_keys(table, &["pacing_overrides"], |_| false, &mut errors);
+    crate::policy::retired_schedule_keys(
+        table,
+        &["model_policy", "rules"],
+        crate::policy::restricting_rule,
+        &mut errors,
+    );
+    errors.extend((DomainSection::new::<RoutingConfig>("routing", defaults).validate)(table));
+    errors
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

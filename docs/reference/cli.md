@@ -1786,13 +1786,8 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `target` | `{"name": "target", "positional": true, "required": true}` |
-| `value` | `{"name": "value", "positional": true}` |
-| `--account` | `{"conflicts": ["provider", "all"], "name": "account"}` |
-| `--provider` | `{"conflicts": ["account", "all"], "name": "provider"}` |
-| `--all` | `{"conflicts": ["account", "provider"], "defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
-| `--policy` | `{"name": "policy", "values": ["pace", "spend", "max", "off"]}` |
-| `--until` | `{"name": "until"}` |
+| `provider` | `{"name": "provider", "positional": true, "required": true}` |
+| `policy` | `{"name": "policy", "positional": true, "required": true, "values": ["pace", "spend", "max", "off"]}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1801,13 +1796,8 @@ Accepted by every command, before or after the subcommand.
   "groups": [
     {
       "arguments": [
-        "target",
-        "value",
-        "account",
         "provider",
-        "all",
-        "policy",
-        "until"
+        "policy"
       ],
       "multiple": true,
       "name": "RoutePacing",
@@ -1837,12 +1827,84 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant route override set`
+
+| Argument | Contract |
+|---|---|
+| `--account` | `{"name": "account"}` |
+| `--provider` | `{"name": "provider"}` |
+| `--all` | `{"defaults": ["false"], "name": "all", "values": ["true", "false"]}` |
+| `--policy` | `{"name": "policy", "required": true, "values": ["pace", "spend", "max", "off"]}` |
+| `--starts` | `{"name": "starts"}` |
+| `--until` | `{"name": "until"}` |
+| `--window` | `{"name": "window", "repeatable": true}` |
+| `--tz` | `{"name": "tz"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "account",
+        "provider",
+        "all",
+        "policy",
+        "starts",
+        "until",
+        "window",
+        "tz"
+      ],
+      "multiple": true,
+      "name": "OverrideSet",
+      "required": false
+    },
+    {
+      "arguments": [
+        "account",
+        "provider",
+        "all"
+      ],
+      "multiple": false,
+      "name": "scope",
+      "required": true
+    }
+  ]
+}
+```
+
 ## `provenant route override list`
 
 | Argument | Contract |
 |---|---|
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
+
+## `provenant route override clear`
+
+| Argument | Contract |
+|---|---|
+| `--account` | `{"conflicts": ["provider"], "name": "account"}` |
+| `--provider` | `{"conflicts": ["account"], "name": "provider"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "account",
+        "provider"
+      ],
+      "multiple": true,
+      "name": "OverrideClear",
+      "required": false
+    }
+  ]
+}
+```
 
 ## `provenant preset`
 
