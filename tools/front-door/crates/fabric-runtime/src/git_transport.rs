@@ -81,12 +81,11 @@ impl GitTransportError {
             Self::PushUnknown { .. } | Self::PushUnresolved { .. } => "launch_unknown",
             Self::Store(error) => crate::coordination::facade::FacadeError::from(error).code(),
             Self::PushNotFound { .. } => "not_found",
-            Self::Invalid(_) | Self::InvalidRemote | Self::BundleTooLarge => "invalid_input",
+            Self::Invalid(_) | Self::InvalidRemote => "invalid_input",
             Self::DirtyWorktree
             | Self::IncompleteRepository
             | Self::OidMismatch
             | Self::NonFastForward
-            | Self::BundleHeadMismatch
             | Self::TransportConflict
             | Self::RemoteMoved => "conflict",
             Self::GitUnavailable
@@ -94,7 +93,6 @@ impl GitTransportError {
             | Self::GitCommand { .. }
             | Self::IncompleteOutput { .. }
             | Self::InvalidOutput { .. }
-            | Self::BundleDurabilityUnconfirmed
             | Self::Filesystem(_)
             | Self::Execution(_) => "io",
         }
@@ -1196,7 +1194,6 @@ mod tests {
                 git_executable: "/git".into(),
                 ssh_executable: "/ssh".into(),
                 ssh_auth_sock: None,
-                max_bundle_bytes: MAX_BUNDLE_BYTES,
             };
             let error = transport
                 .ensure_repo_root(fixture.root.path(), &fixture.cancel)
