@@ -339,36 +339,29 @@ fn pacing_evaluator_applies_overnight_weekday_and_sunday_windows()
 }
 
 #[test]
-fn legacy_pacing_override_loads_and_evaluates_like_schedule_form()
+fn pacing_override_schedules_validate_at_load_and_need_no_expiry()
 -> Result<(), Box<dyn std::error::Error>> {
-    let catalogue = Catalogue::bundled()?;
-    let now = jiff::Timestamp::now().as_second();
-    let expires = now + 3600;
-    let legacy: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing_overrides": [{"provider":"codex", "policy":"spend", "starts_unix_seconds":now-60, "expires_unix_seconds":expires, "windows":[]}]
+    use provenant_config::DomainConfig;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pacing_overrides": [
+            {"provider":"codex", "policy":"spend", "schedule":{"windows":[{"weekdays":[0,1,2,3,4],"start_hour":23,"end_hour":7}]}},
+            {"provider":"claude", "policy":"max"},
+            {"provider":"agy", "policy":"off", "schedule":{"tz":"Mars/Olympus_Mons"}},
+            {"provider":"cursor", "policy":"pace", "schedule":{"starts":5,"expires":5}}
+        ]
     }))?;
-    let canonical: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing_overrides": [{"provider":"codex", "policy":"spend", "schedule":{"starts":now-60,"expires":expires,"windows":[]}}]
-    }))?;
-    let time = provenant_core::WallTime::from_micros(now * 1_000_000)?;
-    let old_context = context(&catalogue, &legacy, time);
-    let new_context = context(&catalogue, &canonical, time);
-    let model = ModelId::parse("codex/gpt-6.1-terra")?;
+    let errors: Vec<_> = config
+        .validate()
+        .into_iter()
+        .map(|error| (error.field, error.code))
+        .collect();
     assert_eq!(
-        pacing_preview(&model, &old_context)[0].policy,
-        PacingPolicy::Spend
+        errors,
+        [
+            ("pacing_overrides.2.schedule".to_owned(), "schedule"),
+            ("pacing_overrides.3.schedule".to_owned(), "schedule"),
+        ]
     );
-    assert_eq!(
-        pacing_preview(&model, &old_context)[0].policy,
-        pacing_preview(&model, &new_context)[0].policy
-    );
-    assert!(
-        serde_json::to_value(&legacy)?["pacing_overrides"][0]["schedule"]["expires"].is_number()
-    );
-    let expired: RoutingConfig = serde_json::from_value(serde_json::json!({
-        "pacing_overrides": [{"provider":"codex", "policy":"spend", "expires_unix_seconds":now-1}]
-    }))?;
-    assert!(expired.pacing_overrides.is_empty());
     Ok(())
 }
 #[test]

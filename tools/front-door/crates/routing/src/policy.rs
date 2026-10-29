@@ -217,45 +217,20 @@ impl ModelPolicy {
 
 /// Reusable activation schedule for policies, pacing overrides and future
 /// time-scoped routing records. Weekdays use Monday-based indexes: Monday is 0.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Schedule {
+    /// First active instant, in Unix seconds. Missing means already started.
     pub starts: Option<i64>,
+    /// First inactive instant, in Unix seconds. Missing means no expiry.
     pub expires: Option<i64>,
     /// IANA time zone for hour windows. Missing means UTC.
     pub tz: Option<String>,
+    /// Hour windows; empty means all hours.
     pub windows: Vec<ScheduleWindow>,
 }
-impl<'de> Deserialize<'de> for Schedule {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize, Default)]
-        #[serde(default, deny_unknown_fields)]
-        struct Input {
-            starts: Option<i64>,
-            expires: Option<i64>,
-            tz: Option<String>,
-            windows: Vec<ScheduleWindow>,
-        }
-        let input = Input::deserialize(deserializer)?;
-        let tz = input.tz.filter(|tz| {
-            if jiff::tz::TimeZone::get(tz).is_ok() {
-                true
-            } else {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: unknown schedule time zone {tz}; using UTC"
-                );
-                false
-            }
-        });
-        Ok(Self {
-            starts: input.starts,
-            expires: input.expires,
-            tz,
-            windows: input.windows,
-        })
-    }
-}
+/// Most hour windows one schedule may carry.
+pub const MAX_SCHEDULE_WINDOWS: usize = 16;
 impl Schedule {
     pub fn active(&self, now: i64) -> bool {
         self.starts.is_none_or(|start| now >= start)
@@ -266,9 +241,25 @@ impl Schedule {
                     .iter()
                     .any(|window| window.active(now, self.tz.as_deref())))
     }
+    /// Seconds until expiry, zero once expired, `None` without an expiry.
+    pub fn remaining(&self, now: i64) -> Option<i64> {
+        self.expires.map(|end| end.saturating_sub(now).max(0))
+    }
+    /// Whether the bounds, windows, weekdays and time zone are well formed.
+    pub fn valid(&self) -> bool {
+        self.starts
+            .zip(self.expires)
+            .is_none_or(|(starts, expires)| starts < expires)
+            && self
+                .tz
+                .as_deref()
+                .is_none_or(|tz| jiff::tz::TimeZone::get(tz).is_ok())
+            && self.windows.len() <= MAX_SCHEDULE_WINDOWS
+            && self.windows.iter().all(ScheduleWindow::valid)
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleWindow {
     /// Monday-based weekday indexes, Monday = 0 through Sunday = 6. Empty means every day.
@@ -278,6 +269,16 @@ pub struct ScheduleWindow {
     pub end_hour: u8,
 }
 impl ScheduleWindow {
+    fn valid(&self) -> bool {
+        let mut days = self.weekdays.clone();
+        days.sort_unstable();
+        days.dedup();
+        self.start_hour < 24
+            && self.end_hour <= 24
+            && self.start_hour != self.end_hour
+            && days.len() == self.weekdays.len()
+            && days.iter().all(|day| *day <= 6)
+    }
     fn active(&self, now: i64, tz: Option<&str>) -> bool {
         let zone = tz
             .and_then(|tz| jiff::tz::TimeZone::get(tz).ok())
@@ -301,6 +302,59 @@ impl ScheduleWindow {
         }
     }
 }
+
+/// Timing keys that predate [`Schedule`], each with the code naming the
+/// `schedule` key that replaced it. Records that still carry one are refused.
+pub(crate) const RETIRED_SCHEDULE_KEYS: [(&str, &str); 3] = [
+    ("starts_unix_seconds", "moved_to_schedule.starts"),
+    ("expires_unix_seconds", "moved_to_schedule.expires"),
+    ("windows", "moved_to_schedule.windows"),
+];
+/// Report each retired timing key in the array of records at `path`, so the
+/// configuration names its replacement instead of dropping it as unknown.
+pub(crate) fn retired_schedule_keys(
+    table: &toml_edit::Table,
+    path: &[&str],
+    errors: &mut Vec<SectionError>,
+) {
+    let Some((last, parents)) = path.split_last() else {
+        return;
+    };
+    let Some(item) = parents
+        .iter()
+        .try_fold(table as &dyn toml_edit::TableLike, |table, key| {
+            table.get(key).and_then(toml_edit::Item::as_table_like)
+        })
+        .and_then(|table| table.get(last))
+    else {
+        return;
+    };
+    let rows: Vec<&dyn toml_edit::TableLike> = match item {
+        toml_edit::Item::ArrayOfTables(rows) => rows
+            .iter()
+            .map(|row| row as &dyn toml_edit::TableLike)
+            .collect(),
+        toml_edit::Item::Value(toml_edit::Value::Array(rows)) => rows
+            .iter()
+            .filter_map(|row| {
+                row.as_inline_table()
+                    .map(|row| row as &dyn toml_edit::TableLike)
+            })
+            .collect(),
+        _ => return,
+    };
+    for (index, row) in rows.into_iter().enumerate() {
+        for (key, code) in RETIRED_SCHEDULE_KEYS {
+            if row.contains_key(key) {
+                errors.push(SectionError {
+                    field: format!("{}.{index}.{key}", path.join(".")),
+                    code,
+                });
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelPolicyRule {
@@ -313,39 +367,29 @@ pub struct ModelPolicyRule {
 }
 impl<'de> Deserialize<'de> for ModelPolicyRule {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Retired timing keys decode so validation can name their
+        /// replacement; their values are never read.
         #[derive(Deserialize, Default)]
         #[serde(default, deny_unknown_fields)]
         struct Input {
             adapter: Option<String>,
             model: Option<ModelId>,
             account: Option<String>,
-            schedule: Option<Schedule>,
+            schedule: Schedule,
             policy: ModelPolicy,
-            starts_unix_seconds: Option<i64>,
-            expires_unix_seconds: Option<i64>,
-            windows: Option<Vec<ScheduleWindow>>,
+            #[serde(rename = "starts_unix_seconds")]
+            _starts: Option<serde::de::IgnoredAny>,
+            #[serde(rename = "expires_unix_seconds")]
+            _expires: Option<serde::de::IgnoredAny>,
+            #[serde(rename = "windows")]
+            _windows: Option<serde::de::IgnoredAny>,
         }
         let input = Input::deserialize(deserializer)?;
-        let legacy = input.starts_unix_seconds.is_some()
-            || input.expires_unix_seconds.is_some()
-            || input.windows.is_some();
-        let schedule = input.schedule.unwrap_or_else(|| Schedule {
-            starts: input.starts_unix_seconds,
-            expires: input.expires_unix_seconds,
-            windows: input.windows.unwrap_or_default(),
-            ..Default::default()
-        });
-        if legacy {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "note: legacy routing schedules were converted; rewrite the configuration file"
-            );
-        }
         Ok(Self {
             adapter: input.adapter,
             model: input.model,
             account: input.account,
-            schedule,
+            schedule: input.schedule,
             policy: input.policy,
         })
     }
@@ -365,40 +409,11 @@ impl<'de> Deserialize<'de> for ModelPolicies {
             #[serde(default = "default_bundled")]
             bundled: bool,
             defaults: ModelPolicy,
-            rules: Vec<RuleInput>,
+            rules: Vec<ModelPolicyRule>,
         }
         let input = Input::deserialize(deserializer)?;
-        let migrated = input.rules.iter().any(|rule| {
-            rule.starts_unix_seconds.is_some()
-                || rule.expires_unix_seconds.is_some()
-                || rule.windows.is_some()
-        });
         let defaults = input.defaults;
-        let rules: Vec<ModelPolicyRule> = input
-            .rules
-            .into_iter()
-            .map(|rule| {
-                let schedule = rule.schedule.unwrap_or_else(|| Schedule {
-                    starts: rule.starts_unix_seconds,
-                    expires: rule.expires_unix_seconds,
-                    windows: rule.windows.unwrap_or_default(),
-                    ..Default::default()
-                });
-                ModelPolicyRule {
-                    adapter: rule.adapter,
-                    model: rule.model,
-                    account: rule.account,
-                    schedule,
-                    policy: rule.policy,
-                }
-            })
-            .collect();
-        if migrated {
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "note: legacy routing schedules were converted; rewrite the configuration file"
-            );
-        }
+        let rules = input.rules;
         if let Ok(catalogue) = crate::Catalogue::bundled() {
             warn_invalid_fallback(&defaults, "model_policy.defaults", &catalogue);
             for (index, rule) in rules.iter().enumerate() {
@@ -443,18 +458,6 @@ fn warn_invalid_fallback(policy: &ModelPolicy, field: &str, catalogue: &crate::C
 }
 fn default_bundled() -> bool {
     true
-}
-#[derive(Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-struct RuleInput {
-    adapter: Option<String>,
-    model: Option<ModelId>,
-    account: Option<String>,
-    schedule: Option<Schedule>,
-    policy: ModelPolicy,
-    starts_unix_seconds: Option<i64>,
-    expires_unix_seconds: Option<i64>,
-    windows: Option<Vec<ScheduleWindow>>,
 }
 impl Default for ModelPolicies {
     fn default() -> Self {
@@ -597,7 +600,11 @@ const ENFORCED: [&str; 3] = ["max_context", "max_turns", "read_only"];
 /// Whether invalid routing input must refuse the configuration: an enforced
 /// restriction, or a malformed value at or above one, which recovery would drop.
 pub(crate) fn boundary(error: &SectionError) -> bool {
-    if error.code == "restriction" {
+    if error.code == "restriction"
+        || RETIRED_SCHEDULE_KEYS
+            .iter()
+            .any(|(_, code)| *code == error.code)
+    {
         return true;
     }
     if error.code == "policy" {
@@ -626,25 +633,7 @@ impl ModelPolicyRule {
             !crate::request::identifier(a) || self.model.as_ref().is_some_and(|m| m.adapter() != a)
         }) || self.account.as_deref().is_some_and(|a| {
             a.split('/').count() > 2 || a.split('/').any(|part| !crate::request::identifier(part))
-        }) || self
-            .schedule
-            .starts
-            .zip(self.schedule.expires)
-            .is_some_and(|(s, e)| s >= e)
-            || self.schedule.windows.len() > 16
-            || self.schedule.windows.iter().any(|w| {
-                w.start_hour >= 24
-                    || w.end_hour > 24
-                    || w.start_hour == w.end_hour
-                    || w.weekdays.len() > 7
-                    || w.weekdays.iter().any(|day| *day > 6)
-                    || w.weekdays
-                        .iter()
-                        .copied()
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .len()
-                        != w.weekdays.len()
-            }))
+        }) || !self.schedule.valid())
     }
 }
 
@@ -997,33 +986,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_schedule_migrates_and_shared_evaluator_handles_local_windows()
+    fn shared_schedule_evaluator_handles_weekday_and_local_windows()
     -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelId::parse("codex/gpt-6.1-terra")?;
         let starts = "2026-10-29T23:00:00Z" // timebomb: allow evaluated at an injected instant
             .parse::<jiff::Timestamp>()?
             .as_second();
-        let legacy: ModelPolicies = toml_edit::de::from_str(&format!(
-            "[[rules]]\nmodel='codex/gpt-6.1-terra'\nstarts_unix_seconds={starts}\nwindows=[{{weekdays=[3],start_hour=23,end_hour=2}}]\n[rules.policy.lane]\nmax_turns=17\n"
-        ))?;
         let canonical: ModelPolicies = toml_edit::de::from_str(&format!(
             "[[rules]]\nmodel='codex/gpt-6.1-terra'\n[rules.schedule]\nstarts={starts}\nwindows=[{{weekdays=[3],start_hour=23,end_hour=2}}]\n[rules.policy.lane]\nmax_turns=17\n"
         ))?;
         assert_eq!(
-            legacy.effective(&model, None, starts).policy.lane.max_turns,
-            Some(17)
-        );
-        assert_eq!(
-            legacy.effective(&model, None, starts).policy.lane.max_turns,
             canonical
                 .effective(&model, None, starts)
                 .policy
                 .lane
-                .max_turns
+                .max_turns,
+            Some(17)
         );
-        let expired: ModelPolicies =
-            toml_edit::de::from_str("[[rules]]\nexpires_unix_seconds=1\n")?;
-        assert_eq!(expired.rules.len(), 1);
         let sunday_monday = Schedule {
             windows: vec![ScheduleWindow {
                 weekdays: vec![6],
@@ -1072,23 +1051,120 @@ mod tests {
                     .as_second()
             )
         );
-        let unknown: Schedule = toml_edit::de::from_str(
-            "tz='Mars/Olympus_Mons'\nwindows=[{weekdays=[6],start_hour=1,end_hour=4}]",
-        )?;
-        let sunday_utc = "2026-03-08T01:30:00Z" // timebomb: allow evaluated at an injected instant
-            .parse::<jiff::Timestamp>()?
-            .as_second();
-        assert!(unknown.active(sunday_utc));
-        assert!(unknown.tz.is_none());
+        assert!(dst.valid());
         Ok(())
     }
 
     #[test]
-    fn legacy_expiry_is_evaluated_at_the_supplied_instant() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn schedule_validation_refuses_malformed_bounds_windows_and_zones()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let window = |weekdays: Vec<u8>, start_hour, end_hour| ScheduleWindow {
+            weekdays,
+            start_hour,
+            end_hour,
+        };
+        let valid = Schedule {
+            starts: Some(1),
+            expires: Some(2),
+            tz: Some("Australia/Sydney".into()),
+            windows: vec![window(vec![0, 4], 9, 17), window(vec![], 23, 2)],
+        };
+        assert!(valid.valid());
+        assert_eq!(valid.remaining(0), Some(2));
+        assert_eq!(valid.remaining(5), Some(0));
+        assert_eq!(Schedule::default().remaining(5), None);
+        for invalid in [
+            Schedule {
+                starts: Some(2),
+                expires: Some(2),
+                ..Default::default()
+            },
+            Schedule {
+                tz: Some("Mars/Olympus_Mons".into()),
+                ..Default::default()
+            },
+            Schedule {
+                windows: vec![window(vec![], 9, 17); MAX_SCHEDULE_WINDOWS + 1],
+                ..Default::default()
+            },
+            Schedule {
+                windows: vec![window(vec![7], 9, 17)],
+                ..Default::default()
+            },
+            Schedule {
+                windows: vec![window(vec![1, 1], 9, 17)],
+                ..Default::default()
+            },
+            Schedule {
+                windows: vec![window(vec![], 9, 9)],
+                ..Default::default()
+            },
+            Schedule {
+                windows: vec![window(vec![], 24, 2)],
+                ..Default::default()
+            },
+        ] {
+            assert!(!invalid.valid(), "{invalid:?}");
+        }
+        // A rule with a malformed schedule is dropped at load, not applied
+        // more widely than written.
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            "[[rules]]\nmodel='codex/gpt-6.1-terra'\n[rules.schedule]\ntz='Mars/Olympus_Mons'\n[rules.policy.cache]\nttl_seconds=60\n",
+        )?;
+        let mut errors = Vec::new();
+        policies.validate(&mut errors);
+        assert_eq!(
+            errors,
+            [SectionError {
+                field: "model_policy.rules.0".into(),
+                code: "policy",
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retired_schedule_keys_are_refused_with_their_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let table: toml_edit::DocumentMut = "pacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n[[model_policy.rules]]\nstarts_unix_seconds=1\nwindows=[]\n".parse()?;
+        let errors = (crate::SECTION.validate)(table.as_table());
+        let named: Vec<_> = errors
+            .iter()
+            .filter(|error| error.code.starts_with("moved_to_schedule."))
+            .map(|error| (error.field.as_str(), error.code))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                (
+                    "pacing_overrides.0.expires_unix_seconds",
+                    "moved_to_schedule.expires"
+                ),
+                (
+                    "model_policy.rules.0.starts_unix_seconds",
+                    "moved_to_schedule.starts"
+                ),
+                ("model_policy.rules.0.windows", "moved_to_schedule.windows"),
+            ]
+        );
+        assert!(
+            errors
+                .iter()
+                .all(|error| !error.code.starts_with("moved_to_schedule.")
+                    || (crate::SECTION.boundary)(error))
+        );
+        // Serde never reads a retired value into the schedule.
+        let rule: ModelPolicyRule = toml_edit::de::from_str("expires_unix_seconds=1\n")?;
+        assert_eq!(rule.schedule, Schedule::default());
+        Ok(())
+    }
+
+    #[test]
+    fn schedule_expiry_is_evaluated_at_the_supplied_instant()
+    -> Result<(), Box<dyn std::error::Error>> {
         let model = ModelId::parse("codex/gpt-6.1-terra")?;
         let policies: ModelPolicies = toml_edit::de::from_str(
-            "[[rules]]\nmodel='codex/gpt-6.1-terra'\nexpires_unix_seconds=100\n[rules.policy.lane]\nmax_turns=17\n",
+            "[[rules]]\nmodel='codex/gpt-6.1-terra'\nschedule={expires=100}\n[rules.policy.lane]\nmax_turns=17\n",
         )?;
 
         assert_eq!(

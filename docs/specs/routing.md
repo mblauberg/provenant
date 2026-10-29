@@ -116,12 +116,18 @@ Policy rules and pacing overrides use the same `Schedule` shape:
 `starts`, `expires`, an optional IANA `tz` (UTC by default) and zero or more hour windows. Windows may list
 Monday-based weekday indexes (Monday `0` through Sunday `6`); an empty list matches every day.
 Start is inclusive, expiry and window end are exclusive, and overnight windows
-wrap midnight. `provenant route override list` displays both policy rules and
-pacing overrides, including active state and remaining expiry time.
-During the transition, the loader converts persisted `starts_unix_seconds`,
-`expires_unix_seconds` and top-level `windows` into `schedule` once. Expired
-legacy records are discarded. Rewrite the configuration so subsequent writes
-use the `schedule` form. An unknown time zone is reported and evaluated as UTC.
+wrap midnight. `Schedule::valid` is the single load-time check for both: it
+refuses `starts` at or after `expires`, an unknown time zone, more than 16
+windows, out-of-range or equal hours and duplicate or out-of-range weekdays.
+An invalid policy rule is dropped (a boundary when it restricts a lane); an
+invalid pacing override is dropped with a warning. A pacing override needs no
+expiry. `provenant route override set|list|clear` records, displays and
+removes pacing overrides; `list` also shows scheduled policy rules, each with
+its active state and remaining expiry time, and `set` echoes the recorded rule
+and any it replaced. The retired keys `starts_unix_seconds`,
+`expires_unix_seconds` and a record's top-level `windows` refuse the
+configuration with code `moved_to_schedule.starts`, `.expires` or `.windows`;
+there is no conversion.
 
 ### Go monthly allowance floor
 
