@@ -36,7 +36,15 @@ pub(super) fn read(
         false,
     )]);
     let mut nodes = Vec::new();
-    let mut seen = BTreeMap::new();
+    #[allow(clippy::type_complexity)]
+    let mut seen: BTreeMap<
+        (ProjectId, AttemptId),
+        (
+            (provenant_core::RunId, provenant_core::TaskId),
+            (Option<AttemptId>, Option<AttemptId>, Option<AttemptId>),
+            String,
+        ),
+    > = BTreeMap::new();
     let mut duplicate_count = 0u64;
     let mut conflicts = Vec::new();
     let mut examined = 0u64;
@@ -278,20 +286,22 @@ mod tests {
         let mut request: CanonicalRequest = serde_json::from_value(
             json!({"schema_version":1,"tasks":[{"task_id":task,"prompt_digest":CanonicalV1::file_digest(b"body"),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null,"lane_depth":1}),
         )?;
-        let prepared =
-            |run: u8, attempt: u8, request: CanonicalRequest| -> Result<PreparedRun, Box<dyn std::error::Error>> {
-                Ok(PreparedRun {
-                    run_id: RunId::from_bytes([run; 16]),
-                    operation_id: OperationId::parse(&format!("tree-{run}-{attempt}"))?,
-                    created_at: clock.wall_now()?,
-                    request,
-                    attempts: vec![NewAttempt {
-                        task_id: task,
-                        attempt_id: AttemptId::from_bytes([attempt; 16]),
-                        prompt: "body".into(),
-                    }],
-                })
-            };
+        let prepared = |run: u8,
+                        attempt: u8,
+                        request: CanonicalRequest|
+         -> Result<PreparedRun, Box<dyn std::error::Error>> {
+            Ok(PreparedRun {
+                run_id: RunId::from_bytes([run; 16]),
+                operation_id: OperationId::parse(&format!("tree-{run}-{attempt}"))?,
+                created_at: clock.wall_now()?,
+                request,
+                attempts: vec![NewAttempt {
+                    task_id: task,
+                    attempt_id: AttemptId::from_bytes([attempt; 16]),
+                    prompt: "body".into(),
+                }],
+            })
+        };
         store.create(&prepared(1, 1, request.clone())?, &call)?;
         let leaf = read(&roots, None, 1, 100, false)?;
         assert_eq!(leaf["coverage"]["nested_runs"], "complete");
@@ -312,6 +322,7 @@ mod tests {
         inputs.state_dir = Some(child_path);
         let child = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let child_state = child.state.clone();
+        let child_state_path = child_state.as_path().to_string_lossy().into_owned();
         let child_store = RunStore::open(
             &ExecutionContext {
                 state_root: child.state,
@@ -456,17 +467,16 @@ mod tests {
             conflicting["store"]["stored"],
             child4_path.to_string_lossy().as_ref()
         );
-        assert_eq!(
-            conflicting["store"]["observed"],
-            child_state.to_string_lossy().as_ref()
-        );
+        assert_eq!(conflicting["store"]["observed"], child_state_path.as_str());
         assert!(
             !identified["identity_conflicts"]
                 .as_array()
                 .ok_or("conflicts")?
                 .iter()
-                .any(|entry| entry["attempt_id"] == json!(AttemptId::from_bytes([6; 16]))
-                    && entry["reason"] == "conflicting_parents")
+                .any(
+                    |entry| entry["attempt_id"] == json!(AttemptId::from_bytes([6; 16]))
+                        && entry["reason"] == "conflicting_parents"
+                )
         );
         let selected = read(&roots, Some(project2), 3, 100, false)?;
         assert_eq!(selected["totals"]["attempts"], 3);
