@@ -2,6 +2,9 @@
 use crate::run::NetworkAccess;
 use serde::{Deserialize, Serialize};
 
+/// Latest command output retained by the guardian and adapter.
+pub const COMMAND_OUTPUT_TAIL_BYTES: usize = 65_536;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Harness {
@@ -10,6 +13,7 @@ pub enum Harness {
     Cursor,
     Agy,
     Opencode,
+    Command,
 }
 impl Harness {
     pub fn spec(self) -> &'static AdapterSpec {
@@ -19,6 +23,7 @@ impl Harness {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaProbeKind {
+    None,
     HttpGet,
     Command,
     LocalLedger,
@@ -61,6 +66,9 @@ const ALL_NETWORK: &[NetworkAccess] = &[
 /// admission, worktree preparation or receipt creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchCapabilities {
+    /// Accepts a model selector; false for configured command entries.
+    pub model: bool,
+    pub default_network: NetworkAccess,
     /// Takes a reasoning-effort control on the command line.
     pub effort: bool,
     /// Continues a recorded provider session.
@@ -78,6 +86,7 @@ pub struct LaunchCapabilities {
 /// The fields of a launch request an adapter can refuse.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LaunchRequest<'a> {
+    pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub resume: bool,
     pub network: Option<NetworkAccess>,
@@ -86,6 +95,7 @@ pub struct LaunchRequest<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchField {
+    Model,
     Effort,
     Resume,
     Network,
@@ -94,6 +104,7 @@ pub enum LaunchField {
 impl LaunchField {
     pub fn name(self) -> &'static str {
         match self {
+            Self::Model => "model",
             Self::Effort => "effort",
             Self::Resume => "resume",
             Self::Network => "network",
@@ -103,6 +114,7 @@ impl LaunchField {
     /// A fixed refusal for callers that cannot carry the adapter name.
     pub fn refusal(self) -> &'static str {
         match self {
+            Self::Model => "model is not supported by the route's adapter",
             Self::Effort => "effort is not supported by the route's adapter",
             Self::Resume => "resume is not supported by the route's adapter",
             Self::Network => "network mode is not supported by the route's adapter",
@@ -127,7 +139,9 @@ impl AdapterSpec {
     /// Check a request against the declared table before any side effect.
     pub fn check_launch(&self, request: &LaunchRequest<'_>) -> Result<(), UnsupportedLaunch> {
         let caps = &self.launch;
-        let field = if request.effort.is_some() && !caps.effort {
+        let field = if request.model.is_some() && !caps.model {
+            Some(LaunchField::Model)
+        } else if request.effort.is_some() && !caps.effort {
             Some(LaunchField::Effort)
         } else if request.resume && !caps.resume {
             Some(LaunchField::Resume)
@@ -169,7 +183,7 @@ impl AdapterSpec {
 }
 
 // Keep the rows in Harness order. CLI installation also uses this order.
-pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
+pub static ADAPTER_SPECS: &[AdapterSpec; 6] = &[
     AdapterSpec {
         id: Harness::Claude,
         name: "claude",
@@ -190,6 +204,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         free_pool: None,
         pacing_keys: None,
         launch: LaunchCapabilities {
+            model: true,
+            default_network: NetworkAccess::Open,
             effort: true,
             resume: true,
             steering: false,
@@ -218,6 +234,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         free_pool: None,
         pacing_keys: None,
         launch: LaunchCapabilities {
+            model: true,
+            default_network: NetworkAccess::Open,
             effort: true,
             resume: true,
             steering: false,
@@ -246,6 +264,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         free_pool: None,
         pacing_keys: None,
         launch: LaunchCapabilities {
+            model: true,
+            default_network: NetworkAccess::Open,
             effort: false,
             resume: true,
             steering: false,
@@ -274,6 +294,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         free_pool: None,
         pacing_keys: None,
         launch: LaunchCapabilities {
+            model: true,
+            default_network: NetworkAccess::Open,
             effort: true,
             resume: true,
             steering: false,
@@ -302,12 +324,44 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 5] = &[
         free_pool: Some("opencode-free"),
         pacing_keys: Some(("opencode_free", "opencode_paid")),
         launch: LaunchCapabilities {
+            model: true,
+            default_network: NetworkAccess::Open,
             effort: true,
             resume: true,
             steering: false,
             network: ALL_NETWORK,
             image_input: false,
             write: true,
+        },
+    },
+    AdapterSpec {
+        id: Harness::Command,
+        name: "command",
+        binary: "",
+        registered_account: false,
+        local_login: false,
+        argv_prompt: false,
+        authentication: None,
+        user_sessions: false,
+        quota_probe: QuotaProbeKind::None,
+        quota_credits: false,
+        grouped_quota_pools: false,
+        retain_quota_accounts: false,
+        quota_identity_check: false,
+        peer_bootstrap: false,
+        quota_model_prefix: None,
+        free_account: None,
+        free_pool: None,
+        pacing_keys: None,
+        launch: LaunchCapabilities {
+            model: false,
+            default_network: NetworkAccess::Provider,
+            effort: false,
+            resume: false,
+            steering: false,
+            network: ALL_NETWORK,
+            image_input: false,
+            write: false,
         },
     },
 ];
@@ -355,6 +409,47 @@ mod launch_tests {
     use super::*;
 
     #[test]
+    fn command_has_no_model_effort_session_or_write_capability() {
+        let command = AdapterSpec::get("command").unwrap();
+        assert!(!command.registered_account);
+        assert_eq!(command.quota_probe, QuotaProbeKind::None);
+        assert_eq!(command.launch.default_network, NetworkAccess::Provider);
+        assert!(command.check_launch(&LaunchRequest::default()).is_ok());
+        for (request, field) in [
+            (
+                LaunchRequest {
+                    model: Some("placeholder"),
+                    ..Default::default()
+                },
+                LaunchField::Model,
+            ),
+            (
+                LaunchRequest {
+                    effort: Some("high"),
+                    ..Default::default()
+                },
+                LaunchField::Effort,
+            ),
+            (
+                LaunchRequest {
+                    resume: true,
+                    ..Default::default()
+                },
+                LaunchField::Resume,
+            ),
+            (
+                LaunchRequest {
+                    write: true,
+                    ..Default::default()
+                },
+                LaunchField::Write,
+            ),
+        ] {
+            assert_eq!(command.check_launch(&request).unwrap_err().field, field);
+        }
+    }
+
+    #[test]
     fn launch_table_is_checked_per_adapter() {
         // (adapter, effort, resume, network, write, refused field)
         let effort = Some("high");
@@ -369,6 +464,7 @@ mod launch_tests {
         for (name, effort, refused) in cases {
             let spec = AdapterSpec::get(name).unwrap();
             let request = LaunchRequest {
+                model: None,
                 effort,
                 resume: true,
                 network: Some(NetworkAccess::Open),
@@ -398,6 +494,8 @@ mod launch_tests {
     fn unsupported_modes_are_refused_by_field() {
         let narrow = AdapterSpec {
             launch: LaunchCapabilities {
+                model: true,
+                default_network: NetworkAccess::Open,
                 resume: false,
                 network: &[NetworkAccess::Provider],
                 write: false,

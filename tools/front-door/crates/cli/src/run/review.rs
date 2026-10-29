@@ -505,6 +505,7 @@ fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>
         task_id: slot.task_id,
         prompt,
         base: None,
+        pinned_base: None,
         head: Some(head.into()),
         route: run::RequestedRoute::Review {
             extra: Default::default(),

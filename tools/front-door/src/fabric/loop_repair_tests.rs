@@ -81,6 +81,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                 task_id: TaskId::from_bytes([71; 16]),
                 prompt: "reply OK".into(),
                 base: Some(head.to_string()),
+                pinned_base: None,
                 head: None,
                 profile: Default::default(),
                 route: provenant_run::RequestedRoute::Model {extra: Default::default(),

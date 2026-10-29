@@ -587,9 +587,17 @@ pub const HOLDER_CONTEXT_LIMIT: usize = 64 * 1024;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StreamMode {
-    Capture { limit: u64 },
+    Capture {
+        limit: u64,
+    },
+    /// Retain the latest bytes while draining the entire stream.
+    Tail {
+        limit: u64,
+    },
     Discard,
-    Tee { limit: u64 },
+    Tee {
+        limit: u64,
+    },
 }
 impl StreamMode {
     pub(crate) fn piped(self) -> bool {
@@ -597,7 +605,7 @@ impl StreamMode {
     }
     pub(crate) fn limit(self) -> u64 {
         match self {
-            Self::Capture { limit } | Self::Tee { limit } => limit,
+            Self::Capture { limit } | Self::Tail { limit } | Self::Tee { limit } => limit,
             Self::Discard => 0,
         }
     }

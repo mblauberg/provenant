@@ -7,6 +7,8 @@ pub struct ResolvedRoute {
     pub extra: crate::ExtraFields,
     pub adapter: String,
     /// Provider-native model identifier, retaining all segments after the adapter separator.
+    /// Empty for a model-less adapter and absent from its wire representation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
     pub effort: Option<String>,
     pub catalogue_revision: String,

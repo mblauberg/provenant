@@ -304,6 +304,7 @@ fn fragment(
                     extra: Default::default(),
                     alias: Some("senior".into()),
                     adapter: None,
+                    name: None,
                     model: None,
                     effort: None,
                     account: None,

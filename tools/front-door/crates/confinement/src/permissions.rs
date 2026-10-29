@@ -277,6 +277,10 @@ pub struct ProviderProfileSpec {
     pub allow_process_fork: bool,
     /// Deny keychain IPC and its CLI even when a tool can execute system programs.
     pub deny_keychain_access: bool,
+    /// Deny all known credential stores, including networked GitHub access.
+    pub deny_credential_access: bool,
+    /// An offline adapter denies even the runtime's DNS socket exception.
+    pub deny_network: bool,
     /// The CLI runs its tools' commands on a pseudo-terminal: open `/dev/ptmx`
     /// and only the terminals this sandbox allocates, never another `ttys`.
     pub allow_pseudo_tty: bool,
@@ -288,7 +292,7 @@ pub struct ProviderProfileSpec {
     /// Provider-owned state the CLI must write outside scratch, such as one
     /// session transcript. It never overlaps an authentication root.
     pub state_writes: Vec<PathGrant>,
-    /// Directories whose executables the provider's own tools may run, for
+    /// Paths whose executables the provider's own tools may run, for
     /// providers whose file reading goes through a shell. Exec only: reading
     /// them needs the runtime baseline or another grant.
     pub tool_exec_roots: Vec<PathGrant>,
@@ -1659,13 +1663,7 @@ fn render_profile(
         )?;
     }
     for root in &profile.spec.tool_exec_roots {
-        push_rule(
-            &mut source,
-            "allow",
-            "process-exec",
-            &root.path,
-            PathScope::Subtree,
-        )?;
+        push_rule(&mut source, "allow", "process-exec", &root.path, root.scope)?;
     }
     // Writers run build scripts in configured write roots and fixture binaries
     // in their own attempt tmp/candidate-N. Scratch already has a read grant.
@@ -1791,12 +1789,15 @@ fn render_profile(
     if plan.network == NetworkAccess::Open {
         source.push_str("(allow network-outbound (remote ip \"*:*\"))\n");
     }
+    if profile.spec.deny_network {
+        source.push_str("(deny network*)\n");
+    }
 
     // The gh read comes before the secret-root denies: Seatbelt is
     // last-match-wins, so an overlapping secret root must still hide it.
-    let gh_paths = if (matches!(plan.mode, AccessMode::ReadOnly)
-        && plan.network == NetworkAccess::Open)
-        || plan.writer_publishing()
+    let gh_paths = if !profile.spec.deny_credential_access
+        && ((matches!(plan.mode, AccessMode::ReadOnly) && plan.network == NetworkAccess::Open)
+            || plan.writer_publishing())
     {
         gh_config_paths(home)
     } else {
@@ -1820,6 +1821,18 @@ fn render_profile(
             push_rule(&mut source, "deny", "file-read*", &path, scope)?;
         }
         push_rule(&mut source, "deny", "file-write*", &path, scope)?;
+    }
+    if profile.spec.deny_credential_access {
+        for relative in CREDENTIAL_DIRECTORIES
+            .iter()
+            .chain(NESTED_CREDENTIAL_DIRECTORIES)
+            .chain(PROVIDER_CREDENTIAL_DIRECTORIES)
+        {
+            let path = home.join(relative);
+            for operation in ["file-read*", "file-write*", "process-exec"] {
+                push_rule(&mut source, "deny", operation, &path, PathScope::Subtree)?;
+            }
+        }
     }
     if let Some(grants) = worktree_grants {
         let git_marker = grants.worktree.path.join(".git");
@@ -2071,9 +2084,6 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
     }
     for root in &spec.tool_exec_roots {
         validate_read_exec_grant(root)?;
-        if root.scope != PathScope::Subtree {
-            return Err(PermissionError::InvalidPath(root.path.clone()));
-        }
     }
     // State may sit under a provider's home (Claude keeps transcripts beside
     // its configuration), so only the authentication roots themselves are off
@@ -2243,6 +2253,27 @@ fn is_broad_root(path: &Path) -> bool {
                 || (normal.len() == 2 && normal.get(1).is_some_and(|value| *value == "tmp"))))
 }
 
+const CREDENTIAL_DIRECTORIES: &[&str] = &[
+    ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".secrets", ".codex", ".claude", ".cursor",
+    ".gemini", "Monero",
+];
+const NESTED_CREDENTIAL_DIRECTORIES: &[&str] = &[
+    ".config/gh",
+    ".config/gcloud",
+    "Library/Keychains",
+    "Archives/git-preservation",
+    "Library/Application Support/GitHub CLI",
+];
+
+// Additional provider stores can contain credentials alongside their state.
+// Keep these command-only denials out of model profile validation.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+const PROVIDER_CREDENTIAL_DIRECTORIES: &[&str] = &[
+    ".config/cursor",
+    ".config/opencode",
+    ".local/share/opencode",
+];
+
 pub(crate) fn is_credential_root(path: &Path) -> bool {
     let components: Vec<&OsStr> = path
         .components()
@@ -2251,25 +2282,21 @@ pub(crate) fn is_credential_root(path: &Path) -> bool {
             _ => None,
         })
         .collect();
-    let single = [
-        ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".secrets", ".codex", ".claude", ".cursor",
-        ".gemini", "Monero",
-    ];
-    if components
-        .iter()
-        .any(|component| single.iter().any(|name| *component == OsStr::new(name)))
-    {
+    if components.iter().any(|component| {
+        CREDENTIAL_DIRECTORIES
+            .iter()
+            .any(|name| *component == OsStr::new(name))
+    }) {
         return true;
     }
-    components.windows(2).any(|pair| {
-        (pair[0] == OsStr::new(".config")
-            && (pair[1] == OsStr::new("gh") || pair[1] == OsStr::new("gcloud")))
-            || (pair[0] == OsStr::new("Library") && pair[1] == OsStr::new("Keychains"))
-            || (pair[0] == OsStr::new("Archives") && pair[1] == OsStr::new("git-preservation"))
-    }) || components.windows(3).any(|triple| {
-        triple[0] == OsStr::new("Library")
-            && triple[1] == OsStr::new("Application Support")
-            && triple[2] == OsStr::new("GitHub CLI")
+    NESTED_CREDENTIAL_DIRECTORIES.iter().any(|relative| {
+        let parts: Vec<_> = Path::new(relative)
+            .components()
+            .map(|part| part.as_os_str())
+            .collect();
+        components
+            .windows(parts.len())
+            .any(|window| window == parts)
     })
 }
 
@@ -2873,6 +2900,36 @@ mod tests {
                 ),
                 "{path}"
             );
+        }
+    }
+
+    #[test]
+    fn exact_tool_exec_grants_validate_without_allowing_credential_paths() {
+        let mut spec = ProviderProfileSpec {
+            process_executables: vec![PathGrant {
+                path: "/bin/sh".into(),
+                scope: PathScope::Exact,
+            }],
+            allow_process_fork: true,
+            tool_exec_roots: vec![PathGrant {
+                path: "/opt/check/bin/python3".into(),
+                scope: PathScope::Exact,
+            }],
+            ..Default::default()
+        };
+        assert!(validate_profile_spec(&spec).is_ok());
+        for path in [
+            "/Users/fixture/.config/gh/token",
+            "/Users/fixture/Library/Application Support/GitHub CLI/token",
+            "/Users/fixture/Library/Keychains/login.keychain-db",
+            "/Users/fixture/.ssh/key",
+            "/Users/fixture/.config/gcloud/token",
+        ] {
+            spec.tool_exec_roots[0].path = path.into();
+            assert!(matches!(
+                validate_profile_spec(&spec),
+                Err(PermissionError::CredentialRoot)
+            ));
         }
     }
 

@@ -88,6 +88,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     task_id: TaskId::from_bytes([index + 1; 16]),
                     prompt: "local work".into(),
                     base: None,
+                    pinned_base: None,
                     head: None,
                     route: provenant_run::RequestedRoute::Named {
                         extra: Default::default(),
@@ -403,6 +404,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                     task_id: TaskId::from_bytes([task; 16]),
                     prompt: "new work".into(),
                     base: None,
+                    pinned_base: None,
                     head: None,
                     route: provenant_run::RequestedRoute::Named {
                         extra: Default::default(),

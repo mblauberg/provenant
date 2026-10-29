@@ -449,7 +449,12 @@ impl RunStore {
         scope: custody::Scope,
         call: &Request<'_>,
     ) -> Result<Option<custody::Recovery>> {
-        match custody::acquire_recovery(directory, call.budget, call.cancel, call.clock) {
+        match custody::acquire_recovery(
+            directory,
+            call.transaction_budget(),
+            call.cancel,
+            call.clock,
+        ) {
             Ok(recovery) => Ok(Some(recovery)),
             Err(error) => {
                 if let CustodyError::Filesystem(filesystem) = &error

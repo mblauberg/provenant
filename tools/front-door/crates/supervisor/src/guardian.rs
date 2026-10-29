@@ -1593,6 +1593,9 @@ fn stream_policy(
         StreamMode::Capture { limit } => provenant_os::exec::StreamPolicy::Capture {
             limit: limit as usize,
         },
+        StreamMode::Tail { limit } => provenant_os::exec::StreamPolicy::Tail {
+            limit: limit as usize,
+        },
         StreamMode::Discard => provenant_os::exec::StreamPolicy::Discard,
         StreamMode::Tee { limit } => provenant_os::exec::StreamPolicy::Tee {
             limit: limit as usize,

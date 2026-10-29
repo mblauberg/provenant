@@ -71,6 +71,14 @@ pub fn runtime_seconds(task: &TaskRequest, cap: Option<u64>) -> u64 {
 
 pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64) -> CapturePlan {
     CapturePlan {
+        stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. } if provider == "command")
+        {
+            provenant_supervisor::custody::StreamMode::Tail {
+                limit: provenant_records::COMMAND_OUTPUT_TAIL_BYTES as u64,
+            }
+        } else {
+            CapturePlan::default().stdout
+        },
         wall_ms: runtime_seconds.saturating_mul(1000),
         silence_ms: task
             .profile
@@ -1270,9 +1278,13 @@ impl RunStore {
                 .map_err(|e| local(&e))
         };
         let mut holder_context = context(record, requester).map_err(|e| local(&e))?;
-        let reservation =
-            PublicationReservation::prepare(directory()?, call.budget, call.cancel, call.clock)
-                .map_err(|e| local(&e))?;
+        let reservation = PublicationReservation::prepare(
+            directory()?,
+            call.transaction_budget(),
+            call.cancel,
+            call.clock,
+        )
+        .map_err(|e| local(&e))?;
         // Clone before acquiring custody: failure leaves no writer reservation.
         let held = if self.sealed_requester.is_some() {
             Some((
@@ -1456,7 +1468,7 @@ impl RunStore {
             OwnedLaunch {
                 command,
                 lease: &mut lease,
-                handshake: call.budget,
+                handshake: call.transaction_budget(),
                 cancel: call.cancel,
                 clock: call.clock,
             },

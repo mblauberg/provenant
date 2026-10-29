@@ -2,7 +2,7 @@
 Owner: provenant-providers
 Anchor: tools/front-door/crates/providers/src
 
-Per-adapter launch notes. All five adapters (Claude, Codex, Cursor, Agy and
+Per-adapter launch notes. The model adapters (Claude, Codex, Cursor, Agy and
 OpenCode) are enabled by default in every access and session mode with a launch
 form; recordings serve replay tests only. Use `provenant route list`
 to inspect the catalogue; readiness is decided at dispatch.
@@ -24,12 +24,64 @@ catalogue still apply on top.
 | cursor   | no     | yes    | no       | provider, local, open  | no          | yes   |
 | agy      | yes    | yes    | no       | provider, local, open  | no          | yes   |
 | opencode | yes    | yes    | no       | provider, local, open  | no          | yes   |
+| command  | no     | no     | no       | off, local, open       | no          | no    |
 
-Only effort can refuse today. Resume, network and write never refuse for any
-adapter; they are declared so a future adapter can narrow them. Steering (input
-into a live session) and image input are declared likewise, and no request
-surface exists for either yet. Cursor has no
-effort control on its command line, so its catalogue models record none.
+Command routes have no model and refuse model, effort, resume and write
+requests. Steering (input into a live session) and image input have no request
+surface yet. Cursor has no effort control on its command line, so its
+catalogue models record none.
+
+## Command
+
+Configure named argv in the host's effective configuration:
+
+```toml
+[domains.fabric.commands.fmt-check]
+argv = ["cargo", "fmt", "--check"]
+
+[domains.fabric.commands.python-check]
+argv = ["./scripts/check.py"]
+runtimes = ["/opt/check/bin/python3"]
+```
+
+A graph task selects the entry by name:
+
+```json
+{"id":"format","kind":"task","access":"read_only","prompt":"Run the configured format check.","route":{"adapter":"command","name":"fmt-check"}}
+```
+
+The dispatch manifest and Fabric run wire route is
+`{"kind":"adapter","provider":"command","name":"fmt-check"}`. This generic
+adapter route leaves room for other named, model-less adapters. It carries no
+model, effort or account. Prompt text never supplies or changes argv. Bare
+executables resolve on the host's captured PATH; paths resolve from the lane's
+working directory. The applied route records `domains.fabric.commands.NAME`
+as its configuration source, with no model in the receipt.
+
+Commands use the ordinary supervisor, guardian, deadlines, descendant cleanup
+and operation replay. They run read-only with the shared Rust and Node toolchain
+grants and private build output. Network defaults to off: the recorded
+`provider` mode has no provider API endpoints for this adapter. Explicit local
+or open reach uses the existing access grants. All known credential stores,
+including both GitHub CLI config directories and keychains, stay denied in
+every network mode. Commands have no session, hooks, MCP configuration or
+quota probe.
+
+`runtimes` is optional and takes absolute interpreter paths. Each path is
+resolved on the host and granted execution only, so a script can use a custom
+shebang interpreter outside the system, Rust and Node toolchains. The grant
+does not allow reading neighbouring files or writing the interpreter directory.
+Exact non-system Mach-O dependencies receive the existing library read grants;
+credential and project write denials still apply. List each interpreter needed
+by the configured command or its child scripts.
+
+Stdout and stderr share a bounded 64 KiB output tail. Captured lines are quoted
+and log `verdict:` markers are escaped, so only the final exit-derived verdict
+feeds a gate. The result ends with
+`VERDICT: PASS` for exit zero and `VERDICT: FAIL` otherwise, including timeouts.
+An ordinary verdict gate can consume a successful task's result; the gate
+still has no attempt. A failed command fails its task. A missing executable
+settles as adapter unavailable through the existing launch failure path.
 
 ## Claude network access
 
