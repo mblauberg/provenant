@@ -726,9 +726,9 @@ impl RunStore {
             .and_then(|task| task.writer.as_ref())
         {
             let attempt = self.attempt_dir(old.run_id, id, false)?;
-            let head = next
-                .head
-                .or(crate::settlement::pinned_head(&attempt, Self::scope(old))?);
+            // Only an import journal creates a staging ref. A result-only
+            // terminal head does not prove that this attempt opened Git.
+            let head = crate::settlement::pinned_head(&attempt, Self::scope(old))?;
             crate::writer::cleanup_git_pins(
                 self.context.state_root.as_path(),
                 writer,

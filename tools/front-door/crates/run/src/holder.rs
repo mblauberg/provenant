@@ -1189,6 +1189,35 @@ mod writer_recovery_tests {
         observed.scope = scope;
         crate::dispatch_tests::seal_exit(&store, &observed)?;
         for index in 0..3 {
+            if index != 0 {
+                assert!(matches!(
+                    store.finish_in_custody(
+                        id,
+                        &attempt,
+                        &observed,
+                        Completion::Recovered(Some(&recovery)),
+                        &crate::dispatch_tests::Fake::default(),
+                        &call,
+                    ),
+                    Err(RunError::Contention)
+                ));
+                let journal_name = OsStr::new("settlement-progress.json");
+                let mut journal: serde_json::Value =
+                    crate::db::decode(&attempt.read_stable(journal_name, RECORD_LIMIT)?)?;
+                assert_eq!(journal["attempts"], index);
+                assert!(journal["owner"].is_null());
+                // Advance the persisted deadline instead of making the fixture
+                // sleep through the production five- and thirty-second delays.
+                journal["retry_after_ms"] = serde_json::json!(0);
+                attempt
+                    .atomic_write(
+                        journal_name,
+                        ".fixture-backoff-",
+                        &crate::db::bytes(&journal)?,
+                        provenant_os::fs::PublishMode::Replace,
+                    )?
+                    .require_durable()?;
+            }
             let result = store.finish_in_custody(
                 id,
                 &attempt,
@@ -1198,18 +1227,25 @@ mod writer_recovery_tests {
                 &call,
             );
             if index < 2 {
-                assert!(matches!(
-                    result,
-                    Err(RunError::OperationIo {
-                        operation: "import lane Git objects",
-                        ..
-                    })
-                ));
+                assert!(
+                    matches!(
+                        result,
+                        Err(RunError::OperationIo {
+                            operation: "import lane Git objects",
+                            ..
+                        })
+                    ),
+                    "{result:?}"
+                );
             } else {
                 assert!(
                     matches!(result?.state, AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. } if reason.contains("three attempts"))
                 );
             }
+            let journal: serde_json::Value = crate::db::decode(
+                &attempt.read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
+            )?;
+            assert_eq!(journal["attempts"], index + 1);
         }
         let active: i64 = store.db.query_row(
             "SELECT COUNT(*) FROM admission WHERE attempt=?1",
@@ -1219,6 +1255,8 @@ mod writer_recovery_tests {
         assert_eq!(active, 0);
         store.settle_recovered(&attempt, recovery)?;
         assert!(store.writer_fences()?.is_empty());
+        let terminal = store.record(id, &call)?;
+        assert!(store.custody_released(&terminal, &call)?);
         assert!(
             candidate.join("git-common/HEAD").is_file(),
             "refused private Git remains recoverable"

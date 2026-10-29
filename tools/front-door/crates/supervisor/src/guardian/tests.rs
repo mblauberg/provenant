@@ -3,6 +3,67 @@ use crate::census::{Census, ProcessFact};
 use std::collections::BTreeSet;
 
 #[test]
+fn terminal_retries_wait_until_the_holder_can_publish() {
+    use std::cell::{Cell, RefCell};
+    let elapsed = Cell::new(Duration::ZERO);
+    let attempts = RefCell::new(Vec::new());
+    let delays = RefCell::new(Vec::new());
+    assert!(retry_terminal(
+        || {
+            attempts.borrow_mut().push(elapsed.get());
+            elapsed.get() >= Duration::from_secs(35)
+        },
+        |delay| {
+            delays.borrow_mut().push(delay);
+            elapsed.set(elapsed.get() + delay);
+        },
+    ));
+    assert_eq!(
+        *attempts.borrow(),
+        [
+            Duration::ZERO,
+            Duration::from_secs(5),
+            Duration::from_secs(35),
+        ]
+    );
+    assert_eq!(
+        *delays.borrow(),
+        [Duration::from_secs(5), Duration::from_secs(30),]
+    );
+}
+
+#[test]
+fn terminal_retry_exhaustion_keeps_the_failure_bounded() {
+    use std::cell::{Cell, RefCell};
+    let attempts = Cell::new(0);
+    let delays = RefCell::new(Vec::new());
+    assert!(!retry_terminal(
+        || {
+            attempts.set(attempts.get() + 1);
+            false
+        },
+        |delay| delays.borrow_mut().push(delay),
+    ));
+    assert_eq!(attempts.get(), 4);
+    assert_eq!(
+        *delays.borrow(),
+        [
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            Duration::from_secs(120),
+        ]
+    );
+}
+
+#[test]
+fn successful_terminal_publication_does_not_wait() {
+    assert!(retry_terminal(
+        || true,
+        |_| panic!("a successful terminal publication must not wait"),
+    ));
+}
+
+#[test]
 fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
     let message = LaunchMessage {
         priority: 0,

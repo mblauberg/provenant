@@ -1009,6 +1009,12 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
             .join("CHERRY_PICK_HEAD"),
         b"unfinished cherry-pick",
     )?;
+    // The backoff itself has unit coverage. Emulate its expiry so this fixture
+    // can exercise recovery of the repaired archive without a real-time wait.
+    let progress = attempt_path.join("settlement-progress.json");
+    let mut journal: Value = serde_json::from_slice(&fs::read(&progress)?)?;
+    journal["retry_after_ms"] = 0.into();
+    fs::write(progress, serde_json::to_vec(&journal)?)?;
     let found = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
     assert_eq!(found, vec![(attempt, provenant_run::Reconciled::Finished)]);
     let terminal = store.record(attempt, &call)?;
@@ -1319,7 +1325,8 @@ fn await_terminal(
     call: &provenant_run::Request<'_>,
 ) -> Result<provenant_run::AttemptRecord> {
     let mut result = None;
-    if !eventually(Duration::from_secs(12), || {
+    // A third import is eligible after the five- and thirty-second backoffs.
+    if !eventually(Duration::from_secs(60), || {
         match store.record(attempt, call) {
             Ok(record) if matches!(record.state, provenant_run::AttemptState::Terminal { .. }) => {
                 result = Some(Ok(record));
@@ -1332,7 +1339,15 @@ fn await_terminal(
             }
         }
     }) {
-        return Err("writer attempt did not reach terminal state".into());
+        let temporary = store.temporary_path(attempt, call)?;
+        let directory = temporary.parent().ok_or("attempt directory")?;
+        let progress = fs::read_to_string(directory.join("settlement-progress.json"))
+            .unwrap_or_else(|error| error.to_string());
+        return Err(format!(
+            "writer attempt did not reach terminal state: {:?}; settlement: {progress}",
+            store.record(attempt, call)?.state
+        )
+        .into());
     }
     Ok(result.expect("eventually returned on terminal state or error")?)
 }

@@ -30,6 +30,25 @@ fn wall_now() -> Option<WallTime> {
     WallTime::from_micros(i64::try_from(micros).ok()?).ok()
 }
 
+// Match Run's persisted claim backoff so transient contention cannot spend
+// every guardian callback before a replacement driver is eligible.
+fn retry_terminal(mut terminal: impl FnMut() -> bool, mut wait: impl FnMut(Duration)) -> bool {
+    for delay in [0, 5, 30, 120] {
+        if delay != 0 {
+            wait(Duration::from_secs(delay));
+        }
+        if terminal() {
+            return true;
+        }
+    }
+    false
+}
+
+fn wait_terminal_retry(delay: Duration) {
+    let (_wake, waiting) = std::sync::mpsc::channel::<()>();
+    let _ = waiting.recv_timeout(delay);
+}
+
 /// Advisory identity snapshot only; confinement does not yet supply an executable pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1333,29 +1352,33 @@ impl Driver<'_> {
             return;
         }
         drop(self._custody.take());
-        for _ in 0..3 {
-            if holder
-                .terminal(&self.holder_context, &self.attempt, &exit, &recovery)
-                .is_err()
-            {
-                continue;
-            }
-            let verified = self
-                .attempt
-                .open_verified_directory(OsStr::new("quarantine"))
-                .map_err(CustodyError::from)
-                .and_then(|quarantine| {
-                    verify_release(
-                        self.reservation.scope,
-                        &self.attempt,
-                        &self.attempt,
-                        &quarantine,
-                    )
-                });
-            if verified.is_ok() {
-                let _ = recovery.clear_settled_reservation();
-                return;
-            }
+        // Neither writer nor attempt custody locks span a retry wait.
+        let settled = retry_terminal(
+            || {
+                if holder
+                    .terminal(&self.holder_context, &self.attempt, &exit, &recovery)
+                    .is_err()
+                {
+                    return false;
+                }
+                let verified = self
+                    .attempt
+                    .open_verified_directory(OsStr::new("quarantine"))
+                    .map_err(CustodyError::from)
+                    .and_then(|quarantine| {
+                        verify_release(
+                            self.reservation.scope,
+                            &self.attempt,
+                            &self.attempt,
+                            &quarantine,
+                        )
+                    });
+                verified.is_ok()
+            },
+            wait_terminal_retry,
+        );
+        if settled {
+            let _ = recovery.clear_settled_reservation();
         }
     }
     /// Retry without a time limit: custody survives ENOSPC and signals until
