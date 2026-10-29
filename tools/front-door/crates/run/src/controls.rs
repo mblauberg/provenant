@@ -1037,6 +1037,72 @@ impl RunStore {
         )
         .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
     }
+    /// Settle an attempt whose guardian and provider are both gone in this
+    /// boot and left no durable exit: nothing remains to import or publish, so
+    /// it ends Lost with a reason instead of waiting for a holder that is not
+    /// coming. Writer exclusion is taken without waiting, so a live guardian,
+    /// or an inheritor of its lease, keeps the attempt open.
+    fn settle_holderless(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+        observer: &dyn ProcessObserver,
+    ) -> Result<Option<Reconciled>> {
+        let scope = Self::scope(record);
+        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
+            || !custody::holder_gone(&attempt, scope, observer)
+        {
+            return Ok(None);
+        }
+        // Name the slot from the recorded binding; a lost writer's repository
+        // need not be readable for its custody to be settled.
+        let request = self.request(record.run_id, call)?;
+        let writer = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .and_then(|task| task.writer.as_ref());
+        let directory = match writer {
+            Some(writer) => {
+                let slot = self
+                    .writer_registry
+                    .join("worktrees")
+                    .join(self.context.project_id.to_string())
+                    .join(provenant_confinement::worktrees::state_dir_name(
+                        &writer.worktree,
+                    ));
+                match provenant_os::fs::Directory::open_anchor(&slot) {
+                    Ok(directory) => directory,
+                    Err(error) if error.is_not_found() => return Ok(None),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            None => attempt,
+        };
+        let Ok(recovery) = custody::acquire_recovery(
+            directory,
+            scope,
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            call.cancel,
+            call.clock,
+        ) else {
+            return Ok(None);
+        };
+        if recovery.scope() != scope || recovery.observe() != RecoveryState::Absent {
+            return Ok(None);
+        }
+        self.commit_lost(
+            scope,
+            "no live holder: the guardian and provider ended before the attempt settled",
+            call,
+        )?;
+        recovery
+            .release_lost()
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        self.set_temporary_retained(record.attempt_id, false, call)?;
+        Ok(Some(Reconciled::Finished))
+    }
     /// Settle an unreserved attempt only with proof its process tree is gone.
     fn settle_unreserved_loss(
         &self,
@@ -2129,11 +2195,16 @@ impl RunStore {
                         })
                     }
                     Ok(Observation::Live | Observation::PublicationPending) => Ok(Reconciled::Held),
-                    Ok(Observation::Unknown) => Ok(self
-                        .settle_unreserved_loss(record, call, observer, false)?
-                        .unwrap_or_else(|| {
+                    Ok(Observation::Unknown) => {
+                        let settled =
+                            match self.settle_unreserved_loss(record, call, observer, false)? {
+                                Some(state) => Some(state),
+                                None => self.settle_holderless(record, call, observer)?,
+                            };
+                        Ok(settled.unwrap_or_else(|| {
                             Reconciled::uncertain(UncertainReason::GuardianNotObservable)
-                        })),
+                        }))
+                    }
                     Err(error) => Ok(Reconciled::custody_unavailable(&error)),
                 }
             }

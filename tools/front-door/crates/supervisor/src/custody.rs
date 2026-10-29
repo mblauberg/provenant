@@ -1214,6 +1214,29 @@ pub fn checkpoint_before_reboot(
             .boot_identity()
             .is_ok_and(|boot| !boot.is_empty() && boot != guardian.boot)
 }
+/// Whether the guardian and provider recorded for this attempt are both gone
+/// in this boot. Only an observed absence counts; an unreadable process or
+/// record leaves the attempt open.
+pub fn holder_gone(directory: &Directory, scope: Scope, observer: &dyn ProcessObserver) -> bool {
+    let record = match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
+        Ok(record) => record,
+        // No process was ever recorded, so the reservation alone speaks for it.
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return true,
+        Err(_) => return false,
+    };
+    let Some(guardian) = record.guardian else {
+        return false;
+    };
+    let gone = |identity: &ProcessIdentity| match observer.observe(identity.pid) {
+        ProcessObservation::Absent => true,
+        ProcessObservation::Present(fact) => fact.identity != *identity || fact.zombie,
+        ProcessObservation::Unknown(_) => false,
+    };
+    record.scope == scope
+        && !record.publication_pending
+        && gone(&guardian)
+        && record.provider.as_ref().is_none_or(gone)
+}
 /// Whether any of these PIDs may still be alive (a signal-0 probe, no effect).
 pub fn any_pid_alive(pids: &[i64]) -> bool {
     crate::process_os::provider::any_pid_alive(pids)
@@ -1630,6 +1653,11 @@ impl Recovery {
     pub(crate) fn clear_settled_reservation(&mut self) -> Result<()> {
         self.ensure_writer_lock()?;
         clear_reservation(&self.directory, self.scope())
+    }
+    /// Release custody of an attempt the Run owner has committed Lost after
+    /// `holder_gone`. No attempt artefacts or worktree contents are removed.
+    pub fn release_lost(mut self) -> Result<()> {
+        self.clear_settled_reservation()
     }
     pub fn observe(&self) -> RecoveryState {
         self.observe_with(&SystemProcessObserver)
