@@ -317,7 +317,11 @@ fn override_set_echoes_replaces_lists_and_clears() -> Result {
     assert_eq!(overrides.len(), 2);
     assert_eq!(overrides[0]["account"], "claude/pro");
     assert_eq!(overrides[0]["policy"], "pace");
-    assert!(overrides[0]["schedule"]["expires"].as_i64().is_some());
+    assert!(
+        overrides[0]["schedule"]["expires"]
+            .as_str()
+            .is_some_and(|at| provenant_core::WallTime::parse(at).is_ok())
+    );
     assert_eq!(overrides[1]["schedule"]["windows"][0]["start_hour"], 23);
     let one = call(
         &rig,
@@ -345,7 +349,7 @@ fn override_set_resolves_labels_and_rejects_ambiguous_keys() -> Result {
     fs::create_dir_all(&rig.state)?;
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[domains.accounts.entries.one]\nadapter='claude'\nlabel='work'\nkey='shared'\ndirectory='/tmp/a'\n[domains.accounts.entries.two]\nadapter='codex'\nlabel='personal'\nkey='shared'\ndirectory='/tmp/b'\n[[domains.routing.pacing_overrides]]\naccount='work'\npolicy='pace'\nschedule={expires=2000000000}\n",
+        "schema_version=1\n[domains.accounts.entries.one]\nadapter='claude'\nlabel='work'\nkey='shared'\ndirectory='/tmp/a'\n[domains.accounts.entries.two]\nadapter='codex'\nlabel='personal'\nkey='shared'\ndirectory='/tmp/b'\n[[domains.routing.pacing_overrides]]\naccount='work'\npolicy='pace'\nschedule={expires='2033-05-18T03:33:20Z'}\n", // timebomb: allow far-future fixture expiry
     )?;
     let rejected = call(
         &rig,
@@ -397,15 +401,16 @@ fn override_set_resolves_labels_and_rejects_ambiguous_keys() -> Result {
 fn override_list_shows_active_future_and_expired_schedules() -> Result {
     let rig = rig()?;
     fs::create_dir_all(&rig.state)?;
-    let now = jiff::Timestamp::now().as_second();
+    let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+    let at = |seconds: i64| jiff::Timestamp::from_second(seconds).map(|at| at.to_string());
     let config = format!(
-        "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n[[domains.routing.pacing_overrides]]\nprovider='agy'\npolicy='off'\n[domains.routing.pacing_overrides.schedule]\nstarts={}\nexpires={}\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nschedule={{windows=[{{weekdays=[5,6],start_hour=0,end_hour=24}}]}}\n[domains.routing.model_policy.rules.policy.cache]\nttl_seconds=60\n",
-        now - 30,
-        now + 300,
-        now + 300,
-        now + 600,
-        now - 600,
-        now - 300,
+        "schema_version=1\n[[domains.routing.pacing_overrides]]\nprovider='codex'\npolicy='pace'\n[domains.routing.pacing_overrides.schedule]\nstarts='{}'\nexpires='{}'\n[[domains.routing.pacing_overrides]]\nprovider='claude'\npolicy='spend'\n[domains.routing.pacing_overrides.schedule]\nstarts='{}'\nexpires='{}'\n[[domains.routing.pacing_overrides]]\nprovider='agy'\npolicy='off'\n[domains.routing.pacing_overrides.schedule]\nstarts='{}'\nexpires='{}'\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\nschedule={{windows=[{{weekdays=[5,6],start_hour=0,end_hour=24}}]}}\n[domains.routing.model_policy.rules.policy.cache]\nttl_seconds=60\n",
+        at(now - 30)?,
+        at(now + 300)?,
+        at(now + 300)?,
+        at(now + 600)?,
+        at(now - 600)?,
+        at(now - 300)?,
     );
     fs::write(rig.state.join("config.toml"), config)?;
     let listed = call(&rig, &["route", "override", "list"], 0)?;
@@ -480,7 +485,7 @@ fn retired_schedule_keys_drop_only_their_record_with_a_named_warning() -> Result
 fn cached_account_pacing_is_visible_without_probing() -> Result {
     use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow};
     let rig = rig()?;
-    let at = jiff::Timestamp::now().as_second();
+    let at = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
     let directory = rig.state.join("quota/opaque-one");
     fs::create_dir_all(&directory)?;
     for path in [&rig.state, &rig.state.join("quota"), &directory] {

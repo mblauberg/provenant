@@ -622,8 +622,6 @@ fn duration(text: &str) -> bool {
 }
 #[cfg(test)]
 mod tests {
-    // Parsing performance tests measure elapsed wall time.
-    #![allow(clippy::disallowed_methods)]
 
     use super::*;
 

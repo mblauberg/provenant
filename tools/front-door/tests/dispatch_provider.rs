@@ -146,8 +146,11 @@ fn fixture() -> Result {
             Some(".claude-pro" | "claude-config")
         ));
         if args.iter().any(|v| v == "provenant-refresh-probe") {
-            let expiry =
-                u64::try_from(jiff::Timestamp::now().as_millisecond())?.saturating_add(3_600_000);
+            let expiry = u64::try_from(
+                provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())?
+                    .unix_millis(),
+            )?
+            .saturating_add(3_600_000);
             fs::write(
                 dir.join(".credentials.json"),
                 serde_json::to_vec(
@@ -1735,7 +1738,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     fs::write(
         rig.home.join(".claude-pro/.credentials.json"),
         serde_json::to_vec(
-            &json!({"claudeAiOauth":{"accessToken":"fixture-refreshed-token","expiresAt":jiff::Timestamp::now().as_millisecond() + 3_600_000}}),
+            &json!({"claudeAiOauth":{"accessToken":"fixture-refreshed-token","expiresAt":provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())?.unix_millis() + 3_600_000}}),
         )?,
     )?;
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());

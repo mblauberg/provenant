@@ -2087,7 +2087,7 @@ mod tests {
                 five_hour: Some(43),
                 seven_day: Some(17),
                 thirty_day: Some(59),
-                expires: "2026-11-04T00:00:00Z".into(),
+                expires: provenant_core::WallTime::parse_rfc3339("2026-11-04T00:00:00Z").unwrap(),
             },
         );
         settings.apply_calibration(&mut records, 100);

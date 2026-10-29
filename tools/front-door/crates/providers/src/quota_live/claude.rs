@@ -352,10 +352,10 @@ impl LiveQuota {
             .claude_default
             .borrow()
             .as_ref()
-            .is_some_and(|default| freshest(&expected, &fixed, default, now()).is_some());
+            .is_some_and(|default| freshest(&expected, &fixed, default, self.now()).is_some());
         if !has_fresh
             && self.refresh_expired
-            && fixed.expires.is_some_and(|e| e <= now() + 60)
+            && fixed.expires.is_some_and(|e| e <= self.now() + 60)
             && may_refresh(&account.identity_dir, &self.home.join(".claude"), |dir| {
                 self.claude_credentials(dir, deadline)
             })?
@@ -380,7 +380,7 @@ impl LiveQuota {
                     config_dir: &account.identity_dir,
                 };
 
-                let now_ms = || (now().max(0) as u64).saturating_mul(1000);
+                let now_ms = || (self.now().max(0) as u64).saturating_mul(1000);
                 let deadline_ms = (deadline.max(0) as u64).saturating_mul(1000);
                 refresh(&executor, &login, &now_ms, deadline_ms)?;
             }
@@ -388,11 +388,12 @@ impl LiveQuota {
         }
         let borrowed = self.claude_default.borrow();
         let default = borrowed.as_ref().ok_or(ProbeFailure::Network)?;
-        let identity = freshest(&expected, &fixed, default, now()).ok_or(if fixed.missing {
-            ProbeFailure::Auth
-        } else {
-            ProbeFailure::Network
-        })?;
+        let identity =
+            freshest(&expected, &fixed, default, self.now()).ok_or(if fixed.missing {
+                ProbeFailure::Auth
+            } else {
+                ProbeFailure::Network
+            })?;
         details.fingerprint = Some(expected);
         self.http(
             "https://api.anthropic.com/api/oauth/usage",

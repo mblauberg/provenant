@@ -7,11 +7,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
-provenant-core = { workspace = true }
 jiff = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 provenant-config = { workspace = true }
+provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 thiserror = { workspace = true }
 

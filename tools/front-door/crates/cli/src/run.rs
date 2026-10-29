@@ -286,7 +286,9 @@ impl run::Providers for Registry<'_> {
             }
             None => Default::default(),
         };
-        let now = jiff::Timestamp::now().as_second();
+        let now = SystemClock::new()
+            .wall_now()
+            .map_err(|error| error.to_string())?;
         let policy = routing
             .model_policy
             .effective(&model, route.account_key.as_deref(), now)
@@ -316,7 +318,7 @@ impl run::Providers for Registry<'_> {
                 key,
                 &model,
                 model_pool.as_deref(),
-                now,
+                now.unix_seconds(),
             )
         };
         Ok(assess_settlement_retry(
@@ -326,7 +328,7 @@ impl run::Providers for Registry<'_> {
             record,
             decoded,
             policy_attempt,
-            now,
+            now.unix_seconds(),
         ))
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
@@ -950,7 +952,7 @@ impl Registry<'_> {
             let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
             if !lane && (pool.is_some() || route.account_key.is_some()) {
                 if let Some(state_root) = provider_state.ancestors().nth(5) {
-                    let now = jiff::Timestamp::now().as_second();
+                    let now = SystemClock::new().unix_seconds();
                     let resets = resets_in_seconds
                         .and_then(|seconds| i64::try_from(seconds).ok())
                         .and_then(|seconds| now.checked_add(seconds));
@@ -998,7 +1000,7 @@ impl Registry<'_> {
                             let _ = crate::quota::persist_capacity_cooldown(
                                 self.state_root.unwrap_or_else(|| roots.state.as_path()),
                                 route,
-                                jiff::Timestamp::now().as_second(),
+                                SystemClock::new().unix_seconds(),
                                 duration,
                             );
                         }
@@ -1048,7 +1050,7 @@ impl Registry<'_> {
             let _ = crate::quota::persist_provider_success(
                 state_root,
                 route,
-                jiff::Timestamp::now().as_second(),
+                SystemClock::new().unix_seconds(),
             );
         }
         if decoded.outcome == run::Outcome::ModelUnavailable
@@ -6750,7 +6752,7 @@ pub fn stats_by_pr(
 fn cache_kpi_rows(
     facts: &[&provenant_records::AttemptFact],
     domains: &crate::domains::Domains,
-    now: i64,
+    now: provenant_core::WallTime,
 ) -> Value {
     let mut grouped: BTreeMap<(Option<String>, Option<String>), Vec<&provenant_records::Usage>> =
         BTreeMap::new();
@@ -6894,7 +6896,9 @@ fn stats_inner(
     let cache_kpis = cache_kpi_rows(
         &selected,
         &config.domains,
-        jiff::Timestamp::now().as_second(),
+        call.clock
+            .wall_now()
+            .map_err(|_| provenant_run::RunError::Admission(provenant_run::AdmissionError::Clock))?,
     );
     let pipeline = if command.outcomes || command.suggest {
         Some(pipeline_report(
@@ -7229,7 +7233,10 @@ fn pipeline_report(
             serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))
         })
         .transpose()?;
-    let now = jiff::Timestamp::now();
+    let now = SystemClock::new()
+        .wall_now()
+        .map_err(|e| invalid(e.to_string()))?
+        .as_timestamp();
     let mut outcomes = provenant_telemetry::outcome::attribute(
         edge.cwd,
         &options.main_ref,
@@ -8612,7 +8619,11 @@ mod tests {
             partial_signals: Vec::new(),
         };
         let gemini = policies
-            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, 0)
+            .effective(
+                &ModelId::parse("agy/gemini-3.8-flash")?,
+                None,
+                provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
+            )
             .policy;
         let decision = model_assessment(&gemini, task, &record, &decoded, record.attempt_number)?;
         assert!(decision.refusal.is_some());
@@ -8644,7 +8655,11 @@ mod tests {
         }
         decoded.outcome = run::Outcome::Succeeded;
         let terra = policies
-            .effective(&ModelId::parse("codex/gpt-6.1-terra")?, None, 0)
+            .effective(
+                &ModelId::parse("codex/gpt-6.1-terra")?,
+                None,
+                provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
+            )
             .policy;
         record.applied_route = Some(run::RouteRecord {
             provider: Some("codex".into()),

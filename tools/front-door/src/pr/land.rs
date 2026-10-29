@@ -1200,7 +1200,8 @@ mod land_log_tests {
         let project = provenant_core::ProjectId::from_bytes([3; 16]);
         let host = provenant_core::HostId::from_bytes([1; 16]);
         let session = HostSessionId::parse("land-test")?;
-        let issued_at = jiff::Timestamp::now().as_second();
+        let issued_at =
+            provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
         let settings = provenant_config::RetentionSettings::default();
 
         for _ in 0..2 {
@@ -1229,7 +1230,7 @@ mod land_log_tests {
             None,
             50,
             retention,
-            jiff::Timestamp::now().as_second(),
+            provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new()),
         )?;
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.entries[0].update.pr_ids, ["42"]);

@@ -42,6 +42,17 @@ impl UtcMicros {
     pub fn as_timestamp(self) -> jiff::Timestamp {
         self.0
     }
+    pub fn from_unix_seconds(seconds: i64) -> Result<Self, TimeError> {
+        Self::from_micros(seconds.checked_mul(1_000_000).ok_or(TimeError::WallRange)?)
+    }
+    /// Whole seconds since the Unix epoch, truncated toward zero.
+    pub fn unix_seconds(self) -> i64 {
+        self.0.as_second()
+    }
+    /// Whole milliseconds since the Unix epoch, truncated toward zero.
+    pub fn unix_millis(self) -> i64 {
+        self.0.as_millisecond()
+    }
     pub fn parse(text: &str) -> Result<Self, TimeError> {
         let timestamp: jiff::Timestamp = text.parse().map_err(|_| TimeError::WallSpelling)?;
         if timestamp.subsec_nanosecond() % 1000 != 0 {
@@ -53,9 +64,67 @@ impl UtcMicros {
         }
         Ok(value)
     }
+    /// Any RFC 3339 spelling of an instant, in any offset,
+    /// for hand-written configuration. Fractions truncate towards zero to microseconds.
+    /// [`Self::parse`] takes only the
+    /// canonical spelling that [`Display`](std::fmt::Display) writes.
+    pub fn parse_rfc3339(text: &str) -> Result<Self, TimeError> {
+        // RFC 3339 allows arbitrarily many fractional digits; jiff accepts nine.
+        let normalised = text.find('.').and_then(|dot| {
+            let digits = text[dot + 1..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            (digits > 9).then(|| format!("{}{}", &text[..dot + 10], &text[dot + 1 + digits..]))
+        });
+        let text = normalised.as_deref().unwrap_or(text);
+        let timestamp: jiff::Timestamp = text.parse().map_err(|_| TimeError::WallSpelling)?;
+        Self::from_micros(timestamp.as_microsecond())
+    }
     pub fn checked_add(self, duration: DurationMicros) -> Result<Self, TimeError> {
         let sum = i128::from(self.as_micros()) + i128::from(duration.0);
         Self::from_micros(i64::try_from(sum).map_err(|_| TimeError::Overflow)?)
+    }
+}
+
+/// Serde for a configured instant, such as an expiry: reads any RFC 3339
+/// spelling and writes the canonical one. Use with
+/// `#[serde(with = "provenant_core::rfc3339")]`, or `rfc3339::option` for an
+/// optional field.
+pub mod rfc3339 {
+    use super::WallTime;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(value: &WallTime, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(value)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<WallTime, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        WallTime::parse_rfc3339(&text).map_err(|_| {
+            D::Error::custom(format_args!("expected an RFC 3339 timestamp, not {text:?}"))
+        })
+    }
+
+    pub mod option {
+        use super::WallTime;
+        use serde::{Deserialize, Deserializer, Serializer};
+
+        pub fn serialize<S: Serializer>(
+            value: &Option<WallTime>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match value {
+                Some(value) => serializer.collect_str(value),
+                None => serializer.serialize_none(),
+            }
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<WallTime>, D::Error> {
+            #[derive(Deserialize)]
+            struct Wrapped(#[serde(with = "super")] WallTime);
+            Ok(Option::<Wrapped>::deserialize(deserializer)?.map(|Wrapped(value)| value))
+        }
     }
 }
 impl std::fmt::Display for UtcMicros {
@@ -214,6 +283,11 @@ impl WaitBudget {
 /// Sampled by the edge; state machines receive values, never ambient time.
 pub trait Clock {
     fn wall_now(&self) -> Result<WallTime, TimeError>;
+    /// Whole Unix seconds now, for second-granular records; zero when the
+    /// wall clock is outside the supported range.
+    fn unix_seconds(&self) -> i64 {
+        self.wall_now().map_or(0, WallTime::unix_seconds)
+    }
     fn mono_now(&self) -> MonoTime;
     /// Wait until a monotonic deadline according to this clock's time source.
     fn wait_until(&self, deadline: MonoTime) -> Result<(), TimeError>;
@@ -343,6 +417,12 @@ mod tests {
         assert!(matches!(Plain.boot_identity(), Err(TimeError::HostClock)));
         let test = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(7));
         assert_eq!(test.host_monotonic_micros().unwrap(), 7);
+        assert_eq!(Plain.unix_seconds(), 0);
+        let mut later = test.clone();
+        later
+            .advance(DurationMicros::from_seconds(90).unwrap())
+            .unwrap();
+        assert_eq!(later.unix_seconds(), 90);
         assert_eq!(test.boot_identity().unwrap(), "test-boot");
     }
     #[test]
@@ -417,6 +497,65 @@ mod tests {
             wait.remaining(MonoTime::from_micros(1_000_011)),
             DurationMicros::ZERO
         );
+    }
+    #[test]
+    fn configured_instants_read_any_rfc3339_spelling_and_write_one() {
+        let canonical = UtcMicros::from_unix_seconds(1_793_491_200).unwrap();
+        for input in [
+            "2026-11-01T00:00:00Z",
+            "2026-11-01T00:00:00.000000Z",
+            "2026-11-01T10:00:00+10:00",
+            "2026-11-01T00:00:00.000000001Z",
+            "2026-11-01T00:00:00.00000000123456789Z",
+        ] {
+            assert_eq!(UtcMicros::parse_rfc3339(input).unwrap(), canonical);
+        }
+        for input in ["2026-11-01", "1793491200"] {
+            assert!(UtcMicros::parse_rfc3339(input).is_err(), "{input}");
+        }
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Configured {
+            #[serde(with = "rfc3339")]
+            at: WallTime,
+            #[serde(default, with = "rfc3339::option")]
+            expires: Option<WallTime>,
+        }
+        let read: Configured =
+            serde_json::from_str(r#"{"at":"2026-11-01T10:00:00+10:00","expires":null}"#).unwrap();
+        assert_eq!(
+            read,
+            Configured {
+                at: canonical,
+                expires: None
+            }
+        );
+        let read: Configured = serde_json::from_str(r#"{"at":"2026-11-01T00:00:00Z"}"#).unwrap();
+        assert_eq!(read.expires, None);
+        let fractional: Configured = serde_json::from_str(r#"{"at":"2026-11-01T00:00:00.123456789Z","expires":"2026-11-01T10:00:00.000000001+10:00"}"#).unwrap();
+        assert_eq!(fractional.at.as_micros(), canonical.as_micros() + 123_456);
+        assert_eq!(fractional.expires, Some(canonical));
+        let written = Configured {
+            at: canonical,
+            expires: Some(canonical),
+        };
+        assert_eq!(
+            serde_json::to_string(&written).unwrap(),
+            r#"{"at":"2026-11-01T00:00:00.000000Z","expires":"2026-11-01T00:00:00.000000Z"}"#
+        );
+        assert!(serde_json::from_str::<Configured>(r#"{"at":1793491200}"#).is_err());
+        let error = serde_json::from_str::<Configured>(r#"{"at":"next year"}"#).unwrap_err();
+        assert!(error.to_string().contains("RFC 3339"), "{error}");
+    }
+    #[test]
+    fn wall_time_converts_whole_unix_seconds_and_millis() {
+        let at = UtcMicros::from_unix_seconds(1_700_000_000).unwrap();
+        assert_eq!(at.unix_seconds(), 1_700_000_000);
+        assert_eq!(at.unix_millis(), 1_700_000_000_000);
+        let later = at.checked_add(DurationMicros::from_micros(1_999)).unwrap();
+        assert_eq!(later.unix_seconds(), 1_700_000_000);
+        assert_eq!(later.unix_millis(), 1_700_000_000_001);
+        assert!(UtcMicros::from_unix_seconds(i64::MAX).is_err());
+        assert!(UtcMicros::from_unix_seconds(-62_167_219_201).is_err());
     }
     #[test]
     fn test_clock_advance_is_atomic_on_overflow() {

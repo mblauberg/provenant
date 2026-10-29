@@ -22,7 +22,7 @@ use std::{
     ffi::{OsStr, OsString},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 type Error = Box<dyn std::error::Error>;
@@ -45,6 +45,7 @@ struct Context {
     home: PathBuf,
     /// The session's `CLAUDE_CONFIG_DIR`, if the environment names one.
     claude_config: Option<PathBuf>,
+    clock: provenant_os::clock::SystemClock,
 }
 impl Context {
     fn new(globals: &Globals, cwd: &Path) -> Result<Self, Error> {
@@ -70,7 +71,11 @@ impl Context {
             assets: resolved.assets,
             home: resolved.home,
             claude_config: resolved.claude_config,
+            clock: provenant_os::clock::SystemClock::new(),
         })
+    }
+    fn now(&self) -> i64 {
+        self.clock.unix_seconds()
     }
     fn store(&self) -> HandoffStore {
         HandoffStore::new(self.roots.state.clone(), self.cwd.clone())
@@ -83,13 +88,6 @@ impl Context {
             assets: &self.assets,
         }
     }
-}
-// Chair records need current UTC wall time at this production edge.
-#[allow(clippy::disallowed_methods)]
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |t| t.as_secs() as i64)
 }
 fn current<'a>(
     accounts: &'a [RegisteredAccount],
@@ -317,7 +315,13 @@ fn switch(
         .map(|(a, s)| (a.key(), s.as_ref()))
         .collect::<Vec<_>>();
     check_time(deadline)?;
-    let decision = decide_switch(snapshot.as_ref(), &choices, threshold, now(), automatic);
+    let decision = decide_switch(
+        snapshot.as_ref(),
+        &choices,
+        threshold,
+        context.now(),
+        automatic,
+    );
     let (target, reason) = match decision {
         SwitchDecision::Stay => {
             let _ = writeln!(
@@ -350,7 +354,7 @@ fn switch(
         cwd: context.cwd.clone(),
         transcript_path: input.transcript_path.clone(),
         state_handoff_file: None,
-        created_unix: now(),
+        created_unix: context.now(),
         open_lanes: vec![],
         target_account: target.map(|a| a.key().into()),
         reason: reason.into(),
@@ -750,8 +754,6 @@ struct LogInput {
     correction_of: Option<u64>,
 }
 
-// The standard input transport has a real deadline.
-#[allow(clippy::disallowed_methods)]
 fn log_input<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Error> {
     Ok(serde_json::from_slice(&log_bytes(path)?)?)
 }
@@ -951,6 +953,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
     } else {
         "chair log append"
     };
+    let clock = provenant_os::clock::SystemClock::new();
     let result = (|| -> Result<Value, Error> {
         let resolved = crate::roots::resolve(
             globals,
@@ -964,7 +967,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                 operation_id,
                 issued_at,
             } => {
-                let created_at = now();
+                let created_at = clock.unix_seconds();
                 let operation_id = match operation_id {
                     Some(id) => id,
                     None => {
@@ -1061,7 +1064,7 @@ fn log_run(command: ChairLog, globals: &Globals) -> u8 {
                     project,
                     HostSessionId::parse(&session)?,
                 )
-                .page(after, limit as usize, retention, now())?;
+                .page(after, limit as usize, retention, clock.unix_seconds())?;
                 Ok(serde_json::to_value(page)?)
             }
         }
@@ -1207,13 +1210,13 @@ pub fn hook(start: bool, globals: &Globals) -> u8 {
         check_time(Some(deadline))?;
         if start {
             // Consume any handoff first, so attribution never spends its deadline.
-            let handoff = if context.store().pending(now())?.is_some() {
+            let handoff = if context.store().pending(context.now())?.is_some() {
                 let accounts = crate::registered_claude(&context.roots)?;
                 let target = current(&accounts, &context)?;
                 check_time(Some(deadline))?;
                 context
                     .store()
-                    .consume(target.key(), &input.session_id, now())?
+                    .consume(target.key(), &input.session_id, context.now())?
             } else {
                 None
             };
@@ -1301,6 +1304,7 @@ mod tests {
             assets: home.join("assets"),
             home: home.clone(),
             claude_config: None,
+            clock: provenant_os::clock::SystemClock::new(),
         };
         let target = RegisteredAccount::new("claude", "work", home.join(".claude-work"))?;
         let checkpoint = home.join("checkpoint.md");

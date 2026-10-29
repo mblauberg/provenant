@@ -871,7 +871,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods)]
     fn capture_uses_requested_head_instead_of_checkout() -> TestResult {
         let temp = tempfile::tempdir()?;
         let git = |args: &[&str]| -> TestResult {

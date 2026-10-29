@@ -123,7 +123,7 @@ pub struct AccountPacingView {
     pub policy: PacingPolicy,
     pub source: String,
     pub profile: Option<PacingProfile>,
-    pub expires_unix_seconds: Option<i64>,
+    pub expires: Option<provenant_core::WallTime>,
 }
 #[derive(Debug, Serialize)]
 pub struct RoutePoolMemberView {
@@ -239,7 +239,7 @@ pub fn list(
             .config
             .pacing_overrides
             .iter()
-            .filter(|o| o.schedule.active(context.now_seconds()))
+            .filter(|o| o.schedule.active(context.now))
             .cloned()
             .collect(),
         account_pacing: context
@@ -282,7 +282,7 @@ pub fn list(
                     policy,
                     source: source.into(),
                     profile: profile.cloned(),
-                    expires_unix_seconds: expiry,
+                    expires: expiry,
                 })
             })
             .collect(),
@@ -395,7 +395,7 @@ fn effective_profile<'a>(
     PacingPolicy,
     Option<&'a PacingProfile>,
     &'static str,
-    Option<i64>,
+    Option<provenant_core::WallTime>,
 ) {
     // Direct library callers may supply legacy bare keys. These match any
     // adapter; callers with an account registry should qualify them first.
@@ -416,7 +416,7 @@ fn effective_profile<'a>(
     // provider-level default beneath it.
     let profile = account_profile.or(free_profile);
     let active = context.config.pacing_overrides.iter().rev().find(|o| {
-        o.schedule.active(context.now_seconds())
+        o.schedule.active(context.now)
             && o.account.as_deref().is_none_or(|selector| {
                 account.is_some_and(|key| {
                     selector
@@ -1241,7 +1241,7 @@ fn candidate(
                 .effective(
                     model,
                     a.account_key.as_deref().or(context.policy_account_hint),
-                    context.now_seconds(),
+                    context.now,
                 )
                 .policy
                 .permits(intent);
@@ -1506,7 +1506,7 @@ fn resolve_inner(
                     .account_key
                     .as_deref()
                     .or(context.policy_account_hint),
-                context.now_seconds(),
+                context.now,
             )
             .policy,
         request.intent,
@@ -1671,7 +1671,7 @@ fn classify_pool(
                                 .account_key
                                 .as_deref()
                                 .or(context.policy_account_hint),
-                            context.now_seconds(),
+                            context.now,
                         )
                         .policy;
                     if !model_policy.permits(request.intent) {

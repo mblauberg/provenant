@@ -489,7 +489,7 @@ mod admission_tests {
                 five_hour: Some(43),
                 seven_day: Some(17),
                 thirty_day: Some(59),
-                expires: "1970-01-01T00:18:20Z".into(),
+                expires: provenant_core::WallTime::parse_rfc3339("1970-01-01T00:18:20Z").unwrap(),
             },
         );
         let mut active = raw.clone();

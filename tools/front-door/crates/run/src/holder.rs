@@ -545,7 +545,7 @@ impl RunStore {
             return self.recover_terminal(id, exit, call);
         }
         let (mut settlement, retry_limit) =
-            match crate::settlement::Guard::claim(attempt, exit.scope) {
+            match crate::settlement::Guard::claim(attempt, exit.scope, call.clock) {
                 Ok(Some(driver)) => (Some(driver), false),
                 Ok(None) => return Err(RunError::Contention),
                 Err(RunError::ObjectImportLimit(_)) => (None, true),

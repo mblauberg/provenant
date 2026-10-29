@@ -1324,7 +1324,11 @@ pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
         if seconds <= 0 {
             return Err("duration must be positive".into());
         }
-        return jiff::Timestamp::now()
+        use provenant_core::Clock;
+        return provenant_os::clock::SystemClock::new()
+            .wall_now()
+            .map_err(|error| error.to_string())?
+            .as_timestamp()
             .checked_sub(jiff::SignedDuration::from_secs(seconds))
             .map_err(|error| error.to_string());
     }
@@ -1338,9 +1342,11 @@ mod target_tests {
 
     #[test]
     fn since_accepts_whole_seconds_only() {
-        let before = jiff::Timestamp::now();
+        use provenant_core::Clock;
+        let clock = provenant_os::clock::SystemClock::new();
+        let before = clock.wall_now().unwrap().as_timestamp();
         let start = since("86400").unwrap();
-        let after = jiff::Timestamp::now();
+        let after = clock.wall_now().unwrap().as_timestamp();
         let duration = jiff::SignedDuration::from_secs(86_400);
         assert!(start >= before.checked_sub(duration).unwrap());
         assert!(start <= after.checked_sub(duration).unwrap());

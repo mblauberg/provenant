@@ -152,7 +152,6 @@ fn live_read_only_observations_refresh_wal_and_refuse_mutations() {
     assert!(f.open().live_read_only().is_err());
 }
 #[test]
-#[allow(clippy::disallowed_methods)] // Native read-only WAL open deadline.
 fn persisted_wal_survives_last_writer_in_unwritable_directory() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();

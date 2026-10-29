@@ -215,11 +215,6 @@ fn validate(
     {
         return Err("max_cost_ratio must be finite and positive".into());
     }
-    if let Some(expires) = &config.expires {
-        expires
-            .parse::<jiff::Timestamp>()
-            .map_err(|_| format!("expires must be an RFC 3339 timestamp, not {expires:?}"))?;
-    }
     if let Some(tier) = config
         .tiers
         .iter()
@@ -259,13 +254,11 @@ fn assign_one(
     if !tiers.contains(&tier) {
         return Err(format!("risk tier {tier} is not in the experiment's tiers"));
     }
-    if let Some(expires) = &config.expires {
-        let expires: jiff::Timestamp = expires
-            .parse()
-            .map_err(|_| "expires is not an RFC 3339 timestamp")?;
-        if task.now >= expires {
-            return Err("the experiment has expired".into());
-        }
+    if config
+        .expires
+        .is_some_and(|expires| task.now >= expires.as_timestamp())
+    {
+        return Err("the experiment has expired".into());
     }
     let spend = if config.budget_usd.is_some() || config.max_cost_ratio.is_some() {
         let spend = rows
@@ -498,7 +491,7 @@ mod tests {
         assert!(terminal.skipped[0].contains("not in the experiment's tiers"));
 
         let mut expired = config();
-        expired.expires = Some("2025-12-31T00:00:00Z".into());
+        expired.expires = provenant_core::WallTime::parse_rfc3339("2025-12-31T00:00:00Z").ok();
         let expired = placed(expired, "t", Some("routine"), vec![]);
         assert!(expired.assignment.is_none());
         assert!(expired.skipped[0].contains("expired"));
@@ -681,9 +674,11 @@ mod tests {
     #[test]
     fn malformed_experiments_are_rejected_with_the_field_named() {
         let check = |cfg: ExperimentConfig| validate("x", &cfg, &known).unwrap_err();
-        let mut expires = config();
-        expires.expires = Some("next year".into());
-        assert!(check(expires).contains("expires must be an RFC 3339 timestamp"));
+        let expires = serde_json::from_value::<ExperimentConfig>(serde_json::json!({
+            "control": "single", "arms": {"candidate": "chain"}, "expires": "next year"
+        }))
+        .unwrap_err();
+        assert!(expires.to_string().contains("RFC 3339"), "{expires}");
 
         let mut reserved = config();
         reserved.arms.insert("control".into(), "chain".into());

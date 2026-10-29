@@ -99,8 +99,6 @@ struct TrackedFiles {
 }
 
 impl TrackedFiles {
-    // Build-time Git metadata discovery, before the runtime supervisor exists.
-    #[allow(clippy::disallowed_methods)]
     fn load(
         workspace: &Path,
         repository: &Path,

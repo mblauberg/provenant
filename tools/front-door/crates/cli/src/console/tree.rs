@@ -6,7 +6,6 @@ use provenant_run::{ExecutionContext, RunStore};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-#[allow(clippy::disallowed_methods)] // The request owns a bounded real-time budget.
 pub(super) fn read(
     roots: &Roots,
     selected: Option<ProjectId>,

@@ -111,8 +111,6 @@ fn deny(reason: &str) -> u8 {
         2
     }
 }
-// The hook policy deadline comes from the host's real-time input budget.
-#[allow(clippy::disallowed_methods)]
 fn guard(globals: &Globals, deadline: Instant, client: Option<Harness>, event_name: &str) -> u8 {
     let input = match hook_io::read_stdin(INPUT_CAP, deadline) {
         Ok(bytes) => bytes,
