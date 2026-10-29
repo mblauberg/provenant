@@ -339,6 +339,7 @@ impl run::Providers for Registry<'_> {
             &writer.project,
             home,
         )
+        .map_err(String::from)
     }
 
     fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
@@ -1484,13 +1485,29 @@ pub fn submit(
     submit_with_host(session, edge, submission, call, None)
 }
 
+/// A failed writer disk precheck: either the volumes could not be observed, or
+/// the measured free space is below the floor. Only the latter is `DiskFloor`.
+#[derive(Debug)]
+enum DiskCheck {
+    Unobserved(String),
+    Low(String),
+}
+
+impl From<DiskCheck> for String {
+    fn from(check: DiskCheck) -> Self {
+        match check {
+            DiskCheck::Unobserved(message) | DiskCheck::Low(message) => message,
+        }
+    }
+}
+
 fn check_writer_disk(
     settings: &provenant_config::GcSettings,
     state: &Path,
     worktree: &Path,
     project: &Path,
     home: &Path,
-) -> Result<(), String> {
+) -> Result<(), DiskCheck> {
     check_writer_disk_with_collection(
         settings,
         state,
@@ -1564,7 +1581,7 @@ fn check_writer_disk_with(
     worktree: &Path,
     home: &Path,
     available: impl FnMut(&Path) -> Result<u64, String>,
-) -> Result<(), String> {
+) -> Result<(), DiskCheck> {
     check_writer_disk_with_collection(settings, state, worktree, home, available, || 0)
 }
 
@@ -1575,14 +1592,14 @@ fn check_writer_disk_with_collection(
     home: &Path,
     mut available: impl FnMut(&Path) -> Result<u64, String>,
     mut collect: impl FnMut() -> u64,
-) -> Result<(), String> {
+) -> Result<(), DiskCheck> {
     let floor = settings
         .free_floor_bytes(state)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| DiskCheck::Unobserved(error.to_string()))?;
     let cache = home.join("Library/Caches/provenant-lane-cargo");
     let (mut limiting, mut minimum) = (worktree, u64::MAX);
     for path in [worktree, state, cache.as_path()] {
-        let bytes = available(path)?;
+        let bytes = available(path).map_err(DiskCheck::Unobserved)?;
         if bytes < minimum {
             (limiting, minimum) = (path, bytes);
         }
@@ -1591,16 +1608,16 @@ fn check_writer_disk_with_collection(
         let reclaimed = if settings.schedule { collect() } else { 0 };
         minimum = u64::MAX;
         for path in [worktree, state, cache.as_path()] {
-            let bytes = available(path)?;
+            let bytes = available(path).map_err(DiskCheck::Unobserved)?;
             if bytes < minimum {
                 (limiting, minimum) = (path, bytes);
             }
         }
         if minimum < floor {
-            return Err(format!(
+            return Err(DiskCheck::Low(format!(
                 "insufficient disk space on {}: {minimum} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
                 limiting.display()
-            ));
+            )));
         }
     }
     Ok(())
@@ -1630,8 +1647,13 @@ pub fn submit_with_host(
                     &writer.project,
                     edge.home,
                 )
-                .map_err(|message| {
-                    let mut fail = Fail::new(Status::Refused, ErrorKind::DiskFloor, message.clone());
+                .map_err(|check| {
+                    let (kind, status) = match &check {
+                        DiskCheck::Low(_) => (ErrorKind::DiskFloor, Status::Refused),
+                        DiskCheck::Unobserved(_) => (ErrorKind::Io, Status::Error),
+                    };
+                    let message = String::from(check);
+                    let mut fail = Fail::new(status, kind, message.clone());
                     // Keep the volume, available bytes and floor for MCP callers.
                     fail.detail = Some(
                         provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
@@ -7292,11 +7314,34 @@ mod writer_disk_tests {
             let error = result
                 .err()
                 .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
+            let error = String::from(error);
             assert!(error.contains("insufficient disk space"), "{error}");
             assert!(observed.contains(&low.to_path_buf()));
         }
         check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
         Ok(())
+    }
+
+    #[test]
+    fn writer_disk_observation_failure_is_not_low_disk() -> Result<(), String> {
+        let settings = provenant_config::GcSettings {
+            free_floor: Some("100B".into()),
+            ..Default::default()
+        };
+        let result = check_writer_disk_with(
+            &settings,
+            Path::new("/state"),
+            Path::new("/worktree"),
+            Path::new("/home"),
+            |_| Err("Not a directory".into()),
+        );
+        match result {
+            Err(DiskCheck::Unobserved(message)) => {
+                assert!(message.contains("Not a directory"), "{message}");
+                Ok(())
+            }
+            other => Err(format!("observation failure misclassified: {other:?}")),
+        }
     }
 
     #[test]
@@ -7328,6 +7373,7 @@ mod writer_disk_tests {
                 result?;
             } else {
                 let error = result.err().ok_or("writer accepted low disk")?;
+                let error = String::from(error);
                 assert!(error.contains("reported 49 bytes reclaimed"), "{error}");
             }
         }
@@ -7378,7 +7424,7 @@ mod writer_disk_tests {
         };
         let state = base.join("missing/state");
         let home = base.join("missing/home");
-        check_writer_disk(&settings, &state, &base, &base, &home)?;
+        check_writer_disk(&settings, &state, &base, &base, &home).map_err(String::from)?;
         assert!(!base.join("missing").exists());
         Ok(())
     }
