@@ -784,6 +784,7 @@ fn submitted_task(
 ) -> SubmittedTask {
     SubmittedTask {
         extra: Default::default(),
+        context: None,
         build_heavy: task.build_heavy,
         title: task.title,
         // A writer's base belongs to its new worktree request.

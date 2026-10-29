@@ -170,7 +170,28 @@ pub enum Preset {
         roles: bool,
     },
     /// Explain when to use a preset, its cost, and its typed parameters
-    Explain { name: String },
+    Explain {
+        /// Explain one preset, or omit to explain the current rule selection
+        name: Option<String>,
+        /// Risk tier supplied to selection rules
+        #[arg(long)]
+        risk: Option<String>,
+        /// Task kind supplied to selection rules
+        #[arg(long)]
+        kind: Option<String>,
+        /// Changed or declared path supplied to selection rules (repeatable)
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        /// Prompt size band supplied to selection rules
+        #[arg(long)]
+        size: Option<String>,
+        /// Mark the work as ready, bypassing the readiness route
+        #[arg(long)]
+        ready: bool,
+        /// Route underspecified work through the configured readiness rule
+        #[arg(long, conflicts_with = "ready")]
+        underspecified: bool,
+    },
 }
 #[derive(Debug, Args)]
 pub struct Review {
@@ -525,8 +546,17 @@ pub struct Dispatch {
     #[arg(long = "params-file", requires = "preset")]
     pub preset_params_file: Option<PathBuf>,
     /// Explain roles, limits and the expanded graph without running it
-    #[arg(long, requires = "preset")]
+    #[arg(long)]
     pub explain: bool,
+    /// Risk tier supplied to automatic preset selection
+    #[arg(long)]
+    pub risk_tier: Option<String>,
+    /// Task kind supplied to automatic preset selection
+    #[arg(long)]
+    pub task_kind: Option<String>,
+    /// Changed or declared path supplied to automatic preset selection (repeatable)
+    #[arg(long = "path")]
+    pub selection_paths: Vec<String>,
     /// Use the build-heavy scheduling priority
     #[arg(long)]
     pub build_heavy: bool,

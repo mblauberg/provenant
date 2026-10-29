@@ -14,6 +14,51 @@ Nine presets are bundled: `single`, `chain`, `fan-out`,
 `preset list` shows each one's level, summary and cost, and
 `preset explain NAME` shows when to use it, its cost and its typed parameters.
 
+## Select a preset by rules
+
+When `run` has a prompt but no `--preset`, `--model` or `--route`, the bundled
+rules select `single` by default. Readiness is checked against the prompt; a
+prompt missing acceptance criteria, a risk tier, a verification route, a
+settled design decision or a named surface selects `scope-then-run`. Explicit
+`--preset NAME` remains the selection override. The bundled default remains
+`single`; configure size-based choices in repository rules when their
+parameters, such as writer worktrees, are available.
+
+Repository rules live in `.provenant/preset-rules.toml`. They extend the
+bundled defaults; maps merge by key and repository entries replace matching
+keys. Rule values contain a preset and optional typed parameters:
+
+```toml
+[select]
+default = { preset = "single" }
+
+[select.by_risk]
+critical = { preset = "review-council", parameters = { risk_tags = ["security"] } }
+
+[select.by_kind]
+docs = { preset = "chain" }
+
+[select.by_paths]
+"src/security/**" = { preset = "review-council" }
+
+[select.by_size]
+large = { preset = "big-batch" }
+
+[select.by_readiness]
+underspecified = { preset = "scope-then-run" }
+```
+
+Selection precedence is explicit preset override, readiness, most-specific
+matching path, risk tier, task kind, size, then default. `*` and `?` match
+within one path component; `**` can cross directories. The built-in size
+bands are `small` (up to 16 KiB), `medium` (up to 64 KiB) and `large`.
+Inspect a rule result and its source with `provenant preset explain`; supply
+`--risk`, `--kind`, `--path`, `--size`, `--ready` or `--underspecified` to
+explain a particular context. `run --explain` prints the selected preset and
+source, and the choice is recorded in each graph attempt's work context.
+On `run`, provide `--risk-tier`, `--task-kind` and repeatable `--path`
+values for those selectors; prompt size is measured from the prompt input.
+
 Inspect the resolved defaults and explain the exact graph before a run:
 
 ```sh

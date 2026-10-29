@@ -2266,6 +2266,7 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(fail_error)?;
             submitted.push(Submitted {
+                context: task.context,
                 build_heavy: task.build_heavy,
                 base: task.base,
                 head: task.head,
@@ -4373,6 +4374,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 operation_id,
                 tasks: vec![SubmittedTask {
                     extra: Default::default(),
+                    context: node.work_context.cloned().map(|mut context| {
+                        context.graph_id = Some(node.graph_id.to_owned());
+                        context.node_id = Some(node.node_id.to_owned());
+                        context
+                    }),
                     build_heavy: false,
                     base: node.source_commit.map(|head| {
                         self.integration_base

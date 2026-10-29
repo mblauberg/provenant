@@ -2019,6 +2019,7 @@ pub(crate) fn bind_run_context(
     request: &provenant_cli::Dispatch,
     directory: &Path,
     policy: &ReadRoots,
+    selection_source: &str,
 ) -> Result<(), String> {
     if let Some(concurrency) = request.concurrency {
         if expansion.document.get("limits").is_none() {
@@ -2098,6 +2099,10 @@ pub(crate) fn bind_run_context(
         }
         Ok(())
     })?;
+    expansion.document["work_context"] = json!({
+        "preset": expansion.document["preset"],
+        "selection_source": selection_source,
+    });
     expansion.document["graph_id"] = json!("");
     // An integration source resolves at run time, so fold the current head into
     // the identity: a moved branch must never reuse a completed graph.
@@ -2127,7 +2132,9 @@ pub(crate) fn bind_run_context(
         identity.extend_from_slice(format!("\nintegration-head:{head}").as_bytes());
     }
     let digest = provenant_records::CanonicalV1::file_digest(&identity).to_string();
-    expansion.document["graph_id"] = json!(format!("preset-{}", &digest[7..39]));
+    let graph_id = format!("preset-{}", &digest[7..39]);
+    expansion.document["graph_id"] = json!(graph_id);
+    expansion.document["work_context"]["graph_id"] = json!(graph_id);
     Ok(())
 }
 
@@ -2232,6 +2239,13 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
         "Graph {}\nLimits: {}\nExecution: {}\n",
         expansion.document["graph_id"], limits, metrics
     );
+    if let Some(context) = expansion.document.get("work_context") {
+        human.push_str(&format!(
+            "Preset selection: {} ({})\n",
+            context["preset"].as_str().unwrap_or("-"),
+            context["selection_source"].as_str().unwrap_or("-")
+        ));
+    }
     if let Some(shape) = &expansion.review_shape {
         human.push_str(&format!("Review shape: {shape}\n"));
     }
@@ -2301,7 +2315,50 @@ pub fn command(command: provenant_cli::Preset, globals: &provenant_cli::Globals)
         let layers = configured(globals)?;
         match command {
             Preset::List => Ok(json!({"presets": layers.listing()})),
-            Preset::Explain { name } => layers.explain(&name),
+            Preset::Explain {
+                name: Some(name), ..
+            } => layers.explain(&name),
+            Preset::Explain {
+                name: None,
+                risk,
+                kind,
+                paths,
+                size,
+                ready,
+                underspecified,
+            } => {
+                let resolved = crate::roots::resolve(
+                    globals,
+                    crate::roots::Workspace::Project,
+                    crate::roots::Product::Optional,
+                )
+                .map_err(|error| error.to_string())?;
+                let selection = crate::preset_select::select(
+                    Some(&resolved.project.join(".provenant/preset-rules.toml")),
+                    &crate::preset_select::SelectionContext {
+                        risk,
+                        kind,
+                        paths,
+                        size,
+                        ready: underspecified.then_some(false).or(ready.then_some(true)),
+                    },
+                    None,
+                )?;
+                Ok(json!({
+                    "preset": selection.choice.preset,
+                    "parameters": selection.choice.parameters,
+                    "source": selection.source.as_str(),
+                    "matched": selection.matched,
+                    "reason": match selection.source {
+                        crate::preset_select::PresetSelectionSource::Readiness => "readiness rule matched an underspecified task",
+                        crate::preset_select::PresetSelectionSource::Rule => "the highest-precedence matching selector rule was used",
+                        crate::preset_select::PresetSelectionSource::Default => "no selector rule matched; the bundled or repo default applies",
+                        crate::preset_select::PresetSelectionSource::Override => "an explicit preset override was used",
+                        crate::preset_select::PresetSelectionSource::Triage => "the future triage source selected this preset",
+                        crate::preset_select::PresetSelectionSource::Experiment => "the future experiment source selected this preset",
+                    }
+                }))
+            }
             Preset::Show { name, roles: true } => layers.roles_view(name.as_deref()),
             Preset::Show { name: None, .. } => Err("preset show needs a preset name".into()),
             Preset::Show {
@@ -2336,30 +2393,115 @@ fn params_file(path: &Path) -> Result<Vec<(String, Value)>, String> {
         .collect())
 }
 
+fn prompt_ready(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    let named_surface = [
+        "module", "surface", "crate", "package", "command", "src/", "docs/",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let risk_value = lower
+        .split_once("risk tier:")
+        .and_then(|(_, value)| value.split_whitespace().next())
+        .unwrap_or("")
+        .trim_matches(['.', ',', ';']);
+    let risk_is_set = !matches!(risk_value, "" | "?" | "tbd" | "unknown" | "unset");
+    let design_is_set = [
+        "design decision is settled",
+        "design decisions are resolved",
+        "design decision: resolved",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    lower.contains("acceptance criteria")
+        && named_surface
+        && risk_is_set
+        && lower.contains("verification")
+        && design_is_set
+        && ["test", "verify", "check"]
+            .iter()
+            .any(|marker| lower.contains(marker))
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::prompt_ready;
+
+    #[test]
+    fn readiness_requires_acceptance_risk_verification_and_design_markers() {
+        let ready = "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. Verification uses cargo test. Design decision is settled.";
+        assert!(prompt_ready(ready));
+        assert!(!prompt_ready("Improve the run command when possible."));
+        assert!(!prompt_ready(
+            "Acceptance criteria and tests are present in src/run.rs. Risk tier: low. Verification uses cargo test, but the design remains open."
+        ));
+        assert!(!prompt_ready(
+            "Acceptance criteria in src/run.rs. Risk tier: TBD. Verification uses cargo test. Design decision is settled."
+        ));
+    }
+}
+
 pub fn run(
     request: provenant_cli::Dispatch,
     globals: &provenant_cli::Globals,
     workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> u8 {
     let result = (|| -> Result<Expansion, String> {
-        let name = request.preset.as_deref().ok_or("missing preset")?;
-        let path = request
-            .input
-            .prompt_file
-            .as_ref()
-            .ok_or("preset requires --prompt-file")?;
-        let mut file = provenant_os::fs::FileHandle::open_source(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        let bytes = file
-            .read_bounded(1_048_576)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        let prompt = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
-        let params = match &request.preset_params_file {
-            Some(path) => params_file(path)?,
-            None => Vec::new(),
+        let bytes = if let Some(path) = &request.input.prompt_file {
+            let mut file = provenant_os::fs::FileHandle::open_source(path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            file.read_bounded(1_048_576)
+                .map_err(|e| format!("{}: {e}", path.display()))?
+        } else if request.input.prompt_stdin {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .lock()
+                .take(1_048_577)
+                .read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            if bytes.len() > 1_048_576 {
+                return Err("prompt exceeds 1048576 bytes".into());
+            }
+            bytes
+        } else {
+            return Err("preset selection requires a prompt input".into());
         };
+        let prompt = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
         let directory = crate::roots::selected_project(globals.project.as_deref(), false)
             .map_err(|e| e.to_string())?;
+        let rules_path = directory.join(".provenant/preset-rules.toml");
+        let size = match bytes.len() {
+            0..=16_384 => "small",
+            16_385..=65_536 => "medium",
+            _ => "large",
+        };
+        let ready = prompt_ready(prompt);
+        let selection = crate::preset_select::select(
+            Some(&rules_path),
+            &crate::preset_select::SelectionContext {
+                risk: request.risk_tier.clone(),
+                kind: request.task_kind.clone(),
+                paths: request.selection_paths.clone(),
+                size: Some(size.into()),
+                ready: Some(ready),
+            },
+            request.preset.as_deref(),
+        )?;
+        let name = selection.choice.preset.as_str();
+        let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
+        match &request.preset_params_file {
+            Some(path) => params_file(path)?,
+            None => Vec::new(),
+        }
+        .into_iter()
+        .for_each(|(key, value)| {
+            if let Some(existing) = params.iter_mut().find(|(name, _)| name == &key) {
+                existing.1 = value;
+            } else {
+                params.push((key, value));
+            }
+        });
         let roots = crate::roots::resolve(
             globals,
             crate::roots::Workspace::Project,
@@ -2417,7 +2559,13 @@ pub fn run(
             &config.domains.fabric.graph.allowed_read_roots,
             &policy_roots,
         );
-        bind_run_context(&mut expansion, &request, &directory, &policy)?;
+        bind_run_context(
+            &mut expansion,
+            &request,
+            &directory,
+            &policy,
+            selection.source.as_str(),
+        )?;
         Ok(expansion)
     })();
     match result {

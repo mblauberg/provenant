@@ -793,6 +793,9 @@ pub struct Replay<'a> {
 
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
+    pub graph_id: &'a str,
+    pub node_id: &'a str,
+    pub work_context: Option<&'a provenant_records::run::WorkContext>,
     pub read_roots: &'a [String],
     /// Attempts of the source writer whose model families must be avoided.
     pub distinct_from_attempts: &'a [String],
@@ -1506,6 +1509,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     let stored = journal
         .load(&document.graph_id)
         .map_err(GraphError::Journal)?;
+    let work_context = document
+        .extra
+        .get("work_context")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let (base, _) = validate_plan_with_limits(document, &unbounded)
         .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
@@ -2203,6 +2211,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .observe_or_start(
                         &key,
                         NodeInput {
+                            graph_id: &document.graph_id,
+                            node_id: &node.id,
+                            work_context: work_context.as_ref(),
                             read_roots: &node.read_roots,
                             distinct_from_attempts: &distinct_attempts,
                             source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
