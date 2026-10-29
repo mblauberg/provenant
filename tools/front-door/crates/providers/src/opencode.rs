@@ -141,12 +141,17 @@ fn prepare(
     let package = package_root(input.executable)?;
     // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
     let bin = plan.scratch.path.join("bin");
-    let path = std::env::join_paths([
-        bin.as_path(),
+    let shell = access == Access::WorktreeWrite;
+    let cargo_bin = input.home.join(".cargo/bin");
+    let mut path_entries = vec![bin.as_path()];
+    if shell {
+        path_entries.push(cargo_bin.as_path());
+    }
+    path_entries.extend([
         std::path::Path::new("/usr/bin"),
         std::path::Path::new("/bin"),
-    ])
-    .map_err(|_| ProviderError::InvalidPath)?;
+    ]);
+    let path = std::env::join_paths(path_entries).map_err(|_| ProviderError::InvalidPath)?;
     let mut env = base_env(
         input,
         &plan.scratch.path,
@@ -196,7 +201,7 @@ fn prepare(
     }
     // Writers' system roots do not cover a host-selected Homebrew Git.
     let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
-    let tool_exec_roots = if access == Access::WorktreeWrite {
+    let mut tool_exec_roots = if shell {
         vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
     } else {
         Vec::new()
@@ -218,6 +223,25 @@ fn prepare(
             private.join("state").into_os_string(),
         ),
     ]);
+    // Only lanes whose permissions allow bash can run the toolchain.
+    if shell {
+        crate::launch::rust_tools(
+            input,
+            access,
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut env,
+            &mut setup,
+        );
+        crate::launch::node_tools(
+            input.home,
+            access,
+            crate::launch::lane_cache(input),
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut env,
+        );
+    }
     env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
     // No repository configuration or plugins, and no Claude Code files.
     for key in [
@@ -962,18 +986,20 @@ mod tests {
                 target: input.provenant.git.to_owned(),
             }));
             // Read-only Git discovery must not enable other commands.
-            assert_eq!(
-                spec.profile.spec.tool_exec_roots,
-                if access == Access::ReadOnly {
-                    Vec::new()
-                } else {
-                    vec![
+            let roots = &spec.profile.spec.tool_exec_roots;
+            if access == Access::ReadOnly {
+                assert!(roots.is_empty());
+            } else {
+                // The toolchain roots follow the system and package roots.
+                assert_eq!(
+                    roots[..3],
+                    [
                         subtree("/bin"),
                         subtree("/usr/bin"),
                         subtree(package_root(input.executable).unwrap()),
                     ]
-                }
-            );
+                );
+            }
         }
     }
 
@@ -1084,6 +1110,9 @@ mod tests {
         // The project sits under the home, as lane worktrees do.
         let home = root.clone();
         fs::create_dir_all(home.join(".config/opencode")).unwrap();
+        // Writers' toolchain grants anchor on the installed toolchain.
+        fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        fs::create_dir_all(home.join(".rustup/toolchains")).unwrap();
         let project_parent = root.join("projects");
         fs::create_dir_all(project_parent.join("repo")).unwrap();
         // Both the read root and an ancestor contain discovery directories.
