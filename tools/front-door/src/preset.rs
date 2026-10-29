@@ -1332,17 +1332,28 @@ fn lower_leaf(
                     .cloned()
                     .unwrap_or_else(|| json!("senior"))
             });
-            let mut route = match route {
-                Value::String(name) if !name.is_empty() => json!({"alias":name}),
-                Value::Object(_) => route,
-                _ => {
-                    return Err(format!("node {id}: tier must be a name or route table"));
+            if route.is_array() {
+                if effort.is_some() {
+                    return Err(format!(
+                        "node {id}: route lists cannot be combined with effort"
+                    ));
                 }
-            };
-            if let Some(effort) = effort {
-                route["effort"] = effort;
+                map.insert("routes".into(), route);
+            } else {
+                let mut route = match route {
+                    Value::String(name) if !name.is_empty() => json!({"alias":name}),
+                    Value::Object(_) => route,
+                    _ => {
+                        return Err(format!(
+                            "node {id}: tier must be a name, route table or route list"
+                        ));
+                    }
+                };
+                if let Some(effort) = effort {
+                    route["effort"] = effort;
+                }
+                map.insert("route".into(), route);
             }
-            map.insert("route".into(), route);
         }
     } else {
         map.remove("tier");

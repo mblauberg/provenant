@@ -149,10 +149,10 @@ a scope array rather than text.
 
 Role profiles default to read-only access. A writer explicitly declares
 `access = "worktree_write"`, an existing `worktree` and literal relative
-`write_scope` paths. `tier` chooses a named routing pool. Use either `tier` or
-`routes`; `routes` accepts pool names or graph route tables, and `effort`
-configures them. A read-only role's `worktree` becomes an additional read
-root; it acquires no Git writer lock.
+`write_scope` paths. `tier` chooses a named routing pool, one route table or
+ordered route tables. Use either `tier` or `routes`; `effort` configures a
+single route, while lists carry effort per route. A read-only role's `worktree`
+becomes an additional read root; it acquires no Git writer lock.
 
 Two role fields shape review. `prompt_file` appends a bundled prompt, such as
 `code-review/lenses/tests`, to the role prompt; it takes one name or a list and
@@ -341,6 +341,28 @@ repairers, `risk_tier`, `review_shape` and `risk_tags` shape the council, and
 repairer brief with a repository `[roles.repairer]` table in a same-name
 `deliver.toml`. Pull requests open ready for review; draft pull requests are
 not yet supported.
+
+### Host-native repairs
+
+After configuring the optional [host-native row](providers.md#host-native),
+set its ordered repair routes in `.provenant/presets/deliver.toml`:
+
+```toml
+[parameters]
+repair_tier = [
+  { adapter = "host-native", name = "ci-fixer" },
+  { alias = "senior" },
+]
+```
+
+The repairer keeps its inputs, write scope and continuation of the writer's
+branch. An absent host feature falls back to `senior` before launch. Each
+completed repair is followed by the existing CI gate on the pushed head;
+neither host success nor a fixer status check authorises review or land. The
+default `repair_tier` remains `"senior"`. A tier selector accepts a pool name,
+one route table or ordered route tables. Lists carry effort on individual
+model routes or in the host entry; combining a list with role-level `effort`
+is refused.
 
 ## Prepare a batch
 

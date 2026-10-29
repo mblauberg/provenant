@@ -37,7 +37,7 @@ pub(crate) fn default_mcp(h: Harness, home: &Path, base: &Path) -> PathBuf {
         Harness::Agy => base.join("config/mcp_config.json"),
         Harness::Opencode => base.join("opencode.jsonc"),
         // Commands have no managed harness configuration.
-        Harness::Command => PathBuf::new(),
+        Harness::Command | Harness::HostNative => PathBuf::new(),
     }
 }
 pub(crate) fn default_hooks(h: Harness, base: &Path) -> Option<PathBuf> {

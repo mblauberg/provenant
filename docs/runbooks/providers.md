@@ -25,11 +25,64 @@ catalogue still apply on top.
 | agy      | yes    | yes    | no       | provider, local, open  | no          | yes   |
 | opencode | yes    | yes    | no       | provider, local, open  | no          | yes   |
 | command  | no     | no     | no       | off, local, open       | no          | no    |
+| host-native | configured | no | no | provider, local, open | no | yes |
 
 Command routes have no model and refuse model, effort, resume and write
 requests. Steering (input into a live session) and image input have no request
 surface yet. Cursor has no effort control on its command line, so its
 catalogue models record none.
+
+## Host-native
+
+`host-native` selects an optional named host feature. The first supported kind,
+`claude-agent`, runs a Claude Code agent in print mode using the ordinary Claude
+account, prompt, confinement, output decoder and writer delivery path. Configure
+its model, effort and agent definition in the effective host configuration:
+
+```toml
+[domains.fabric.host_native.ci-fixer]
+kind = "claude-agent"
+model = "claude/claude-sonnet-5-5"
+effort = "medium"
+description = "Repair failing CI checks"
+prompt = "Fix the checks named in the task, stay within its write scope and commit on its branch."
+```
+
+The launcher supplies this definition through `--agents` and selects it with
+`--agent ci-fixer`. It does not depend on an agent file in the user's home.
+Model and effort belong to this configured row; the task cannot override them.
+Network defaults to open, as on ordinary model routes; explicit provider-only
+or local reach and access remain the lane's declared permissions. Every launch
+starts fresh: explicit `resume --no-fallback` refuses it, automatic policy retries are
+disabled, and ordinary `resume` can dispatch a fresh lane with the prior result.
+Receipts retain the actual provider/model/effort plus `host_native` and the
+configuration `source` in `applied_route`.
+
+A graph must list a later non-native fallback for every host-native route:
+
+```json
+{"id":"repair","access":"worktree_write","worktree":"/repo/.worktrees/fix","prompt":"Repair the failing checks and commit.","routes":[{"adapter":"host-native","name":"ci-fixer"},{"alias":"senior"}]}
+```
+
+An absent entry, unavailable provider or pre-launch refusal allows the next
+graph route. An internal provider fallback to another model is refused, so it
+cannot silently drop the selected agent or its contract. Once a writer has
+launched, a failure stops it for recovery rather than
+starting another writer. The bundled core path always uses ordinary routes;
+see [the deliver repair example](presets.md#host-native-repairs) to opt in.
+
+Vendor interfaces verified on 29 October 2026:
+
+| Interface | Verified contract | Row support |
+| --- | --- | --- |
+| Claude Code named agent | Print mode, `--agent` and inline `--agents` definitions ([CLI reference](https://code.claude.com/docs/en/cli-reference), [subagents](https://code.claude.com/docs/en/sub-agents#invoke-subagents-explicitly)) | `claude-agent` |
+| Claude Code `/autofix-pr` | Terminal command creates a cloud session and enables PR monitoring ([vendor docs](https://code.claude.com/docs/en/claude-code-on-the-web#auto-fix-pull-requests)) | No documented bounded headless invocation; no executable row shipped |
+| Cursor Bugbot Autofix | Cloud agents can push to the PR branch or a separate branch; its own check reports success or neutral ([vendor docs](https://cursor.com/docs/bugbot#autofix)) | No documented bounded local fixer invocation; no executable row shipped |
+
+Cloud fixer pushes must enter the normal CI gate on the observed PR head. A
+fixer's completion or its own status check does not establish project CI. A
+future asynchronous kind must reconcile the branch and resulting commit before
+it can satisfy the writer delivery contract; the CI gate still checks that head.
 
 ## Command
 
