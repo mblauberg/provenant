@@ -574,6 +574,15 @@ impl RunStore {
             .wall_now()
             .map_err(|_| RunError::Validation("wall clock"))?;
         let cancelled = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some();
+        let provider_state = self
+            .context
+            .state_root
+            .as_path()
+            .join("runs")
+            .join(record.run_id.to_string())
+            .join("attempts")
+            .join(id.to_string())
+            .join("provider-state");
         let mut decoded = match (&record.applied_route, exit.never_spawned) {
             // Cancelled before spawn; keep the guardian's own reason too.
             (_, true) if cancelled => Decoded {
@@ -608,15 +617,6 @@ impl RunStore {
             },
             (Some(route), false) => {
                 let stdout = read_sealed(attempt, "stdout.log", CAPTURE_LIMIT)?.unwrap_or_default();
-                let provider_state = self
-                    .context
-                    .state_root
-                    .as_path()
-                    .join("runs")
-                    .join(record.run_id.to_string())
-                    .join("attempts")
-                    .join(id.to_string())
-                    .join("provider-state");
                 completion
                     .holder_context()
                     .map_or_else(
@@ -635,6 +635,11 @@ impl RunStore {
             }
             (None, false) => return Err(RunError::Validation("running attempt lacks a route")),
         };
+        // Provider-owned session transcripts record tool output, so a printed
+        // credential can survive there after capture and result filtering.
+        // Scrub before publication so a retry never starts from new plaintext.
+        let session_redaction_failed =
+            provenant_confinement::redact::scrub_session_history(&provider_state).is_err();
         let handoff = self.capture_handoff(attempt, &record, &decoded)?;
         // Failed headless tools can leave only stderr. Keep the recognised
         // provider diagnostic alongside any partial answer before sealing it.
@@ -1084,12 +1089,41 @@ impl RunStore {
         } else {
             partial.clear();
         }
+        // Decoding can reveal credential markers hidden by JSON escapes in
+        // the already-filtered capture. Seal only a filtered rendering.
+        // A filter failure withholds the result instead of blocking settlement
+        // forever: the lane fails with a fixed placeholder and stays terminal.
+        let (result, result_redaction_failed) =
+            match provenant_confinement::redact::known_shapes(decoded.result.as_bytes()) {
+                Ok(safe) => match String::from_utf8(safe) {
+                    Ok(text) => (text, false),
+                    Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
+                },
+                Err(_) => (UNREDACTABLE_RESULT.to_owned(), true),
+            };
+        let redaction_failed = result_redaction_failed || session_redaction_failed;
+        if redaction_failed {
+            // A redaction failure fails a lane that would otherwise succeed. A
+            // cancelled, timed-out or lost lane keeps its outcome, and every
+            // reason it already has survives with the redaction failure after it.
+            if matches!(
+                decoded.outcome,
+                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+            ) {
+                decoded.outcome = Outcome::Failed;
+            }
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {REDACTION_FAILED_REASON}"),
+                None => REDACTION_FAILED_REASON.into(),
+            });
+        }
         // Recovered/result-only publication never starts external delivery.
         // A succeeded outcome already proves the provider's terminal event in
         // the sealed stdout, so no live frame observation is required.
         let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
         if !result_orphan
             && succeeded_before_stop
+            && !redaction_failed
             && !cancelled
             && exit.stop_reason.is_none()
             && !exit.unresolved_cleanup
@@ -1118,12 +1152,6 @@ impl RunStore {
                 decoded.reason = Some("cancelled during delivery".into());
             }
         }
-        // Decoding can reveal credential markers hidden by JSON escapes in
-        // the already-filtered capture. Seal only the filtered rendering.
-        let result = provenant_confinement::redact::known_shapes(decoded.result.as_bytes())
-            .map_err(|_| RunError::Validation("result redaction failed"))?;
-        let result = std::str::from_utf8(&result)
-            .map_err(|_| RunError::Validation("redacted result is not UTF-8"))?;
         let publication = TerminalPublication {
             outcome: decoded.outcome,
             finished_at,
@@ -1133,7 +1161,7 @@ impl RunStore {
                     .ok()
             }),
             reason: decoded.reason,
-            result,
+            result: &result,
             complete: decoded.complete,
             redacted: true,
             resolved_route: record.resolved_route.clone(),
@@ -1157,6 +1185,10 @@ impl RunStore {
         Ok(terminal)
     }
 }
+
+/// Stored instead of the provider's answer when settlement cannot filter it.
+const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
+const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";
 
 /// A lane's own words in a one-line reason: bounded and on one line.
 fn bounded_note(note: &str) -> String {

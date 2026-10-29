@@ -1557,6 +1557,54 @@ mod tests {
     }
 
     #[test]
+    fn bundled_pools_prefer_free_flash_and_exclude_other_opencode_models()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let junior = &catalogue.pools["junior"];
+        for name in ["deepseek-v4.1-flash", "glm-5.3-flash"] {
+            let free = ModelId::parse(&format!("opencode/opencode/{name}-free"))?;
+            let paid = ModelId::parse(&format!("opencode/opencode-go/{name}"))?;
+            let free_member = junior
+                .iter()
+                .find(|member| member.model == free)
+                .ok_or("free flash missing")?;
+            let paid_member = junior
+                .iter()
+                .find(|member| member.model == paid)
+                .ok_or("Go flash missing")?;
+            assert!(catalogue.is_free_model(&free));
+            assert_eq!(
+                catalogue
+                    .model(&free)
+                    .ok_or("free model missing")?
+                    .trains_on_prompts,
+                Some(false)
+            );
+            assert_eq!(free_member.weight, 50);
+            assert!(free_member.weight > paid_member.weight);
+            assert!(free_member.efforts.is_empty());
+        }
+        for members in catalogue.pools.values() {
+            for member in members {
+                let name = member.model.as_str();
+                if name.starts_with("opencode/") {
+                    assert!(
+                        [
+                            "opencode/opencode/deepseek-v4.1-flash-free",
+                            "opencode/opencode/glm-5.3-flash-free",
+                            "opencode/opencode-go/deepseek-v4.1-flash",
+                            "opencode/opencode-go/glm-5.3-flash"
+                        ]
+                        .contains(&name),
+                        "unexpected default pool model: {name}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn bundled_go_models_resolve_and_only_flash_models_have_provisional_pool_weights()
     -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;

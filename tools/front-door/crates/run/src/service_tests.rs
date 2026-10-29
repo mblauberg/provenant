@@ -70,12 +70,11 @@ fn peer_wait_views_remain_settling_until_terminal_custody_is_released() -> TestR
 #[test]
 #[allow(clippy::disallowed_methods)]
 fn dispatch_validates_review_commits() -> TestResult {
-    use std::process::Command;
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
     let git = |args: &[&str]| -> TestResult {
         assert!(
-            Command::new("git")
+            provenant_os::fixture::git_command()
                 .current_dir(&root)
                 .args(args)
                 .status()?
@@ -94,7 +93,7 @@ fn dispatch_validates_review_commits() -> TestResult {
         "-qm",
         "test",
     ])?;
-    let output = Command::new("git")
+    let output = provenant_os::fixture::git_command()
         .current_dir(&root)
         .args(["rev-parse", "HEAD"])
         .output()?;

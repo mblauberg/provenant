@@ -2,8 +2,11 @@
 
 Owner: `crates/telemetry` (reducer, prices, trace, usage log)
 Anchor: `crates/telemetry/src/tests.rs`, `crates/telemetry/src/usage/tests.rs`,
-`crates/telemetry/src/native.rs`, `crates/telemetry/src/chair/tests.rs`, `tests/usage.rs`,
-`tests/telemetry_native.rs`, `tests/chair.rs`
+`crates/telemetry/src/native.rs`, `crates/telemetry/src/ingest/tests.rs`,
+`crates/telemetry/src/mileage.rs`, `crates/telemetry/src/chair/tests.rs`,
+`tests/usage.rs`, `tests/telemetry_native.rs`, `tests/telemetry_ingest.rs`,
+`tests/telemetry_mileage.rs`, `tests/chair.rs`,
+`crates/telemetry/tests/telemetry_pipeline.rs`, `tests/telemetry_pipeline_cli.rs`
 
 Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
@@ -134,6 +137,98 @@ shows them per account and project beside lane tokens.
   `::chair_on_an_unregistered_config_directory_is_recorded_as_unattributed`
 - Owner: `crates/telemetry/src/chair.rs`, `src/chair.rs`, `crates/cli/src/quota.rs`
 
+## Native session ingest
+
+`provenant telemetry ingest [--provider P] [--since T]` reads each Claude
+session transcript under a config directory's `projects/<project>/<session>.jsonl`
+and its `subagents/agent-*.jsonl`, and stores one row per assistant message in
+`ingest.jsonl` under the state root. A row carries the account label, provider,
+model, effort when the transcript names one, the five disjoint token buckets,
+the message timestamp, session ID, message ID and a `source` of `chair`,
+`subagent` or `lane`. Prompt, reply, tool and path text is never stored, and a
+row is keyed by session and message ID, so a re-run adds nothing. A message
+that streams repeatedly is kept once at its largest counts, mixing the
+short-TTL and one-hour cache-write parts into separate buckets; a one-hour
+count with no cache-write total still counts. A row first stored as a `lane`
+becomes a `chair` when a later run finds its session recorded by the hook. A
+line the build cannot read, such as a row another schema version wrote or a
+torn line, is kept byte for byte when the store is rewritten.
+`--since` skips files last written before it and messages stamped before it;
+`--provider` other than `claude` ingests nothing.
+
+Attribution uses directories only, never credentials. Each registered account's
+`directory` and its extra `directories` attribute to its label; a directory
+claimed twice is visited once. Every other `~/.claude*` directory with a
+`projects` child, including the default `~/.claude`, is stored under
+`unattributed` and never dropped. A session recorded by the chair's
+SessionStart hook is a `chair`, a file under a session's `subagents` directory
+is a `subagent`, and every other session is a `lane`. The chair's SessionStart
+hook also runs the last day of ingest, best effort, so the interactive session
+is captured without a manual command. That run stops at a three-second wall
+deadline, inside the hook's five-second timeout, and writes the rows it has
+read. A `telemetry ingest` run has no deadline, and its report sets
+`deadline_reached` only when one stopped it.
+Reads are bounded (1 GiB a transcript, 128 MiB a store, 8 MiB a line, 100,000
+sessions, 2,000 subagent files a session) and never follow links. A message
+without a timestamp is counted as skipped, not guessed. When the store reaches
+its cap, ingest stops adding rows and the report says the store is full.
+- Why: most Claude spend is the interactive chair and its native sub-agents,
+  which no supervised attempt record sees.
+- Test: `crates/telemetry/src/ingest/tests.rs::rerun_adds_nothing_and_accounts_stay_distinct`;
+  `::registered_directories_get_their_label_and_the_rest_are_unattributed`;
+  `::lines_this_build_cannot_read_survive_a_rewrite`;
+  `::a_lane_row_is_upgraded_to_chair_when_the_hook_records_it`;
+  `::an_expired_deadline_reads_nothing_and_keeps_the_store`;
+  `::one_message_in_two_session_files_counts_twice`;
+  `tests/telemetry_ingest.rs::ingest_is_idempotent_and_attributes_by_directory`;
+  `::chair_session_start_ingests_the_session_as_chair`
+- Owner: `crates/telemetry/src/ingest.rs`, `src/usage.rs`, `src/hooks.rs`
+
+## Mileage and effective rates
+
+`provenant telemetry mileage [--account] [--window] [--model] [--since] [--json]`
+joins the quota history to ingested usage priced by the reviewed table. Mileage
+is the API-equivalent cost of one percentage point of a window between two
+distinct readings in one reset period; capacity is the cost of a full window
+(mileage times 100). A reset, an advance of the reset time, a fall in the used
+percentage or a plan change ends a run, so no segment is negative. A reset
+time that advances by less than a minute is the same window reporting with
+jitter, not a reset. A drop with no reset time is segmented the same way and
+flagged `reset: inferred`.
+Each figure is the median over the last seven days, with the segment count `n`
+and the priced share.
+
+The step change compares capacities in the last seven days with the prior 28 at
+the same plan and tier. It is `flagged` only for a fall of at least 20% with at
+least ten priced segments on both sides; otherwise it is `inconclusive`. A
+`plan.change` run boundary reports the capacity change around the upgrade.
+
+Effective rates apply the plan's discount factor `price / capacity` to the
+average API rate per bucket for the potential rate at full use, and divide the
+plan price by tokens actually used for the realised rate. The period is the
+report window: the monthly plan price is prorated to it, and one window's
+capacity is expanded to the number of full windows in the period. Both carry
+the window's latest used percentage (`latest_used_basis_points`, the value at
+its latest reading, not averaged over the period), `n` and priced token
+coverage. Every effective report says token use is a lower bound and realised
+rates are upper bounds, because ingest coverage of the account is not checked.
+`--model` narrows only the tokens: quota deltas cover every model, so mileage
+under a model filter is understated.
+Fitted non-negative weights for `delta used = sum w_b x tokens_b` are reported
+per account, window and model only with `n` and the fit's R-squared, and only
+when the fit explains at least half the variance. All money is integer
+microdollars, rounded once.
+- Why: a subscription's value is what a percentage point costs, not what the
+  list price says a token costs.
+- Test: `crates/telemetry/src/mileage.rs::tests::three_readings_give_exact_mileage_and_capacity`;
+  `::a_thirty_percent_fall_at_a_constant_plan_is_flagged`;
+  `::a_ten_percent_fall_or_too_few_runs_is_inconclusive`;
+  `::reset_time_jitter_under_a_minute_stays_in_one_window`;
+  `::full_price_coverage_still_reports_the_bound_note`;
+  `crates/cli/src/mileage.rs::tests::an_interval_takes_each_row_once_in_its_half_open_bounds`;
+  `tests/telemetry_mileage.rs::three_readings_give_exact_mileage_capacity_and_effective_rates`
+- Owner: `crates/telemetry/src/mileage.rs`, `crates/cli/src/mileage.rs`
+
 ## Trace export
 
 `telemetry trace` writes Chrome Trace Event JSON, with one process per host and
@@ -144,6 +239,83 @@ unreadable peer is listed with its error and the rest of the export is still wri
 - Test: `crates/telemetry/src/tests.rs::trace_groups_hosts_and_links_a_child_to_its_parent_across_them`;
   `crates/cli/src/run/remote.rs::peer_export_asks_every_configured_peer_for_its_lanes`
 - Owner: `crates/telemetry/src/`
+
+## Offline post-merge outcomes and suggestions
+
+`telemetry stats --outcomes` adds an offline `pipeline` report. `--suggest`
+also requests the same report with advisory comparisons. The reducer reads
+first-parent history of `--main-ref` (default `main`) through the shared Git
+executable resolver. It never fetches or changes the checkout. A merge subject
+`Merge pull request #N` joins to a graph checkpoint's PR or a retained context
+PR. Without a PR, an exact `Closes #N` body line joins the work item. Ambiguous
+matches and rows without a graph or matching merge remain `unattributed`.
+
+Origin merges come from first-parent history; reachable non-merge descendants
+also include changes delivered through later pull requests.
+The configurable `--outcome-days` window defaults to 14 days after merge.
+Reverts identify the merge or a commit in its second-parent range by the
+canonical revert trailer or its quoted subject. Follow-up commits count once when their subject begins with the word `fix`,
+`bugfix` or `hotfix` (case insensitive), and a removed or replaced line blames
+to a line the merge introduced. Blame identities handle shifted line numbers;
+renames, insertion-only fixes, binary files and later edits that have already
+replaced the original line are outside this conservative matcher. These are
+escaped-defect signals, not proof of causality. Reverts are not counted again
+as follow-up fixes.
+
+An optional `--ci-file` accepts the recorded main-branch run-list JSON described
+in the runbook. A failed run joins the nearest preceding merge in its head's
+first-parent ancestry, within the window. Identical head, workflow and creation
+time rows count once. Without this file, `ci` is `not_measured` and per-row CI
+counts are null. The earliest `createdAt` is exposed as `ci_coverage_from`;
+mature merges older than that date have null CI counts. A supplied empty file has no known coverage, so merge CI counts are null.
+A coverage date does not prove that the export covers every workflow. Runs whose head SHA is unavailable locally are counted as unattributed
+and skipped.
+
+Ranking compares pattern, lens (explicit context lens, otherwise role) and
+model separately within risk-tier and task-kind strata. Retained context extras
+supply these strata where present; absent values stay `unknown`. Both strata
+must be known for a comparison to be sufficient; unknown strata are reported
+as insufficient with a reason. Escapes are attributed per PR, so every node
+arm in that PR is charged with the PR outcome. This change
+adds no context capture. Nodes combine selected attempts' costs, including
+retries. A node attributes to a model only when every selected attempt names
+the same model; mixed or missing identities stay `unknown` for model ranking.
+Only leaf source findings enter the
+confirmed and false-positive counts: graph-local IDs join `accepted` and
+`rejected` verifier dispositions, deduplicated across verifier copies.
+Conflicting, deferred or absent dispositions, ambiguous source IDs and missing
+checkpoints remain unmeasured. Verifier copies contribute their costs and no
+extra findings.
+
+Arms show confirmed findings per API-equivalent dollar, false-positive rate,
+and the fraction of distinct mature attributed merges with any escaped signal.
+Only mature merges enter an attributed ranking cohort. The default minimum is
+20 distinct graphs and mature merges per arm (`--min-samples`). Unknown costs,
+missing dispositions or CI input and smaller arms are `insufficient`.
+Without CI input, escaped-rate values and intervals are null; its retained
+numerator counts only the observed Git signals.
+Rates have 95% Wilson intervals. The confirmed-per-dollar interval scales the
+Wilson confirmed share by observed dispositions per dollar, conditional on
+observed costs; it does not model cost variability or finding correlation.
+Raw finding volume never determines preference. Advice requires separated
+confirmed-per-dollar intervals and no higher observed false-positive or
+escaped-defect rates in the same stratum.
+
+A suggestion includes both sample counts, intervals, references to its full
+arm evidence and an RFC3339 expiry, default 14 days (`--expiry-days`). Reports
+never apply changes. Pattern and lens choices have no scheduled write path.
+The current model-policy CLI also cannot schedule an arbitrary model choice:
+`route override set` schedules pacing only. Suggestions therefore have
+`accept: null` and explain that they are advisory. Graph node asks and the
+#2179 whole-patch-read measurement remain outstanding under #2011; there is no
+read-event source for that measurement.
+
+- Why: post-merge quality and verified value need evidence coverage, comparable
+  cohorts and an explicit decision before changing policy.
+- Test: `crates/telemetry/tests/telemetry_pipeline.rs`;
+  `tests/telemetry_pipeline_cli.rs`
+- Owner: `crates/telemetry/src/outcome.rs`, `crates/telemetry/src/suggest.rs`,
+  `crates/cli/src/run.rs`
 
 ## Demand counters are lossy and private
 
@@ -170,4 +342,4 @@ to `most_constrained` with a warning and leaves config unchanged.
 ## Not provided
 
 - A ledger, OpenTelemetry ingest or collector; prompt and tool logging stays off.
-- Delivery cost columns, a telemetry MCP tool or an `--account` selector.
+- Delivery cost columns, a telemetry MCP tool or an `--account` selector on `telemetry stats`.

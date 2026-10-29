@@ -848,7 +848,7 @@ mod tests {
         };
         let temp = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
-            std::process::Command::new(&git)
+            provenant_os::fixture::git_command_at(&git)
                 .current_dir(temp.path())
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_SYSTEM", "/dev/null")

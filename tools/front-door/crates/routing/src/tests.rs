@@ -6,12 +6,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[test]
-fn default_pools_do_not_include_free_routes() -> Result<(), Box<dyn std::error::Error>> {
+fn default_free_routes_sit_only_in_the_junior_pool() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
     let config = RoutingConfig::default();
     let context = context(&catalogue, &config, now()?);
     let listed = list(&RouteListQuery::default(), &context)?;
-    assert!(listed.pools.values().flatten().all(|member| !member.free));
+    for (pool, members) in &listed.pools {
+        if pool != "junior" {
+            assert!(
+                members.iter().all(|member| !member.free),
+                "{pool} holds a free route"
+            );
+        }
+    }
+    assert!(
+        listed
+            .pools
+            .get("junior")
+            .is_some_and(|members| members.iter().any(|member| member.free))
+    );
     Ok(())
 }
 

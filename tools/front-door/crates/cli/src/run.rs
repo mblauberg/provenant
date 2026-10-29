@@ -6767,6 +6767,17 @@ fn stats_inner(
         &config.domains,
         jiff::Timestamp::now().as_second(),
     );
+    let pipeline = if command.outcomes || command.suggest {
+        Some(pipeline_report(
+            &selected,
+            &prices,
+            &command.pipeline,
+            edge,
+            context.project_id,
+        )?)
+    } else {
+        None
+    };
     // Chair sessions span projects, so the host's whole window is read. They are
     // best effort: an unreadable usage log must not hide the lane figures.
     let chair_window = (
@@ -6952,6 +6963,22 @@ fn stats_inner(
         ));
     }
     data["partial_signals"] = json!(partial);
+    if let Some(pipeline) = pipeline {
+        human.push_str(&format!(
+            "post-merge outcomes: CI {}; {} unattributed rows; {} suggestions\n",
+            pipeline["outcomes"]["ci"]
+                .as_str()
+                .unwrap_or("not_measured"),
+            pipeline["outcomes"]["unattributed_rows"],
+            pipeline["ranking"]["suggestions"]
+                .as_array()
+                .map_or(0, Vec::len)
+        ));
+        human.push_str(
+            "suggestions are advisory; inspect counts, intervals and expiry with --json\n",
+        );
+        data["pipeline"] = pipeline;
+    }
     attach_freshness(&prices, &mut data, &mut human)?;
     if by == Some(crate::StatsBy::Pr) {
         data["pr_attribution"] = json!({
@@ -6968,6 +6995,347 @@ fn stats_inner(
         data["chair_error"] = Value::String(error);
     }
     Ok((data, human))
+}
+
+/// Read retained facts and checkpoints only. Source findings receive verifier
+/// decisions by graph-local finding identity; synthesis copies never add value.
+fn pipeline_report(
+    facts: &[&provenant_records::AttemptFact],
+    prices: &provenant_telemetry::PriceTable,
+    options: &crate::PipelineOptions,
+    edge: &Edge<'_>,
+    project: provenant_core::ProjectId,
+) -> Result<Value, Fail> {
+    use provenant_fabric_runtime::graph::FileJournal;
+    use provenant_telemetry::outcome::Evidence;
+    let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
+    let mut checkpoints = BTreeMap::new();
+    let mut unreadable_graphs = std::collections::BTreeSet::new();
+    for fact in facts {
+        if let Some(graph) = fact.context.as_ref().and_then(|c| c.graph_id.as_ref())
+            && !checkpoints.contains_key(graph)
+        {
+            let checkpoint = match FileJournal::read_checkpoint(&edge.roots.state, project, graph) {
+                Ok(checkpoint) => checkpoint,
+                Err(_) => {
+                    unreadable_graphs.insert(graph.clone());
+                    None
+                }
+            };
+            checkpoints.insert(graph.clone(), checkpoint);
+        }
+    }
+    let mut nodes =
+        BTreeMap::<(Option<String>, String), Vec<provenant_records::AttemptFact>>::new();
+    for fact in facts {
+        let context = fact.context.as_ref();
+        let graph = context.and_then(|c| c.graph_id.clone());
+        let node = context
+            .filter(|_| graph.is_some())
+            .and_then(|c| c.node_id.clone())
+            .unwrap_or_else(|| fact.attempt_id.to_string());
+        nodes
+            .entry((graph, node))
+            .or_default()
+            .push((*fact).clone());
+    }
+    let mut evidence = Vec::new();
+    for ((graph, node), mut facts) in nodes {
+        facts.sort_by_key(|f| (f.finished_at, f.attempt_number));
+        let latest = facts
+            .last()
+            .ok_or_else(|| invalid("empty node evidence".into()))?;
+        let context = latest.context.as_ref();
+        let extra = |key: &str| {
+            context
+                .and_then(|c| c.extra.get(key))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        let checkpoint = graph
+            .as_ref()
+            .and_then(|g| checkpoints.get(g))
+            .and_then(Option::as_ref);
+        let pr = context
+            .and_then(|c| c.extra.get("pr"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                checkpoint
+                    .and_then(|c| c.pull_request.as_deref())
+                    .and_then(|pr| pr.trim_end_matches('/').rsplit('/').next()?.parse().ok())
+            });
+        let issue = context
+            .and_then(|c| c.work_item.as_deref())
+            .and_then(|s| s.rsplit(['#', '/']).next())
+            .and_then(|s| s.parse().ok());
+        let (confirmed, false_positives) = pipeline_dispositions(checkpoint, &node);
+        let mut row = Evidence {
+            sample: json!([graph, node]).to_string(),
+            graph,
+            pr,
+            issue,
+            pattern: context.and_then(|c| c.pattern.clone()),
+            lens: extra("lens").or_else(|| context.and_then(|c| c.role.clone())),
+            model: pipeline_node_model(&facts),
+            risk_tier: extra("risk_tier"),
+            task_kind: extra("task_kind"),
+            cost_microdollars: None,
+            confirmed,
+            false_positives,
+        };
+        let report =
+            provenant_telemetry::stats(facts, prices, provenant_telemetry::Window::default())
+                .map_err(|e| invalid(e.to_string()))?;
+        row.cost_microdollars = report.totals.cost.complete.map(|m| m.microdollars);
+        evidence.push(row);
+    }
+    let ci: Option<Vec<provenant_telemetry::outcome::CiRun>> = options
+        .ci_file
+        .as_ref()
+        .map(|path| {
+            let bytes = std::fs::read(path).map_err(|e| invalid(e.to_string()))?;
+            if bytes.len() > 16 * 1024 * 1024 {
+                return Err(invalid("CI file exceeds 16 MiB".into()));
+            }
+            serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))
+        })
+        .transpose()?;
+    let now = jiff::Timestamp::now();
+    let mut outcomes = provenant_telemetry::outcome::attribute(
+        edge.cwd,
+        &options.main_ref,
+        evidence,
+        ci.as_deref(),
+        options.outcome_days,
+        now.as_second(),
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    for row in &mut outcomes.rows {
+        if row
+            .evidence
+            .graph
+            .as_ref()
+            .is_some_and(|graph| unreadable_graphs.contains(graph))
+        {
+            row.stratum = "unmeasured";
+            row.signals.unmeasured = true;
+        }
+    }
+    let ranking = provenant_telemetry::suggest::rank(
+        &outcomes,
+        options.min_samples as usize,
+        options.expiry_days,
+        now,
+    )
+    .map_err(invalid)?;
+    Ok(json!({"outcomes": outcomes, "ranking": ranking}))
+}
+
+fn pipeline_dispositions(
+    checkpoint: Option<&provenant_fabric_runtime::graph::GraphCheckpoint>,
+    node: &str,
+) -> (Option<u64>, Option<u64>) {
+    let mut confirmed = None;
+    let mut false_positives = None;
+    if let Some(checkpoint) = checkpoint {
+        let mut decisions = BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
+        let mut origins = BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
+        for source_node in checkpoint.nodes.iter().filter(|n| n.children.is_empty()) {
+            for finding in source_node.outputs.iter().flat_map(|o| &o.findings) {
+                if finding.disposition.is_none() {
+                    origins
+                        .entry(&finding.id)
+                        .or_default()
+                        .insert(&source_node.id);
+                }
+            }
+        }
+        for finding in checkpoint
+            .nodes
+            .iter()
+            .filter(|n| n.children.is_empty())
+            .filter_map(|n| n.outputs.as_ref())
+            .flat_map(|o| &o.findings)
+        {
+            if let Some(disposition) = finding.disposition.as_deref() {
+                decisions
+                    .entry(&finding.id)
+                    .or_default()
+                    .insert(disposition);
+            }
+        }
+        if let Some(source) = checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == node && n.children.is_empty())
+            .and_then(|n| n.outputs.as_ref())
+        {
+            let ids: std::collections::BTreeSet<_> = source
+                .findings
+                .iter()
+                .filter(|f| f.disposition.is_none())
+                .map(|f| f.id.as_str())
+                .collect();
+            let mut c = 0;
+            let mut f = 0;
+            let mut complete = true;
+            for id in ids {
+                if origins.get(id).is_none_or(|nodes| nodes.len() != 1) {
+                    complete = false;
+                    continue;
+                }
+                match decisions
+                    .get(id)
+                    .filter(|d| d.len() == 1)
+                    .and_then(|d| d.first())
+                    .copied()
+                {
+                    Some("accepted") => c += 1,
+                    Some("rejected") => f += 1,
+                    _ => complete = false,
+                }
+            }
+            if complete {
+                confirmed = Some(c);
+                false_positives = Some(f);
+            }
+        }
+    }
+    (confirmed, false_positives)
+}
+
+fn pipeline_node_model(facts: &[provenant_records::AttemptFact]) -> Option<String> {
+    let models: Option<std::collections::BTreeSet<_>> = facts
+        .iter()
+        .map(|fact| {
+            fact.applied_route
+                .as_ref()
+                .or(fact.resolved_route.as_ref())?
+                .model
+                .clone()
+        })
+        .collect();
+    let models = models?;
+    (models.len() == 1)
+        .then(|| models.into_iter().next())
+        .flatten()
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use serde_json::{Value, json};
+    #[test]
+    fn verifier_copies_count_once_and_unknown_dispositions_stay_unknown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::GraphCheckpoint;
+        let finding = |id: &str, disposition: Option<&str>| {
+            json!({
+                "id":id, "severity":"high", "file":"a.rs", "line":1,
+                "summary":"defect", "status":"open", "disposition":disposition,
+            })
+        };
+        let node = |id: &str, findings: Vec<Value>| {
+            json!({
+                "id":id, "state":"succeeded", "attempts":[], "worktree":null,
+                "outputs":{"schema_version":1,"result":null,"verdict":null,"findings":findings,"branch":null,"commit":null,"warnings":[]}
+            })
+        };
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"g","plan_digest":"digest","nodes":[
+                node("review", vec![finding("F1", None), finding("F2", None)]),
+                node("verify", vec![finding("F1", Some("accepted")), finding("F2", Some("rejected"))]),
+                node("copy", vec![finding("F1", Some("accepted")), finding("F2", Some("rejected"))]),
+            ]
+        }))?;
+        assert_eq!(
+            super::pipeline_dispositions(Some(&checkpoint), "review"),
+            (Some(1), Some(1))
+        );
+        assert_eq!(
+            super::pipeline_dispositions(Some(&checkpoint), "verify"),
+            (Some(0), Some(0))
+        );
+        assert_eq!(super::pipeline_dispositions(None, "review"), (None, None));
+        checkpoint.nodes[2]
+            .outputs
+            .as_mut()
+            .ok_or("outputs")?
+            .findings[0]
+            .disposition = Some("deferred".into());
+        assert_eq!(
+            super::pipeline_dispositions(Some(&checkpoint), "review"),
+            (None, None)
+        );
+        checkpoint.nodes[2]
+            .outputs
+            .as_mut()
+            .ok_or("outputs")?
+            .findings[0]
+            .disposition = None;
+        assert_eq!(
+            super::pipeline_dispositions(Some(&checkpoint), "review"),
+            (None, None)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_model_node_stays_unknown_instead_of_charging_the_final_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{AttemptId, OperationId, ProjectId, TaskId, WallTime};
+        use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
+        let mut fact = AttemptFact {
+            context: None,
+            attempt_id: AttemptId::from_bytes([1; 16]),
+            task_id: TaskId::from_bytes([2; 16]),
+            attempt_number: 1,
+            operation_id: OperationId::parse("pipeline-test")?,
+            project_id: ProjectId::from_bytes([3; 16]),
+            terminal_state: AttemptOutcome::Succeeded,
+            exit_code: Some(0),
+            queued_at: WallTime::from_micros(0)?,
+            started_at: None,
+            provider_ms: None,
+            finished_at: WallTime::from_micros(1)?,
+            resolved_route: Some(RouteFact {
+                provider: Some("p".into()),
+                model: Some("p/a".into()),
+                effort: None,
+                account_label: None,
+            }),
+            usage: Usage::default(),
+            reviewer: None,
+            delivery_id: None,
+            subject: None,
+            head: None,
+            output_refs: vec![],
+            requested_route: None,
+            applied_route: None,
+            observed_route: None,
+            verified_owner: None,
+            lineage: vec![],
+            reason: None,
+            trace: Default::default(),
+            transcript: None,
+        };
+        let prior = fact.clone();
+        assert_eq!(
+            super::pipeline_node_model(&[prior.clone(), fact.clone()]).as_deref(),
+            Some("p/a")
+        );
+        fact.applied_route = Some(RouteFact {
+            model: Some("p/b".into()),
+            ..fact.resolved_route.clone().ok_or("route")?
+        });
+        assert_eq!(
+            super::pipeline_node_model(&[prior.clone(), fact.clone()]),
+            None
+        );
+        fact.applied_route = None;
+        fact.resolved_route = None;
+        assert_eq!(super::pipeline_node_model(&[prior, fact]), None);
+        Ok(())
+    }
 }
 
 /// Report the sheet's review age in JSON and, once stale, in the human text.

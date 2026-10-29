@@ -4,10 +4,14 @@
 #![forbid(unsafe_code)]
 
 mod chair;
+pub mod ingest;
+pub mod mileage;
 mod native;
+pub mod outcome;
 mod prices;
 mod reducer;
 pub mod refresh;
+pub mod suggest;
 mod trace;
 pub mod usage;
 pub use chair::{ChairModelUsage, Unread, attach_usage as attach_chair_usage};

@@ -952,6 +952,10 @@ pub enum Telemetry {
         #[command(subcommand)]
         command: Prices,
     },
+    /// Record native chair and sub-agent token usage per account
+    Ingest(Ingest),
+    /// Report quota mileage and effective token rates from quota history and ingested usage
+    Mileage(Mileage),
 }
 #[derive(Debug, Subcommand)]
 pub enum Prices {
@@ -977,6 +981,39 @@ pub struct PricesRefresh {
     /// Proposal file (default `telemetry-prices.proposed.json`)
     #[arg(long, default_value = "telemetry-prices.proposed.json")]
     pub out: PathBuf,
+}
+#[derive(Debug, Args)]
+pub struct Ingest {
+    /// Ingest only this provider's sessions (only `claude` writes native transcripts)
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Ingest transcripts written, and messages stamped, from this date or timestamp, or this many seconds ago
+    #[arg(long, value_parser = since)]
+    pub since: Option<jiff::Timestamp>,
+}
+#[derive(Debug, Args)]
+pub struct Mileage {
+    /// Account label or key
+    #[arg(long)]
+    pub account: Option<String>,
+    /// Quota window, such as five_hour or weekly (default every window)
+    #[arg(long)]
+    pub window: Option<String>,
+    /// Count only usage of this exact model; quota deltas still cover every model, so mileage is understated
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Use readings and usage from this date or timestamp, or this many seconds ago
+    #[arg(long, value_parser = since)]
+    pub since: Option<jiff::Timestamp>,
+    /// Runs needed on each side before a capacity trend is judged
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(2..=10_000))]
+    pub min_runs: u32,
+    /// Fall in capacity, in percent, that is flagged rather than inconclusive
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=99))]
+    pub fall_percent: u32,
+    /// Days in the recent side of a capacity step change
+    #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=90))]
+    pub recent_days: u32,
 }
 #[derive(Debug, Args)]
 pub struct Trace {
@@ -1005,6 +1042,14 @@ pub enum StatsBy {
 }
 #[derive(Debug, Args)]
 pub struct Stats {
+    /// Include offline post-merge outcomes and stratified ranking
+    #[arg(long, conflicts_with_all = ["usage", "claude_subagents", "by"])]
+    pub outcomes: bool,
+    /// Include advisory expiring suggestions from offline pipeline evidence
+    #[arg(long, conflicts_with_all = ["usage", "claude_subagents", "by"])]
+    pub suggest: bool,
+    #[command(flatten)]
+    pub pipeline: PipelineOptions,
     /// Report native Claude subagents from one session's subagents directory instead of supervised attempts
     #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id", "by"])]
     pub claude_subagents: Option<PathBuf>,
@@ -1026,6 +1071,25 @@ pub struct Stats {
     /// Include per-attempt detail
     #[arg(long, conflicts_with = "usage")]
     pub detail: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PipelineOptions {
+    /// Local main-line ref to analyse; no fetch is performed
+    #[arg(long, default_value = "main")]
+    pub main_ref: String,
+    /// Recorded gh main-branch run list JSON; absent means CI not_measured
+    #[arg(long)]
+    pub ci_file: Option<PathBuf>,
+    /// Days after a merge to attribute escaped defects
+    #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u32).range(1..=3650))]
+    pub outcome_days: u32,
+    /// Independent graphs and mature merges required per arm
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    pub min_samples: u32,
+    /// Days until a suggestion expires
+    #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u32).range(1..=3650))]
+    pub expiry_days: u32,
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {

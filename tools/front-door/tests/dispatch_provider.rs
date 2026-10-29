@@ -211,13 +211,20 @@ fn fixture() -> Result {
         .find(|pair| pair[0] == "-m")
         .map(|pair| pair[1].as_str());
     if !prompt.contains("missing") {
+        // Real rollouts record tool output. A printed credential must be
+        // scrubbed from this transcript at settlement, not only from captures.
+        let recorded = if prompt.contains("fixture printed credential") {
+            "printed ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+        } else {
+            "must not be retained"
+        };
         fs::write(
             sessions.join(format!("rollout-2026-10-24T00-00-00-{session}.jsonl")),
             format!(
                 "{}\n{}\n{}\n",
                 json!({"type":"session_meta","payload":{"id":recorded_session}}),
                 json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
-                json!({"type":"response_item","payload":{"content":"must not be retained"}})
+                json!({"type":"response_item","payload":{"content":recorded}})
             ),
         )?;
     }

@@ -34,8 +34,9 @@ costs the same allowance as GLM-5.3 Flash.
 ## Flash fallbacks
 
 The free Zen variants of DeepSeek V4.1 Flash and GLM-5.3 Flash already sit in
-the junior pool, but free allowances run out. Their paid Go endpoints are the
-cheapest fallbacks: the [Go documentation](https://opencode.ai/v2/docs/console/go/)
+the junior pool at weight 50 each, but free allowances run out. Weighted
+selection favours them without guaranteeing they are exhausted first. Their paid
+Go endpoints are the cheapest fallbacks: the [Go documentation](https://opencode.ai/v2/docs/console/go/)
 gives DeepSeek V4.1 Flash an $80 monthly limit on the $10 plan (8x) and GLM-5.3
 Flash $60 (6x), the same as MiMo V2.6 Flash. Artificial Analysis rates
 [DeepSeek V4.1 Flash](https://artificialanalysis.ai/models/releases/deepseek-v4-1-flash)

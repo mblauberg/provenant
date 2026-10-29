@@ -94,6 +94,131 @@ pub fn run(stats: &Stats, globals: &Globals) -> u8 {
     }
 }
 
+/// Ingest native Claude sessions into the state root's token store. Registered
+/// accounts attribute their directories; every other `~/.claude*` directory is
+/// `unattributed`, never dropped.
+pub fn ingest_native(
+    roots: &Roots,
+    home: &std::path::Path,
+    provider: Option<&str>,
+    since: Option<jiff::Timestamp>,
+    deadline: Option<std::time::Instant>,
+) -> Result<provenant_telemetry::ingest::Report, String> {
+    use provenant_telemetry::ingest;
+    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+        .map_err(|error| error.to_string())?;
+    let accounts: Vec<(String, Vec<std::path::PathBuf>)> = config
+        .domains
+        .accounts
+        .entries
+        .values()
+        .filter(|entry| entry.adapter == ingest::PROVIDER)
+        .map(|entry| {
+            let mut directories = vec![entry.directory.clone()];
+            directories.extend(entry.directories.iter().cloned());
+            (entry.label.clone(), directories)
+        })
+        .collect();
+    let dirs = ingest::config_dirs(&accounts, home);
+    let chairs: std::collections::BTreeSet<String> =
+        usage::chair_sessions(roots, jiff::Timestamp::MIN, jiff::Timestamp::MAX)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|chair| chair.session)
+            .collect();
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(roots.state.as_path())
+            .map_err(|error| format!("cannot create the state directory: {error}"))?;
+    }
+    ingest::ingest(
+        roots,
+        &ingest::Request {
+            dirs: &dirs,
+            chair_sessions: &chairs,
+            provider,
+            since,
+            deadline,
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Wall budget for the SessionStart ingest, inside the hook's five-second host
+/// timeout with room for the chair's own work.
+const HOOK_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Best-effort ingest after the chair's SessionStart hook records its session.
+/// The hook has a five-second host timeout, so only the last day is read, the
+/// read stops at a three-second wall deadline, and the rows read so far are
+/// still written. Every failure is ignored: a slow transcript must never stop
+/// the chair.
+#[allow(clippy::disallowed_methods)]
+pub fn ingest_after_chair_hook(globals: &Globals) {
+    let Ok(resolved) = roots::resolve(globals, Workspace::Directory, Product::Optional) else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + HOOK_INGEST_BUDGET;
+    use provenant_core::Clock;
+    let since = provenant_os::clock::SystemClock::new()
+        .wall_now()
+        .ok()
+        .and_then(|now| jiff::Timestamp::from_second(now.as_timestamp().as_second() - 86_400).ok());
+    let _ = ingest_native(&resolved.roots, &resolved.home, None, since, Some(deadline));
+}
+
+pub fn ingest(cmd: &provenant_cli::Ingest, globals: &Globals) -> u8 {
+    let Ok(resolved) = roots::resolve(globals, Workspace::Directory, Product::Optional) else {
+        return crate::fail(
+            "telemetry ingest",
+            Outcome::Error,
+            "ROOT",
+            "cannot resolve the state root",
+            globals,
+        );
+    };
+    match ingest_native(
+        &resolved.roots,
+        &resolved.home,
+        cmd.provider.as_deref(),
+        cmd.since,
+        None,
+    ) {
+        Ok(report) => {
+            let mut text = format!(
+                "Ingested {} new of {} messages ({} already recorded) from {} directories\n",
+                report.added, report.messages, report.already_present, report.directories
+            );
+            for (account, count) in &report.accounts {
+                text.push_str(&format!("{:>8} new  {account}\n", count.added));
+            }
+            if report.store_full {
+                text.push_str("The ingest store is full; some messages were not recorded\n");
+            }
+            crate::emit(
+                &CommandResult::new(
+                    "telemetry ingest",
+                    Outcome::Ok,
+                    serde_json::to_value(&report).ok(),
+                ),
+                globals,
+                &text,
+                false,
+            )
+        }
+        Err(message) => crate::fail(
+            "telemetry ingest",
+            Outcome::Error,
+            "INGEST",
+            &message,
+            globals,
+        ),
+    }
+}
+
 #[cfg(test)]
 // The worktree driver includes this module without libtest.
 #[allow(dead_code, unused_imports)]
