@@ -10,6 +10,27 @@ use std::{
 };
 
 #[test]
+fn bounded_row_collection_stops_before_over_budget_row() {
+    let rows = [
+        Ok((vec![0; MAX_PAGE_BYTES / 2], ())),
+        Ok((vec![0; MAX_PAGE_BYTES / 2], ())),
+        Ok((vec![0; 1], ())),
+    ];
+    let rows = bounded_rows(rows.into_iter(), |bytes, ()| Ok(bytes)).unwrap();
+    assert_eq!(rows.items.len(), 2);
+    assert!(rows.truncated);
+    assert_eq!(
+        rows.items.iter().map(Vec::len).sum::<usize>(),
+        MAX_PAGE_BYTES
+    );
+
+    let rows = [Ok((vec![0; MAX_PAGE_BYTES + 1], ()))];
+    let rows = bounded_rows(rows.into_iter(), |bytes, ()| Ok(bytes)).unwrap();
+    assert!(rows.items.is_empty());
+    assert!(rows.truncated);
+}
+
+#[test]
 fn sqlite_diagnostic_reports_code_without_private_details() {
     let error = Error::Sqlite(rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY),

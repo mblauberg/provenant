@@ -179,31 +179,23 @@ impl Store {
         let mut statement=self.db.prepare("SELECT substr(record,1,?7) FROM tasks WHERE project=?1 AND (?2 IS NULL OR state=?3) AND (?4 IS NULL OR id>?5) ORDER BY id LIMIT ?6")?;
         let state = state.map(TaskState::sql);
         let after = after.map(|id| id.to_string());
-        let mut rows = statement.query(params![
-            project.to_string(),
-            state,
-            state,
-            after,
-            after,
-            limit,
-            MAX_RECORD_READ_BYTES
-        ])?;
-        let mut items = Vec::new();
-        let mut total = 0;
-        let mut truncated = false;
-        while let Some(row) = rows.next()? {
-            let bytes: Vec<u8> = row.get(0)?;
-            total += bytes.len();
-            if total > MAX_PAGE_BYTES {
-                truncated = true;
-                break;
-            }
-            items.push(decode(&bytes)?);
-        }
+        let rows = statement.query_map(
+            params![
+                project.to_string(),
+                state,
+                state,
+                after,
+                after,
+                limit,
+                MAX_RECORD_READ_BYTES
+            ],
+            |row| Ok((row.get(0)?, ())),
+        )?;
+        let rows = bounded_rows(rows, |bytes, ()| decode(&bytes))?;
         Ok(Page {
             extra: Default::default(),
-            items,
-            truncated,
+            items: rows.items,
+            truncated: rows.truncated,
         })
     }
     pub fn claim_task(&self, claim: &TaskClaim, request: &Request<'_>) -> Result<TaskFence> {
