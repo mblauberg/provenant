@@ -114,6 +114,8 @@ restricted routes select their reliable fallback before launch there instead of
 trusting a later retry record. Nested session continuations require explicit
 caller recovery. Exact attempt inspection preserves original evidence;
 run views, local Fabric waits and graph execution observe successors.
+`run` keeps superseded receipts visible with `superseded_by` and derives its exit
+status from the final successor. Waits include a successor queued during a poll.
 
 `provenant telemetry stats` reports cache-read share by
 model, account and lane using existing terminal usage categories. Lane JSON

@@ -1593,7 +1593,10 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
             ));
         }
         human.push_str(&format!("more: provenant output {id}\n"));
-        if !timed_out && !matches!(state, "succeeded" | "review_required" | "input_required") {
+        if !timed_out
+            && !row["superseded_by"].is_string()
+            && !matches!(state, "succeeded" | "review_required" | "input_required")
+        {
             result.result.status = Status::Failed;
         }
     }
@@ -3101,6 +3104,12 @@ fn report(
     let canonical = session.store.request(record.run_id, call)?;
     if let Some(rows) = data["lanes"].as_array_mut() {
         for row in rows {
+            if let Some(id) = row["attempt_id"].as_str().and_then(|id| id.parse().ok()) {
+                let tail = session.store.policy_tail(id, call)?;
+                if tail.attempt_id != id {
+                    row["superseded_by"] = json!(tail.attempt_id);
+                }
+            }
             if let Some(task) = canonical
                 .tasks
                 .iter()
@@ -3537,10 +3546,24 @@ fn candidates<'a>(
             _ => select(session, picks.targets, seen, picks.owner, &call)?,
         };
         let mut lanes = Vec::with_capacity(ids.len());
-        for id in ids {
-            let lane = session.service().status_for_wait(id, &call)?;
-            if picks.label.is_none() || lane.verified_owner == Some(picks.owner) {
-                lanes.push(lane);
+        let mut included = std::collections::BTreeSet::new();
+        for mut id in ids {
+            // Settlement may have queued a successor after the selection read.
+            // Keep the original receipt and wait for its current policy tail.
+            for _ in 0..9 {
+                let lane = session.service().status_for_wait(id, &call)?;
+                if included.insert(id)
+                    && (picks.label.is_none() || lane.verified_owner == Some(picks.owner))
+                {
+                    lanes.push(lane);
+                }
+                // Read the tail after the state: a terminal state must already
+                // have committed any successor in the same transaction.
+                let tail = session.store.policy_tail(id, &call)?.attempt_id;
+                if tail == id {
+                    break;
+                }
+                id = tail;
             }
         }
         Ok(lanes)
@@ -6116,6 +6139,45 @@ mod tests {
             stats_summary(&totals),
             "3 attempts, est. API-equivalent $2.000000\n"
         );
+    }
+
+    #[test]
+    fn core_run_status_uses_policy_successor_and_retains_receipts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let edge = Edge {
+            roots: &roots,
+            home: &root.join("home"),
+            assets: root,
+            cwd: root,
+        };
+        for (tail, expected) in [("succeeded", Status::Ok), ("failed", Status::Failed)] {
+            let result = super::reply(
+                "dispatch",
+                Ok((
+                    json!({
+                        "lanes": [
+                            {"attempt_id":"01010101010101010101010101010101", "state":"failed", "superseded_by":"02020202020202020202020202020202"},
+                            {"attempt_id":"02020202020202020202020202020202", "state":tail}
+                        ]
+                    }),
+                    String::new(),
+                )),
+            );
+            let report = super::render_run(result, &edge);
+            assert_eq!(report.result.status, expected);
+            assert_eq!(
+                report.result.data["lanes"].as_array().ok_or("lanes")?.len(),
+                2
+            );
+            assert!(report.human.contains("01010101 failed"));
+            assert!(report.human.contains(&format!("02020202 {tail}")));
+        }
+        Ok(())
     }
 
     #[test]
