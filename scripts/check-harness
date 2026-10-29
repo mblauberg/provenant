@@ -136,6 +136,9 @@ def main():
                 fail(path, "missing frontmatter")
                 continue
             fields = load_yaml(path, "\n".join(lines[1:lines.index("---", 1)]))
+            extra = fields.keys() - {"name", "description", "verified-against"}
+            if extra:
+                fail(path, f"unsupported frontmatter keys: {', '.join(sorted(map(str, extra)))}")
             if fields.get("name") != path.parent.name:
                 fail(path, "name must match the skill directory")
             if not nonempty(fields.get("description")) or len(fields["description"]) > 1024:
@@ -156,6 +159,9 @@ def main():
             for key in ("display_name", "short_description", "default_prompt"):
                 if not nonempty(interface.get(key)):
                     fail(path, f"interface.{key} is required")
+            description = interface.get("short_description")
+            if nonempty(description) and not 25 <= len(description) <= 64:
+                fail(path, "interface.short_description must contain 25..64 characters")
             if nonempty(interface.get("default_prompt")) and f"${path.parent.parent.name}" not in interface["default_prompt"]:
                 fail(path, "default prompt must invoke the skill")
             for key in ("icon_small", "icon_large"):
@@ -165,6 +171,9 @@ def main():
                         fail(path, f"{key} must refer to a tracked local asset")
         elif path.parent == Path(".github/ISSUE_TEMPLATE") and path.suffix in (".yml", ".yaml") and path.stem != "config":
             fields = load_yaml(path, (root / path).read_text())
+            extra = fields.keys() - {"assignees", "body", "description", "labels", "name", "projects", "title", "type"}
+            if extra:
+                fail(path, f"unsupported issue form keys: {', '.join(sorted(map(str, extra)))}")
             if not all(nonempty(fields.get(k)) for k in ("name", "description")):
                 fail(path, "name and description are required")
             body = fields.get("body")
@@ -172,10 +181,16 @@ def main():
                 fail(path, "body must be a nonempty sequence")
                 continue
             ids = set()
+            inputs = 0
             for item in body:
                 if not isinstance(item, dict) or item.get("type") not in ("checkboxes", "dropdown", "input", "markdown", "textarea", "upload"):
                     fail(path, "invalid issue field type")
                     continue
+                extra = item.keys() - {"attributes", "id", "type", "validations"}
+                if extra:
+                    fail(path, f"unsupported issue body keys: {', '.join(sorted(map(str, extra)))}")
+                if item["type"] != "markdown":
+                    inputs += 1
                 attrs = item.get("attributes")
                 if not isinstance(attrs, dict):
                     fail(path, "issue field attributes are required")
@@ -198,6 +213,8 @@ def main():
                     labels = [o.get("label") if isinstance(o, dict) else o for o in options] if isinstance(options, list) else []
                     if not labels or not all(nonempty(x) for x in labels) or len(set(labels)) != len(labels):
                         fail(path, "options need unique, nonempty labels")
+            if not inputs:
+                fail(path, "at least one input is required")
         elif path.parent.name == "evals" and path.name in ("trigger_cases.json", "regression_cases.json"):
             try:
                 data = json.loads((root / path).read_text())

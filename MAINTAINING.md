@@ -253,7 +253,7 @@ provenant check release
 git diff --check
 ```
 
-The harness check requires Python 3 and PyYAML (`python3 -m pip install PyYAML==6.0.2`).
+The harness check requires Python 3 and PyYAML (`python3 -m pip install PyYAML==6.0.2`). It scans repository assets, not installed skill roots. Run `scripts/test-check-harness` to exercise its fixture tests.
 
 Use `provenant check writing PATHS --rules general` for prose, with
 `--rules academic` or `--rules legal` where they apply. Git pre-push

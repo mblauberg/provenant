@@ -87,8 +87,8 @@ pub fn next_due(
 pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option<u64>) -> u64 {
     let base = match failure {
         ProbeFailure::Network => 15_u64
-            .saturating_mul(1_u64 << failures.saturating_sub(1).min(2))
-            .min(60),
+            .saturating_mul(1_u64 << failures.saturating_sub(1).min(5))
+            .min(300),
         ProbeFailure::RateLimited => 120_u64
             .saturating_mul(1_u64 << failures.saturating_sub(1).min(5))
             .min(3600),
@@ -808,7 +808,12 @@ mod tests {
     #[test]
     fn backoff_has_bounded_exponential_and_retry_after_floor() {
         assert_eq!(backoff(ProbeFailure::Network, 1, None), 15);
-        assert_eq!(backoff(ProbeFailure::Network, 50, None), 60);
+        assert_eq!(backoff(ProbeFailure::Network, 2, None), 30);
+        assert_eq!(backoff(ProbeFailure::Network, 3, None), 60);
+        assert_eq!(backoff(ProbeFailure::Network, 4, None), 120);
+        assert_eq!(backoff(ProbeFailure::Network, 5, None), 240);
+        assert_eq!(backoff(ProbeFailure::Network, 6, None), 300);
+        assert_eq!(backoff(ProbeFailure::Network, 50, None), 300);
         assert_eq!(backoff(ProbeFailure::RateLimited, 50, None), 3600);
         assert_eq!(backoff(ProbeFailure::Network, 1, Some(999999)), 86400);
         assert_eq!(backoff(ProbeFailure::Auth, 1, None), 900);

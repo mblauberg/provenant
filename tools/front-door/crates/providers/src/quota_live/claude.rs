@@ -103,11 +103,13 @@ fn status_fingerprint(result: Result<ExecOutcome, ProbeFailure>) -> Result<Strin
     }
     let state: Value =
         serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProbeFailure::Network)?;
-    if state.get("loggedIn").and_then(Value::as_bool) == Some(false)
-        || state
-            .get("email")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
+    if state.get("loggedIn").and_then(Value::as_bool) == Some(false) {
+        return Err(ProbeFailure::Auth);
+    }
+    if state
+        .get("email")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
     {
         return Err(ProbeFailure::Network);
     }
@@ -128,6 +130,17 @@ fn default_identity(result: Result<Identity, ProbeFailure>) -> Result<Identity, 
         Err(ProbeFailure::ProbeDirectory) => Err(ProbeFailure::ProbeDirectory),
         Err(_) => Ok(Identity::default()),
     }
+}
+
+fn parse_credentials(raw: &[u8]) -> Result<Value, ProbeFailure> {
+    if raw.is_empty() {
+        return Err(ProbeFailure::Auth);
+    }
+    let value: Value = serde_json::from_slice(raw).map_err(|_| ProbeFailure::Network)?;
+    if value.get("claudeAiOauth").is_none() {
+        return Err(ProbeFailure::Auth);
+    }
+    Ok(value)
 }
 
 fn credential_open_error(error: std::io::Error) -> ProbeFailure {
@@ -193,14 +206,7 @@ impl LiveQuota {
             None,
             deadline,
             10,
-        ))
-        .map_err(|error| {
-            if missing && error != ProbeFailure::ProbeDirectory {
-                ProbeFailure::Auth
-            } else {
-                error
-            }
-        })?;
+        ))?;
         let (token, expires) = credential.map_or((None, None), |(t, e)| (Some(t), Some(e)));
         // The default session can rotate while a tick is in flight. Confirm
         // the identity after reading its credential before attributing it.
@@ -257,11 +263,11 @@ impl LiveQuota {
             }
             bytes
         };
-        serde_json::from_slice(&raw).map_err(|_| ProbeFailure::Network)
+        parse_credentials(&raw)
     }
     fn claude_token(&self, dir: &Path, deadline: i64) -> Result<(String, i64), ProbeFailure> {
         let value = self.claude_credentials(dir, deadline)?;
-        let oauth = value.get("claudeAiOauth").ok_or(ProbeFailure::Network)?;
+        let oauth = value.get("claudeAiOauth").ok_or(ProbeFailure::Auth)?;
         let token = oauth
             .get("accessToken")
             .and_then(Value::as_str)
@@ -465,6 +471,15 @@ mod tests {
     }
 
     #[test]
+    fn absent_credentials_are_auth_and_invalid_json_is_transient() {
+        use super::*;
+        assert_eq!(parse_credentials(b""), Err(ProbeFailure::Auth));
+        assert_eq!(parse_credentials(b"{}"), Err(ProbeFailure::Auth));
+        assert_eq!(parse_credentials(b"invalid"), Err(ProbeFailure::Network));
+        assert!(parse_credentials(br#"{"claudeAiOauth":{}}"#).is_ok());
+    }
+
+    #[test]
     fn signed_out_status_and_optional_default_are_classified() {
         use super::*;
         let outcome = |json: &[u8], code, timed_out| ExecOutcome {
@@ -480,12 +495,16 @@ mod tests {
             cancelled: false,
             elapsed_micros: 0,
         };
-        for json in [br#"{"loggedIn":false}"#.as_slice(), br#"{}"#] {
+        for code in [0, 1] {
             assert_eq!(
-                status_fingerprint(Ok(outcome(json, 1, false))),
-                Err(ProbeFailure::Network)
+                status_fingerprint(Ok(outcome(br#"{"loggedIn":false}"#, code, false))),
+                Err(ProbeFailure::Auth)
             );
         }
+        assert_eq!(
+            status_fingerprint(Ok(outcome(br#"{}"#, 1, false))),
+            Err(ProbeFailure::Network)
+        );
         assert_eq!(
             status_fingerprint(Ok(outcome(b"invalid", 1, false))),
             Err(ProbeFailure::Network)

@@ -47,6 +47,42 @@ class HarnessChecks(unittest.TestCase):
         self.skill.write_text("---\nname: example\nname: example\ndescription: A skill\n---\n")
         self.assertIn("duplicate key", self.check(1))
 
+    def test_skill_frontmatter_allowlist_and_stale_pin(self):
+        self.skill.write_text("---\nname: example\ndescription: A skill\nextra: value\n---\n")
+        self.assertIn("unsupported frontmatter keys: extra", self.check(1))
+        (self.root / "package.json").write_text(json.dumps({"dependencies": {"example": "1.5.0"}}))
+        self.skill.write_text("---\nname: example\ndescription: A skill\nverified-against: example@1.4\n---\n")
+        self.assertIn("pinned to 1.4", self.check(1))
+
+    def test_sidecar_description_and_icon(self):
+        sidecar = self.root / "skills/example/agents/openai.yaml"
+        sidecar.parent.mkdir()
+        def write_sidecar(description, icon=""):
+            sidecar.write_text(f"interface:\n  display_name: Example\n  short_description: '{description}'\n  default_prompt: Use $example\n{icon}")
+        write_sidecar("A" * 25)
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        self.check()
+        for description in ("A" * 24, "A" * 65):
+            write_sidecar(description)
+            self.assertIn("25..64", self.check(1))
+        write_sidecar("A" * 64, "  icon_small: missing.svg\n")
+        self.assertIn("tracked local asset", self.check(1))
+
+    def test_issue_form_keys_and_input(self):
+        form = self.root / ".github/ISSUE_TEMPLATE/bug.yml"
+        form.parent.mkdir(parents=True)
+        header = "name: Bug\ndescription: Report a bug\n"
+        input_field = "body:\n  - type: input\n    id: summary\n    attributes:\n      label: Summary\n"
+        form.write_text(header + input_field)
+        subprocess.run(["git", "-C", str(self.root), "add", "."], check=True)
+        self.check()
+        form.write_text(header + "extra: value\n" + input_field)
+        self.assertIn("unsupported issue form keys: extra", self.check(1))
+        form.write_text(header + input_field + "    placeholder: misplaced\n")
+        self.assertIn("unsupported issue body keys: placeholder", self.check(1))
+        form.write_text(header + "body:\n  - type: markdown\n    attributes:\n      value: Instructions\n")
+        self.assertIn("at least one input is required", self.check(1))
+
     def test_recorded_skill_and_sidecar(self):
         skill = ROOT / "skills/refactor/SKILL.md"
         sidecar = ROOT / "skills/refactor/agents/openai.yaml"
