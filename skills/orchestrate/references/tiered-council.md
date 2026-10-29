@@ -4,9 +4,9 @@ When several model families are available, work as a hierarchy, like an
 engineering team. Juniors from many families do the laid-out work and the
 fine-grained passes. Seniors judge that work, make the medium decisions and
 delegate to juniors. Principals make the critical calls. `junior`, `senior` and
-`principal` are ordered route pools, so one task names one pool. The `writing`
+`principal` are weighted route pools, so one task names one pool. The `writing`
 and `design` pools are craft choices, not extra risk tiers. `provenant route
-list` shows members in preference order.
+list` shows members and weights.
 
 | Tier | Route | Job |
 |---|---|---|
@@ -14,8 +14,8 @@ list` shows members in preference order.
 | Senior | `senior` | judge the work and the junior claims; medium decisions; delegate to juniors |
 | Principal | `principal` | critical decisions and high-level judgement |
 
-Rust routing resolves a pool in order and does not rotate members. A repeated
-`route: "junior"` can select the same model each time. To seat distinct
+Rust routing draws a weighted pool member per task. Repeated selection of
+`junior` can select the same model each time. To seat distinct
 families, inspect the pool and submit a separate task for each exact model.
 Claude chairs use native Claude subagents. Claude models stay in the pools for
 non-Claude chairs, which can dispatch them through Fabric.

@@ -32,13 +32,10 @@ The bundled catalogue defines weighted `utility`, `junior`, `senior`,
 positive-weight members by weight multiplied by provider pacing. `route list`
 shows configured weights and pacing policy; dispatch applies the pacing factor
 and decides readiness. Zero-weight members are ordered fallbacks. Operation ID
-and task index seed the draw so retries repeat the same choice. The utility
-pool uses Claude Haiku@low at weight 4, Codex Luna@low at weight 2, then the
-two OpenCode `*-free` models at weight 1 each. Free members are ordinary pool members. Omit `--effort` on OpenCode free routes: their
-recorded model controls do not support effort, so an explicit value is refused
-before launch. Agy Gemini Flash is a paid subscription model and is never
-marked free. `--confidential` excludes training or unclassified members and
-fallbacks. The Rust Fabric task schema has no per-task
+and task index seed the draw so retries repeat the same choice. Free models are
+ordinary pool members. Set effort only when the catalogue records that control.
+`--confidential` excludes members and fallbacks whose training and retention
+classification is not eligible. The Rust Fabric task schema has no per-task
 `confidential` field. For an explicit eligibility check, use `provenant route
 resolve --route NAME --confidential`.
 
@@ -54,8 +51,7 @@ default pool membership and weights; `[domains.routing]` in the state root's
 `provenant route set` or `provenant route pacing`. A Fabric submission carries
 one route preference; the task schema rejects unknown fields.
 
-Run `provenant help route` for flags. Named routes and
-exact model selectors are mutually exclusive. Explicit fallbacks use
+Run `provenant help route` for flags. Explicit fallbacks use
 `--fallback ADAPTER/ID,ADAPTER/ID`.
 The resolved attempt record owns route provenance. Never claim an unavailable
 or substituted provider supplied a missing review leg.
