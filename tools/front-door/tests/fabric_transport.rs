@@ -855,11 +855,19 @@ fn pending_ci_graph_status_is_a_snapshot() -> Result {
     let gh = rig.root.join("gh");
     let calls = rig.root.join("gh-calls");
     let response = rig.root.join("gh-response");
-    std::fs::write(&response, r#"[{"name":"build","bucket":"pending"}]"#)?;
+    // The host pins the PR head, then reads that head's check runs and
+    // statuses, so the fake answers each read the way GitHub would.
+    let head = "a".repeat(40);
+    let check_runs = |status: &str, conclusion: Option<&str>| {
+        json!([{"check_runs":[{"name":"build","head_sha":head,"status":status,"conclusion":conclusion}]}])
+            .to_string()
+    };
+    std::fs::write(&response, check_runs("in_progress", None))?;
+    let pull = json!({"headRefOid":head,"headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"}});
     std::fs::write(
         &gh,
         format!(
-            "#!/bin/sh\nprintf 'call\\n' >> '{}'\ncat '{}'\n",
+            "#!/bin/sh\nprintf 'call\\n' >> '{}'\ncase \"$*\" in\n*'pr view'*) printf '%s' '{pull}' ;;\n*check-runs*) cat '{}' ;;\n*statuses*) printf '[[]]' ;;\n*) exit 1 ;;\nesac\n",
             calls.display(),
             response.display()
         ),
@@ -908,7 +916,7 @@ fn pending_ci_graph_status_is_a_snapshot() -> Result {
         .join("graph-pending-ci.advance-error");
     std::fs::write(&marker, "journal lock timed out")?;
     // If status queried CI, the new response could release the downstream node.
-    std::fs::write(&response, r#"[{"name":"build","bucket":"pass"}]"#)?;
+    std::fs::write(&response, check_runs("completed", Some("success")))?;
     let status = rig.command(&["fabric", "graph", "status", "pending-ci", "--json"])?;
     assert_eq!(code(&status), 0);
     let status: Value = serde_json::from_slice(&status.stdout.bytes)?;

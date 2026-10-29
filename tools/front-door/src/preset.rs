@@ -2121,7 +2121,7 @@ pub(crate) fn bind_run_context(
         Ok(())
     })?;
     expansion.document["work_context"] = json!({
-        "preset": expansion.document["preset"],
+        "preset": expansion.document["provenance"]["preset"],
         "selection_source": selection_source,
     });
     expansion.document["graph_id"] = json!("");

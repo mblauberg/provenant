@@ -1,4 +1,5 @@
 Graph <id>
+Preset selection: generator-evaluator (override)
 Review shape: standard (default)
 implement  role=write.implement tier=senior family=any kind=- access=worktree_write worktree=.
   write_scope: ["."]
