@@ -80,7 +80,7 @@ impl RunStore {
         let lease = run.lock(
             OsStr::new("publication.lock"),
             LockMode::Shared,
-            call.budget,
+            call.transaction_budget(),
             call.cancel,
             call.clock,
         )?;

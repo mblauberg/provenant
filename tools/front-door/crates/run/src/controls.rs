@@ -1811,16 +1811,21 @@ impl RunStore {
         // The submitter died before reserving: the held lease proves no
         // handoff began and keeps a late reservation out.
         let attempt = dir()?;
-        let unreserved = custody::prove_unreserved(&attempt, call.budget, call.cancel, call.clock)
-            .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+        let unreserved =
+            custody::prove_unreserved(&attempt, call.transaction_budget(), call.cancel, call.clock)
+                .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
         let _recovery = match unreserved {
             Some(lease) => Held::Unreserved(lease),
             None => {
-                let recovery =
-                    match custody::acquire_recovery(dir()?, call.budget, call.cancel, call.clock) {
-                        Ok(recovery) => recovery,
-                        Err(error) => return Ok(Reconciled::custody_unavailable(&error)),
-                    };
+                let recovery = match custody::acquire_recovery(
+                    dir()?,
+                    call.transaction_budget(),
+                    call.cancel,
+                    call.clock,
+                ) {
+                    Ok(recovery) => recovery,
+                    Err(error) => return Ok(Reconciled::custody_unavailable(&error)),
+                };
                 if recovery.scope() != scope || recovery.observe() != RecoveryState::Absent {
                     return Ok(Reconciled::uncertain(
                         UncertainReason::CustodyNotProvablyAbsent,

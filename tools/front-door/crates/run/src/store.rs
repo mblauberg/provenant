@@ -240,7 +240,7 @@ impl RunStore {
         let _writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
-            call.budget,
+            call.transaction_budget(),
             call.cancel,
             call.clock,
         )?;
@@ -354,7 +354,7 @@ impl RunStore {
         let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
-            call.budget,
+            call.transaction_budget(),
             call.cancel,
             call.clock,
         )?;
@@ -416,7 +416,7 @@ impl RunStore {
         let writer = dir.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
-            call.budget,
+            call.transaction_budget(),
             call.cancel,
             call.clock,
         )?;
@@ -697,7 +697,7 @@ impl RunStore {
         let _publication = directory.lock(
             OsStr::new("publication.lock"),
             LockMode::Exclusive,
-            call.budget,
+            call.transaction_budget(),
             call.cancel,
             call.clock,
         )?;

@@ -28,7 +28,7 @@ use provenant_os::fs::{
 use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
 use provenant_records::{PathWire, PathWireError};
 use provenant_supervisor::census::{
-    Ancestry, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
+    Ancestry, ObservationIssue, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
     SystemProcessObserver, current_process,
 };
 use provenant_supervisor::custody::WriterBinding;
@@ -88,7 +88,7 @@ pub enum WorktreeError {
     #[error("worktree writer is live: process {0} has its working directory inside the tree")]
     LiveProcess(ObservedProcess),
     #[error(
-        "incomplete worker census or ancestry; retry `provenant land` when process observation is complete"
+        "incomplete worker census; retry `provenant land` when process observation is complete"
     )]
     IncompleteCensus,
     #[error("worktree writer or registration is unknown")]
@@ -538,13 +538,26 @@ fn observe_worker_holders(
             .collect();
         return (unknown, holders);
     };
-    let mut unknown_all = !census.is_complete();
+    // Custody is decided per root. A gap that could hide a process anywhere
+    // (an incomplete or truncated listing, or a process that could not be
+    // described or placed) leaves every root that is not positively live
+    // unknown. A process the kernel refuses to describe belongs to another
+    // user or a protected service: it is a host diagnostic, not evidence
+    // about any root, since lane writers are this user's processes and also
+    // hold the writer lock.
+    let mut unknown_all = !census.listing_is_complete()
+        || census
+            .unknown_pids()
+            .values()
+            .any(|issue| *issue != ObservationIssue::PermissionDenied);
+    // Exclude the caller's verified ancestors. A walk that stops early leaves
+    // the remaining ancestors in the census, where one inside a root still
+    // makes it live, so an incomplete ancestry hides nothing.
     let mut excluded = BTreeSet::from([current.identity.clone()]);
     if ancestors {
         let mut child = current;
         while child.identity.pid != current.identity.session_id {
             let ProcessLookup::Present(parent) = census.process(child.parent_pid) else {
-                unknown_all = true;
                 break;
             };
             if parent.identity.boot != current.identity.boot
@@ -552,7 +565,6 @@ fn observe_worker_holders(
                 || census.ancestry(&child.identity, &parent.identity) != Ancestry::Yes
                 || !excluded.insert(parent.identity.clone())
             {
-                unknown_all = true;
                 break;
             }
             child = parent;
@@ -564,7 +576,7 @@ fn observe_worker_holders(
             continue;
         }
         match observe_same_process(observer, cwd_observer, fact) {
-            NativeCwd::Gone => {}
+            NativeCwd::Gone | NativeCwd::Denied => {}
             NativeCwd::Unknown => unknown_all = true,
             NativeCwd::Path(path) => {
                 let Some(canonical) = canonical_cwd(&path) else {
@@ -616,6 +628,9 @@ fn canonical_cwd(path: &Path) -> Option<PathBuf> {
 enum NativeCwd {
     Path(PathBuf),
     Gone,
+    /// The kernel refused to describe the process: another user's or a
+    /// protected one. It binds no root.
+    Denied,
     Unknown,
 }
 
@@ -627,6 +642,9 @@ fn observe_same_process(
     match process_observer.observe(expected.identity.pid) {
         ProcessObservation::Present(before) if before.identity == expected.identity => {}
         ProcessObservation::Absent => return NativeCwd::Gone,
+        ProcessObservation::Unknown(ObservationIssue::PermissionDenied) => {
+            return NativeCwd::Denied;
+        }
         ProcessObservation::Present(_) | ProcessObservation::Unknown(_) => {
             return NativeCwd::Unknown;
         }
@@ -634,7 +652,8 @@ fn observe_same_process(
     let observed = match cwd_observer.cwd(expected.identity.pid) {
         Ok(CwdObservation::Path(path)) => NativeCwd::Path(path),
         Ok(CwdObservation::Gone) => return NativeCwd::Gone,
-        Ok(CwdObservation::PermissionDenied | CwdObservation::Unsupported) | Err(_) => {
+        Ok(CwdObservation::PermissionDenied) => NativeCwd::Denied,
+        Ok(CwdObservation::Unsupported) | Err(_) => {
             return NativeCwd::Unknown;
         }
     };
@@ -1417,9 +1436,10 @@ fn lock_worktree_for_mutation(
         .workers
         .observe_roots(std::slice::from_ref(&canonical));
     // The writer lock and the absence of a reservation are the custody proof.
-    // An unobservable process does not make a free lease live, since the
-    // native census marks every root unknown when one process's directory
-    // cannot be read. Only a positive observation of a live process refuses.
+    // A census gap does not make a free lease live; only a positive
+    // observation of a live process refuses. Landing also needs this root
+    // observed free, which a process the kernel refuses to describe does not
+    // prevent.
     match observations
         .get(&canonical)
         .copied()
@@ -4906,24 +4926,181 @@ mod lifecycle_tests {
                 false,
                 32,
             )?);
-            let cwds = Cwds(
+            let mut cwds = Cwds(
                 facts
                     .iter()
                     .map(|fact| (fact.identity.pid, outside.clone()))
                     .collect(),
             );
-            assert_eq!(
+            let observe = |cwds: &Cwds| {
                 observe_worker_roots(
                     std::slice::from_ref(&root),
                     &processes,
-                    &cwds,
+                    cwds,
                     &current,
-                    true
-                )[&root],
-                WorkerState::Unknown,
-                "{ambiguity}"
-            );
+                    true,
+                )[&root]
+            };
+            // An ambiguous ancestry excludes no unverified ancestor, so it
+            // says nothing about a root no process is inside.
+            assert_eq!(observe(&cwds), WorkerState::Free, "{ambiguity}");
+            // The session leader is never verified once the walk stops, so
+            // inside the root it still makes the root live.
+            cwds.0.insert(10, root.clone());
+            assert_eq!(observe(&cwds), WorkerState::Live, "{ambiguity}");
         }
+        Ok(())
+    }
+
+    /// The native census over injected process and directory observations,
+    /// with landing's demand for a complete census.
+    struct InjectedCensus {
+        census: provenant_supervisor::census::Census,
+        cwds: BTreeMap<i64, CwdObservation>,
+        current: ProcessFact,
+    }
+    impl ProcessObserver for InjectedCensus {
+        fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
+            Ok("boot".into())
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            match self.census.process(pid) {
+                ProcessLookup::Present(fact) => ProcessObservation::Present(fact.clone()),
+                _ => ProcessObservation::Absent,
+            }
+        }
+        fn census(
+            &self,
+            _: usize,
+        ) -> Result<provenant_supervisor::census::Census, provenant_supervisor::census::CensusError>
+        {
+            Ok(self.census.clone())
+        }
+    }
+    impl CwdObserver for InjectedCensus {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(self.cwds.get(&pid).cloned().unwrap_or(CwdObservation::Gone))
+        }
+    }
+    impl WorkerObserver for InjectedCensus {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            observe_worker_roots(roots, self, self, &self.current, true)
+        }
+        fn requires_complete_census(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn unreadable_foreign_process_does_not_block_pruning_a_merged_clean_tree()
+    -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, ProcessIdentity};
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-M", "main"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let cancellation = cancel();
+        let fact = |pid: i64| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let outside = canonicalize(fixture._temp.path())?;
+        // The caller, a readable bystander, a process whose directory the
+        // kernel will not reveal, and a listed PID it will not describe.
+        let census = |unknown: ObservationIssue| {
+            Census::from_observations(
+                [fact(100), fact(200), fact(300)],
+                [(400, unknown)],
+                [],
+                true,
+                false,
+                32,
+            )
+        };
+        let observer = |unknown, inside: Option<&Path>| -> Result<_, Box<dyn Error>> {
+            let mut cwds = BTreeMap::from([
+                (200, CwdObservation::Path(outside.clone())),
+                (300, CwdObservation::PermissionDenied),
+            ]);
+            if let Some(path) = inside {
+                cwds.insert(200, CwdObservation::Path(path.to_path_buf()));
+            }
+            Ok(InjectedCensus {
+                census: census(unknown)?,
+                cwds,
+                current: fact(100),
+            })
+        };
+        let remove_named = |workers: &InjectedCensus, name: &str| {
+            remove(
+                &WorktreeContext {
+                    workers,
+                    ..test_context.context()
+                },
+                WorktreeRemove::Name {
+                    name: name.to_owned(),
+                    discard: false,
+                    integration: None,
+                    expected_head: None,
+                },
+                &cancellation,
+            )
+        };
+        let created = create(
+            &test_context.context(),
+            WorktreeCreate {
+                branch: "landed".to_owned(),
+                base: None,
+            },
+            &cancellation,
+        )?;
+
+        // Uncertainty that could place a process anywhere keeps the tree.
+        let unplaced = observer(ObservationIssue::Io, None)?;
+        assert_eq!(
+            unplaced.observe_roots(std::slice::from_ref(&created.path))[&created.path],
+            WorkerState::Unknown
+        );
+        assert!(matches!(
+            remove_named(&unplaced, "landed"),
+            Err(WorktreeError::IncompleteCensus)
+        ));
+        // A readable process inside the tree still keeps it.
+        let live = observer(ObservationIssue::PermissionDenied, Some(&created.path))?;
+        assert!(matches!(
+            remove_named(&live, "landed"),
+            Err(WorktreeError::LiveWriter)
+        ));
+        assert!(created.path.exists());
+
+        // Processes the kernel refuses to describe are host diagnostics.
+        let foreign = observer(ObservationIssue::PermissionDenied, None)?;
+        assert_eq!(
+            foreign.observe_roots(std::slice::from_ref(&created.path))[&created.path],
+            WorkerState::Free
+        );
+        let listed = list(
+            &WorktreeContext {
+                workers: &foreign,
+                ..test_context.context()
+            },
+            &cancellation,
+        )?;
+        assert!(
+            listed
+                .iter()
+                .any(|entry| entry.path == created.path && entry.writer == WriterState::Free)
+        );
+        remove_named(&foreign, "landed")?;
+        assert!(!created.path.exists());
         Ok(())
     }
 
