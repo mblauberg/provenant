@@ -29,14 +29,18 @@ pub(super) fn read(
         }
         found => found?,
     };
-    let mut stores: VecDeque<_> = VecDeque::from([(
-        roots.state.clone(),
-        0u64,
-        None::<(ProjectId, AttemptId)>,
-        false,
-    )]);
+    let mut stores: VecDeque<_> =
+        VecDeque::from([(roots.state.clone(), 0u64, None::<(ProjectId, AttemptId)>)]);
     let mut nodes = Vec::new();
-    let mut seen = BTreeMap::new();
+    #[allow(clippy::type_complexity)]
+    let mut seen: BTreeMap<
+        (ProjectId, AttemptId),
+        (
+            (provenant_core::RunId, provenant_core::TaskId),
+            (Option<AttemptId>, Option<AttemptId>, Option<AttemptId>),
+            String,
+        ),
+    > = BTreeMap::new();
     let mut duplicate_count = 0u64;
     let mut conflicts = Vec::new();
     let mut examined = 0u64;
@@ -54,7 +58,7 @@ pub(super) fn read(
     .into_iter()
     .map(|key| (key, (0, 0)))
     .collect();
-    while let Some((state, depth, owner, expected)) = stores.pop_front() {
+    while let Some((state, depth, owner)) = stores.pop_front() {
         let call = provenant_run::Request {
             clock: &clock,
             budget: WaitBudget::cli(clock.mono_now(), 5).map_err(|_| Error::Encode)?,
@@ -78,10 +82,8 @@ pub(super) fn read(
         let store = match RunStore::open_read_only(&context, &call) {
             Ok(Some(store)) => store,
             Ok(None) => {
-                if owner.is_some() && expected {
+                if owner.is_some() {
                     unfetched.push(json!({"project_id":owner_project,"parent_attempt":owner_attempt,"reason":"missing_store"}));
-                } else if owner.is_some() {
-                    children_absent += 1;
                 }
                 continue;
             }
@@ -94,6 +96,7 @@ pub(super) fn read(
         if depth == 0 {
             root_coverage = "complete";
         }
+        let store_path = state.as_path().to_string_lossy().into_owned();
         let mut after = 0;
         let mut through = None;
         loop {
@@ -125,13 +128,13 @@ pub(super) fn read(
                 let key = (attempt.project_id, attempt.attempt_id);
                 let identity = (attempt.run_id, attempt.task_id);
                 let parents = (lane.run.parent_attempt, lane.run.parent, attempt.retry_of);
-                if let Some((existing, existing_parents)) = seen.get(&key) {
+                if let Some((existing, existing_parents, existing_store)) = seen.get(&key) {
                     duplicate_count += 1;
                     if *existing != identity {
-                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_identity"}));
+                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_identity","values":{"stored":{"run_id":existing.0,"task_id":existing.1},"observed":{"run_id":identity.0,"task_id":identity.1}},"store":{"stored":existing_store,"observed":store_path.clone()}}));
                     }
                     if *existing_parents != parents {
-                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_parents"}));
+                        conflicts.push(json!({"project_id":attempt.project_id,"attempt_id":attempt.attempt_id,"reason":"conflicting_parents","values":{"stored":{"dispatch":existing_parents.0,"continuation":existing_parents.1,"retry":existing_parents.2},"observed":{"dispatch":parents.0,"continuation":parents.1,"retry":parents.2}},"store":{"stored":existing_store,"observed":store_path.clone()}}));
                     }
                     let duplicate_child = state
                         .as_path()
@@ -143,7 +146,7 @@ pub(super) fn read(
                     }
                     continue;
                 }
-                seen.insert(key, (identity, parents));
+                seen.insert(key, (identity, parents, store_path.clone()));
                 let usage = serde_json::to_value(&attempt.usage).map_err(|_| Error::Encode)?;
                 for (name, (sum, missing)) in &mut totals {
                     if let Some(value) = usage[*name].as_u64() {
@@ -158,10 +161,9 @@ pub(super) fn read(
                     .join(attempt.attempt_id.to_string());
                 let mut inputs = RootInputs::new("/".into(), "/__provenant_tree_excluded__".into());
                 inputs.state_dir = Some(child_path.clone());
-                let expected = !lane.run.children.is_empty();
                 match std::fs::symlink_metadata(&child_path) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        if expected {
+                        if !lane.run.children.is_empty() {
                             unfetched.push(json!({"project_id":attempt.project_id,"parent_attempt":attempt.attempt_id,"reason":"missing_store"}));
                         } else { children_absent += 1; }
                     }
@@ -172,7 +174,7 @@ pub(super) fn read(
                     }
                     Ok(_) => match inputs.resolve(&provenant_os::fs::SystemPathResolver) {
                         Ok(child) if child.state.as_path() == child_path => {
-                            stores.push_back((child.state, depth + 1, Some((attempt.project_id, attempt.attempt_id)), expected))
+                            stores.push_back((child.state, depth + 1, Some((attempt.project_id, attempt.attempt_id))))
                         }
                         _ => unfetched.push(
                             json!({"project_id":attempt.project_id,"parent_attempt":attempt.attempt_id,"reason":"unavailable"}),
@@ -279,21 +281,23 @@ mod tests {
         let mut request: CanonicalRequest = serde_json::from_value(
             json!({"schema_version":1,"tasks":[{"task_id":task,"prompt_digest":CanonicalV1::file_digest(b"body"),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null,"lane_depth":1}),
         )?;
-        let prepared =
-            |n: u8, request: CanonicalRequest| -> Result<PreparedRun, Box<dyn std::error::Error>> {
-                Ok(PreparedRun {
-                    run_id: RunId::from_bytes([n; 16]),
-                    operation_id: OperationId::parse(&format!("tree-{n}"))?,
-                    created_at: clock.wall_now()?,
-                    request,
-                    attempts: vec![NewAttempt {
-                        task_id: task,
-                        attempt_id: AttemptId::from_bytes([n; 16]),
-                        prompt: "body".into(),
-                    }],
-                })
-            };
-        store.create(&prepared(1, request.clone())?, &call)?;
+        let prepared = |run: u8,
+                        attempt: u8,
+                        request: CanonicalRequest|
+         -> Result<PreparedRun, Box<dyn std::error::Error>> {
+            Ok(PreparedRun {
+                run_id: RunId::from_bytes([run; 16]),
+                operation_id: OperationId::parse(&format!("tree-{run}-{attempt}"))?,
+                created_at: clock.wall_now()?,
+                request,
+                attempts: vec![NewAttempt {
+                    task_id: task,
+                    attempt_id: AttemptId::from_bytes([attempt; 16]),
+                    prompt: "body".into(),
+                }],
+            })
+        };
+        store.create(&prepared(1, 1, request.clone())?, &call)?;
         let leaf = read(&roots, None, 1, 100, false)?;
         assert_eq!(leaf["coverage"]["nested_runs"], "complete");
         assert_eq!(leaf["children_absent"], 1);
@@ -304,7 +308,7 @@ mod tests {
             ..context.clone()
         };
         let other_store = RunStore::open(&other_context, &call)?;
-        other_store.create(&prepared(4, request.clone())?, &call)?;
+        other_store.create(&prepared(4, 4, request.clone())?, &call)?;
         let child_path = roots
             .state
             .as_path()
@@ -313,6 +317,7 @@ mod tests {
         inputs.state_dir = Some(child_path);
         let child = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let child_state = child.state.clone();
+        let child_state_path = child_state.as_path().to_string_lossy().into_owned();
         let child_store = RunStore::open(
             &ExecutionContext {
                 state_root: child.state,
@@ -331,15 +336,15 @@ mod tests {
         duplicate.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
         request.parent_attempt = Some(AttemptId::from_bytes([1; 16]));
         request.lane_depth = Some(2);
-        child_store.create(&prepared(2, request.clone())?, &call)?;
+        child_store.create(&prepared(2, 2, request.clone())?, &call)?;
         request.parent = Some(AttemptId::from_bytes([2; 16]));
         request.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
-        child_store.create(&prepared(3, request.clone())?, &call)?;
+        child_store.create(&prepared(3, 3, request.clone())?, &call)?;
         let missing = read(&roots, None, 3, 100, false)?;
         assert_eq!(missing["identity_conflicts"], json!([]));
         assert_eq!(missing["unfetched_children"], json!([]));
         assert_eq!(missing["coverage"]["nested_runs"], "partial");
-        other_child.create(&prepared(4, duplicate)?, &call)?;
+        other_child.create(&prepared(4, 4, duplicate)?, &call)?;
         let child4_path = roots
             .state
             .as_path()
@@ -356,7 +361,7 @@ mod tests {
         let mut other_request = request.clone();
         other_request.parent = None;
         other_request.parent_attempt = Some(AttemptId::from_bytes([4; 16]));
-        child4.create(&prepared(2, other_request)?, &call)?;
+        child4.create(&prepared(2, 2, other_request)?, &call)?;
         let tree = read(&roots, None, 3, 100, false)?;
         assert_eq!(tree["totals"]["attempts"], 5);
         assert_eq!(
@@ -378,6 +383,11 @@ mod tests {
             tree["identity_conflicts"][0]["reason"],
             "conflicting_parents"
         );
+        let exact = read(&roots, None, 3, 6, false)?;
+        assert_eq!(exact["totals"]["attempts"], 5);
+        assert_eq!(exact["truncated"], false);
+        assert_eq!(exact["unfetched_children"], json!([]));
+        assert_eq!(exact["totals"]["duplicate_observations"], 1);
         assert_eq!(tree["totals"]["usage"]["reasoning"]["missing"], 5);
         assert!(
             tree["edges"]
@@ -426,8 +436,45 @@ mod tests {
         let detailed = read(&roots, None, 3, 100, true)?;
         assert!(detailed["nodes"][0]["metadata"]["run"].is_object());
         assert!(serde_json::to_vec(&tree)?.len() < serde_json::to_vec(&detailed)?.len());
+        let mut pair = request.clone();
+        pair.parent = None;
+        pair.parent_attempt = Some(AttemptId::from_bytes([9; 16]));
+        pair.lane_depth = Some(3);
+        child4.create(&prepared(6, 6, pair.clone())?, &call)?;
+        other_child.create(&prepared(7, 6, pair)?, &call)?;
+        let identified = read(&roots, None, 3, 100, false)?;
+        let conflicting = identified["identity_conflicts"]
+            .as_array()
+            .ok_or("conflicts")?
+            .iter()
+            .find(|entry| entry["attempt_id"] == json!(AttemptId::from_bytes([6; 16])))
+            .ok_or("conflicting_identity")?;
+        assert_eq!(conflicting["reason"], "conflicting_identity");
+        assert_eq!(
+            conflicting["values"]["stored"]["run_id"],
+            json!(RunId::from_bytes([6; 16]))
+        );
+        assert_eq!(
+            conflicting["values"]["observed"]["run_id"],
+            json!(RunId::from_bytes([7; 16]))
+        );
+        assert_eq!(
+            conflicting["store"]["stored"],
+            child4_path.to_string_lossy().as_ref()
+        );
+        assert_eq!(conflicting["store"]["observed"], child_state_path.as_str());
+        assert!(
+            !identified["identity_conflicts"]
+                .as_array()
+                .ok_or("conflicts")?
+                .iter()
+                .any(
+                    |entry| entry["attempt_id"] == json!(AttemptId::from_bytes([6; 16]))
+                        && entry["reason"] == "conflicting_parents"
+                )
+        );
         let selected = read(&roots, Some(project2), 3, 100, false)?;
-        assert_eq!(selected["totals"]["attempts"], 2);
+        assert_eq!(selected["totals"]["attempts"], 3);
         assert!(
             selected["nodes"]
                 .as_array()
@@ -468,6 +515,29 @@ mod tests {
                 .ok_or("unfetched")?
                 .iter()
                 .any(|entry| entry["detail"] == "duplicate observation child store not traversed")
+        );
+        let store_less = roots
+            .state
+            .as_path()
+            .join("children")
+            .join(AttemptId::from_bytes([1; 16]).to_string())
+            .join("children")
+            .join(AttemptId::from_bytes([2; 16]).to_string());
+        std::fs::create_dir_all(&store_less)?;
+        // A private directory with no store is a gap; a non-private one is unavailable.
+        std::fs::set_permissions(
+            &store_less,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
+        let empty_child = read(&roots, None, 3, 100, false)?;
+        assert!(
+            empty_child["unfetched_children"]
+                .as_array()
+                .ok_or("unfetched")?
+                .iter()
+                .any(|entry| entry["reason"] == "missing_store"
+                    && entry["project_id"] == json!(project)
+                    && entry["parent_attempt"] == json!(AttemptId::from_bytes([2; 16])))
         );
         let db = rusqlite::Connection::open(child4_path.join("run.sqlite3"))?;
         let raw: Vec<u8> = db.query_row(

@@ -262,6 +262,39 @@ pub struct RouteGroup {
     pub route: RouteFact,
     pub totals: Totals,
 }
+/// A single work-context dimension for attribution. Missing values form a group.
+#[derive(Clone, Copy, Debug)]
+pub enum ContextKey {
+    WorkItem,
+    GraphId,
+    NodeId,
+    Preset,
+    Pattern,
+    Role,
+    RoleDigest,
+    ExperimentArm,
+    SelectionSource,
+}
+impl ContextKey {
+    fn value(self, context: &provenant_records::run::WorkContext) -> &Option<String> {
+        match self {
+            Self::WorkItem => &context.work_item,
+            Self::GraphId => &context.graph_id,
+            Self::NodeId => &context.node_id,
+            Self::Preset => &context.preset,
+            Self::Pattern => &context.pattern,
+            Self::Role => &context.role,
+            Self::RoleDigest => &context.role_digest,
+            Self::ExperimentArm => &context.experiment_arm,
+            Self::SelectionSource => &context.selection_source,
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct ContextGroup {
+    pub value: Option<String>,
+    pub totals: Totals,
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct DailyGroup {
     pub day: String,
@@ -285,6 +318,8 @@ pub struct StatsReport {
     pub prices: PriceIdentity,
     pub totals: Totals,
     pub routes: Vec<RouteGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_groups: Option<Vec<ContextGroup>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daily_accounts: Option<Vec<DailyGroup>>,
     /// Highest numbered selected terminal attempt per task; never active work.
@@ -511,9 +546,30 @@ pub fn stats_with_chair(
     prices: &PriceTable,
     window: Window,
 ) -> Stats {
+    stats_inner(facts, chairs, prices, window, None)
+}
+
+/// Reduce attempts by one work-context dimension as well as the usual totals.
+pub fn stats_by_context(
+    facts: impl IntoIterator<Item = AttemptFact>,
+    prices: &PriceTable,
+    window: Window,
+    key: ContextKey,
+) -> Stats {
+    stats_inner(facts, std::iter::empty(), prices, window, Some(key))
+}
+
+fn stats_inner(
+    facts: impl IntoIterator<Item = AttemptFact>,
+    chairs: impl IntoIterator<Item = crate::usage::ChairSession>,
+    prices: &PriceTable,
+    window: Window,
+    context_key: Option<ContextKey>,
+) -> Stats {
     if window.since.zip(window.until).is_some_and(|(s, u)| s >= u) {
         return Err(TelemetryError::InvalidWindow);
     }
+    let mut context_groups = BTreeMap::<Option<String>, Accumulator>::new();
     let mut total = Accumulator::default();
     let mut routes = BTreeMap::<RouteFact, Accumulator>::new();
     let mut daily = BTreeMap::<(String, RouteFact), Accumulator>::new();
@@ -580,6 +636,26 @@ pub fn stats_with_chair(
             &mut coverage.missing_account,
             u64::from(key.account_label.is_none()),
         )?;
+        if fact
+            .context
+            .as_ref()
+            .is_some_and(|context| !context.valid())
+        {
+            return Err(TelemetryError::InvalidFact("work context"));
+        }
+        if let Some(dimension) = context_key {
+            let value = fact
+                .context
+                .as_ref()
+                .and_then(|context| dimension.value(context).clone());
+            let size = value.as_ref().map_or(0, String::len);
+            budget.group(&mut context_groups, value, size)?.record(
+                &fact,
+                cost.numerator,
+                cost.missing_cost,
+                cost.subscription,
+            )?;
+        }
         budget.group(&mut routes, key.clone(), bytes)?.record(
             &fact,
             cost.numerator,
@@ -629,6 +705,14 @@ pub fn stats_with_chair(
         prices: prices.identity.clone(),
         totals: total.finish()?,
         routes,
+        context_groups: if context_key.is_some() {
+            Some(groups(context_groups, |value, totals| ContextGroup {
+                value,
+                totals,
+            })?)
+        } else {
+            None
+        },
         daily_accounts: window.detail.then_some(daily),
         window,
         latest_task_outcomes,

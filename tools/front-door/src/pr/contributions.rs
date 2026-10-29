@@ -2,7 +2,7 @@
 use super::{Result, execute, successful};
 use crate::{emit, fail, roots};
 use provenant_cli::Globals;
-use provenant_core::{CancelToken, Clock, GitOid, ProjectId, WaitBudget};
+use provenant_core::{CancelToken, Clock, GitOid, ProjectId, WaitBudget, WallTime};
 use provenant_os::clock::SystemClock;
 use provenant_records::{CommandResult, Outcome};
 use provenant_run::{Contributions, PullRequest, Request};
@@ -91,27 +91,9 @@ impl Tracker {
                 continue;
             }
             let swept = (|| -> Result<()> {
-                #[derive(serde::Deserialize)]
-                struct State {
-                    state: String,
-                }
-                let bytes = successful(execute(
-                    &self.resolved.project,
-                    &[
-                        "gh",
-                        "pr",
-                        "view",
-                        &candidate.number.to_string(),
-                        "--repo",
-                        &candidate.repository,
-                        "--json",
-                        "state",
-                    ],
-                    false,
-                )?)?;
-                let state = serde_json::from_slice::<State>(&bytes)?.state;
+                let (state, ended_at) = self.observed_end(&candidate)?;
                 if matches!(state.as_str(), "CLOSED" | "MERGED") {
-                    db.close(project, &candidate, &call)?;
+                    db.close_at(project, &candidate, ended_at, &call)?;
                 }
                 Ok(())
             })();
@@ -124,6 +106,25 @@ impl Tracker {
         }
         db.bind(project, branch, &pr, head, &call)?;
         Ok(())
+    }
+
+    /// GitHub state and end time of a PR from one gh call.
+    fn observed_end(&self, pr: &PullRequest) -> Result<(String, Option<WallTime>)> {
+        let bytes = successful(execute(
+            &self.resolved.project,
+            &[
+                "gh",
+                "pr",
+                "view",
+                &pr.number.to_string(),
+                "--repo",
+                &pr.repository,
+                "--json",
+                "state,mergedAt,closedAt",
+            ],
+            false,
+        )?)?;
+        parse_end(&bytes)
     }
 
     pub(super) fn close(&self, number: u64) -> Result<()> {
@@ -141,9 +142,18 @@ impl Tracker {
         let closed = if Contributions::open_read_only(self.resolved.roots.state.as_path(), &call)?
             .is_some()
         {
-            Contributions::open(self.resolved.roots.state.as_path(), &call)?.close(
+            // An unreadable end time still closes the binding, without reassignment.
+            let ended_at = self
+                .observed_end(&self.pr(number))
+                .map(|(_, ended_at)| ended_at)
+                .unwrap_or_else(|error| {
+                    warn(Some(number), &format!("PR end time unavailable: {error}"));
+                    None
+                });
+            Contributions::open(self.resolved.roots.state.as_path(), &call)?.close_at(
                 project,
                 &self.pr(number),
+                ended_at,
                 &call,
             )?
         } else {
@@ -157,6 +167,28 @@ impl Tracker {
         }
         Ok(())
     }
+}
+
+/// GitHub reports whole seconds, and the instant is compared with the local
+/// clock that stamped `queued_at`, so skew can misplace attempts near the boundary.
+fn parse_end(bytes: &[u8]) -> Result<(String, Option<WallTime>)> {
+    #[derive(serde::Deserialize)]
+    struct State {
+        state: String,
+        #[serde(rename = "mergedAt")]
+        merged_at: Option<String>,
+        #[serde(rename = "closedAt")]
+        closed_at: Option<String>,
+    }
+    let view = serde_json::from_slice::<State>(bytes)?;
+    let ended_at = match view.merged_at.or(view.closed_at) {
+        Some(text) => {
+            let stamp: jiff::Timestamp = text.parse()?;
+            Some(WallTime::from_micros(stamp.as_microsecond())?)
+        }
+        None => None,
+    };
+    Ok((view.state, ended_at))
 }
 
 /// Workflow success must not depend on optional attribution storage.
@@ -226,6 +258,16 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             .map(|db| db.skipped_sealed_for_pr(&pr, &call))
             .transpose()?
             .unwrap_or(0);
+        let reassigned = db
+            .as_ref()
+            .map(|db| db.reassigned_from_pr(&pr, &call))
+            .transpose()?
+            .unwrap_or(0);
+        let unplaced = db
+            .as_ref()
+            .map(|db| db.unplaced_for_pr(&pr, &call))
+            .transpose()?
+            .unwrap_or(0);
         let ambiguous = attempts.iter().any(|row| row.ambiguous);
         let bound = project_bound
             && db
@@ -292,7 +334,7 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             ));
         }
         text.push_str(&format!(
-            "local_attempts: {coverage}\nskipped_sealed: {skipped_sealed}\n"
+            "local_attempts: {coverage}\nskipped_sealed: {skipped_sealed}\nreassigned: {reassigned}\nunplaced: {unplaced}\n"
         ));
         text.push_str(&format!(
             "peer_attempts: unknown (known hosts: {})\n",
@@ -304,7 +346,7 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
         ));
         Ok((
             json!({"pull_request":pr,"attempts":attempts,
-            "coverage":{"local_attempts":coverage, "ambiguous":ambiguous,"truncated":truncated,"skipped_sealed":skipped_sealed, "peer_attempts":"unknown","known_peer_hosts":peers}}),
+            "coverage":{"local_attempts":coverage, "ambiguous":ambiguous,"truncated":truncated,"skipped_sealed":skipped_sealed,"reassigned":reassigned,"unplaced":unplaced, "peer_attempts":"unknown","known_peer_hosts":peers}}),
             text,
         ))
     })();
@@ -322,5 +364,23 @@ pub(super) fn run(number: u64, bind_requested: bool, globals: &Globals) -> u8 {
             &error.to_string(),
             globals,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn end_time_prefers_merge_and_tolerates_nulls() {
+        let (state, at) = super::parse_end(br#"{"state":"MERGED","mergedAt":"2026-01-02T03:04:05Z","closedAt":"2026-01-02T03:04:06Z"}"#).unwrap();
+        assert_eq!(state, "MERGED");
+        assert_eq!(at.unwrap().as_micros(), 1_767_323_045_000_000);
+        let (_, at) = super::parse_end(
+            br#"{"state":"CLOSED","mergedAt":null,"closedAt":"2026-01-02T03:04:06Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(at.unwrap().as_micros(), 1_767_323_046_000_000);
+        let (_, at) =
+            super::parse_end(br#"{"state":"CLOSED","mergedAt":null,"closedAt":null}"#).unwrap();
+        assert!(at.is_none());
     }
 }

@@ -105,6 +105,7 @@ pub(super) fn input() -> PreparedRun {
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                context: None,
                 extra: Default::default(),
                 build_heavy: false,
                 title: None,
@@ -788,7 +789,13 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     let cancel = CancelToken::new();
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context, &call)?;
-    let input = input();
+    let mut input = input();
+    let work = provenant_records::run::WorkContext {
+        work_item: Some("issue-42".into()),
+        role: Some("reviewer".into()),
+        ..Default::default()
+    };
+    input.request.tasks[0].context = Some(work.clone());
     // A schema-v1 request without a profile must keep its sealed digest.
     let mut unstamped = serde_json::to_value(&input.request)?;
     for task in unstamped["tasks"].as_array_mut().ok_or("tasks")? {
@@ -873,6 +880,11 @@ fn create_publish_and_read_exact_bounded_facts() -> TestResult {
     assert!(all.eof && all.complete);
     assert_eq!(all.bytes, publication().result.as_bytes());
     let fact = store.attempt(id, &call)?;
+    assert_eq!(
+        store.request(run.run_id, &call)?.tasks[0].context,
+        Some(work.clone())
+    );
+    assert_eq!(fact.context, Some(work));
     assert_eq!(fact.output_refs[0].digest, all.digest);
     assert_eq!(fact.provider_ms, Some(1));
     let reviewer = fact
@@ -1703,5 +1715,33 @@ fn lane_selection_is_owned_and_skips_seen_completions() -> TestResult {
     let seen = store.seen_cursor("default", true, &call)?;
     assert_eq!(seen, last, "the cursor never moves back");
     assert_eq!(count(&query(Some(context.actor_id), Some(seen)))?, 0);
+    Ok(())
+}
+
+#[test]
+fn work_context_bounds_are_enforced() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    for value in ["x".repeat(257), "  ".into(), "bad\nvalue".into()] {
+        let mut request = input();
+        request.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+            work_item: Some(value),
+            ..Default::default()
+        });
+        assert!(matches!(
+            store.create(&request, &call),
+            Err(RunError::Validation("work context"))
+        ));
+    }
+    let mut request = input();
+    request.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+        work_item: Some("x".repeat(256)),
+        ..Default::default()
+    });
+    store.create(&request, &call)?;
     Ok(())
 }

@@ -6226,6 +6226,7 @@ mod peer_tests {
                     lane_depth: 1,
                     parent_attempt: None,
                     tasks: vec![provenant_run::DispatchTask {
+                        context: None,
                         build_heavy: false,
                         title: None,
                         task_id: TaskId::from_bytes([3; 16]),

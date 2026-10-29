@@ -2798,6 +2798,7 @@ mod tests {
         for entry in REGISTRY {
             let adapter = entry.adapter.id();
             let requested = run::TaskRequest {
+                context: None,
                 extra: Default::default(),
                 build_heavy: false,
                 title: None,
@@ -3163,6 +3164,7 @@ mod tests {
         let prompt = "é".repeat(75_000);
         let review_oid = run::resolve_git_base(&git, &project, "HEAD")?;
         let task = run::TaskRequest {
+            context: None,
             extra: Default::default(),
             build_heavy: false,
             title: None,
@@ -3320,6 +3322,31 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "PROVENANT_LANE_BASE" && value == review_oid.as_str())
         );
+        // The writer plan the CLI prepares, with its grant list, must leave the
+        // build slot directory out of reach: a lane cannot create, unlink or
+        // replace a slot file.
+        let confinement = launch.confinement.as_ref().ok_or("confinement")?;
+        let slots = confinement
+            .state_root
+            .join(provenant_os::build_slots::DIRECTORY.join("/"));
+        let grants = provenant_confinement::write_grants(
+            confinement.plan.permissions(),
+            &confinement.profile,
+        );
+        assert!(!grants.is_empty(), "the profile lists its write grants");
+        for grant in &grants {
+            let reaches = match grant.scope {
+                PathScope::Exact => grant.path == slots,
+                PathScope::Subtree => slots.starts_with(&grant.path),
+            };
+            assert!(
+                !reaches,
+                "{:?} grant {} reaches {}",
+                grant.source,
+                grant.path.display(),
+                slots.display()
+            );
+        }
         // Exercise the host project policy through preparation and the actual
         // generated shim, with a fake gh so no GitHub access is needed.
         std::fs::create_dir_all(home.join(".config/gh"))?;

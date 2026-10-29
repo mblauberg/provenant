@@ -696,6 +696,7 @@ mod tests {
                 lane_depth: 2,
                 parent_attempt: child.request.parent_attempt,
                 tasks: vec![run::DispatchTask {
+                    context: None,
                     build_heavy: false,
                     title: None,
                     task_id: task.task_id,
@@ -1544,6 +1545,7 @@ mod tests {
             for index in first..(first + 64).min(256) {
                 let task_id = TaskId::from_bytes(index.to_be_bytes());
                 child.request.tasks.push(run::TaskRequest {
+                    context: None,
                     title: None,
                     task_id,
                     ..template.clone()
@@ -1660,6 +1662,7 @@ mod tests {
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    context: None,
                     extra: Default::default(),
                     build_heavy: false,
                     title: None,

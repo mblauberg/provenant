@@ -1627,6 +1627,7 @@ pub fn submit_with_host(
         .into_iter()
         .map(|task| {
             Ok(run::DispatchTask {
+                context: None,
                 build_heavy: task.build_heavy,
                 profile: profile.clone(),
                 title: task.title,
@@ -8190,6 +8191,7 @@ mod tests {
                 fresh_continuation: None,
                 schema_version: 1,
                 tasks: vec![run::TaskRequest {
+                    context: None,
                     extra: Default::default(),
                     build_heavy: false,
                     title: None,

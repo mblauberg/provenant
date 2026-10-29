@@ -225,6 +225,7 @@ fn overview_needs_you() -> Result {
             chair: None,
             operation_id: OperationId::parse("overview-lane")?,
             tasks: vec![DispatchTask {
+                context: None,
                 build_heavy: false,
                 title: Some("Review changes".into()),
                 task_id: TaskId::from_bytes([3; 16]),
