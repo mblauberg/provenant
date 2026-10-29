@@ -19,13 +19,23 @@ Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
 
 New stdout/stderr captures and settled `result.md` files mask known credential
 shapes before storage. Settlement also masks them in the attempt's Codex and
-Claude session transcripts before provider state is retained or archived.
-Result digests identify the stored bytes, and `redacted: true` means the stored
-result is a filtered rendering or the fixed withheld placeholder. A redaction
-failure withholds the result and settles the lane failed instead of retrying
-forever. Unknown secret formats, earlier run files and provider history archived
-before this rule still need care when sharing. See
-[output redaction and identity](../specs/run.md#output-redaction-and-identity).
+Claude session transcripts, including Claude's `.txt` and `.json` tool-result
+files, before provider state is retained or archived. Result digests identify
+the stored bytes, and `redacted: true` means the stored result is a filtered
+rendering or the fixed withheld placeholder. A result redaction failure withholds
+the result; a transcript failure keeps the filtered result. Either one settles
+a lane that would otherwise succeed as failed, instead of retrying forever. A
+cancelled, timed-out or lost lane keeps its outcome and names the failure in its
+reason.
+
+Some provider stores are not scrubbed and keep whatever a lane printed. These
+are Codex's SQLite databases with their WAL, SHM and journal companions, agy's
+`agy-home` copy of its history, and Claude state outside `projects/` other than
+`history.jsonl` and `session_index.jsonl`. Unknown secret formats, earlier run
+files and provider history archived before this rule still need care when
+sharing. See
+[output redaction and identity](../specs/run.md#output-redaction-and-identity)
+for the full list.
 
 A valid final handoff declaring `stopped_early` or `blocked` makes an otherwise
 successful lane settle as `review_required`. `run --wait` and `lanes` show the

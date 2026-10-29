@@ -3,7 +3,7 @@
 //! Exact literal prefixes and incomplete token markers stay buffered across
 //! chunks. The capture filter's EOF hook releases any unmatched tail.
 use provenant_os::exec::{CaptureFilter, FRAME_LIMIT, FilterError};
-use provenant_os::fs::{Directory, FileKind};
+use provenant_os::fs::{Directory, FileHandle, FileKind, Metadata};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -477,28 +477,72 @@ pub fn known_shapes(bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
 const SESSION_CHUNK: usize = 32 * 1024;
 const SESSION_DEPTH: u8 = 8;
 const SESSION_ENTRIES: usize = 100_000;
+const SESSION_CANDIDATES: usize = 64;
 const SESSION_STAGING: &str = ".session-redact-";
 static SESSION_STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Refusals seen during one scrub. A refusal is recorded and the scrub goes on
+/// to the remaining entries, so one bad file never leaves another unscrubbed.
+#[derive(Default)]
+struct Scrub {
+    rewritten: usize,
+    failed: bool,
+}
+
+impl Scrub {
+    /// Keep a value that was read, or record the refusal and move on.
+    fn keep<T>(&mut self, result: Result<T, FilterError>) -> Option<T> {
+        result.inspect_err(|_| self.failed = true).ok()
+    }
+
+    fn file(&mut self, dir: &Directory, name: &OsStr) {
+        match scrub_file(dir, name) {
+            Ok(rewritten) => self.rewritten += usize::from(rewritten),
+            Err(_) => self.failed = true,
+        }
+    }
+
+    fn finish(self) -> Result<usize, FilterError> {
+        if self.failed {
+            Err(FilterError)
+        } else {
+            Ok(self.rewritten)
+        }
+    }
+}
 
 /// Post-process provider-owned session text under an attempt's private state.
 ///
 /// Codex writes rollouts and history files and Claude writes project sessions
 /// there, so a credential a lane printed can survive in a transcript even when
-/// captures and the result are filtered. Only `.jsonl` transcripts in the known
-/// session layouts are rewritten in place; binary stores, credentials, cache
-/// trees and links are never touched. A file without a known shape is left as
-/// it is. Returns the number of rewritten files.
+/// captures and the result are filtered. `.jsonl` transcripts in the known
+/// session layouts are rewritten in place. Claude's `projects` roots also hold
+/// large tool output as regular `.txt` and `.json` files, so those are scrubbed
+/// too. Binary stores, credentials, cache trees and links are never touched. A
+/// file without a known shape is only read and left as it is.
+///
+/// Every entry is visited even when another one is refused: a link, a hard
+/// link, a file that changes while it is read, a line over the frame bound, a
+/// tree deeper than the bound, or more candidates than the bound. Each refusal
+/// is recorded and the call returns an error once the walk is done. Candidates
+/// past the bound are not descended into. Returns the number of rewritten files
+/// when every entry was scrubbed.
 pub fn scrub_session_history(root: &Path) -> Result<usize, FilterError> {
     let state = match Directory::open_anchor(root) {
         Ok(state) => state,
         Err(error) if error.is_not_found() => return Ok(0),
         Err(_) => return Err(FilterError),
     };
-    let mut rewritten = 0;
-    scrub_layout(&state, &mut rewritten)?;
-    let mut entries = 0;
-    for candidate in state.entries().map_err(|_| FilterError)? {
-        let candidate = candidate.map_err(|_| FilterError)?;
+    let mut scrub = Scrub::default();
+    scrub_layout(&state, &mut scrub);
+    let Some(entries) = scrub.keep(state.entries().map_err(|_| FilterError)) else {
+        return scrub.finish();
+    };
+    let mut candidates = 0;
+    for candidate in entries {
+        let Some(candidate) = scrub.keep(candidate.map_err(|_| FilterError)) else {
+            break;
+        };
         let is_candidate = candidate.to_str().is_some_and(|name| {
             name.strip_prefix("candidate-")
                 .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
@@ -506,72 +550,78 @@ pub fn scrub_session_history(root: &Path) -> Result<usize, FilterError> {
         if !is_candidate {
             continue;
         }
-        entries += 1;
-        if entries > 64 {
-            return Err(FilterError);
+        candidates += 1;
+        if candidates > SESSION_CANDIDATES {
+            scrub.failed = true;
+            break;
         }
-        let candidate = state
-            .open_verified_directory(&candidate)
-            .map_err(|_| FilterError)?;
-        scrub_layout(&candidate, &mut rewritten)?;
+        let candidate = scrub.keep(
+            state
+                .open_verified_directory(&candidate)
+                .map_err(|_| FilterError),
+        );
+        if let Some(candidate) = candidate {
+            scrub_layout(&candidate, &mut scrub);
+        }
     }
-    Ok(rewritten)
+    scrub.finish()
 }
 
-fn scrub_layout(dir: &Directory, rewritten: &mut usize) -> Result<(), FilterError> {
+fn scrub_layout(dir: &Directory, scrub: &mut Scrub) {
     for name in ["sessions", "archived_sessions"] {
-        if let Some(sessions) = subdirectory(dir, name)? {
-            scrub_tree(&sessions, 0, rewritten)?;
+        if let Some(Some(sessions)) = scrub.keep(subdirectory(dir, name)) {
+            scrub_tree(&sessions, 0, is_jsonl, scrub);
         }
     }
-    for name in ["history.jsonl", "session_index.jsonl"] {
-        if let Some(file) = regular_file(dir, name)?
-            && scrub_file(dir, &file)?
-        {
-            *rewritten += 1;
+    scrub_files(dir, scrub);
+    if let Some(Some(config)) = scrub.keep(subdirectory(dir, "claude-config")) {
+        if let Some(Some(projects)) = scrub.keep(subdirectory(&config, "projects")) {
+            scrub_tree(&projects, 0, is_projects_text, scrub);
         }
+        scrub_files(&config, scrub);
     }
-    if let Some(config) = subdirectory(dir, "claude-config")? {
-        if let Some(projects) = subdirectory(&config, "projects")? {
-            scrub_tree(&projects, 0, rewritten)?;
-        }
-        for name in ["history.jsonl", "session_index.jsonl"] {
-            if let Some(file) = regular_file(&config, name)?
-                && scrub_file(&config, &file)?
-            {
-                *rewritten += 1;
-            }
-        }
-    }
-    Ok(())
 }
 
-fn scrub_tree(dir: &Directory, depth: u8, rewritten: &mut usize) -> Result<(), FilterError> {
-    if depth > SESSION_DEPTH {
-        return Err(FilterError);
-    }
-    let mut entries = 0;
-    for entry in dir.entries().map_err(|_| FilterError)? {
-        let entry = entry.map_err(|_| FilterError)?;
-        entries += 1;
-        if entries > SESSION_ENTRIES {
-            return Err(FilterError);
+fn scrub_files(dir: &Directory, scrub: &mut Scrub) {
+    for name in ["history.jsonl", "session_index.jsonl"] {
+        if let Some(Some(file)) = scrub.keep(regular_file(dir, name)) {
+            scrub.file(dir, &file);
         }
-        let metadata = dir.metadata_at(&entry, false).map_err(|_| FilterError)?;
+    }
+}
+
+fn scrub_tree(dir: &Directory, depth: u8, wanted: fn(&OsStr) -> bool, scrub: &mut Scrub) {
+    if depth > SESSION_DEPTH {
+        scrub.failed = true;
+        return;
+    }
+    let Some(entries) = scrub.keep(dir.entries().map_err(|_| FilterError)) else {
+        return;
+    };
+    for (index, entry) in entries.enumerate() {
+        if index >= SESSION_ENTRIES {
+            scrub.failed = true;
+            return;
+        }
+        let Some(entry) = scrub.keep(entry.map_err(|_| FilterError)) else {
+            return;
+        };
+        let Some(metadata) = scrub.keep(dir.metadata_at(&entry, false).map_err(|_| FilterError))
+        else {
+            continue;
+        };
         match metadata.kind {
             FileKind::Directory => {
-                let child = dir
-                    .open_verified_directory(&entry)
-                    .map_err(|_| FilterError)?;
-                scrub_tree(&child, depth + 1, rewritten)?;
+                let child =
+                    scrub.keep(dir.open_verified_directory(&entry).map_err(|_| FilterError));
+                if let Some(child) = child {
+                    scrub_tree(&child, depth + 1, wanted, scrub);
+                }
             }
-            FileKind::Regular if is_jsonl(&entry) && scrub_file(dir, &entry)? => {
-                *rewritten += 1;
-            }
+            FileKind::Regular if wanted(&entry) => scrub.file(dir, &entry),
             _ => {}
         }
     }
-    Ok(())
 }
 
 fn subdirectory(dir: &Directory, name: &str) -> Result<Option<Directory>, FilterError> {
@@ -599,58 +649,82 @@ fn is_jsonl(name: &OsStr) -> bool {
     name.to_str().is_some_and(|name| name.ends_with(".jsonl"))
 }
 
+/// Claude keeps large tool output as plain text beside its transcripts.
+fn is_projects_text(name: &OsStr) -> bool {
+    is_jsonl(name)
+        || name
+            .to_str()
+            .is_some_and(|name| name.ends_with(".txt") || name.ends_with(".json"))
+}
+
 /// Rewrite one transcript through the streaming filter, replacing the entry
-/// only when a shape matched. A file that changes while it is read fails
-/// closed; a link or hard link is refused rather than followed.
+/// only when a shape matched. A clean file is read once and never staged,
+/// copied or synced. A file that changes while it is read fails closed; a link
+/// or hard link is refused rather than followed.
 fn scrub_file(dir: &Directory, name: &OsStr) -> Result<bool, FilterError> {
     let before = dir.metadata_at(name, false).map_err(|_| FilterError)?;
     if before.kind != FileKind::Regular || before.links != 1 {
         return Err(FilterError);
     }
+    if !filter_pass(dir, name, &before, None)? {
+        return Ok(false);
+    }
+    let staging = staging_name();
+    let staging = OsStr::new(&staging);
+    let mut target = dir.create_new(staging).map_err(|_| FilterError)?;
+    let staged = filter_pass(dir, name, &before, Some(&mut target)).and_then(|matched| {
+        target.sync().map_err(|_| FilterError)?;
+        Ok(matched)
+    });
+    if !matches!(staged, Ok(true)) {
+        let _ = dir.unlink(staging);
+        return staged;
+    }
+    if dir.replace(staging, dir, name).is_err() {
+        let _ = dir.unlink(staging);
+        return Err(FilterError);
+    }
+    dir.sync().map_err(|_| FilterError)?;
+    Ok(true)
+}
+
+/// Stream one transcript through a fresh redactor, writing the filtered bytes
+/// to `staged` when one is given. Returns whether any shape matched. The file
+/// must match `before` when it is opened and must not change while it is read.
+fn filter_pass(
+    dir: &Directory,
+    name: &OsStr,
+    before: &Metadata,
+    mut staged: Option<&mut FileHandle>,
+) -> Result<bool, FilterError> {
     let mut source = dir.open_read(name).map_err(|_| FilterError)?;
     let opened = source.metadata().map_err(|_| FilterError)?;
     if !before.unchanged(&opened) {
         return Err(FilterError);
     }
-    let staging = staging_name();
-    let staging = OsStr::new(&staging);
-    let mut target = dir.create_new(staging).map_err(|_| FilterError)?;
     let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
     let mut buffer = [0_u8; SESSION_CHUNK];
-    let copied = (|| -> Result<(), FilterError> {
-        loop {
-            let read = source.read(&mut buffer).map_err(|_| FilterError)?;
-            if read == 0 {
-                break;
-            }
-            let filtered = redactor.filter(&buffer[..read])?;
-            target.write_all(&filtered).map_err(|_| FilterError)?;
+    loop {
+        let read = source.read(&mut buffer).map_err(|_| FilterError)?;
+        if read == 0 {
+            break;
         }
-        let tail = redactor.finish()?;
-        target.write_all(&tail).map_err(|_| FilterError)?;
-        target.sync().map_err(|_| FilterError)?;
-        Ok(())
-    })();
-    if let Err(error) = copied {
-        let _ = dir.unlink(staging);
-        return Err(error);
+        let filtered = redactor.filter(&buffer[..read])?;
+        write_staged(staged.as_deref_mut(), &filtered)?;
     }
+    let tail = redactor.finish()?;
+    write_staged(staged, &tail)?;
     let after = source.metadata().map_err(|_| FilterError)?;
     if !opened.unchanged(&after) {
-        let _ = dir.unlink(staging);
         return Err(FilterError);
     }
-    drop(source);
-    if redactor.has_redaction() {
-        if dir.replace(staging, dir, name).is_err() {
-            let _ = dir.unlink(staging);
-            return Err(FilterError);
-        }
-        dir.sync().map_err(|_| FilterError)?;
-        Ok(true)
-    } else {
-        let _ = dir.unlink(staging);
-        Ok(false)
+    Ok(redactor.has_redaction())
+}
+
+fn write_staged(staged: Option<&mut FileHandle>, bytes: &[u8]) -> Result<(), FilterError> {
+    match staged {
+        Some(target) => target.write_all(bytes).map_err(|_| FilterError),
+        None => Ok(()),
     }
 }
 
@@ -735,6 +809,7 @@ impl CaptureFilter for Redactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     fn joined(redactor: &mut Redactor, chunks: &[&[u8]]) -> Vec<u8> {
         let mut output = Vec::new();
@@ -946,10 +1021,122 @@ mod tests {
         std::os::unix::fs::symlink(&outside, sessions.join("linked.jsonl"))?;
         let clean = sessions.join("clean.jsonl");
         std::fs::write(&clean, b"{\"content\":\"ordinary\"}\n")?;
+        let inode = std::fs::metadata(&clean)?.ino();
 
         assert_eq!(scrub_session_history(root)?, 0);
         assert_eq!(std::fs::read(&outside)?, token.as_bytes());
         assert_eq!(std::fs::read(&clean)?, b"{\"content\":\"ordinary\"}\n");
+        // A clean transcript is never staged or replaced, so its inode survives.
+        assert_eq!(std::fs::metadata(&clean)?.ino(), inode);
+        Ok(())
+    }
+
+    #[test]
+    fn session_scrub_keeps_going_after_an_overlong_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        // A `://` run longer than the frame bound cannot be filtered, so the file is refused.
+        let sessions = root.join("candidate-0/sessions");
+        std::fs::create_dir_all(&sessions)?;
+        let overlong = format!("https://{}\n", "a".repeat(FRAME_LIMIT + 1));
+        std::fs::write(sessions.join("overlong.jsonl"), overlong)?;
+        // Layout order scrubs `sessions` before `claude-config`, so the good
+        // file comes after the refused one.
+        let good = root.join("candidate-0/claude-config/projects/key/session.jsonl");
+        std::fs::create_dir_all(good.parent().ok_or("parent")?)?;
+        std::fs::write(&good, format!("{{\"message\":\"{token}\"}}\n"))?;
+
+        assert!(scrub_session_history(root).is_err());
+        assert!(!std::fs::read_to_string(&good)?.contains(token));
+        assert!(std::fs::read_to_string(&good)?.contains("[REDACTED]"));
+        Ok(())
+    }
+
+    #[test]
+    fn session_scrub_keeps_going_past_a_tree_over_the_depth_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let mut deep = root.join("candidate-0/sessions");
+        for level in 0..=SESSION_DEPTH {
+            deep.push(format!("d{level}"));
+        }
+        std::fs::create_dir_all(&deep)?;
+        std::fs::write(deep.join("deep.jsonl"), format!("{token}\n"))?;
+        let good = root.join("candidate-0/claude-config/projects/key/session.jsonl");
+        std::fs::create_dir_all(good.parent().ok_or("parent")?)?;
+        std::fs::write(&good, format!("{{\"message\":\"{token}\"}}\n"))?;
+
+        assert!(scrub_session_history(root).is_err());
+        assert!(!std::fs::read_to_string(&good)?.contains(token));
+        Ok(())
+    }
+
+    #[test]
+    fn session_scrub_refuses_more_candidates_than_its_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        for index in 0..=SESSION_CANDIDATES {
+            std::fs::create_dir_all(root.join(format!("candidate-{index}")))?;
+        }
+        assert!(scrub_session_history(root).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn token_split_across_the_session_chunk_boundary_is_redacted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        // The token starts ten bytes before the first read ends, so it spans two reads.
+        let mut text = " ".repeat(SESSION_CHUNK - 10);
+        text.push_str(token);
+        text.push_str("\n{\"keep\":\"large\"}\n");
+        assert!(text.len() > SESSION_CHUNK);
+        let sessions = root.join("candidate-0/sessions");
+        std::fs::create_dir_all(&sessions)?;
+        let transcript = sessions.join("large.jsonl");
+        std::fs::write(&transcript, &text)?;
+
+        assert_eq!(scrub_session_history(root)?, 1);
+        let rewritten = std::fs::read_to_string(&transcript)?;
+        assert!(!rewritten.contains(token));
+        assert!(rewritten.contains("[REDACTED]"));
+        assert!(rewritten.ends_with("{\"keep\":\"large\"}\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn session_scrub_reaches_tool_result_text_under_projects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let results = root.join("candidate-0/claude-config/projects/key/session/tool-results");
+        std::fs::create_dir_all(&results)?;
+        let text = results.join("toolu_text.txt");
+        std::fs::write(&text, format!("printed {token}\n"))?;
+        let json = results.join("toolu_json.json");
+        std::fs::write(&json, format!("{{\"stdout\":\"{token}\"}}\n"))?;
+        let binary = results.join("toolu_blob.bin");
+        std::fs::write(&binary, token)?;
+        let outside = root.join("candidate-0/sessions/notes.txt");
+        std::fs::create_dir_all(outside.parent().ok_or("parent")?)?;
+        std::fs::write(&outside, token)?;
+
+        assert_eq!(scrub_session_history(root)?, 2);
+        for path in [&text, &json] {
+            let body = std::fs::read_to_string(path)?;
+            assert!(!body.contains(token), "plaintext survived in {path:?}");
+            assert!(body.contains("[REDACTED]"));
+        }
+        assert_eq!(std::fs::read(&binary)?, token.as_bytes());
+        assert_eq!(std::fs::read(&outside)?, token.as_bytes());
         Ok(())
     }
 }

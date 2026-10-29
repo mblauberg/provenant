@@ -3133,6 +3133,69 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
 }
 
 #[test]
+fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    // The operator cancelled before the provider spawned, so the lane keeps
+    // that reason. An over-long `://` run makes the session scrub refuse a transcript.
+    artifacts::seal(&dir, "cancel.json", b"{}", RECORD_LIMIT)?;
+    let attempt = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let sessions = attempt.join("provider-state/candidate-0/sessions");
+    std::fs::create_dir_all(&sessions)?;
+    let overlong = format!(
+        "https://{}\n",
+        "a".repeat(provenant_os::exec::FRAME_LIMIT + 1)
+    );
+    std::fs::write(sessions.join("overlong.jsonl"), overlong)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    observed.never_spawned = true;
+    observed.termination = None;
+    observed.terminal_observed = false;
+    observed.warnings = vec!["stopped by the operator".into()];
+    observed.stop_reason = Some(provenant_supervisor::machine::StopReason::ExplicitCancellation);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        ..Fake::default()
+    };
+
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = &record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(*outcome, Outcome::Cancelled);
+    assert_eq!(
+        reason.as_deref(),
+        Some("cancelled before start: stopped by the operator; redaction failed; result withheld")
+    );
+    Ok(())
+}
+
+#[test]
 fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

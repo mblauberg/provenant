@@ -1103,8 +1103,19 @@ impl RunStore {
             };
         let redaction_failed = result_redaction_failed || session_redaction_failed;
         if redaction_failed {
-            decoded.outcome = Outcome::Failed;
-            decoded.reason = Some(REDACTION_FAILED_REASON.into());
+            // A redaction failure fails a lane that would otherwise succeed. A
+            // cancelled, timed-out or lost lane keeps its outcome, and every
+            // reason it already has survives with the redaction failure after it.
+            if matches!(
+                decoded.outcome,
+                Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+            ) {
+                decoded.outcome = Outcome::Failed;
+            }
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {REDACTION_FAILED_REASON}"),
+                None => REDACTION_FAILED_REASON.into(),
+            });
         }
         // Recovered/result-only publication never starts external delivery.
         // A succeeded outcome already proves the provider's terminal event in
