@@ -580,6 +580,28 @@ transcript except Codex's post-exit identity projection.
   `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`
 - Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`
 
+## A partial finish is flagged, not failed
+
+An attempt that settles `succeeded`, `review_required` or `uncommitted` carries
+`partial_signals` when there is structured evidence that part of the brief is
+undone: `declared_stop` (its final answer ends with a single, valid `handoff`
+block with status `stopped_early`, the contract graph writers already use, and
+nothing after it), `provider_stop` (the provider reported a stop reason other
+than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
+`terminal_reason` other than `completed`) and `uncommitted_work`. Prose is never
+read, and a quoted, repeated or trailing-text block is no flag. The outcome is
+not changed, so delivery and fallback behave as before; the reason carries a
+`partial finish (...)` note, and `lanes` shows `(partial)` beside the state,
+the signals, and a `provenant resume` hint. A failed lane carries no flag. Every
+launch prompt asks the lane to end with the `handoff` block when it stops with
+work left. The chair decides whether to resume.
+- Why: a lane that did part of its brief must not read as one that did all of it.
+- Test: `crates/run/src/dispatch_tests.rs::a_terra_style_early_stop_settles_succeeded_but_flagged_partial`;
+  `::a_complete_finish_and_prose_about_remaining_work_are_not_flagged`;
+  `crates/run/src/completion.rs::tests`;
+  `crates/providers/src/tests.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
+- Owner: `crates/run/src/completion.rs`, `crates/run/src/holder.rs`
+
 ## Host inputs fail before launch
 
 A host failure to read the stored prompt, or to stage or read back a context

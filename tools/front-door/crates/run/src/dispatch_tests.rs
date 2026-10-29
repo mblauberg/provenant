@@ -729,7 +729,17 @@ fn host_remembers_child_task_after_attempt_row_deletion() -> TestResult {
     // Make the replacement fully launchable, including its prompt and ticket.
     let directory = store.attempt_dir(nested.run_id, replacement.attempt_id, true)?;
     artifacts::seal(&directory, "prompt.txt", b"exact prompt", RECORD_LIMIT)?;
-    store.queue_ticket(&store.db, &replacement, LaneClass::ReadOnly, 1, 0, 1)?;
+    store.queue_ticket(
+        &store.db,
+        &replacement,
+        LaneClass::ReadOnly,
+        1,
+        crate::admission::Allowance {
+            queue_seconds: 0,
+            runtime_seconds: 0,
+        },
+        1,
+    )?;
     let revalidated = store.validate_child(
         nested.run_id,
         parent,
@@ -2730,6 +2740,12 @@ pub(super) struct Fake {
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
+    /// The outcome a decode reports; success when unset.
+    outcome: Option<Outcome>,
+    /// The answer a decode reports, instead of the captured stdout.
+    answer: Option<String>,
+    /// Partial-finish signals a decode reports.
+    partial: Vec<PartialSignal>,
 }
 
 #[test]
@@ -2798,16 +2814,173 @@ impl Providers for Fake {
         assert_eq!(applied, &route());
         self.decoded.set(self.decoded.get() + 1);
         Ok(Decoded {
-            outcome: Outcome::Succeeded,
-            result: String::from_utf8_lossy(stdout).into_owned(),
-            complete: true,
+            outcome: self.outcome.unwrap_or(Outcome::Succeeded),
+            result: self
+                .answer
+                .clone()
+                .unwrap_or_else(|| String::from_utf8_lossy(stdout).into_owned()),
+            complete: self
+                .outcome
+                .is_none_or(|outcome| outcome == Outcome::Succeeded),
             observed_route: self.observed.clone(),
             usage: UsageRecord::default(),
             session: None,
             reason: None,
+            partial_signals: self.partial.clone(),
         })
     }
 }
+#[test]
+fn a_stop_at_the_runtime_deadline_settles_as_a_typed_timeout() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    // A hung provider's partial output, then the guardian's stop and kill.
+    artifacts::seal(&dir, "stdout.log", b"half an answer", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    observed.termination = Some(Termination::Signal(9));
+    observed.stop_reason = Some(provenant_supervisor::machine::StopReason::WallDeadline);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        outcome: Some(Outcome::Failed),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(outcome, Outcome::TimedOut);
+    assert_eq!(
+        reason.as_deref(),
+        Some("runtime deadline exceeded: provider stopped after 3600s")
+    );
+    Ok(())
+}
+
+/// Settle one attempt whose provider reported `outcome` and `signals`, with
+/// `answer` as its final answer, and return the committed record.
+fn settle_with(
+    answer: &str,
+    outcome: Option<Outcome>,
+    signals: Vec<PartialSignal>,
+) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        outcome,
+        answer: Some(answer.into()),
+        partial: signals,
+        ..Fake::default()
+    };
+    Ok(store.finish(id, &dir, &observed, &fake, &call)?)
+}
+
+const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":1,\"status\":\"stopped_early\",\"note\":\"Parser done; renderer and tests remain.\"}\n```";
+
+#[test]
+fn a_terra_style_early_stop_settles_succeeded_but_flagged_partial() -> TestResult {
+    let record = settle_with(
+        &format!("Done: parser.\n\n{STOPPED_EARLY}\n"),
+        Some(Outcome::Succeeded),
+        Vec::new(),
+    )?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = &record.state
+    else {
+        return Err("not terminal".into());
+    };
+    // Advisory: the outcome is not downgraded.
+    assert_eq!(*outcome, Outcome::Succeeded);
+    assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
+    let reason = reason.as_deref().ok_or("no reason")?;
+    assert!(
+        reason.contains("partial finish (declared_stop)"),
+        "{reason}"
+    );
+    assert!(reason.contains("renderer and tests remain"), "{reason}");
+    Ok(())
+}
+
+#[test]
+fn a_complete_finish_and_prose_about_remaining_work_are_not_flagged() -> TestResult {
+    for answer in [
+        "All of the brief is done.".to_owned(),
+        "Work remains in the renderer, which I did not finish.".to_owned(),
+        // A block quoted mid-answer is not the lane's closing statement.
+        format!("The contract says:\n{STOPPED_EARLY}\nI followed it and finished."),
+    ] {
+        let record = settle_with(&answer, Some(Outcome::Succeeded), Vec::new())?;
+        assert_eq!(record.partial_signals, [], "{answer}");
+        assert!(matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded,
+                reason: None,
+                ..
+            }
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn provider_stops_are_kept_and_failures_carry_no_flag() -> TestResult {
+    let record = settle_with(
+        "answer",
+        Some(Outcome::Succeeded),
+        vec![PartialSignal::ProviderStop],
+    )?;
+    assert_eq!(record.partial_signals, [PartialSignal::ProviderStop]);
+    // A failed lane is already a failure; a partial flag would only repeat it.
+    let record = settle_with(
+        &format!("{STOPPED_EARLY}\n"),
+        Some(Outcome::Failed),
+        vec![PartialSignal::ProviderStop],
+    )?;
+    assert_eq!(record.partial_signals, []);
+    Ok(())
+}
+
 fn two_tasks(concurrency: u64) -> PreparedRun {
     let mut run = input();
     let mut task = run.request.tasks[0].clone();
@@ -4414,6 +4587,7 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
         observed_route: Some(route()),
         usage: UsageRecord::default(),
         session: None,
+        partial_signals: Vec::new(),
     };
     store.publish_terminal(terminal, 1, &publication, &observed, &call)?;
     assert!(!terminal_tmp.exists());

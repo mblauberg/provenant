@@ -1087,14 +1087,35 @@ fn message(value: &Value) -> String {
         value["command"].as_str().unwrap_or("")
     )
 }
-// Attribution is best effort and must not prevent consuming a handoff.
+/// The session's Claude config directory relative to home, so a report can find
+/// its transcript even when no registered account owns the directory.
+fn config_hint(context: &Context) -> Option<String> {
+    let dir = context
+        .claude_config
+        .clone()
+        .unwrap_or_else(|| context.home.join(".claude"));
+    let relative = std::fs::canonicalize(dir)
+        .ok()?
+        .strip_prefix(std::fs::canonicalize(&context.home).ok()?)
+        .ok()?
+        .to_owned();
+    let text = relative.to_str()?;
+    (!text.is_empty()
+        && text.len() <= 64
+        && relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_))))
+    .then(|| text.to_owned())
+}
+// Attribution is best effort and must not prevent consuming a handoff. A
+// session whose config directory is not a registered account (the default
+// `~/.claude` included) is still recorded, as `unattributed`: launching the
+// chair with `CLAUDE_CONFIG_DIR` set to a registered account's directory is
+// what attributes it.
 fn record_start(context: &Context, input: &Input) {
-    let Ok(accounts) = crate::registered_claude(&context.roots) else {
-        return;
-    };
-    let Ok(target) = current(&accounts, context) else {
-        return;
-    };
+    let account = crate::registered_claude(&context.roots)
+        .ok()
+        .and_then(|accounts| current(&accounts, context).ok().map(|a| a.key().to_owned()));
     let project = if crate::usage::attribution_enabled(&context.roots) {
         crate::hooks::with_git(|runtime, executor, budget, cancel| {
             let location = runtime
@@ -1111,9 +1132,12 @@ fn record_start(context: &Context, input: &Input) {
     provenant_telemetry::usage::record_chair(
         &context.roots,
         &provenant_os::clock::SystemClock::new(),
-        target.key(),
+        account
+            .as_deref()
+            .unwrap_or(provenant_telemetry::usage::UNATTRIBUTED),
         input.session_id.as_str(),
         project,
+        config_hint(context).as_deref(),
     );
 }
 // The hook protocol imposes real wall-time input and execution caps.

@@ -42,6 +42,9 @@ pub struct Usage {
     pub uncached_input: Option<u64>,
     pub cache_read: Option<u64>,
     pub cache_write: Option<u64>,
+    /// The part of `cache_write` the provider billed to its long (one-hour)
+    /// time-to-live bucket. Absent where the provider reports no TTL split.
+    pub cache_write_1h: Option<u64>,
     /// Output tokens excluding reasoning.
     pub output_excluding_reasoning: Option<u64>,
     pub reasoning: Option<u64>,

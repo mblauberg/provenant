@@ -548,6 +548,7 @@ impl RunStore {
                 observed_route: None,
                 usage: UsageRecord::default(),
                 session: None,
+                partial_signals: Vec::new(),
                 reason: Some(format!(
                     "cancelled before start: {}",
                     exit.warnings
@@ -562,6 +563,7 @@ impl RunStore {
                 observed_route: None,
                 usage: UsageRecord::default(),
                 session: None,
+                partial_signals: Vec::new(),
                 reason: Some(
                     exit.warnings
                         .first()
@@ -662,6 +664,22 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("terminal task missing from request"))?;
+        // A stop at the runtime deadline is a typed timeout, whatever partial
+        // output the provider left, and the lane stays resumable.
+        if decoded.outcome == Outcome::TimedOut
+            && exit.stop_reason == Some(StopReason::WallDeadline)
+        {
+            let limit = format!(
+                "runtime deadline exceeded: provider stopped after {}s",
+                task.provider_timeout_seconds
+            );
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(detail) if detail != "provider output is partial" => {
+                    format!("{limit}; {detail}")
+                }
+                _ => limit,
+            });
+        }
         if cancelled {
             decoded.outcome = Outcome::Cancelled;
         }
@@ -953,6 +971,35 @@ impl RunStore {
             decoded.outcome = Outcome::ReviewRequired;
             decoded.reason = Some("protected changes require review".into());
         }
+        // A finish that settled well can still be a partial one. Flag it for
+        // the chair, who decides whether to resume; the outcome stays as is.
+        let mut partial = std::mem::take(&mut decoded.partial_signals);
+        if matches!(
+            decoded.outcome,
+            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+        ) {
+            let mut notes = Vec::new();
+            if let Some(note) = crate::completion::declared_stop(&decoded.result) {
+                partial.push(PartialSignal::DeclaredStop);
+                notes.push(format!("lane stopped early: {}", bounded_note(&note)));
+            }
+            if decoded.outcome == Outcome::Uncommitted {
+                partial.push(PartialSignal::UncommittedWork);
+            }
+            partial.sort();
+            partial.dedup();
+            if !partial.is_empty() {
+                let signals: Vec<_> = partial.iter().map(|signal| signal.as_str()).collect();
+                notes.insert(0, format!("partial finish ({})", signals.join(", ")));
+                let note = notes.join(": ");
+                decoded.reason = Some(match decoded.reason.take() {
+                    Some(reason) => format!("{reason}; {note}"),
+                    None => note,
+                });
+            }
+        } else {
+            partial.clear();
+        }
         // Recovered/result-only publication never starts external delivery.
         // A succeeded outcome already proves the provider's terminal event in
         // the sealed stdout, so no live frame observation is required.
@@ -1004,6 +1051,7 @@ impl RunStore {
             observed_route: decoded.observed_route,
             usage: decoded.usage,
             session: decoded.session,
+            partial_signals: partial,
         };
         // A result sealed without intent predates a crash: keep its bytes.
         if result_orphan {
@@ -1017,6 +1065,15 @@ impl RunStore {
             driver.advance(crate::settlement::Phase::Release)?;
         }
         Ok(terminal)
+    }
+}
+
+/// A lane's own words in a one-line reason: bounded and on one line.
+fn bounded_note(note: &str) -> String {
+    let line: String = note.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(240) {
+        Some((end, _)) => format!("{}...", &line[..end]),
+        None => line,
     }
 }
 

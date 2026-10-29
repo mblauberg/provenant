@@ -202,6 +202,13 @@ impl Registry<'_> {
     }
 }
 impl run::Providers for Registry<'_> {
+    fn runtime_cap(&self, provider: &str) -> Option<u64> {
+        provenant_config::read_with_domains(self.roots?, &crate::domains::SECTIONS)
+            .ok()?
+            .providers
+            .get(provider)?
+            .runtime_deadline_seconds
+    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         let roots = self.roots.ok_or("routing context is unavailable")?;
         let priority = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
@@ -342,6 +349,7 @@ impl Registry<'_> {
             },
             session: None,
             reason: Some(reason.into()),
+            partial_signals: Vec::new(),
         };
         let Some(adapter) = REGISTRY
             .iter()
@@ -440,22 +448,32 @@ impl Registry<'_> {
             usage: run::UsageRecord::default(),
             session: outcome.session().map(str::to_owned),
             reason: None,
+            partial_signals: Vec::new(),
         };
         let mut has_usage = false;
+        let mut early_stop = None;
         for event in &events {
             match event {
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
+                ProviderEvent::EarlyStop { reason } => {
+                    decoded
+                        .partial_signals
+                        .push(run::PartialSignal::ProviderStop);
+                    early_stop = Some(reason.clone());
+                }
                 ProviderEvent::Usage {
                     input,
                     output,
                     cache_read,
                     cache_write,
+                    cache_write_1h,
                 } => {
                     has_usage = true;
                     decoded.usage.uncached_input = Some(*input);
                     decoded.usage.output_excluding_reasoning = Some(*output);
                     decoded.usage.cache_read = *cache_read;
                     decoded.usage.cache_write = *cache_write;
+                    decoded.usage.cache_write_1h = *cache_write_1h;
                     decoded.usage.source = Some("provider".into());
                 }
                 _ => {}
@@ -495,6 +513,17 @@ impl Registry<'_> {
         };
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
+        }
+        if decoded.outcome == run::Outcome::Succeeded
+            && let Some(reason) = early_stop
+        {
+            decoded.reason = Some(format!(
+                "provider stopped early: {}",
+                provenant_confinement::redact::known_shapes(reason.as_bytes())
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .unwrap_or_default()
+            ));
         }
         if let Some(ProviderEvent::Denied { action }) = events
             .iter()
@@ -2483,6 +2512,9 @@ struct PreparedProvider<'a> {
     ready: Option<&'a run::PreparedStart>,
 }
 impl run::Providers for PreparedProvider<'_> {
+    fn runtime_cap(&self, provider: &str) -> Option<u64> {
+        self.fallback.runtime_cap(provider)
+    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         self.fallback.priority(task)
     }
@@ -3042,11 +3074,59 @@ fn render_lanes(
                 .as_deref()
                 .map(|title| format!(" {}", plain_text(title, usize::MAX)))
                 .unwrap_or_default();
+            // A partial finish keeps its outcome; the header says so beside it.
+            let state_text = if lane.partial_signals.is_empty() {
+                state.clone()
+            } else {
+                format!("{state} (partial)")
+            };
             // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
-                "{}/{}/{}{title_text} {state} {route_text}{account_field}{reason_text}\n",
+                "{}/{}/{}{title_text} {state_text} {route_text}{account_field}{reason_text}\n",
                 lane.run_id, lane.task_id, lane.attempt_id,
             ));
+            if !lane.partial_signals.is_empty() {
+                // The outcome is untouched; the chair decides whether to resume.
+                human.push_str(&format!(
+                    "  partial finish: {}; the chair decides whether to resume\n",
+                    lane.partial_signals
+                        .iter()
+                        .map(|signal| signal.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                if lane
+                    .session
+                    .as_deref()
+                    .is_some_and(|session| !session.is_empty())
+                {
+                    human.push_str(&format!(
+                        "  continue: provenant resume {} --prompt-file PROMPT\n",
+                        lane.attempt_id
+                    ));
+                }
+            }
+            if matches!(lane.state, run::AttemptState::Running { .. })
+                && let Some(deadline) = lane.runtime_deadline
+            {
+                human.push_str(&format!("  runtime deadline {deadline}\n"));
+            }
+            if matches!(
+                lane.state,
+                run::AttemptState::Terminal {
+                    outcome: run::Outcome::TimedOut,
+                    ..
+                }
+            ) && lane
+                .session
+                .as_deref()
+                .is_some_and(|session| !session.is_empty())
+            {
+                human.push_str(&format!(
+                    "  continue: provenant resume {} --prompt-file PROMPT\n",
+                    lane.attempt_id
+                ));
+            }
             if matches!(
                 lane.state,
                 run::AttemptState::Terminal {
@@ -3147,6 +3227,8 @@ fn render_lanes(
                 "priority": lane.priority,
                 "finished_at": finished_at,
                 "last_output_at": lane.last_output_at,
+                "runtime_deadline": lane.runtime_deadline,
+                "partial_signals": lane.partial_signals,
                 "delivery_id": lane.delivery_id,
                 "write_grants": lane.write_grants,
                 "read_only_writable": lane.read_only_writable,
@@ -5358,15 +5440,41 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         })
         .transpose()?
         .unwrap_or_default();
-    let report = provenant_telemetry::stats(facts, &prices, window)
+    // Chair sessions span projects, so the host's whole window is read. They are
+    // best effort: an unreadable usage log must not hide the lane figures.
+    let chair_window = (
+        window
+            .since
+            .map_or(jiff::Timestamp::MIN, |t| t.as_timestamp()),
+        window
+            .until
+            .map_or(jiff::Timestamp::MAX, |t| t.as_timestamp()),
+    );
+    let (chairs, chair_error) = match crate::quota::chair_sessions_with_usage(
+        edge.roots,
+        Some(edge.home),
+        chair_window.0,
+        chair_window.1,
+    ) {
+        Ok(chairs) => (chairs, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+    let report = provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let human = stats_summary(&report.totals);
-    let data = serde_json::to_value(&report)
+    let mut human = stats_summary(&report);
+    let mut data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    if let Some(error) = chair_error {
+        human.push_str(&format!(
+            "chair sessions not read: {}\n",
+            plain_text(&error, usize::MAX)
+        ));
+        data["chair_error"] = Value::String(error);
+    }
     Ok((data, human))
 }
 
-fn stats_summary(totals: &provenant_telemetry::Totals) -> String {
+fn cost_summary(totals: &provenant_telemetry::Totals) -> String {
     let cost = &totals.cost;
     let human = if let Some(money) = &cost.complete {
         format!("est. API-equivalent ${}", money.usd)
@@ -5382,6 +5490,58 @@ fn stats_summary(totals: &provenant_telemetry::Totals) -> String {
         )
     };
     format!("{} attempts, {human}\n", totals.attempts)
+}
+
+fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
+    let totals = &report.totals;
+    let mut text = cost_summary(totals);
+    if totals.attempts == 0
+        && let Some(project) = report.window.project
+    {
+        text.push_str(&format!(
+            "no terminal attempts recorded for project {project}; run from its checkout to see its lanes\n"
+        ));
+    }
+    // Only figures that exist: a source with no cache split adds no line, and
+    // the JSON carries the counts of what was not reported.
+    let mut share = |label: &str, rows: &[provenant_telemetry::CacheGroup]| {
+        for row in rows.iter().filter(|row| row.cache.reporting > 0) {
+            let name = [&row.provider, &row.model, &row.account]
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let name = if name.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", plain_text(&name, usize::MAX))
+            };
+            text.push_str(&format!(
+                "cache read {label} [{}]{name}: {}\n",
+                row.source,
+                crate::quota::cache_share(&row.cache)
+            ));
+        }
+    };
+    share("by source", &report.cache.by_source);
+    share("by model", &report.cache.by_model);
+    share("by account", &report.cache.by_account);
+    if let Some(chair) = &report.chair {
+        let unread: u64 = chair.unread.values().sum();
+        text.push_str(&format!(
+            "chair: {} sessions on this host ({unread} unread), {}\n",
+            chair.sessions,
+            chair.cost.complete.as_ref().map_or_else(
+                || chair.cost.known_lower_bound.as_ref().map_or_else(
+                    || "cost unknown".to_owned(),
+                    |money| format!("est. API-equivalent at least ${}", money.usd),
+                ),
+                |money| format!("est. API-equivalent ${}", money.usd)
+            )
+        ));
+    }
+    text
 }
 
 /// Offline lane timeline: terminal attempts as Chrome Trace Event JSON.
@@ -5748,6 +5908,7 @@ mod tests {
         let mut totals = Totals {
             attempts: 3,
             usage: Default::default(),
+            cache: Default::default(),
             cost: CostTotal {
                 cost_basis: "api_equivalent_estimate",
                 subscription_attempts: 0,
@@ -5759,7 +5920,7 @@ mod tests {
             outcomes: Default::default(),
         };
         assert_eq!(
-            stats_summary(&totals),
+            cost_summary(&totals),
             "3 attempts, cost unknown (3 attempts missing cost data)\n"
         );
         totals.cost.known_lower_bound = Some(Money {
@@ -5769,14 +5930,76 @@ mod tests {
         totals.cost.priced_attempts = 1;
         totals.cost.missing_attempts = 2;
         assert_eq!(
-            stats_summary(&totals),
+            cost_summary(&totals),
             "3 attempts, est. API-equivalent at least $2.000000 (1 of 3 attempts priced)\n"
         );
         totals.cost.complete = totals.cost.known_lower_bound.clone();
         assert_eq!(
-            stats_summary(&totals),
+            cost_summary(&totals),
             "3 attempts, est. API-equivalent $2.000000\n"
         );
+    }
+
+    #[test]
+    fn stats_text_lists_cache_share_only_where_a_provider_reported_it() {
+        use provenant_telemetry::{ChairModelUsage, ConfiguredPrices, usage::ChairSession};
+        let prices = provenant_telemetry::validate_prices(&ConfiguredPrices {
+            schema_version: 1,
+            id: "empty".into(),
+            reviewed_at: "2026-10-29".into(),
+            units: "usd_microdollars_per_million_tokens".into(),
+            models: Vec::new(),
+        })
+        .unwrap();
+        let chair = |usage| ChairSession {
+            adapter: "claude".into(),
+            account: "work".into(),
+            session: "s".into(),
+            project: None,
+            config: None,
+            usage,
+            unread: None,
+        };
+        let usage = |read| {
+            vec![ChairModelUsage {
+                model: "claude-opus-5-5".into(),
+                usage: provenant_records::Usage {
+                    uncached_input: Some(10),
+                    cache_read: read,
+                    cache_write: Some(0),
+                    cache_write_1h: None,
+                    output_excluding_reasoning: Some(1),
+                    reasoning: None,
+                },
+            }]
+        };
+        let report = |usage| {
+            let report = provenant_telemetry::stats_with_chair(
+                [],
+                [chair(usage)],
+                &prices,
+                Default::default(),
+            )
+            .unwrap();
+            stats_summary(&report)
+        };
+        let text = report(usage(Some(90)));
+        assert!(
+            text.contains(
+                "cache read by source [chair]: 90.0% of 100 input tokens (1 records reported, 0 did not)\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("cache read by model [chair] claude claude/claude-opus-5-5: 90.0%"),
+            "{text}"
+        );
+        assert!(
+            text.contains("chair: 1 sessions on this host (0 unread)"),
+            "{text}"
+        );
+        let text = report(usage(None));
+        assert!(!text.contains("cache read"), "{text}");
     }
 
     #[test]
@@ -8382,7 +8605,7 @@ mod tests {
         };
         let stream = concat!(
             "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40,\"cache_creation\":{\"ephemeral_1h_input_tokens\":25}}}\n",
         );
         let decoded = Registry::default()
             .decode(
@@ -8396,7 +8619,61 @@ mod tests {
         assert_eq!(decoded.usage.output_excluding_reasoning, Some(20));
         assert_eq!(decoded.usage.cache_read, Some(30));
         assert_eq!(decoded.usage.cache_write, Some(40));
+        assert_eq!(decoded.usage.cache_write_1h, Some(25));
         assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
+    }
+
+    #[test]
+    fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
+        let route = run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/claude-sonnet-5".into()),
+            ..Default::default()
+        };
+        let stream = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"half\",\"stop_reason\":\"max_tokens\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n",
+        );
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.partial_signals, [run::PartialSignal::ProviderStop]);
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider stopped early: stop_reason max_tokens")
+        );
+        assert_ne!(decoded.outcome, run::Outcome::Failed);
+    }
+
+    #[test]
+    fn codex_usage_records_cache_read_apart_from_uncached_input() {
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-terra".into()),
+            ..Default::default()
+        };
+        let stream = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7}}\n",
+        );
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.usage.uncached_input, Some(20));
+        assert_eq!(decoded.usage.cache_read, Some(80));
+        assert_eq!(decoded.usage.cache_write, None);
+        assert_eq!(decoded.usage.output_excluding_reasoning, Some(7));
     }
 
     #[test]

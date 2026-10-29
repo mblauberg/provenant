@@ -195,6 +195,10 @@ pub struct GuardianHooks<'a> {
     pub observer: Option<&'a dyn ProcessObserver>,
     #[cfg(feature = "fixture")]
     pub exit_publisher: Option<&'a dyn ExitPublisher>,
+    /// Replaces the system wall clock that bounds the attempt, so a test can
+    /// move it as a sleeping host does.
+    #[cfg(feature = "fixture")]
+    pub wall_clock: Option<&'a dyn Fn() -> Option<WallTime>>,
     pub stdout_tee: Option<&'a dyn provenant_os::exec::NonblockingSink>,
     pub stderr_tee: Option<&'a dyn provenant_os::exec::NonblockingSink>,
     pub stdout_decoder: Option<&'a dyn provenant_os::capture::FrameDecoder>,
@@ -578,6 +582,12 @@ impl Driver<'_> {
             return self.never_spawned(&admission_refusal(&error));
         }
         let started = Instant::now();
+        #[cfg(feature = "fixture")]
+        let clock = hooks.wall_clock;
+        #[cfg(not(feature = "fixture"))]
+        let clock: Option<&dyn Fn() -> Option<WallTime>> = None;
+        let wall_now = || clock.map_or_else(wall_now, |clock| clock());
+        let wall_started = wall_now();
         let budgets =
             Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
         let mut state = State::prepared(budgets);
@@ -824,6 +834,12 @@ impl Driver<'_> {
             };
             let mut tick = Tick::at(now);
             tick.observed_exit = exit;
+            // The monotonic clock stops while the host sleeps; the wall
+            // deadline must not. A wall clock set backwards only adds nothing.
+            tick.wall_ms = wall_started.zip(wall_now()).map_or(0, |(began, current)| {
+                u64::try_from(current.as_micros().saturating_sub(began.as_micros()) / 1000)
+                    .unwrap_or(0)
+            });
             let (next, effects) = machine::step(state, event, tick);
             state = next;
             for effect in effects {

@@ -4631,6 +4631,7 @@ fn resume_refuses_low_disk_writer() -> Result {
             observed_route: Some(fixture_route()),
             usage: Default::default(),
             session: Some("fixture-session".into()),
+            partial_signals: Vec::new(),
         },
         &exit,
         &call,

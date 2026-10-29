@@ -30,6 +30,13 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
     "agy",
     "opencode"
   ],
+  "runtime_deadline_seconds": {
+    "default": "unset",
+    "effect": "Cap on the wall-clock runtime of any lane on this provider. A dispatch's own --provider-timeout applies when it is shorter. At the deadline the provider is stopped and the attempt settles as timed_out, whatever the host did meanwhile, including sleeping.",
+    "max": 14400,
+    "min": 1,
+    "type": "int"
+  },
   "update": {
     "default": true,
     "effect": "Run the detected native updater between lanes in a detached one-shot worker scheduled by quota events. false opts out; {command: [program, argument, ...]} overrides the updater directly without a shell.",

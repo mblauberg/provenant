@@ -19,6 +19,13 @@
       "min": 1,
       "default": 86400,
       "effect": "Minimum time between update attempts, checked on existing housekeeping events. Failed and interrupted attempts and result-write errors wait the same interval."
+    },
+    "runtime_deadline_seconds": {
+      "type": "int",
+      "min": 1,
+      "max": 14400,
+      "default": "unset",
+      "effect": "Cap on the wall-clock runtime of any lane on this provider. A dispatch's own --provider-timeout applies when it is shorter. At the deadline the provider is stopped and the attempt settles as timed_out, whatever the host did meanwhile, including sleeping."
     }
   },
   "host_lane_build_settings": {

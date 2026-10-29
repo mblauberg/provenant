@@ -3249,7 +3249,8 @@ fn graph_attempt_usage(
         usage.output_excluding_reasoning,
         usage.reasoning,
     ];
-    let tokens_partial = categories.iter().any(Option::is_none);
+    // Reasoning is counted inside output, so providers never report it apart.
+    let tokens_partial = categories[..4].iter().any(Option::is_none);
     let tokens = categories.iter().any(Option::is_some).then(|| {
         categories
             .into_iter()
@@ -5688,6 +5689,22 @@ mod result_tests {
         assert_eq!(result.wall_time_seconds, Some(2));
         assert_eq!(result.cost_unknown_reason, None);
 
+        // No provider reports reasoning apart from output, so its absence is
+        // not partial usage.
+        let without_reasoning = super::graph_attempt_usage(
+            usage_record(
+                "priced",
+                json!({"uncached_input":1_000_000, "cache_read":1_000_000,
+                    "cache_write":1_000_000, "output_excluding_reasoning":1_000_000}),
+                Some(1000),
+            ),
+            Some(&prices),
+            None,
+        );
+        assert!(!without_reasoning.tokens_partial);
+        assert!(!without_reasoning.cost_partial);
+        assert_eq!(without_reasoning.cost_micro_usd, Some(10_000_000));
+
         let partial = super::graph_attempt_usage(
             usage_record("priced", json!({"uncached_input":1_000_000}), Some(1000)),
             Some(&prices),
@@ -6041,6 +6058,7 @@ mod peer_tests {
                 observed_route: Some(route),
                 usage: Default::default(),
                 session: None,
+                partial_signals: Vec::new(),
             },
             &exit,
             call,

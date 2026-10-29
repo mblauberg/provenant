@@ -232,10 +232,30 @@ other failed attempts. Interruption can leave a partially replaced installation;
 the next attempt uses the same native updater to repair it. Update failures
 are recorded once per interval, with updater output discarded. An independent
 attempt record preserves backoff if publishing the result record fails.
-Worker failures surface through the activity note and update records only;
-the quota tick does not report them. Activity records the old and new versions.
+The worker starts in the quota event's working directory, which need not be a
+Git checkout, and quota events launch it at most once every 15 minutes whatever
+its outcome. `<state>/provider-updates/worker.json` holds the last launch time
+and, if that run failed, its one cause. Worker failures surface through the
+activity note, that record and the update records only; the quota tick does not
+report them. Activity records the old and new versions.
 Each lane's `availability.json`
 also includes its observed version and the latest update result.
+
+## Lane runtime deadline
+
+A lane's wall-clock allowance is its dispatch `--provider-timeout` (3600
+seconds, or 10800 for `worktree-write`; at most 14400). Cap it per provider with
+`runtime_deadline_seconds`; the shorter of the two applies:
+
+```toml
+[providers.codex]
+runtime_deadline_seconds = 7200
+```
+
+The deadline runs on the wall clock, so a host that sleeps through it stops the
+provider on waking. The attempt settles as `timed_out`, releases its worktree
+and lock, and `lanes` shows the deadline of each running lane and a
+`provenant resume` hint for a timed-out one.
 
 ## OpenCode Go monthly allowance floor
 

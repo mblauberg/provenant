@@ -3,11 +3,13 @@
 //! OS crate's held filesystem handles.
 #![forbid(unsafe_code)]
 
+mod chair;
 mod native;
 mod prices;
 mod reducer;
 mod trace;
 pub mod usage;
+pub use chair::{ChairModelUsage, Unread, attach_usage as attach_chair_usage};
 pub use native::{NativeError, NativeModel, NativeReport, claude_subagents};
 pub use prices::{
     BillingKind, Categories, ConfiguredModel, ConfiguredPrices, PriceError, PriceIdentity,
