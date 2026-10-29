@@ -3,6 +3,7 @@
 // file and dispatches with its fixture seams. Plain comments only: `include!`
 // refuses inner attributes.
 mod bench;
+mod build_slot;
 mod chair;
 mod checks;
 #[cfg(test)]
@@ -637,6 +638,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::Supervise { descriptors }) => {
             supervise(&descriptors, globals, process)
         }
+        // Handled in `dispatch` before roots and telemetry; it never gets here.
+        Command::Internal(provenant_cli::Internal::BuildSlot { .. }) => fail(
+            &inv.leaf,
+            Outcome::Error,
+            "INTERNAL",
+            "build-slot is dispatched before the command table",
+            globals,
+        ),
         Command::Internal(provenant_cli::Internal::Settle { request }) => {
             match provenant_run::settlement::resume(
                 &request,
@@ -1001,6 +1010,18 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         ParseOutcome::Version { globals } => ("version", globals),
     };
     let verb = verb.to_owned();
+    // The lane's cargo shim runs on every build: it needs no roots, telemetry
+    // or result envelope, and ends with cargo's exit code.
+    if let ParseOutcome::Invocation(inv) = &parsed
+        && let Command::Internal(provenant_cli::Internal::BuildSlot { command }) = &inv.command
+    {
+        let env: Vec<_> = std::env::vars_os().collect();
+        return u8::try_from(build_slot::run(build_slot::Gate {
+            settings: build_slot::Settings::from_env(&env),
+            command,
+        }))
+        .unwrap_or(1);
+    }
     // No product installation, Git probe or provider access is needed to count.
     // Read-only catalogue and checkpoint observation must not record demand
     // telemetry, including on an otherwise empty state root.

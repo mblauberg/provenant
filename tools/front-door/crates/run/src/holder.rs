@@ -211,9 +211,15 @@ fn custody_error(error: RunError) -> CustodyError {
         RunError::GuardianIdentityUnavailable => CustodyError::AdmissionGuardianIdentity,
         RunError::DiskFloor { free, floor } => CustodyError::AdmissionDisk { free, floor },
         RunError::MemoryPressure { level } => CustodyError::AdmissionMemoryPressure { level },
-        RunError::BuildSlots { active, limit } => {
-            CustodyError::AdmissionBuildSlots { active, limit }
-        }
+        RunError::LaneCap {
+            active,
+            limit,
+            scope,
+        } => CustodyError::AdmissionLaneCap {
+            active,
+            limit,
+            scope,
+        },
         other => CustodyError::Io(std::io::Error::other(other.to_string())),
     }
 }

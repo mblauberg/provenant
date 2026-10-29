@@ -104,6 +104,12 @@ pub struct Lanes {
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub max_writer_lanes: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub max_project_writer_lanes: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub build_wait_minutes: Option<u64>,
     /// `CARGO_INCREMENTAL` for lanes; off unless set.
     pub cargo_incremental: Option<bool>,
     /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
@@ -129,6 +135,9 @@ impl Lanes {
             build_dir_max_bytes: self.build_dir_max_bytes,
             build_dir_grace_seconds: self.build_dir_grace_seconds,
             build_dir_survey_interval_seconds: self.build_dir_survey_interval_seconds,
+            max_writer_lanes: self.max_writer_lanes,
+            max_project_writer_lanes: self.max_project_writer_lanes,
+            build_wait_minutes: self.build_wait_minutes,
         }
     }
 }
@@ -416,6 +425,9 @@ mod tests {
         let mut config = config();
         config.lanes.max_concurrent_builds = Some(0);
         config.lanes.cargo_build_jobs = Some(1025);
+        config.lanes.max_writer_lanes = Some(65);
+        config.lanes.max_project_writer_lanes = Some(0);
+        config.lanes.build_wait_minutes = Some(0);
         let errors = config.validate();
         assert!(
             errors
@@ -423,6 +435,13 @@ mod tests {
                 .any(|e| e.field == "lanes.max_concurrent_builds")
         );
         assert!(errors.iter().any(|e| e.field == "lanes.cargo_build_jobs"));
+        for key in [
+            "max_writer_lanes",
+            "max_project_writer_lanes",
+            "build_wait_minutes",
+        ] {
+            assert!(errors.iter().any(|e| e.field == format!("lanes.{key}")));
+        }
     }
 
     #[test]

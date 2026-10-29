@@ -731,6 +731,37 @@ fn prepare_candidates(
                 continue;
             }
         };
+        let build_settings = config.domains.fabric.lanes.build_settings();
+        // Builds, not lanes, share the host's build slots: a `cargo` shim takes
+        // one around each compiling command. The host (this process, outside
+        // the sandbox) creates the slot files; the lane may only read and lock
+        // them. Memory is unreadable only on a host that cannot run lanes.
+        let cargo = home.join(".cargo/bin/cargo");
+        if spec.env.iter().any(|(name, _)| name == "CARGO_TARGET_DIR") && cargo.is_file() {
+            let total =
+                provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
+            let slots = build_settings.build_limit(total);
+            match provenant_os::build_slots::BuildSlots::provision(roots.state.as_path(), slots) {
+                Ok(()) => spec
+                    .configure_build_slots(
+                        scratch,
+                        &provenant_providers::BuildSlotGate {
+                            provenant: &provenant_executable,
+                            state: roots.state.as_path(),
+                            slots,
+                            wait_seconds: build_settings.build_wait().as_secs(),
+                            cargo: &cargo,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?,
+                // Build slots are fair sharing, not a boundary: without them
+                // the lane still runs, ungated.
+                #[allow(clippy::print_stderr)]
+                Err(error) => eprintln!(
+                    "provenant: build slots unavailable for this lane, building without them: {error}"
+                ),
+            }
+        }
         if !host_indexes_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
@@ -749,8 +780,6 @@ fn prepare_candidates(
                 spec.env.push(("PROVENANT_LANE_BASE".into(), base.into()));
             }
         }
-        let build_settings = config.domains.fabric.lanes.build_settings();
-        let jobs = build_settings.jobs();
         set_cargo_profile(&mut spec.env, &build_settings);
         spec.env.extend(
             model_policy
@@ -763,7 +792,7 @@ fn prepare_candidates(
             registry
                 .host
                 .and_then(|host| host.cargo_build_jobs.as_deref()),
-            jobs,
+            build_settings.jobs(),
         );
         if adapter.id() == "claude" {
             spec.configure_claude_shell(scratch)

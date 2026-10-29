@@ -539,7 +539,7 @@ fn admission_refusal(error: &CustodyError) -> String {
         | CustodyError::AdmissionGuardianIdentity
         | CustodyError::AdmissionDisk { .. }
         | CustodyError::AdmissionMemoryPressure { .. }
-        | CustodyError::AdmissionBuildSlots { .. } => error.to_string(),
+        | CustodyError::AdmissionLaneCap { .. } => error.to_string(),
         _ => "admission refused".into(),
     }
 }

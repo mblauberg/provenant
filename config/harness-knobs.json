@@ -38,7 +38,10 @@
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {
-      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "1 at 16 GiB or less, otherwise 2", "effect": "Maximum active worktree-write lanes across the host."},
+      "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
+      "build_wait_minutes": {"type": "int", "min": 1, "max": 1440, "auto_value": -1, "default": 30, "effect": "Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error."},
+      "max_writer_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": 40, "effect": "Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap."},
+      "max_project_writer_lanes": {"type": "int", "min": 1, "max": 32, "auto_value": -1, "default": 30, "effect": "Most writer lanes live at once for one project; at most max_writer_lanes."},
       "cargo_build_jobs": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": "Half the available cores, at least 1", "effect": "Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence."},
       "cargo_incremental": {"type": "bool", "allowed": "true or false", "default": "false", "effect": "CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence."},
       "cargo_debug": {"type": "string", "allowed": "none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false", "default": "line-tables-only", "effect": "CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence."},

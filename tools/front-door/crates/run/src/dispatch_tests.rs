@@ -2498,36 +2498,6 @@ fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
 }
 
 #[test]
-fn writer_build_limit_is_shared_across_runs() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (Stepped::up(0), CancelToken::new());
-    let call = stepped_call(&clock, &cancel);
-    let mut store = RunStore::open(&context(temp.path())?, &call)?;
-    store.set_admission_policy(AdmissionPolicy {
-        startup_spacing_ms: 0,
-        ..AdmissionPolicy::default()
-    });
-    let first = starting(&store, &lane(55, true), &call)?;
-    let second = starting(&store, &lane(56, true), &call)?;
-    let third = starting(&store, &lane(57, true), &call)?;
-    assert!(
-        store
-            .claim_with_build_limit(first, 2, &clock, &call)?
-            .is_some()
-    );
-    assert!(
-        store
-            .claim_with_build_limit(second, 2, &clock, &call)?
-            .is_some()
-    );
-    assert!(
-        store
-            .claim_with_build_limit(third, 2, &clock, &call)?
-            .is_none()
-    );
-    Ok(())
-}
-#[test]
 fn invalid_build_settings_refuse_without_waiting() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -2536,11 +2506,7 @@ fn invalid_build_settings_refuse_without_waiting() -> TestResult {
     let run = lane(69, true);
     let id = starting(&store, &run, &call)?;
     let attempt = store.attempt_dir(run.run_id, id, false)?;
-    for assignment in [
-        "max_concurrent_builds = 0",
-        "cargo_build_jobs = -2",
-        "cargo_build_jobs = 'invalid'",
-    ] {
+    for assignment in ["cargo_build_jobs = -2", "cargo_build_jobs = 'invalid'"] {
         std::fs::write(
             store.writer_registry.join("config.toml"),
             format!("[domains.fabric.lanes]\n{assignment}\n"),
@@ -2617,7 +2583,45 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
 }
 
 #[test]
-fn configured_build_limit_controls_host_leases() -> TestResult {
+fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
+    // `max_concurrent_builds` gates builds inside lanes, never writer lanes.
+    for limit in [None, Some(1)] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            startup_spacing_ms: 0,
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        if let Some(limit) = limit {
+            std::fs::write(
+                store.writer_registry.join("config.toml"),
+                format!("[domains.fabric.lanes]\nmax_concurrent_builds = {limit}\n"),
+            )?;
+        }
+        for seed in 60..65 {
+            let run = lane(seed, true);
+            let id = starting(&store, &run, &call)?;
+            let dir = store.attempt_dir(run.run_id, id, false)?;
+            assert_eq!(
+                store
+                    .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
+                    .state,
+                AttemptState::Running {
+                    extra: Default::default()
+                },
+                "writer {seed} with limit {limit:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
+    // Range errors are reported when configuration loads, not at admission.
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -2629,96 +2633,73 @@ fn configured_build_limit_controls_host_leases() -> TestResult {
     });
     std::fs::write(
         store.writer_registry.join("config.toml"),
-        "[domains.fabric.lanes]\nmax_concurrent_builds = 2\n",
+        "[domains.fabric.lanes]\nmax_concurrent_builds = 0\n",
     )?;
-    let first_run = lane(63, true);
-    let second_run = lane(64, true);
-    let third_run = lane(65, true);
-    for run in [&first_run, &second_run] {
-        let id = starting(&store, run, &call)?;
-        let dir = store.attempt_dir(run.run_id, id, false)?;
-        assert_eq!(
-            store
-                .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
-                .state,
-            AttemptState::Running {
-                extra: Default::default()
-            }
-        );
-    }
-    let id = starting(&store, &third_run, &call)?;
-    let dir = store.attempt_dir(third_run.run_id, id, false)?;
-    assert!(matches!(
-        store.admit(id, &dir, &Host { available: 100 }, &clock, &cancel),
-        Err(RunError::BuildSlots {
-            active: 2,
-            limit: 2
-        })
-    ));
+    let run = lane(71, true);
+    let id = starting(&store, &run, &call)?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    assert_eq!(
+        store
+            .admit(id, &dir, &Host { available: 100 }, &clock, &cancel)?
+            .state,
+        AttemptState::Running {
+            extra: Default::default()
+        }
+    );
     Ok(())
 }
 
 #[test]
-fn writer_slot_refusal_and_release() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let mut store = RunStore::open(&context(temp.path())?, &call)?;
-    store.set_admission_policy(AdmissionPolicy {
-        startup_spacing_ms: 0,
-        admission_seconds: 1,
-        ..AdmissionPolicy::default()
-    });
-    let first_run = lane(60, true);
-    let first = starting(&store, &first_run, &call)?;
-    assert!(
-        store
-            .claim_with_build_limit(first, 1, &clock, &call)?
-            .is_some()
-    );
-    let blocked_run = lane(61, true);
-    let blocked = starting(&store, &blocked_run, &call)?;
-    let waits = store.lane_waits_with_resources(
-        &[store.record(blocked, &call)?],
-        &call,
-        &Host { available: 100 },
-    );
-    assert_eq!(
-        waits[0].waiting_for,
-        "host capacity: 1 of 1 writer build slots active"
-    );
-    let attempt = store.attempt_dir(blocked_run.run_id, blocked, false)?;
-    assert!(matches!(
-        store.admit(blocked, &attempt, &Host { available: 100 }, &clock, &cancel),
-        Err(RunError::BuildSlots {
-            active: 1,
-            limit: 1
-        })
-    ));
-    let next = starting(&store, &lane(62, true), &call)?;
-    assert!(
-        store
-            .claim_with_build_limit(next, 1, &clock, &call)?
-            .is_none()
-    );
-    let mut observed = exit();
-    observed.scope = RunStore::scope(&store.record(first, &call)?);
-    seal_exit(&store, &observed)?;
-    let revision = store.record(first, &call)?.revision;
-    store.publish_terminal(
-        first,
-        revision,
-        &super::tests::publication(),
-        &observed,
-        &call,
-    )?;
-    assert!(
-        store
-            .claim_with_build_limit(next, 1, &clock, &call)?
-            .is_some()
-    );
+fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
+    for (config, scope) in [
+        ("max_writer_lanes = 3\nmax_project_writer_lanes = 3", "host"),
+        (
+            "max_writer_lanes = 8\nmax_project_writer_lanes = 3",
+            "project",
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            startup_spacing_ms: 0,
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        std::fs::write(
+            store.writer_registry.join("config.toml"),
+            format!("[domains.fabric.lanes]\n{config}\n"),
+        )?;
+        let mut last = None;
+        for seed in 80..84 {
+            let run = lane(seed, true);
+            let id = starting(&store, &run, &call)?;
+            let dir = store.attempt_dir(run.run_id, id, false)?;
+            last = Some(store.admit(id, &dir, &Host { available: 100 }, &clock, &cancel));
+            if seed < 83 {
+                assert_eq!(
+                    last.take().ok_or("admitted")??.state,
+                    AttemptState::Running {
+                        extra: Default::default()
+                    },
+                    "writer {seed} is inside the cap"
+                );
+            }
+        }
+        match last.ok_or("a fourth writer")? {
+            Err(error @ RunError::LaneCap { limit: 3, .. }) => {
+                let text = error.to_string();
+                assert!(text.contains("writer lane cap reached"), "{text}");
+                assert!(text.contains(scope), "{text}");
+                assert!(text.contains("max_"), "{text}");
+            }
+            other => return Err(format!("the fourth writer is refused: {other:?}").into()),
+        }
+    }
     Ok(())
 }
+
 impl Resources for Host {
     fn memory(&self) -> std::io::Result<MemorySample> {
         Ok(MemorySample {

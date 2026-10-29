@@ -363,20 +363,26 @@ workflow. Lane-writable missing child records alone cannot authorise deletion.
 Admission and operation insertion are one transaction, and the immutable
 request is published before acknowledgement. No launch, probe, wait or
 supervisor call happens inside a transaction. Admission bounds active lanes
-at 64 per host and 32 per project and queued lanes at 256 per host, with
+at the fixed ceilings of 64 per host and 32 per project (writers also by the configured caps below) and queued lanes at 256 per host, with
 memory and disk floors, startup spacing and a deadline.
 
 On macOS, Warning or Critical kernel memory pressure defers both classes.
 Normal pressure still requires the memory floor. An unavailable or unknown
 pressure sample is logged and falls back to the floor; Linux uses the floor.
-Disk and memory floors apply to both classes. Writers also require a host-wide
-build slot, defaulting to one at or below 16 GiB of RAM and two above that;
-read-only lanes do not consume one. The provider-exit callback releases this
-slot before Git import or terminal bookkeeping, including on cancellation. At expiry, disk floor, known pressure and
-full build slots have distinct refusal reasons. Disk-floor refusal takes precedence
-when disk and pressure are both insufficient; otherwise Warning or Critical
-pressure is named before build-slot contention. A failed memory sample or a
-floor-only memory shortage retains the generic admission refusal. The ledger associates new leases
+Disk and memory floors apply to both classes. Build slots do not gate
+admission: a host-wide build throttle (not a hard cap), by default
+max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) slots, gates each
+compiling cargo command a lane runs (`provenant_os::build_slots`, reached
+through the lane's `cargo` shim), so idle writers are admitted beyond the slot
+count. Writer lanes are capped separately by `max_writer_lanes` (host, default
+40) and `max_project_writer_lanes` (per project, default 30); a writer at the
+cap queues to the admission deadline and is then refused with a reason naming
+the cap, its scope and the key to raise. All lanes also count against fixed
+ceilings of 64 per host and 32 per project. At expiry, disk floor, known
+pressure and the writer cap have distinct refusal reasons. Disk-floor refusal
+takes precedence when disk and pressure are both insufficient. A failed memory
+sample or a floor-only memory shortage retains the generic admission refusal.
+The ledger associates new leases
 with the boot and guardian identity; a different boot, a definitely absent
 guardian or an admission row proven absent from the same readable owner store
 releases a lease. A busy, missing, replaced or unreadable store retains the
@@ -439,10 +445,13 @@ action simply shows none.
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
 - Test: `crates/run/src/ledger.rs::tests::{live_guardian_fences_busy_replaced_and_corrupt_store, cross_boot_malformed_and_readable_row_removal_release}`;
-  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, writer_slot_refusal_and_release}`;
+  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, idle_writers_are_admitted_beyond_the_build_limit, the_writer_cap_refuses_at_its_limit_and_names_it, out_of_range_build_settings_do_not_block_admission}`;
   `crates/providers/src/lane.rs::tests::claude_shell_restores_jobs_after_scrub`;
-  `crates/config/src/gc.rs::build_tests::{defaults_and_overrides, automatic_and_invalid_build_values}`;
-  `crates/run/src/dispatch_tests.rs::{configured_build_limit_controls_host_leases, invalid_build_settings_refuse_without_waiting, guardian_identity_unknown_retries_and_names_expiry}`;
+  `crates/os/src/build_slots.rs::tests::{slots_are_bounded_and_reusable, contention_never_exceeds_the_limit, read_only_slot_files_cannot_be_created_unlinked_or_replaced_yet_still_lock, the_slot_descriptor_is_close_on_exec, a_process_that_outlives_the_holder_does_not_keep_the_slot, a_wait_reports_progress_then_times_out_naming_the_slots, waiting_for_a_cargo_lock_reports_progress_and_times_out}`;
+  `crates/providers/src/lane.rs::tests::{the_cargo_shim_hands_the_command_to_the_build_slot_gate, the_cargo_shim_refuses_settings_that_cannot_be_trusted, no_write_grant_of_the_finished_lane_profile_reaches_the_slot_directory}`;
+  `tests/build_slot.rs::{more_builds_than_slots_compile_serially, a_killed_build_releases_its_slot_and_the_wait_is_reported, a_backgrounded_grandchild_that_outlives_the_build_does_not_keep_the_slot, a_wait_gives_up_after_the_configured_time_naming_the_slots, a_spoofed_marker_does_not_skip_the_gate_unless_it_names_a_live_ancestor, read_only_slot_files_cannot_be_unlinked_or_created_by_the_build, commands_that_do_not_compile_and_nested_cargo_never_queue, a_marker_naming_a_live_ancestor_that_is_not_a_shim_does_not_skip_the_gate, the_cargo_lock_wait_and_the_slot_wait_share_one_deadline, a_terminated_shim_passes_the_signal_to_its_build}`;
+  `crates/config/src/gc.rs::build_tests::{defaults_and_overrides, automatic_and_invalid_build_values, writer_caps_and_wait_validate_and_default, automatic_build_slots_follow_cores_jobs_and_memory}`;
+  `crates/run/src/dispatch_tests.rs::{invalid_build_settings_refuse_without_waiting, guardian_identity_unknown_retries_and_names_expiry}`;
   `crates/fabric-runtime/src/config.rs::tests::lane_build_settings_validate_shared_bounds_and_auto`;
   `crates/run/src/dispatch_tests.rs::admission_holds_run_concurrency_spacing_floors_and_deadline`;
   `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;

@@ -13,6 +13,15 @@ pub struct LaneBuildSettings {
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
+    /// Most writer lanes live at once across the host.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub max_writer_lanes: Option<u64>,
+    /// Most writer lanes live at once for one project.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub max_project_writer_lanes: Option<u64>,
+    /// Minutes a build waits for a build slot or a Cargo lock before giving up.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub build_wait_minutes: Option<u64>,
     /// `CARGO_INCREMENTAL` for lanes; off unless set.
     pub cargo_incremental: Option<bool>,
     /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
@@ -35,6 +44,12 @@ pub struct LaneBuildSettings {
     /// minutes unless set.
     pub build_dir_survey_interval_seconds: Option<u64>,
 }
+pub const DEFAULT_MAX_WRITER_LANES: u64 = 40;
+pub const DEFAULT_MAX_PROJECT_WRITER_LANES: u64 = 30;
+pub const DEFAULT_BUILD_WAIT_MINUTES: u64 = 30;
+/// Hard ceilings on the configurable lane caps.
+pub const WRITER_LANES_CEILING: u64 = 64;
+pub const PROJECT_WRITER_LANES_CEILING: u64 = 32;
 /// Cargo's accepted `debug` levels, including the legacy numeric and boolean forms.
 const CARGO_DEBUG_LEVELS: [&str; 10] = [
     "none",
@@ -105,28 +120,31 @@ impl LaneBuildSettings {
             Err(error) if error.is_not_found() => Self::default(),
             Err(error) => return Err(std::io::Error::other(error)),
         };
-        if !settings.invalid_keys().is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "invalid lane build settings",
-            ));
-        }
         Ok(settings)
     }
-    /// Invalid host build setting names, shared with the Fabric reader.
+    /// Out-of-range setting names, checked when configuration loads. Admission
+    /// never re-validates them: it clamps through the accessors below.
     pub fn invalid_keys(&self) -> Vec<&'static str> {
         let mut invalid = Vec::new();
-        if self
-            .max_concurrent_builds
-            .is_some_and(|n| !(1..=64).contains(&n))
-        {
+        let in_range = |value: Option<u64>, max: u64| value.is_none_or(|n| (1..=max).contains(&n));
+        if !in_range(self.max_concurrent_builds, 64) {
             invalid.push("max_concurrent_builds");
         }
-        if self
-            .cargo_build_jobs
-            .is_some_and(|n| !(1..=1024).contains(&n))
-        {
+        if !in_range(self.cargo_build_jobs, 1024) {
             invalid.push("cargo_build_jobs");
+        }
+        if !in_range(self.max_writer_lanes, WRITER_LANES_CEILING) {
+            invalid.push("max_writer_lanes");
+        }
+        if !in_range(self.max_project_writer_lanes, PROJECT_WRITER_LANES_CEILING)
+            || self
+                .max_project_writer_lanes
+                .is_some_and(|project| project > self.writer_lanes())
+        {
+            invalid.push("max_project_writer_lanes");
+        }
+        if !in_range(self.build_wait_minutes, 1440) {
+            invalid.push("build_wait_minutes");
         }
         if self
             .cargo_debug
@@ -158,13 +176,43 @@ impl LaneBuildSettings {
         self.build_dir_survey_interval_seconds
             .unwrap_or(DEFAULT_BUILD_DIR_SURVEY_INTERVAL_SECONDS)
     }
+    /// Concurrent cargo builds the host allows: the setting (clamped to 1..=64)
+    /// or max(1, min(cores / cargo_build_jobs, total GiB / 6)), so a 10-core
+    /// 16 GiB host with 5 jobs gets 2.
     pub fn build_limit(&self, total_bytes: u64) -> u64 {
-        self.max_concurrent_builds
-            .unwrap_or(if total_bytes <= 16 * 1024_u64.pow(3) {
-                1
-            } else {
-                2
-            })
+        if let Some(limit) = self.max_concurrent_builds {
+            return limit.clamp(1, 64);
+        }
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
+        Self::automatic_builds(cores, self.jobs(), total_bytes)
+    }
+    /// The automatic build limit for a host with `cores` and `total_bytes`.
+    pub fn automatic_builds(cores: u64, jobs: u64, total_bytes: u64) -> u64 {
+        let by_cpu = cores / jobs.max(1);
+        let by_memory = total_bytes / (6 * 1024_u64.pow(3));
+        by_cpu.min(by_memory).clamp(1, 64)
+    }
+    pub fn writer_lanes(&self) -> u64 {
+        self.max_writer_lanes
+            .unwrap_or(DEFAULT_MAX_WRITER_LANES)
+            .clamp(1, WRITER_LANES_CEILING)
+    }
+    /// The per-project writer cap. An unset key defaults to
+    /// `min(default, writer_lanes)`, so lowering only the host cap never makes
+    /// the default project cap exceed it.
+    pub fn project_writer_lanes(&self) -> u64 {
+        self.max_project_writer_lanes
+            .unwrap_or(DEFAULT_MAX_PROJECT_WRITER_LANES)
+            .clamp(1, PROJECT_WRITER_LANES_CEILING)
+            .min(self.writer_lanes())
+    }
+    pub fn build_wait(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            60 * self
+                .build_wait_minutes
+                .unwrap_or(DEFAULT_BUILD_WAIT_MINUTES)
+                .clamp(1, 1440),
+        )
     }
     pub fn jobs(&self) -> u64 {
         self.cargo_build_jobs.unwrap_or_else(|| {
@@ -412,19 +460,65 @@ mod build_tests {
         assert!(toml_edit::de::from_str::<LaneBuildSettings>("cargo_build_jobs = -2").is_err());
     }
     #[test]
+    fn writer_caps_and_wait_validate_and_default() {
+        let defaults = LaneBuildSettings::default();
+        assert_eq!(defaults.writer_lanes(), 40);
+        assert_eq!(defaults.project_writer_lanes(), 30);
+        assert_eq!(defaults.build_wait(), std::time::Duration::from_secs(1800));
+        let invalid: LaneBuildSettings = toml_edit::de::from_str(
+            "max_writer_lanes = 65\nmax_project_writer_lanes = 0\nbuild_wait_minutes = 0",
+        )
+        .unwrap();
+        assert_eq!(
+            invalid.invalid_keys(),
+            [
+                "max_writer_lanes",
+                "max_project_writer_lanes",
+                "build_wait_minutes"
+            ]
+        );
+        let wider: LaneBuildSettings =
+            toml_edit::de::from_str("max_writer_lanes = 8\nmax_project_writer_lanes = 9").unwrap();
+        assert_eq!(wider.invalid_keys(), ["max_project_writer_lanes"]);
+        let fine: LaneBuildSettings =
+            toml_edit::de::from_str("max_writer_lanes = 8\nmax_project_writer_lanes = 8").unwrap();
+        assert!(fine.invalid_keys().is_empty());
+        // Only the host cap set: the unset project key is not blamed, and its
+        // effective cap follows the host cap down.
+        let only_host: LaneBuildSettings =
+            toml_edit::de::from_str("max_writer_lanes = 20").unwrap();
+        assert!(only_host.invalid_keys().is_empty());
+        assert_eq!(only_host.writer_lanes(), 20);
+        assert_eq!(only_host.project_writer_lanes(), 20);
+        let roomy: LaneBuildSettings = toml_edit::de::from_str("max_writer_lanes = 50").unwrap();
+        assert_eq!(roomy.project_writer_lanes(), 30);
+    }
+    #[test]
+    fn automatic_build_slots_follow_cores_jobs_and_memory() {
+        let gib = 1024_u64.pow(3);
+        // A 10-core 16 GiB host with 5 jobs per build: 2 by cores, 2 by memory.
+        assert_eq!(LaneBuildSettings::automatic_builds(10, 5, 16 * gib), 2);
+        assert_eq!(LaneBuildSettings::automatic_builds(10, 5, 64 * gib), 2);
+        assert_eq!(LaneBuildSettings::automatic_builds(32, 4, 64 * gib), 8);
+        assert_eq!(LaneBuildSettings::automatic_builds(32, 4, 12 * gib), 2);
+        assert_eq!(LaneBuildSettings::automatic_builds(2, 8, 4 * gib), 1);
+    }
+    #[test]
     fn defaults_and_overrides() {
-        let settings = LaneBuildSettings::default();
-        let boundary = 16 * 1024_u64.pow(3);
-        assert_eq!(settings.build_limit(boundary), 1);
-        assert_eq!(settings.build_limit(boundary + 1), 2);
-        assert!(settings.jobs() >= 1);
         let settings = LaneBuildSettings {
             max_concurrent_builds: Some(3),
             cargo_build_jobs: Some(7),
             ..LaneBuildSettings::default()
         };
-        assert_eq!(settings.build_limit(boundary), 3);
+        assert_eq!(settings.build_limit(1), 3);
         assert_eq!(settings.jobs(), 7);
+        assert!(LaneBuildSettings::default().build_limit(0) >= 1);
+        // Out-of-range values are rejected at config load and clamped here.
+        let wild = LaneBuildSettings {
+            max_concurrent_builds: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(wild.build_limit(0), 1);
     }
     #[test]
     fn cargo_profile_defaults_and_overrides() {
