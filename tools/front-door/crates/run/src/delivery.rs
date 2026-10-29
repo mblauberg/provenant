@@ -1286,7 +1286,7 @@ impl HostDeliveryContext {
         self.discover_common_git_dir(&writer.project, stage)
     }
 
-    fn common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
+    pub(super) fn common_git_dir(&self, project: &Path, stage: Stage) -> Result<PathBuf> {
         match self
             .bound
             .as_ref()
