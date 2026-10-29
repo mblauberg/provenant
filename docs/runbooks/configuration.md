@@ -432,7 +432,7 @@ GC reports `provider_state.attempt_logs`; disk reports measure `attempt_logs`.
 `gc.schedule = false` disables scheduled retention sweeps and admission
 collection; settlement pressure collection and landing cleanup still run.
 
-The optional `[gc]` section controls the macOS per-user schedule:
+The optional `[gc]` section controls daily collection by the host tick:
 
 ```toml
 [gc]
@@ -449,8 +449,8 @@ foreign_worktrees = "keep" # opt in with "merged-clean"
 ```
 
 `gc.schedule` defaults to true. Setting it to false prevents subsequent
-scheduled collections; rerun `install` to boot out the agent and remove its
-unchanged receipt-owned plist. `gc.idle_days` accepts 1 to 3650 (default 7).
+scheduled collections. The host tick continues to serve graph deadlines.
+`gc.idle_days` accepts 1 to 3650 (default 7).
 `gc.free_floor` defaults to 10% of the state volume's capacity, with a minimum
 of 50 GiB. Set it to override that floor. GC requests additional cache
 collection until available disk space reaches the floor, after the usual
@@ -458,14 +458,17 @@ orphaned, tombstoned and idle pass. Sizes are whole binary units: `B`, `K`,
 `M`, `G`, `T`, or `KiB` through `TiB`; plain numbers mean GiB.
 On APFS, local snapshots can keep deletions from increasing available space, so
 a floor may remove every eligible cache on each run.
-Rerun `install` after changing the idle threshold to update the
-agent's arguments. The floor is read from configuration each collection. Edit these keys in `config.toml`; they are separate from
+The idle threshold and floor are read from configuration each collection.
+Edit these keys in `config.toml`; they are separate from
 the harness knob registry.
 
-The schedule runs at load and daily, only for installations in the account's
-default state root. Logs are `<state>/gc/stdout.log` and
-`<state>/gc/stderr.log`. It discovers registered projects without requiring a
-checkout as its working directory. Unobservable projects keep their caches.
+The macOS host tick runs at load and every 60 seconds, only for installations
+in the account's default state root. Collection runs when its persisted daily
+deadline is due. Logs are `<state>/tick/stdout.log` and `<state>/tick/stderr.log`.
+Collection runs in a detached one-shot worker, with its latest result in
+`<state>/tick/gc-result.json`, so a slow collection does not hold up graph wakes.
+It discovers registered projects without requiring a checkout as its working
+directory. Unobservable projects keep their caches.
 Manual `provenant gc --dry-run --free-floor 20G` previews the selected
 project's cleanup, including oldest-first pressure removals. Live writers and
 reservations remain protected.
@@ -484,8 +487,7 @@ consume the same free space.
 
 Bare `provenant gc` deletes eligible caches and previews merged worktree and
 declared output cleanup. Pass `--apply` to delete those entries too, or
-`--dry-run` to preview all cleanup. The installed scheduled agent passes
-`--apply`. Merged worktree cleanup fetches `origin`'s actual default branch;
+`--dry-run` to preview all cleanup. The daily tick task applies those removals. Merged worktree cleanup fetches `origin`'s actual default branch;
 it does not need a fresh local `main`. Failed fetches keep worktrees and
 report the failure. Worktrees need known-terminal lanes and merged commits
 of their own: tips equal to upstream or on its first-parent history stay.
@@ -547,7 +549,7 @@ status names a disk pause and the command `provenant gc --apply`.
 
 The `[disk_guard]` table and its separate warning, pause, resume and process
 settings have been removed. Remove that table from existing configuration.
-Install retires the old LaunchAgent once; the daily GC agent remains a backstop.
+Install retires the old LaunchAgent once; the daily GC tick task remains a backstop.
 
 ## Writer extra write paths
 

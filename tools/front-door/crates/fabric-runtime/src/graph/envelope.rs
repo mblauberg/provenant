@@ -179,6 +179,8 @@ fn node_bound(
             on_fail: node.on_fail.clone(),
         }),
         ci: ci.then(|| CiEvidence {
+            wake_at: Some(latest()),
+            pending_observations: u64::MAX,
             extra: Default::default(),
             first_observed_stamp: Some(CiHostStamp {
                 extra: Default::default(),

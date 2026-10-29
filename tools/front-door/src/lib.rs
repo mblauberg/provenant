@@ -12,7 +12,8 @@ mod console;
 mod disk;
 mod disk_guard;
 mod fabric;
-mod gc_agent;
+mod tick;
+mod tick_agent;
 
 mod chair_log_retention;
 mod gc_support;
@@ -662,6 +663,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 ),
             }
         }
+        Command::Internal(provenant_cli::Internal::TickGc) => {
+            tick::gc_worker(globals, process.workers())
+        }
         Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => match provenant_cli::provider_updates::housekeep(
@@ -961,6 +965,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }
         Command::Worktree(worktree) => worktrees::run(worktree, globals, process.workers()),
         Command::Pr(command) => pr::run(command, globals, process.workers()),
+        Command::Tick => tick::run(globals, process.workers()),
         Command::Gc(command) => worktrees::run_gc(command, globals, process.workers()),
         Command::Disk(provenant_cli::Disk::Report) => disk::run(globals),
         Command::Bench(command) => bench::run(command, globals),

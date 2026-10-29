@@ -344,13 +344,25 @@ plists are preserved and block install. To recover, move the named plist
 aside, run `launchctl bootout gui/$UID/dev.provenant.peer`, then rerun install.
 
 The same macOS default-state install also manages
-`~/Library/LaunchAgents/dev.provenant.gc.plist`, with `RunAtLoad = true` and
-`StartInterval = 86400` (daily). It runs `provenant gc` for registered projects,
-protecting live writers and reservations. Its stdout and stderr go to `<state>/gc/`.
-`[gc] schedule = false` disables scheduled deletion; rerun install to remove
-the owned agent. `idle_days` becomes an agent argument on install. The collector reads
-`gc.free_floor` from configuration each run. When `free_floor` is unset, the floor is 10% of the state volume,
-at least 50 GiB. See [configuration](configuration.md#lane-cache-collection).
+`~/Library/LaunchAgents/dev.provenant.tick.plist`, with `RunAtLoad = true` and
+`StartInterval = 60`. It runs `provenant tick` to advance graphs with due persisted
+wake deadlines and collect registered projects daily, protecting live writers
+and reservations. Its stdout and stderr go to `<state>/tick/`. The tick uses a
+fixed PATH plus the install bin directory and resolved provider, Git and GitHub
+CLI locations outside project worktrees. Linux scheduler installation is deferred;
+`provenant tick` can also run directly.
+
+Daily collection runs in a detached one-shot worker, so a slow collection does
+not delay graph deadlines. Its completion or failure is recorded in
+`<state>/tick/gc-result.json`; `provenant tick --json` reports a failed sweep.
+
+Install and upgrade unload the former `dev.provenant.gc` label. Receipt-owned,
+unchanged GC plists are removed during migration; modified plists are preserved
+and reported. `[gc] schedule = false` disables scheduled deletion without
+stopping graph deadlines. The collector reads the live idle threshold and floor
+from configuration each run. When `free_floor` is unset, the floor is 10% of the
+state volume, at least 50 GiB. See
+[configuration](configuration.md#lane-cache-collection).
 
 Install quietly boots out and deletes an existing
 `~/Library/LaunchAgents/dev.provenant.disk-guard.plist` on upgrade. Disk checks
@@ -368,7 +380,7 @@ unchanged owned entries and keeps the state and release assets. It never
 recursively deletes a checkout, state root or release. With `CLAUDE_CONFIG_DIR`
 or `CODEX_HOME` set, uninstall removes only that directory's target; without
 it, every recorded target of the harness.
-Removing the last recorded target also boots out the peer and GC
+Removing the last recorded target also boots out the peer and tick
 LaunchAgents and removes their unchanged plists.
 A modified plist is kept and reported; its
 service is left running. A failed bootout keeps the plist for a retry.

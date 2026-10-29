@@ -181,6 +181,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     on_fail: node.on_fail.clone(),
                 }),
                 ci: matches!(node.condition, Some(GateCondition::Ci { .. })).then(|| CiEvidence {
+                    wake_at: Some(envelope::latest()),
+                    pending_observations: u64::MAX,
                     extra: Default::default(),
                     first_observed_stamp: Some(CiHostStamp {
                         extra: Default::default(),

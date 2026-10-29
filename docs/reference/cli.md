@@ -3325,6 +3325,13 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 }
 ```
 
+## `provenant tick`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
 ## `provenant disk`
 
 | Argument | Contract |
