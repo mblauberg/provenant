@@ -900,7 +900,7 @@ pub struct ModelEntry {
     pub efforts: Vec<String>,
     pub evidence_ref: String,
     pub family: Option<String>,
-    /// Unknown is treated as training for confidential selection.
+    /// Covers prompt training and retention. Unknown is ineligible for confidential selection.
     #[serde(default)]
     pub trains_on_prompts: Option<bool>,
     #[serde(default)]
@@ -1316,7 +1316,6 @@ mod tests {
                 choice: RouteChoice::Model(ModelId::parse(id)?),
                 effort: None,
                 confidential: false,
-                allow_free: false,
                 fallback: Fallback::None,
             })
         };
@@ -1369,7 +1368,6 @@ mod tests {
             choice: RouteChoice::Model(ModelId::parse(id)?),
             effort: None,
             confidential: false,
-            allow_free: false,
             fallback: Fallback::None,
         })
     }
@@ -1670,7 +1668,6 @@ mod tests {
                     choice: RouteChoice::Model(model.clone()),
                     effort: None,
                     confidential: true,
-                    allow_free: false,
                     fallback: Fallback::None,
                 },
                 &context,

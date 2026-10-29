@@ -210,7 +210,6 @@ fn preset_ignored_flags(request: &provenant_cli::Dispatch) -> Vec<&'static str> 
         ("--effort", route.effort.is_some()),
         ("--fallback", !route.fallback.is_empty()),
         ("--confidential", route.confidential),
-        ("--allow-free", route.allow_free),
         ("--read-heavy", route.read_heavy),
         ("--host", request.host.is_some()),
         ("--branch", request.branch.is_some()),

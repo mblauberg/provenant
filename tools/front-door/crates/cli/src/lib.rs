@@ -1524,7 +1524,6 @@ mod tests {
             vec!["--title", "title"],
             vec!["--build-heavy"],
             vec!["--confidential"],
-            vec!["--allow-free"],
             vec!["--provider-timeout", "1"],
             vec!["--operation-id", "id"],
         ] {

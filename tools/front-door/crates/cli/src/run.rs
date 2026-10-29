@@ -1126,7 +1126,6 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         effort,
         fallback,
         confidential: false,
-        allow_free: false,
     })
 }
 

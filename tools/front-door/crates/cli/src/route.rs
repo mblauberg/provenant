@@ -179,9 +179,6 @@ pub struct RouteRequest {
     /// Require a confidential-safe route
     #[arg(long)]
     pub confidential: bool,
-    /// Allow free-tier models
-    #[arg(long)]
-    pub allow_free: bool,
     /// Fallback models in ADAPTER/ID form, comma separated
     #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
     pub fallback: Vec<Model>,
@@ -225,7 +222,6 @@ impl RouteRequest {
             choice,
             effort: self.effort.clone(),
             confidential: self.confidential,
-            allow_free: self.allow_free,
             fallback,
         })
     }
@@ -2384,7 +2380,6 @@ mod route_tests {
                 route: route.map(str::to_owned),
                 effort: None,
                 confidential: false,
-                allow_free: false,
                 fallback: vec![],
             }
             .to_domain()
@@ -2413,7 +2408,6 @@ mod route_tests {
                 route: None,
                 effort: None,
                 confidential: false,
-                allow_free: false,
                 fallback: vec![],
             },
         });
@@ -2438,7 +2432,6 @@ mod route_tests {
                 route: route.map(str::to_owned),
                 effort: None,
                 confidential: false,
-                allow_free: false,
                 fallback: vec![super::Model("opencode/opencode-go/glm-5.3-flash".into())],
             };
             let resolved = resolve(&request.to_domain()?)?;
@@ -2566,7 +2559,6 @@ mod route_tests {
             route: None,
             effort: None,
             confidential: false,
-            allow_free: false,
             fallback: vec![super::Model("codex/unlisted-fallback".into())],
         }
         .to_domain()?;
@@ -2669,7 +2661,6 @@ mod route_tests {
             route: None,
             effort: None,
             confidential: false,
-            allow_free: false,
             fallback: vec![],
         }
         .to_domain()?;
@@ -2919,7 +2910,6 @@ mod route_tests {
             route: Some("test".into()),
             effort: None,
             confidential: false,
-            allow_free: false,
             fallback: vec![],
         }
         .to_domain()?;
