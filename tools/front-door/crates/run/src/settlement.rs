@@ -337,6 +337,18 @@ impl crate::RunStore {
         run: provenant_core::RunId,
         call: &crate::Request<'_>,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
+        self.queue_reconcile_with(run, call, provenant_os::exec::spawn_detached)
+    }
+
+    pub(crate) fn queue_reconcile_with(
+        &self,
+        run: provenant_core::RunId,
+        call: &crate::Request<'_>,
+        spawn: impl FnOnce(
+            &[std::ffi::OsString],
+            &std::path::Path,
+        ) -> std::result::Result<(), provenant_os::exec::ExecError>,
+    ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
         self.run(run, call)?;
         let attempts = self.pending_attempts(run, call)?;
         let checkout = std::env::current_dir()?;
@@ -365,8 +377,7 @@ impl crate::RunStore {
                 .map_err(|_| RunError::Validation("settlement resume request"))?
                 .into(),
         ];
-        provenant_os::exec::spawn_detached(&argv, &checkout)
-            .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        spawn(&argv, &checkout).map_err(|error| RunError::Io(std::io::Error::other(error)))?;
         Ok(attempts
             .into_iter()
             .map(|attempt| {

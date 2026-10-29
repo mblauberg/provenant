@@ -1,9 +1,9 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Advisory CI signal: stress-run the tests a pull request added or changed.
 #   run-stress-tests <base> [<head>]
 # Runs nextest with --stress-count 20 and no retries over just those tests.
 # A failure becomes a warning annotation and summary; the script always exits 0.
-set -eu
+set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 base=${1:?usage: run-stress-tests <base> [<head>]}
@@ -29,8 +29,7 @@ trap 'rm -f "$log"' EXIT HUP INT TERM
 status=0
 cargo nextest run --profile ci --workspace --locked \
   --features provenant-providers/recording \
-  --stress-count "$count" --retries 0 --no-tests=pass -E "$filter" > "$log" 2>&1 || status=$?
-tail -n 200 "$log"
+  --stress-count "$count" --retries 0 --no-tests=pass -E "$filter" 2>&1 | tee "$log" || status=$?
 
 if [ "$status" -eq 0 ]; then
   note "Changed tests passed $count stress iterations with no retries."

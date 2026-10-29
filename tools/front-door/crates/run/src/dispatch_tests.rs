@@ -7133,7 +7133,20 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         store.cancel(id, "bounded cancellation", &call)?,
         CancelReceipt::Requested
     );
-    let queued = store.reconcile(run.run_id, &Fake::default(), &call)?;
+    // A unit-test executable interprets "internal settle" as test filters.
+    // Exercise the control's process boundary without starting hidden tests.
+    let mut launched = false;
+    let queued = store.queue_reconcile_with(run.run_id, &call, |argv, cwd| {
+        assert_eq!(argv.len(), 4);
+        assert_eq!(argv[0], std::env::current_exe().unwrap().into_os_string());
+        assert_eq!(argv[1..3], ["internal", "settle"]);
+        assert_eq!(cwd, std::env::current_dir().unwrap());
+        let request: serde_json::Value = serde_json::from_str(argv[3].to_str().unwrap()).unwrap();
+        assert_eq!(request["run"], serde_json::to_value(run.run_id).unwrap());
+        launched = true;
+        Ok(())
+    })?;
+    assert!(launched);
     assert!(matches!(queued.as_slice(), [(found, Reconciled::Settling { .. })] if *found == id));
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(
