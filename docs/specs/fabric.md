@@ -86,6 +86,8 @@ Viewer request presentation state is separate from resolution and blocking.
 Viewer names are caller-supplied labels, like agent labels: they are not an
 authentication boundary. A local caller that knows a label can change that
 viewer's state; the direct SQLite access residual above also applies.
+A lane may dismiss or snooze a request in any viewer, including `console`.
+Snoozing never grants authority.
 A lane may change only the bounded request presentation fields `seen_revision`,
 `snoozed_until` and `dismissed`; it never changes resolution, answers or the
 blocking state, and summary baselines remain outside a lane.

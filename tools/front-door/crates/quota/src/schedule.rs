@@ -30,6 +30,12 @@ pub struct QuotaTick {
 }
 
 pub const TICK_BUDGET_SECONDS: i64 = 55;
+/// A probe must finish before its durable claim expires, even when the tick's
+/// configured wall budget is longer than the claim window.
+pub fn probe_deadline(tick_deadline: i64, started: i64) -> Result<i64, QuotaError> {
+    let claim_expiry = add(started, TICK_BUDGET_SECONDS as u64)?;
+    Ok(tick_deadline.min(claim_expiry - 1))
+}
 pub fn interval(
     policies: &[QuotaPolicy],
     adapter: &str,
@@ -515,6 +521,12 @@ pub fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_deadline_respects_tick_wall_budget_and_claim_expiry() {
+        assert_eq!(probe_deadline(700, 100).unwrap(), 154);
+        assert_eq!(probe_deadline(130, 100).unwrap(), 130);
+    }
     fn account() -> AccountScope {
         AccountScope {
             adapter: "claude".into(),

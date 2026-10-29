@@ -394,9 +394,13 @@ max_parallel = 3
 wall_budget_seconds = 55
 ```
 
-`max_parallel` accepts 1 to 16 concurrent account probes and
-`wall_budget_seconds` accepts 1 to 600 seconds. The defaults remain 3 and 55.
-Values outside those ranges refuse the file because they control probe
+`max_parallel` accepts 1 to 16 accounts per batch, and
+`wall_budget_seconds` accepts 1 to 600 seconds for the whole tick. The defaults
+remain 3 and 55. Batches and probes currently run sequentially, so
+`max_parallel` does not create concurrent probes. Each probe also has a
+55-second claim window and receives a deadline no later than one second before
+that claim expires; the tick wall budget bounds the total time across probes.
+Values outside these ranges refuse the file because they control probe
 admission and deadlines.
 
 ## OpenCode Go quota calibration

@@ -284,7 +284,7 @@ fn fragment(
             ));
         }
         // Gate evidence lives in its condition and a decision in its question.
-        // Agent nodes carry explicit scope and acceptance prose in their brief.
+        // Writer nodes carry explicit scope; all agents carry acceptance prose.
         if !matches!(child.kind, Some(NodeKind::Gate | NodeKind::Decide)) {
             if child.prompt.trim().is_empty()
                 || child.acceptance_checks.is_empty()
