@@ -24,6 +24,7 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 
 | Key | Default | Effect |
 |---|---|---|
+| `allowed_read_roots` | empty (read roots stay inside the project and its registered worktrees) | Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees. (absolute directory paths). |
 | `limits.expansion_depth` | 32 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 29. Graph documents cannot raise it. (1 or more). |
 
 ## Provider updates
