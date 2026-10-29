@@ -296,6 +296,76 @@ fn check_os_sources(path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// Cover literal Git commands and the common names used for fixture Git paths.
+// Deliberately bound tests also go through the helper before adding their env.
+fn check_fixture_git_sources(path: &Path, pattern: &regex::Regex) -> Result<(), Box<dyn Error>> {
+    if path.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_symlink() {
+                check_fixture_git_sources(&entry.path(), pattern)?;
+            }
+        }
+    } else if path.extension().is_some_and(|extension| extension == "rs") {
+        let source = fs::read_to_string(path)?;
+        let name = path.to_string_lossy();
+        let test_file = name.contains("/tests/") || name.ends_with("_tests.rs");
+        let test_source = if test_file {
+            source.as_str()
+        } else {
+            source
+                .rsplit_once("#[cfg(test)]\nmod tests")
+                .map_or("", |(_, tests)| tests)
+        };
+        if pattern.is_match(test_source) {
+            return Err(format!("{} spawns Git without the fixture helper", path.display()).into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fixture_git_commands_use_the_scrubbed_helper() -> Result<(), Box<dyn Error>> {
+    let pattern = regex::Regex::new(
+        r#"Command\s*::\s*new\s*\(\s*(?:"(?:/usr/bin/)?git"|&?(?:(?:self|fixture)\.)?git\b|executable\b)"#,
+    )?;
+    assert!(pattern.is_match(concat!("Command::new(", "\"git\")")));
+    assert!(pattern.is_match(concat!("Command::new(", "&fixture.git)")));
+    assert!(!pattern.is_match("provenant_os::fixture::git_command()"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        root.join("src"),
+        root.join("tests"),
+        root.join("crates"),
+        root.join("build.rs"),
+    ] {
+        check_fixture_git_sources(&path, &pattern)?;
+    }
+    let script_pattern =
+        regex::Regex::new(r#"(?m)(?:^\s*git\s|\$\(\s*git\s|subprocess\.\w+\(\s*\[\s*"git")"#)?;
+    for entry in fs::read_dir(root.join("../../scripts"))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("test-") || name == "test-check-adr-index" {
+            // This one only reads the checkout containing the test itself.
+            continue;
+        }
+        let source = fs::read_to_string(entry.path())?;
+        if script_pattern.is_match(&source)
+            && !source.contains("test-git-env.sh")
+            && !source.contains("test_git_env.isolate()")
+        {
+            return Err(format!(
+                "{} spawns Git without fixture isolation",
+                entry.path().display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn os_internals_are_reserved_for_supervisor() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));

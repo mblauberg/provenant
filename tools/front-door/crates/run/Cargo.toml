@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+provenant-os = { workspace = true, features = ["fixture"] }
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }

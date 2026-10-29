@@ -4,6 +4,14 @@
 )]
 use std::{path::PathBuf, process::Command};
 
+fn fixture_cli() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
+    provenant_os::fixture::scrub_git_env(&mut command);
+    command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command
+}
+
 #[test]
 fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -23,7 +31,7 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
             "seed",
         ],
     ] {
-        let output = Command::new("git")
+        let output = provenant_os::fixture::git_command()
             .current_dir(&project)
             .args(args)
             .output()?;
@@ -43,7 +51,7 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
     std::fs::write(&prompt, "accept the bounded graph")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let run = || {
-        Command::new(env!("CARGO_BIN_EXE_provenant"))
+        fixture_cli()
             .current_dir(&project)
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
@@ -91,7 +99,7 @@ fn explain_pins_source_refs_before_hashing_without_creating_state()
     let project = temp.path().join("project");
     std::fs::create_dir(&project)?;
     let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
-        let output = Command::new("git")
+        let output = provenant_os::fixture::git_command()
             .current_dir(&project)
             .args(args)
             .output()?;
@@ -121,7 +129,7 @@ fn explain_pins_source_refs_before_hashing_without_creating_state()
     std::fs::write(&prompt, "review this immutable subject")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let run = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        let output = fixture_cli()
             .current_dir(&project)
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
@@ -165,7 +173,7 @@ fn run_announces_contributing_repo_file() -> Result<(), Box<dyn std::error::Erro
     std::fs::write(&prompt, "brief")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     // This directory is not a Git checkout, so the graph owner cannot submit.
-    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+    let output = fixture_cli()
         .current_dir(temp.path())
         .env("PROVENANT_ROOT", root)
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
@@ -190,7 +198,7 @@ fn explain_does_not_create_state() -> Result<(), Box<dyn std::error::Error>> {
     let prompt = temp.path().join("prompt");
     std::fs::write(&prompt, "brief")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+    let output = fixture_cli()
         .current_dir(&root)
         .env("PROVENANT_ROOT", &root)
         .env("XDG_CONFIG_HOME", temp.path())
@@ -209,7 +217,7 @@ fn explain_does_not_create_state() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(result["data"]["graph"]["nodes"][0]["id"], "task");
     assert!(!state.exists());
     std::fs::write(&prompt, vec![b'x'; 600_000])?;
-    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+    let output = fixture_cli()
         .current_dir(&root)
         .env("PROVENANT_ROOT", &root)
         .env("XDG_CONFIG_HOME", temp.path())
@@ -249,7 +257,7 @@ fn explain_applies_writer_read_root_and_concurrency_bindings_without_state()
     let prompt = temp.path().join("brief");
     std::fs::write(&prompt, "Implement the bounded slice")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+    let output = fixture_cli()
         .current_dir(temp.path())
         .env("PROVENANT_ROOT", root)
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
@@ -296,7 +304,7 @@ fn show_validates_and_list_reports_bad_files() -> Result<(), Box<dyn std::error:
     std::fs::write(presets.join("broken.toml"), "[invalid")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let run = |args: &[&str]| -> std::io::Result<std::process::Output> {
-        Command::new(env!("CARGO_BIN_EXE_provenant"))
+        fixture_cli()
             .current_dir(&root)
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", temp.path())
@@ -331,7 +339,7 @@ fn oversized_expansions_fail_before_graph_state_for_run_and_explain()
     std::fs::write(&prompt, vec![b'x'; 1_048_576])?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for explain in [false, true] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
+        let mut command = fixture_cli();
         command
             .current_dir(&root)
             .env("PROVENANT_ROOT", &root)
@@ -359,7 +367,7 @@ fn run_refuses_a_read_root_outside_the_project() -> Result<(), Box<dyn std::erro
     let prompt = temp.path().join("brief");
     std::fs::write(&prompt, "Read elsewhere")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+    let output = fixture_cli()
         .current_dir(temp.path())
         .env("PROVENANT_ROOT", root)
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
@@ -385,7 +393,7 @@ fn integration_sourced_graph_identity_follows_the_integration_head()
     let project = temp.path().join("project");
     std::fs::create_dir(&project)?;
     let git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
-        let output = Command::new("git")
+        let output = provenant_os::fixture::git_command()
             .current_dir(&project)
             .args([
                 "-c",
@@ -417,7 +425,7 @@ fn integration_sourced_graph_identity_follows_the_integration_head()
     std::fs::write(&prompt, "review the batch")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let run = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        let output = fixture_cli()
             .current_dir(&project)
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
@@ -466,7 +474,7 @@ fn params_file_supplies_lists_and_set_wins_over_it() -> Result<(), Box<dyn std::
         ),
     )?;
     let run = |extra: &[String]| -> Result<std::process::Output, std::io::Error> {
-        Command::new(env!("CARGO_BIN_EXE_provenant"))
+        fixture_cli()
             .current_dir(&root)
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", temp.path())
@@ -507,7 +515,7 @@ fn preset_explain_describes_the_pattern_and_creates_no_state()
     let temp = tempfile::tempdir()?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let state = temp.path().join("state");
-    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+    let output = fixture_cli()
         .current_dir(&root)
         .env("PROVENANT_ROOT", &root)
         .env("XDG_CONFIG_HOME", temp.path())
@@ -589,7 +597,7 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
         ],
     ] {
         assert!(
-            Command::new("git")
+            provenant_os::fixture::git_command()
                 .current_dir(&project)
                 .args(args)
                 .status()?
@@ -601,7 +609,7 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
-    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+    let output = fixture_cli()
         .current_dir(&project)
         .env("PROVENANT_ROOT", &root)
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
@@ -707,7 +715,7 @@ fn preset_show_roles_lists_the_library_with_origins() -> Result<(), Box<dyn std:
         "[roles.\"lens.house\"]\nextends = 'lens'\ncard = 'House rules.'\n",
     )?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = Command::new(env!("CARGO_BIN_EXE_provenant"))
+    let output = fixture_cli()
         .current_dir(temp.path())
         .env("PROVENANT_ROOT", root)
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
@@ -769,7 +777,7 @@ fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
             "seed",
         ],
     ] {
-        let output = Command::new("git")
+        let output = provenant_os::fixture::git_command()
             .current_dir(&project)
             .args(args)
             .output()?;
@@ -794,7 +802,7 @@ fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let state = temp.path().join("state");
     let run = |extra: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_provenant"))
+        fixture_cli()
             .current_dir(&project)
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
