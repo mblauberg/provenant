@@ -120,14 +120,16 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
             return Err("plan pattern uses an undeclared parameter");
         }
     }
-    let samples = pattern
+    // Bounds do not affect template types. Relax them only for synthetic
+    // samples so a required parameter with a positive minimum is admissible.
+    let mut sample_pattern = pattern.clone();
+    let samples = sample_pattern
         .parameters
-        .iter()
+        .iter_mut()
         .map(|(name, parameter)| {
             let value = parameter
                 .default
                 .clone()
-                .or_else(|| parameter.allowed.first().cloned())
                 .unwrap_or_else(|| match parameter.kind {
                     PatternParameterKind::String => Value::String("sample".into()),
                     PatternParameterKind::Integer | PatternParameterKind::Number => {
@@ -137,13 +139,26 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
                     PatternParameterKind::List => serde_json::json!([]),
                     PatternParameterKind::Table => serde_json::json!({}),
                 });
+            if parameter.default.is_none() {
+                parameter.min = None;
+                parameter.max = None;
+                parameter.allowed.clear();
+            }
             (name.clone(), value)
         })
         .collect();
-    for node in &pattern.nodes {
-        let value = interpolate(node, &samples).map_err(|_| "plan pattern interpolation")?;
-        serde_json::from_value::<GraphNode>(value).map_err(|_| "plan pattern node template")?;
-    }
+    instantiate(
+        &sample_pattern,
+        &PatternInstance {
+            id: "sample".into(),
+            pattern: pattern.name.clone(),
+            parameters: Value::Object(samples),
+            depends_on: Vec::new(),
+            inputs: Vec::new(),
+            title: None,
+        },
+    )
+    .map_err(|_| "plan pattern node template")?;
     Ok(())
 }
 
