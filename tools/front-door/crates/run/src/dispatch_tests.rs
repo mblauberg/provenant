@@ -8024,9 +8024,12 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         })?;
         drop(held);
     }
-    let driver =
-        crate::settlement::Guard::claim(&attempt, RunStore::scope(&store.record(id, &call)?))?
-            .ok_or("settlement owner")?;
+    let driver = crate::settlement::Guard::claim(
+        &attempt,
+        RunStore::scope(&store.record(id, &call)?),
+        call.clock,
+    )?
+    .ok_or("settlement owner")?;
     store.queue_reconcile_with(run.run_id, &call, |_, _| {
         panic!("a live settlement owner needs no detached worker");
     })?;

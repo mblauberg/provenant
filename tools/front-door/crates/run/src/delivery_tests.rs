@@ -175,8 +175,12 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         );
         // A cancelled import may have pinned its head without publishing the
         // writer-terminal record. Terminal cleanup must consult the journal.
-        let mut driver =
-            crate::settlement::Guard::claim(&attempt, exit.scope)?.ok_or("settlement owner")?;
+        let mut driver = crate::settlement::Guard::claim(
+            &attempt,
+            exit.scope,
+            &provenant_os::clock::SystemClock::new(),
+        )?
+        .ok_or("settlement owner")?;
         driver.set_head(launch.base)?;
         drop(driver);
         let stage = format!("refs/provenant/import/{}", launch.base);
@@ -2392,8 +2396,12 @@ impl PrepareFixture {
             )?;
         }
         recovery.prepare_settlement()?;
-        let mut settlement =
-            crate::settlement::Guard::claim(&attempt, scope)?.ok_or("settlement owner")?;
+        let mut settlement = crate::settlement::Guard::claim(
+            &attempt,
+            scope,
+            &provenant_os::clock::SystemClock::new(),
+        )?
+        .ok_or("settlement owner")?;
         if resume_after_publish {
             let source = crate::objects::bound_source(&attempt)?.ok_or("private Git source")?;
             let tip = crate::objects::private_tip(&source, launch.branch.as_str())?;

@@ -42,6 +42,17 @@ impl UtcMicros {
     pub fn as_timestamp(self) -> jiff::Timestamp {
         self.0
     }
+    pub fn from_unix_seconds(seconds: i64) -> Result<Self, TimeError> {
+        Self::from_micros(seconds.checked_mul(1_000_000).ok_or(TimeError::WallRange)?)
+    }
+    /// Whole seconds since the Unix epoch, truncated toward zero.
+    pub fn unix_seconds(self) -> i64 {
+        self.0.as_second()
+    }
+    /// Whole milliseconds since the Unix epoch, truncated toward zero.
+    pub fn unix_millis(self) -> i64 {
+        self.0.as_millisecond()
+    }
     pub fn parse(text: &str) -> Result<Self, TimeError> {
         let timestamp: jiff::Timestamp = text.parse().map_err(|_| TimeError::WallSpelling)?;
         if timestamp.subsec_nanosecond() % 1000 != 0 {
@@ -417,6 +428,17 @@ mod tests {
             wait.remaining(MonoTime::from_micros(1_000_011)),
             DurationMicros::ZERO
         );
+    }
+    #[test]
+    fn wall_time_converts_whole_unix_seconds_and_millis() {
+        let at = UtcMicros::from_unix_seconds(1_700_000_000).unwrap();
+        assert_eq!(at.unix_seconds(), 1_700_000_000);
+        assert_eq!(at.unix_millis(), 1_700_000_000_000);
+        let later = at.checked_add(DurationMicros::from_micros(1_999)).unwrap();
+        assert_eq!(later.unix_seconds(), 1_700_000_000);
+        assert_eq!(later.unix_millis(), 1_700_000_000_001);
+        assert!(UtcMicros::from_unix_seconds(i64::MAX).is_err());
+        assert!(UtcMicros::from_unix_seconds(-62_167_219_201).is_err());
     }
     #[test]
     fn test_clock_advance_is_atomic_on_overflow() {

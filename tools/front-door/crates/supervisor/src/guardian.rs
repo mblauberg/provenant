@@ -9,7 +9,7 @@ use crate::machine::{
     self, Budgets, DeliveryFailure, DeliveryOutcome, DeliveryReceipt, Effect, Event, Phase, State,
     Tick,
 };
-use provenant_core::{CancelToken, WallTime};
+use provenant_core::{CancelToken, Clock, WallTime};
 use provenant_os::fs::{Directory, Publication, PublishMode};
 use provenant_records::{Limits, decode_v1};
 use serde::{Deserialize, Serialize};
@@ -18,17 +18,7 @@ use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-// Guardian records use UTC wall time at the production boundary.
-#[allow(clippy::disallowed_methods)]
-fn wall_now() -> Option<WallTime> {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_micros();
-    WallTime::from_micros(i64::try_from(micros).ok()?).ok()
-}
+use std::time::{Duration, Instant};
 
 // Match Run's persisted claim backoff so transient contention cannot spend
 // every guardian callback before a replacement driver is eligible.
@@ -222,7 +212,7 @@ pub struct GuardianHooks<'a> {
     /// Replaces the system wall clock that bounds the attempt, so a test can
     /// move it as a sleeping host does.
     #[cfg(feature = "fixture")]
-    pub wall_clock: Option<&'a dyn Fn() -> Option<WallTime>>,
+    pub wall_clock: Option<&'a dyn Clock>,
     pub stdout_tee: Option<&'a dyn provenant_os::exec::NonblockingSink>,
     pub stderr_tee: Option<&'a dyn provenant_os::exec::NonblockingSink>,
     pub stdout_decoder: Option<&'a dyn provenant_os::capture::FrameDecoder>,
@@ -643,11 +633,12 @@ impl Driver<'_> {
             env
         };
         let started = Instant::now();
+        let system = provenant_os::clock::SystemClock::new();
         #[cfg(feature = "fixture")]
-        let clock = hooks.wall_clock;
+        let clock = hooks.wall_clock.unwrap_or(&system);
         #[cfg(not(feature = "fixture"))]
-        let clock: Option<&dyn Fn() -> Option<WallTime>> = None;
-        let wall_now = || clock.map_or_else(wall_now, |clock| clock());
+        let clock: &dyn Clock = &system;
+        let wall_now = || clock.wall_now().ok();
         let wall_started = wall_now();
         let budgets =
             Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);

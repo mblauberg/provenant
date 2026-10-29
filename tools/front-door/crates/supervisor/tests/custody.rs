@@ -2500,6 +2500,29 @@ fn run_case(name: &str) -> Result<()> {
     result
 }
 
+/// The system clock, with wall time jumped forward once the marker appears,
+/// as a sleeping host's would be.
+struct JumpingClock {
+    sleeping: PathBuf,
+    jump: i64,
+}
+impl provenant_core::Clock for JumpingClock {
+    fn wall_now(&self) -> std::result::Result<provenant_core::WallTime, provenant_core::TimeError> {
+        let now = provenant_core::Clock::wall_now(&SystemClock::new())?;
+        let offset = if self.sleeping.exists() { self.jump } else { 0 };
+        provenant_core::WallTime::from_micros(now.as_micros() + offset * 1_000_000)
+    }
+    fn mono_now(&self) -> provenant_core::MonoTime {
+        provenant_core::Clock::mono_now(&SystemClock::new())
+    }
+    fn wait_until(
+        &self,
+        deadline: provenant_core::MonoTime,
+    ) -> std::result::Result<(), provenant_core::TimeError> {
+        provenant_core::Clock::wait_until(&SystemClock::new(), deadline)
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|a| a == "internal")
@@ -2519,14 +2542,9 @@ fn main() -> Result<()> {
         // The jump starts once the test has the provider connected: a stop at
         // once would end it before it could.
         let sleeping = home.join(S2_WALL_JUMP_NOW);
-        let jumping = move || {
-            let now = provenant_core::Clock::wall_now(&SystemClock::new()).ok()?;
-            let offset = if sleeping.exists() {
-                jump.unwrap_or(0)
-            } else {
-                0
-            };
-            provenant_core::WallTime::from_micros(now.as_micros() + offset * 1_000_000).ok()
+        let jumping = JumpingClock {
+            sleeping,
+            jump: jump.unwrap_or(0),
         };
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
@@ -2553,7 +2571,9 @@ fn main() -> Result<()> {
                 children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
                 nested_children: production_shape.then_some(&store as &dyn NestedChildStore),
                 observer: Some(&observer),
-                wall_clock: jump.is_some().then_some(&jumping as &dyn Fn() -> Option<_>),
+                wall_clock: jump
+                    .is_some()
+                    .then_some(&jumping as &dyn provenant_core::Clock),
                 disk: disk
                     .as_ref()
                     .map(|disk| disk as &dyn provenant_supervisor::DiskPressure),

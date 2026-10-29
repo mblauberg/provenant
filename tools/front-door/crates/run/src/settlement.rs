@@ -74,11 +74,11 @@ fn write(attempt: &Directory, journal: &Journal) -> Result<()> {
     Ok(())
 }
 
-fn now_ms() -> Result<u64> {
-    provenant_os::clock::SystemClock::new()
+fn now_ms(clock: &dyn Clock) -> Result<u64> {
+    clock
         .wall_now()
         .ok()
-        .and_then(|time| u64::try_from(time.as_micros() / 1000).ok())
+        .and_then(|time| u64::try_from(time.unix_millis()).ok())
         .ok_or(RunError::HostClock)
 }
 
@@ -126,8 +126,12 @@ pub(crate) struct Guard;
 impl Guard {
     /// A live native owner, including this process, excludes another driver.
     /// A crash leaves its progress and attempt count ready for the next claim.
-    pub(crate) fn claim(attempt: &Directory, scope: Scope) -> Result<Option<Driver>> {
-        Self::claim_at(attempt, scope, now_ms()?)
+    pub(crate) fn claim(
+        attempt: &Directory,
+        scope: Scope,
+        clock: &dyn Clock,
+    ) -> Result<Option<Driver>> {
+        Self::claim_at(attempt, scope, now_ms(clock)?)
     }
 
     pub(crate) fn claim_at(
@@ -269,7 +273,8 @@ impl Drop for Driver {
         };
         if journal.owner.as_ref() == Some(&self.owner) {
             journal.owner = None;
-            if let Ok(now) = now_ms() {
+            // Drop has no caller to inject a clock, so it samples the system's.
+            if let Ok(now) = now_ms(&provenant_os::clock::SystemClock::new()) {
                 journal.retry_after_ms = now.saturating_add(backoff_ms(journal.attempts));
             }
             let _ = write(&self.attempt, &journal);
@@ -318,6 +323,7 @@ pub(crate) fn with_cancellation<T>(
 mod tests {
     use super::*;
     use provenant_core::{AttemptId, RunId};
+    use provenant_os::clock::SystemClock;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -372,7 +378,8 @@ mod tests {
         let attempt = Directory::open_anchor(temp.path())?;
         let head = GitOid::parse(&"a".repeat(40))?;
         let base = GitOid::parse(&"b".repeat(40))?;
-        let mut first = Guard::claim(&attempt, scope())?.expect("initial claim");
+        let mut first =
+            Guard::claim(&attempt, scope(), &SystemClock::new())?.expect("initial claim");
         first.set_head(head)?;
         first.set_base(base)?;
         first.advance(Phase::Record)?;
@@ -399,8 +406,8 @@ mod tests {
     fn native_live_owner_excludes_another_driver_and_pid_reuse_resumes() -> TestResult {
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
-        let first = Guard::claim(&attempt, scope())?.expect("initial claim");
-        assert!(Guard::claim(&attempt, scope())?.is_none());
+        let first = Guard::claim(&attempt, scope(), &SystemClock::new())?.expect("initial claim");
+        assert!(Guard::claim(&attempt, scope(), &SystemClock::new())?.is_none());
         let mut crashed = read(&attempt, scope())?;
         let owner = crashed.owner.as_mut().expect("owner");
         owner.native_start = owner.native_start.wrapping_add(1);
@@ -416,7 +423,7 @@ mod tests {
     fn claims_before_import_do_not_consume_the_import_retry_budget() -> TestResult {
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
-        let driver = Guard::claim(&attempt, scope())?.expect("initial claim");
+        let driver = Guard::claim(&attempt, scope(), &SystemClock::new())?.expect("initial claim");
         assert_eq!(driver.attempts(), 0, "claiming has not reached import");
         Ok(())
     }
@@ -426,7 +433,9 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
         for expected in 1..=LIMIT {
-            let now = read(&attempt, scope())?.retry_after_ms.max(now_ms()?);
+            let now = read(&attempt, scope())?
+                .retry_after_ms
+                .max(now_ms(&SystemClock::new())?);
             let mut driver = Guard::claim_at(&attempt, scope(), now)?.expect("claim within cap");
             driver.begin_import()?;
             driver.begin_import()?;
@@ -434,7 +443,7 @@ mod tests {
             drop(driver);
         }
         assert!(matches!(
-            Guard::claim(&attempt, scope()),
+            Guard::claim(&attempt, scope(), &SystemClock::new()),
             Err(RunError::ObjectImportLimit(
                 "settlement exhausted three attempts; private Git retained for host recovery"
             ))
@@ -447,10 +456,12 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
         for expected in 1..=LIMIT {
-            let now = read(&attempt, scope())?.retry_after_ms.max(now_ms()?);
+            let now = read(&attempt, scope())?
+                .retry_after_ms
+                .max(now_ms(&SystemClock::new())?);
             let mut driver = Guard::claim_at(&attempt, scope(), now)?.expect("eligible claim");
             driver.begin_import()?;
-            let dropped_at = now_ms()?;
+            let dropped_at = now_ms(&SystemClock::new())?;
             drop(driver);
             let journal = read(&attempt, scope())?;
             if expected < LIMIT {
@@ -467,7 +478,7 @@ mod tests {
         use provenant_supervisor::census::ObservationIssue;
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
-        let driver = Guard::claim(&attempt, scope())?.expect("claim");
+        let driver = Guard::claim(&attempt, scope(), &SystemClock::new())?.expect("claim");
         let unknown = || ProcessObservation::Unknown(ObservationIssue::Malformed);
         assert!(observed_alive(
             &driver.owner,
@@ -488,7 +499,7 @@ mod tests {
     fn import_accounting_and_owner_release_survive_short_journal_contention() -> TestResult {
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
-        let mut driver = Guard::claim(&attempt, scope())?.expect("claim");
+        let mut driver = Guard::claim(&attempt, scope(), &SystemClock::new())?.expect("claim");
         let held = attempt.try_lock(OsStr::new("settlement.lock"), LockMode::Exclusive)?;
         std::thread::scope(|threads| {
             threads.spawn(move || {
@@ -578,7 +589,8 @@ impl crate::RunStore {
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
         self.run(run, call)?;
         let attempts = self.pending_attempts(run, call)?;
-        let now = now_ms()?;
+        let wall = call.clock.wall_now().map_err(|_| RunError::HostClock)?;
+        let now = now_ms(call.clock)?;
         // Owed reactions need a worker even when no attempt is live.
         let mut needs_worker = !self.pending_reactions(run, call)?.is_empty();
         for attempt in &attempts {
@@ -627,10 +639,10 @@ impl crate::RunStore {
                 Err(FsError::LockTimeout { .. }) => None,
                 Err(error) => return Err(error.into()),
             };
+        // A marker in an earlier format reads as expired, not as an error.
         let pending = read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
-            .map(|raw| crate::db::decode::<QueuedWorker>(&raw))
-            .transpose()?
-            .is_some_and(|request| request.run == run && now < request.expires_ms);
+            .and_then(|raw| crate::db::decode::<QueuedWorker>(&raw).ok())
+            .is_some_and(|request| request.run == run && wall < request.expires);
         if needs_worker && spawn_lock.is_some() && worker_lock.is_some() && !pending {
             let checkout = std::env::current_dir()?;
             let home = std::env::var_os("HOME")
@@ -663,9 +675,13 @@ impl crate::RunStore {
                     OsStr::new("settlement-queued.json"),
                     ".settlement-",
                     &crate::db::bytes(&QueuedWorker {
-                        schema_version: 1,
+                        schema_version: 2,
                         run,
-                        expires_ms: now.saturating_add(UNKNOWN_OWNER_LIMIT_MS),
+                        expires: wall
+                            .checked_add(provenant_core::DurationMicros::from_micros(
+                                UNKNOWN_OWNER_LIMIT_MS * 1000,
+                            ))
+                            .map_err(|_| RunError::HostClock)?,
                     })?,
                     PublishMode::Replace,
                 )?
@@ -707,7 +723,7 @@ impl crate::RunStore {
 struct QueuedWorker {
     schema_version: u64,
     run: provenant_core::RunId,
-    expires_ms: u64,
+    expires: provenant_core::WallTime,
 }
 
 /// The internal same-binary supervisor entry. It acquires journal ownership

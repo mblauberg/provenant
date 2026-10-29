@@ -6,6 +6,8 @@ mod opencode;
 use crate::accounts::Settings;
 use crate::host::PROBE_DIR_OPERATION;
 use crate::identity::{agy_fingerprint, base64url, codex_account, cursor_account};
+use provenant_core::{Clock, WallTime};
+use provenant_os::clock::SystemClock;
 use provenant_os::exec::{
     ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, SystemExecutor, Termination,
 };
@@ -21,7 +23,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 const LIMIT: usize = 1_048_576;
@@ -45,6 +47,7 @@ pub struct LiveQuota {
     accounts: Vec<Account>,
     refresh_expired: bool,
     claude_default: RefCell<Option<claude::Identity>>,
+    clock: SystemClock,
 }
 fn read(path: &Path) -> Result<Vec<u8>, ProbeFailure> {
     let mut bytes = Vec::new();
@@ -60,13 +63,6 @@ fn read(path: &Path) -> Result<Vec<u8>, ProbeFailure> {
 }
 fn value(path: &Path) -> Result<Value, ProbeFailure> {
     serde_json::from_slice(&read(path)?).map_err(|_| ProbeFailure::Malformed)
-}
-// Provider quota snapshots need the current UTC wall time.
-#[allow(clippy::disallowed_methods)]
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |n| n.as_secs() as i64)
 }
 // Keep Lane Q's Claude identity scheme in the provider owner.
 fn fingerprint(identity: &str, length: usize) -> String {
@@ -134,7 +130,12 @@ impl LiveQuota {
             accounts,
             refresh_expired: true,
             claude_default: RefCell::new(None),
+            clock: SystemClock::new(),
         })
+    }
+    /// Whole Unix seconds; zero when the clock cannot be read.
+    fn now(&self) -> i64 {
+        self.clock.wall_now().map_or(0, WallTime::unix_seconds)
     }
     fn command(
         &self,
@@ -145,7 +146,7 @@ impl LiveQuota {
         deadline: i64,
         max_seconds: u64,
     ) -> Result<ExecOutcome, ProbeFailure> {
-        let remaining = deadline.saturating_sub(now());
+        let remaining = deadline.saturating_sub(self.now());
         if remaining <= 0 {
             return Err(ProbeFailure::Network);
         }
@@ -316,7 +317,12 @@ impl QuotaEffects for LiveQuota {
             }
             "opencode" => {
                 details.note = Some("Local estimate, this machine only; calibrated Go caps, other hosts not counted".into());
-                opencode::capture(&account.identity_dir, &account.options, now(), deadline)?
+                opencode::capture(
+                    &account.identity_dir,
+                    &account.options,
+                    self.now(),
+                    deadline,
+                )?
             }
             "command" => return Err(ProbeFailure::Disabled),
             _ => return Err(ProbeFailure::Disabled),
@@ -396,7 +402,7 @@ impl LiveQuota {
         if claims
             .get("exp")
             .and_then(Value::as_i64)
-            .is_none_or(|e| e <= now() + 60)
+            .is_none_or(|e| e <= self.now() + 60)
         {
             return Err(ProbeFailure::Auth);
         }
@@ -488,6 +494,7 @@ mod tests {
             accounts: Vec::new(),
             refresh_expired: false,
             claude_default: RefCell::new(None),
+            clock: SystemClock::new(),
         }
     }
 
@@ -496,7 +503,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let quota = quota(home.path(), home.path().join("missing"));
         let failure = quota
-            .command("unused-provider", &[], None, None, now() + 60, 1)
+            .command("unused-provider", &[], None, None, quota.now() + 60, 1)
             .unwrap_err();
         assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
     }
@@ -515,7 +522,7 @@ mod tests {
             options: Value::Null,
         };
         let failure = quota
-            .agy(&account, now() + 60, &mut QuotaDetails::default())
+            .agy(&account, quota.now() + 60, &mut QuotaDetails::default())
             .unwrap_err();
         assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
     }
@@ -552,7 +559,12 @@ mod tests {
             options: Value::Null,
         };
         let failure = quota
-            .claude(&account, None, now() + 60, &mut QuotaDetails::default())
+            .claude(
+                &account,
+                None,
+                quota.now() + 60,
+                &mut QuotaDetails::default(),
+            )
             .unwrap_err();
         assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
     }

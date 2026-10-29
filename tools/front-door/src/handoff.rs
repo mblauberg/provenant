@@ -40,7 +40,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 const COMMAND: &str = "workflow session handoff";
@@ -85,12 +85,11 @@ impl<E: std::fmt::Display> From<E> for Refusal {
     }
 }
 
-// Handoff lease records use current UTC wall time at this production edge.
-#[allow(clippy::disallowed_methods)]
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |t| i64::try_from(t.as_secs()).unwrap_or(i64::MAX))
+/// Whole Unix seconds for lease records; zero when the clock cannot be read.
+fn unix_now(clock: &dyn Clock) -> i64 {
+    clock
+        .wall_now()
+        .map_or(0, provenant_core::WallTime::unix_seconds)
 }
 
 fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), Refusal> {
@@ -396,13 +395,12 @@ fn open_source(globals: &Globals) -> Result<Source, Refusal> {
     })
 }
 
-// Operation identity includes the current wall-time sample.
-#[allow(clippy::disallowed_methods)]
 fn execute(
     args: &Handoff,
     globals: &Globals,
     workers: &dyn WorkerObserver,
 ) -> Result<(Value, String), Refusal> {
+    let clock = SystemClock::new();
     if provenant_cli::fabric::in_lane() {
         return Err(Refusal::refused(
             "lane_coordination_refused",
@@ -502,9 +500,9 @@ fn execute(
     let attachments = read_attachments(&args.attachments)?;
     let operation_id = OperationId::parse(&format!(
         "handoff-{}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |t| t.as_micros()),
+        clock
+            .wall_now()
+            .map_or(0, provenant_core::WallTime::as_micros),
         std::process::id()
     ))
     .map_err(|e| Refusal::invalid(e.to_string()))?;
@@ -691,7 +689,6 @@ fn execute(
 
     // 4. Send one peer action. The checkpoint and lease change only after
     // the peer accepts, so a retry starts from the same checkpoint.
-    let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), context.config.limits.peer_seconds)?;
     let reply = context.peer(
@@ -802,7 +799,7 @@ fn execute(
             previous: Some(local),
             operation_id,
             session_id: session.map(String::from),
-            at_unix: now_unix(),
+            at_unix: unix_now(&clock),
         };
         let lease_error = write_owner(&lease_dir, &lease).err().map(|e| e.to_string());
         data["owner"] = serde_json::to_value(&lease)?;
@@ -1149,7 +1146,7 @@ pub(crate) fn receive(
                 previous: Some(target.source),
                 operation_id: input.operation_id.clone(),
                 session_id: None,
-                at_unix: now_unix(),
+                at_unix: unix_now(target.clock),
             },
         );
     }
