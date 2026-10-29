@@ -249,8 +249,10 @@ are local logins of one client directory, so their registrations add no target.
 Never synced: credentials and sign-in state (`.credentials*`, `auth.json`),
 identity fields in `.claude.json` such as `oauthAccount`, any `settings.json`
 key outside the allow-list, user-owned hooks and MCP entries, and the key
-names listed under [configuration](configuration.md#chair-account-switching)
-(`apiKeyHelper`, `*token*` and the like), which are refused outright. Other
+names refused by the deny rule in
+[configuration](configuration.md#chair-account-switching) (`apiKeyHelper`, any
+name containing `token`, `secret`, `session` and the like), which are refused
+outright. Other
 bytes in `settings.json` and `.claude.json` are preserved.
 
 ### Hooks
@@ -283,7 +285,14 @@ last written. On the next sync:
   source's values;
 - a key the account deleted stays deleted (`--force-settings` restores it).
 
-The account whose file is the source is never rewritten. Settings drift is
+Sync never rewrites the source file or the account that holds it; `--adopt`
+is the one explicit exception. It resolves a symlinked source and writes the
+target, so the link survives, stages the new file exclusively beside it, and
+re-reads the source just before the swap: if the bytes changed since the plan
+read them, nothing is written and you rerun the command. Applying settings to
+an account likewise compares the planned snapshot before its atomic rename, so
+an edit saved by a running Claude session in between is reported as drift
+rather than lost. Settings drift is
 reported as `settings_drift` or `settings_conflict` by `check install`,
 `accounts list` and `hosts doctor`.
 

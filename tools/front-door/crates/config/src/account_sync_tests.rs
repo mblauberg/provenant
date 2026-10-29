@@ -394,6 +394,20 @@ fn identity_and_credential_keys_are_never_syncable() {
         "user_credentials",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
+        "authtoken",
+        "AUTHTOKEN",
+        "refreshtoken",
+        "ANTHROPICAUTHTOKEN",
+        "GITHUBTOKEN",
+        "token2",
+        "oauth2",
+        "sessionId",
+        "COOKIEJAR",
+        "bearerValue",
+        "dbpasswd",
+        "clientsecret",
+        "PRIVATEKEY",
+        "MYAPIKEY",
     ] {
         assert!(denied_key(key), "{key}");
         assert!(check_key(key).is_err(), "{key}");
@@ -404,6 +418,81 @@ fn identity_and_credential_keys_are_never_syncable() {
     assert!(check_key("hooks").is_err());
     assert!(check_value("env", &serde_json::json!({"ANTHROPIC_AUTH_TOKEN": "x"})).is_err());
     assert!(check_value("env", &serde_json::json!({"EDITOR": "vim"})).is_ok());
+    for name in [
+        "AUTHTOKEN",
+        "REFRESHTOKEN",
+        "ANTHROPICAUTHTOKEN",
+        "GITHUBTOKEN",
+        "TOKEN2",
+        "OAUTH2",
+        "MY_SESSION_ID",
+    ] {
+        let error = check_value("env", &serde_json::json!({ name: "x" })).unwrap_err();
+        assert!(error.contains(&format!("`env.{name}`")), "{error}");
+        assert!(error.contains("contains"), "{error}");
+    }
+    // The reason names the substring that matched.
+    assert!(check_key("refreshtoken").unwrap_err().contains("`token`"));
+}
+
+#[test]
+fn a_symlinked_source_keeps_its_link_and_a_concurrent_edit_aborts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().canonicalize().unwrap().join("real.json");
+    let link = real.with_file_name("settings.json");
+    fs::write(&real, b"{\"a\": 1}\n").unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    crate::shared_settings::publish_source(&link, b"{\"a\": 1}\n", b"{\"a\": 2}\n", || {}).unwrap();
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&real).unwrap(), b"{\"a\": 2}\n");
+    // An edit between planning and the swap is detected and nothing is written.
+    let error =
+        crate::shared_settings::publish_source(&link, b"{\"a\": 2}\n", b"{\"a\": 3}\n", || {
+            fs::write(&real, b"{\"a\": 9}\n").unwrap()
+        })
+        .unwrap_err();
+    assert!(matches!(error, InstallError::Drift(_)), "{error:?}");
+    assert_eq!(fs::read(&real).unwrap(), b"{\"a\": 9}\n");
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn a_live_edit_between_plan_and_publish_is_not_lost() {
+    let mut f = Fixture::new();
+    let work = account(&f, "work");
+    f.targets.shared_settings = Some(shared(&f, serde_json::json!({"outputStyle": "terse"})));
+    f.targets.accounts = vec![work.clone()];
+    f.targets.harnesses = vec![HarnessTarget::at(Harness::Claude, &f.home, &work.home)];
+    f.targets.hook_specs = crate::hooks::CLAUDE_HOOKS.to_vec();
+    let plan = f.plan();
+    // A running Claude session saves its own settings after the snapshot.
+    let live = work.home.join("settings.json");
+    fs::write(&live, "{\"model\": \"opus\"}\n").unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let error = install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap_err();
+    assert!(matches!(error, InstallError::Drift(_)), "{error:?}");
+    assert_eq!(
+        fs::read_to_string(&live).unwrap(),
+        "{\"model\": \"opus\"}\n"
+    );
 }
 
 #[test]

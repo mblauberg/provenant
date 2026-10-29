@@ -5032,13 +5032,32 @@ fn shared_settings_refuse_identity_credential_and_hook_keys() {
         keys: Some(vec!["outputStyle".into(), "includeCoAuthoredBy".into()]),
     });
     assert!(settings.settings_error().is_none());
-    for key in ["apiKeyHelper", "forceLoginMethod", "oauthAccount", "hooks"] {
+    for key in [
+        "apiKeyHelper",
+        "forceLoginMethod",
+        "oauthAccount",
+        "hooks",
+        "authtoken",
+        "AUTHTOKEN",
+        "refreshtoken",
+        "token2",
+        "oauth2",
+    ] {
         settings.shared_settings = Some(accounts::SharedSettings {
             source: None,
             keys: Some(vec!["outputStyle".into(), key.into()]),
         });
         assert!(settings.settings_error().is_some(), "{key}");
     }
+    settings.shared_settings = Some(accounts::SharedSettings {
+        source: None,
+        keys: Some(vec!["refreshtoken".into()]),
+    });
+    let message = settings.settings_error().unwrap();
+    assert!(
+        message.contains("`refreshtoken`") && message.contains("`token`"),
+        "{message}"
+    );
     settings.shared_settings = None;
     let mut entry = accounts::Registration {
         adapter: "claude".into(),

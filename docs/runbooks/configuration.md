@@ -464,10 +464,17 @@ outputStyle = "verbose"
 nothing is synced. Only keys in `keys` are synced, and a per-account `settings`
 key must be in `keys`. Identity and credential keys (`apiKeyHelper`,
 `awsAuthRefresh`, `awsCredentialExport`, `forceLoginMethod`,
-`forceLoginOrgUUID`, `otelHeadersHelper`, and any name with an `auth`,
-`credential`, `token`, `oauth` or `secret` word, including variables inside
-`env`) and `hooks` are refused even when listed: the configuration is
-rejected with a message and install, upgrade and sync stop.
+`forceLoginOrgUUID`, `otelHeadersHelper`) and `hooks` are refused even when
+listed. So is any key, or variable name inside `env`, that contains an `auth`,
+`credential`, `token`, `oauth`, `secret` or `password` word, an `api key`,
+`access key` or `private key` pair, or, after lower-casing and dropping
+separators and digits, any of `token`, `secret`, `password`, `passwd`,
+`credential`, `oauth`, `apikey`, `authtoken`, `privatekey`, `session`,
+`cookie` or `bearer`. The substring rule also catches glued names such as
+`ANTHROPICAUTHTOKEN`, `token2` and `oauth2`, and accepts some false positives;
+the one exemption is the default key `includeCoAuthoredBy`. The message names
+the key and the rule that matched. A refused configuration stops install,
+upgrade and sync, never uninstall.
 
 ```sh
 provenant config set chair.switch_accounts '["work-spare","personal-spare"]'

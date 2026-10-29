@@ -71,26 +71,70 @@ fn words(name: &str) -> Vec<String> {
     words
 }
 
-/// Whether `name` identifies the user or carries a credential. Whole words
-/// only, so `includeCoAuthoredBy` is a setting but `awsAuthRefresh` is not.
-pub fn denied_key(name: &str) -> bool {
+/// Substrings that deny a name once it is lower-cased and stripped of
+/// separators and digits, so glued forms such as `ANTHROPICAUTHTOKEN`, `token2`
+/// and `oauth2` are caught. Some false positives are accepted.
+const DENIED_SUBSTRINGS: [&str; 12] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "oauth",
+    "apikey",
+    "authtoken",
+    "privatekey",
+    "session",
+    "cookie",
+    "bearer",
+];
+
+/// The one default key that contains a denied substring (`coauthored`).
+const EXEMPT: [&str; 1] = ["includeCoAuthoredBy"];
+
+/// Why `name` identifies the user or carries a credential, if it does. The
+/// answer names the rule that matched, never a value.
+pub fn denied_reason(name: &str) -> Option<String> {
     if DENIED
         .iter()
         .any(|denied| denied.eq_ignore_ascii_case(name))
     {
-        return true;
+        return Some(format!("it is the identity or credential setting `{name}`"));
     }
     let words = words(name);
-    words
+    if let Some(word) = words
         .iter()
-        .any(|word| DENIED_WORDS.contains(&word.as_str()) || word.starts_with("authori"))
-        || words.iter().any(|word| word == "apikey")
+        .find(|word| DENIED_WORDS.contains(&word.as_str()) || word.starts_with("authori"))
+    {
+        return Some(format!("it contains the word `{word}`"));
+    }
+    if words.iter().any(|word| word == "apikey")
         || words.windows(2).any(|pair| {
             matches!(
                 (pair[0].as_str(), pair[1].as_str()),
                 ("api" | "secret" | "access" | "private", "key")
             )
         })
+    {
+        return Some("it names an API or access key".into());
+    }
+    if EXEMPT.contains(&name) {
+        return None;
+    }
+    let squashed: String = name
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    DENIED_SUBSTRINGS
+        .iter()
+        .find(|term| squashed.contains(**term))
+        .map(|term| format!("it contains `{term}` once separators and digits are ignored"))
+}
+
+/// Whether `name` identifies the user or carries a credential.
+pub fn denied_key(name: &str) -> bool {
+    denied_reason(name).is_some()
 }
 
 /// What may never be synced. `Err` names the offending key, never a value.
@@ -100,12 +144,10 @@ pub fn check_key(key: &str) -> Result<(), String> {
             "`hooks` is managed by `provenant install --hooks`, not shared settings".into(),
         );
     }
-    if denied_key(key) {
-        return Err(format!(
-            "`{key}` carries identity or credentials and is never synced"
-        ));
+    match denied_reason(key) {
+        Some(reason) => Err(format!("`{key}` is never synced: {reason}")),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Refuses an allow-list or a value tree that would sync identity or credentials.
@@ -113,13 +155,30 @@ pub fn check_key(key: &str) -> Result<(), String> {
 pub fn check_value(key: &str, value: &Value) -> Result<(), String> {
     if key == "env"
         && let Some(env) = value.as_object()
-        && let Some(name) = env.keys().find(|name| denied_key(name))
+        && let Some((name, reason)) = env
+            .keys()
+            .find_map(|name| denied_reason(name).map(|reason| (name, reason)))
     {
-        return Err(format!(
-            "`env.{name}` carries identity or credentials and is never synced"
-        ));
+        return Err(format!("`env.{name}` is never synced: {reason}"));
     }
     Ok(())
+}
+
+/// A message with a fixed lifetime for the static config error codes. Each
+/// distinct message is kept once, however often validation repeats.
+pub fn interned(message: String) -> &'static str {
+    use std::sync::{Mutex, OnceLock};
+    static KNOWN: OnceLock<Mutex<BTreeSet<&'static str>>> = OnceLock::new();
+    let mut known = KNOWN
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = known.get(message.as_str()) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(message.into_boxed_str());
+    known.insert(leaked);
+    leaked
 }
 
 /// Best-effort canonical form, so a symlinked or relative spelling still matches.
@@ -266,4 +325,43 @@ pub fn adopt(
         adopted.push(key.clone());
     }
     Ok((out, adopted))
+}
+
+/// Replaces the shared settings source with `bytes` for `--adopt`, the one
+/// place sync writes it. A symlinked source is resolved and its target
+/// written, so the link survives. The staged file is created exclusively in
+/// the target's directory and synced; just before the rename the target is
+/// read again, and a change since `planned` was read aborts with `Drift`.
+/// `before_swap` runs between that re-read's preparation and the check, so a
+/// test can race an edit against it.
+pub fn publish_source(
+    source: &std::path::Path,
+    planned: &[u8],
+    bytes: &[u8],
+    before_swap: impl FnOnce(),
+) -> Result<(), InstallError> {
+    use std::os::unix::fs::PermissionsExt;
+    let target = std::fs::canonicalize(source).map_err(|_| InstallError::Path(source.into()))?;
+    let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
+        return Err(InstallError::Path(target));
+    };
+    let mode = std::fs::metadata(&target)
+        .map_err(|_| InstallError::Path(target.clone()))?
+        .permissions()
+        .mode()
+        & 0o7777;
+    let directory = provenant_os::fs::Directory::open_anchor(parent)?;
+    before_swap();
+    let current = std::fs::read(&target).map_err(|_| InstallError::Drift(target.clone()))?;
+    if current != planned {
+        return Err(InstallError::Drift(target));
+    }
+    directory.atomic_write_with_permissions(
+        name,
+        ".provenant-staging.",
+        bytes,
+        mode,
+        provenant_os::fs::PublishMode::Replace,
+    )?;
+    Ok(())
 }

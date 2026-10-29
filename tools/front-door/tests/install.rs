@@ -1935,12 +1935,7 @@ fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
     })?;
     let (status, refused) = run_json(&rig, &["accounts", "sync"])?;
     assert_ne!(status, 0, "{refused}");
-    assert!(
-        refused
-            .to_string()
-            .contains("identity, credential or hook key"),
-        "{refused}"
-    );
+    assert!(refused.to_string().contains("is never synced"), "{refused}");
     let removed = rig.command(&["uninstall", "--harness", "claude"])?;
     assert_eq!(code(&removed), 0, "{removed:?}");
     // `CLAUDE_CONFIG_DIR` selects the one matching recorded target.

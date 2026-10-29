@@ -161,10 +161,12 @@ pub(crate) fn shared_settings(
             };
             for key in &keys {
                 if let Some(value) = object.get(key) {
-                    provenant_config::shared_settings::check_value(key, value).map_err(|_| {
-                        InstallError::InvalidConfig(
-                            "shared settings source `env` holds an identity or credential variable; remove it or drop `env` from `keys`",
-                        )
+                    provenant_config::shared_settings::check_value(key, value).map_err(|reason| {
+                        InstallError::InvalidConfig(provenant_config::shared_settings::interned(
+                            format!(
+                                "shared settings source: {reason}; remove it or drop `{key}` from `keys`"
+                            ),
+                        ))
                     })?;
                     source.insert(key.clone(), value.clone());
                 }
@@ -1120,25 +1122,19 @@ fn adopt_settings(globals: &cli::Globals, account: &str) -> Result<Vec<String>, 
     )
     .map_err(|error| error.to_string())?;
     if !adopted.is_empty() {
-        let name = shared
-            .source_file
-            .file_name()
-            .ok_or("invalid source path")?
-            .to_string_lossy()
-            .into_owned();
-        let temporary = shared
-            .source_file
-            .with_file_name(format!(".{name}.provenant-adopt"));
-        let mode = std::fs::metadata(&shared.source_file)
-            .map_err(|error| error.to_string())?
-            .permissions();
-        std::fs::write(&temporary, &bytes)
-            .and_then(|()| std::fs::set_permissions(&temporary, mode))
-            .and_then(|()| std::fs::rename(&temporary, &shared.source_file))
-            .map_err(|error| {
-                let _ = std::fs::remove_file(&temporary);
-                format!("cannot write the source settings: {}", error.kind())
-            })?;
+        provenant_config::shared_settings::publish_source(
+            &shared.source_file,
+            &source_bytes,
+            &bytes,
+            || {},
+        )
+        .map_err(|error| match error {
+            InstallError::Drift(path) => format!(
+                "{} changed while adopting; nothing was written. Rerun `accounts sync --adopt`",
+                path.display()
+            ),
+            other => format!("cannot write the source settings: {other}"),
+        })?;
     }
     Ok(adopted)
 }

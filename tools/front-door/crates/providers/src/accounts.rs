@@ -117,8 +117,6 @@ impl Settings {
         settings
     }
 }
-const DENIED_KEY: &str =
-    "an identity, credential or hook key can never be synced; remove it from `keys` or `settings`";
 const NOT_ALLOWED: &str =
     "a per-account `settings` key is not in `shared_settings.keys`; add it there first";
 impl Settings {
@@ -135,15 +133,20 @@ impl Settings {
     /// Identity, credential or hook keys in the allow-list, an override or an
     /// `env` name; or an override of a key the allow-list does not name.
     pub fn settings_error(&self) -> Option<&'static str> {
-        use provenant_config::shared_settings::{check_key, check_value};
+        use provenant_config::shared_settings::{check_key, check_value, interned};
+        let refuse = |reason: String| {
+            interned(format!(
+                "{reason}; remove it from `keys` or `settings` (or the `env` it names)"
+            ))
+        };
         let keys = self.settings_keys();
-        if keys.iter().any(|key| check_key(key).is_err()) {
-            return Some(DENIED_KEY);
+        if let Some(reason) = keys.iter().find_map(|key| check_key(key).err()) {
+            return Some(refuse(reason));
         }
         for entry in self.entries.values() {
             for (key, value) in &entry.settings {
-                if check_key(key).is_err() || check_value(key, value).is_err() {
-                    return Some(DENIED_KEY);
+                if let Err(reason) = check_key(key).and_then(|()| check_value(key, value)) {
+                    return Some(refuse(reason));
                 }
                 if !keys.contains(key) {
                     return Some(NOT_ALLOWED);
