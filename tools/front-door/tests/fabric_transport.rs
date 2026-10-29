@@ -848,6 +848,19 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     Ok(())
 }
 
+/// Status refreshes the live CI wait time, so snapshots compare without it.
+fn without_elapsed(checkpoint: &Value) -> Value {
+    let mut checkpoint = checkpoint.clone();
+    if let Some(nodes) = checkpoint["nodes"].as_array_mut() {
+        for node in nodes {
+            if let Some(ci) = node["ci"].as_object_mut() {
+                ci.remove("elapsed_seconds");
+            }
+        }
+    }
+    checkpoint
+}
+
 #[test]
 fn pending_ci_graph_status_is_a_snapshot() -> Result {
     let mut rig = TestRig::new()?;
@@ -920,7 +933,10 @@ fn pending_ci_graph_status_is_a_snapshot() -> Result {
     let status = rig.command(&["fabric", "graph", "status", "pending-ci", "--json"])?;
     assert_eq!(code(&status), 0);
     let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-    assert_eq!(status["data"]["checkpoint"], *checkpoint);
+    assert_eq!(
+        without_elapsed(&status["data"]["checkpoint"]),
+        without_elapsed(checkpoint)
+    );
     assert_eq!(status["data"]["advance_error"], "journal lock timed out");
     let frames = mcp(
         &rig,
@@ -933,7 +949,10 @@ fn pending_ci_graph_status_is_a_snapshot() -> Result {
         .find(|frame| frame["id"] == "status")
         .ok_or("graph status")?["result"];
     assert_ne!(result["isError"], true, "{result}");
-    assert_eq!(result["structuredContent"]["checkpoint"], *checkpoint);
+    assert_eq!(
+        without_elapsed(&result["structuredContent"]["checkpoint"]),
+        without_elapsed(checkpoint)
+    );
     assert_eq!(
         result["structuredContent"]["advance_error"],
         "journal lock timed out"
