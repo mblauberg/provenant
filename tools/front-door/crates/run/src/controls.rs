@@ -45,16 +45,40 @@ pub struct Resume {
 const DEADLINE_GRACE_SECONDS: u64 = 120;
 
 fn past_runtime_deadline(record: &AttemptRecord, call: &Request<'_>) -> bool {
-    let (AttemptState::Running { .. }, Some(deadline), Ok(now)) = (
-        &record.state,
-        record.runtime_deadline,
-        call.clock.wall_now(),
-    ) else {
+    call.clock
+        .wall_now()
+        .is_ok_and(|now| overdue_at(record, now))
+}
+
+/// Whether a running attempt is past its runtime deadline plus the grace.
+pub fn overdue_at(record: &AttemptRecord, now: WallTime) -> bool {
+    let (AttemptState::Running { .. }, Some(deadline)) = (&record.state, record.runtime_deadline)
+    else {
         return false;
     };
     provenant_core::DurationMicros::from_seconds(DEADLINE_GRACE_SECONDS)
         .and_then(|grace| deadline.checked_add(grace))
         .is_ok_and(|limit| now >= limit)
+}
+
+/// Whether a running attempt's guardian and provider are both gone with no
+/// exit recorded, so nothing is left to settle it. Read-only; unreadable
+/// state counts as not stale. `root` is the execution state root.
+pub fn holder_absent(root: &std::path::Path, record: &AttemptRecord) -> bool {
+    if !matches!(record.state, AttemptState::Running { .. }) {
+        return false;
+    }
+    let path = root.join(format!(
+        "runs/{}/attempts/{}",
+        record.run_id, record.attempt_id
+    ));
+    let Ok(attempt) = provenant_os::fs::Directory::open_anchor(&path) else {
+        return false;
+    };
+    matches!(
+        read_sealed(&attempt, "process-exit.json", RECORD_LIMIT),
+        Ok(None)
+    ) && custody::holder_gone(&attempt, RunStore::scope(record), &SystemProcessObserver)
 }
 
 /// What reconcile found for one attempt.
@@ -417,6 +441,79 @@ mod reboot_tests {
                 started.checked_add(provenant_core::DurationMicros::from_seconds(seconds)?)?;
             assert_eq!(claimed.runtime_deadline, Some(expected));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn reap_queues_recovery_for_running_and_cancelled_starting_attempts_only()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let spawned = std::cell::Cell::new(0);
+        let spawn = |_: &[std::ffi::OsString], _: &std::path::Path| {
+            spawned.set(spawned.get() + 1);
+            Ok(())
+        };
+        assert_eq!(
+            store.reap_with(&call, spawn)?,
+            0,
+            "an uncancelled start waits"
+        );
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        crate::artifacts::seal(&attempt, "cancel.json", b"{}", RECORD_LIMIT)?;
+        assert_eq!(
+            store.reap_with(&call, spawn)?,
+            1,
+            "a cancelled start is reaped"
+        );
+        assert_eq!(spawned.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_running_attempt_with_no_guardian_is_stale_and_reaped()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let record = store.record(id, &call)?;
+        assert!(holder_absent(context.state_root.as_path(), &record));
+        let spawned = std::cell::Cell::new(0);
+        let reaped = store.reap_with(&call, |_, _| {
+            spawned.set(spawned.get() + 1);
+            Ok(())
+        })?;
+        assert_eq!((reaped, spawned.get()), (1, 1));
         Ok(())
     }
 
@@ -1952,6 +2049,52 @@ impl RunStore {
         Ok(runs)
     }
 
+    /// Queue recovery for each run of this project that holds a running
+    /// attempt, or a starting attempt with a cancel request, so a lane whose
+    /// guardian died is settled by the next read instead of waiting for a
+    /// `reconcile`. Queuing already leaves a live holder alone and takes no
+    /// writer lock. Best effort: a run that cannot be queued is skipped.
+    pub fn reap(&self, call: &Request<'_>) -> Result<usize> {
+        self.reap_with(call, provenant_os::exec::spawn_detached)
+    }
+    pub(crate) fn reap_with(
+        &self,
+        call: &Request<'_>,
+        spawn: impl Fn(
+            &[std::ffi::OsString],
+            &std::path::Path,
+        ) -> std::result::Result<(), provenant_os::exec::ExecError>,
+    ) -> Result<usize> {
+        let runs: Vec<String> = {
+            let mut query = self
+                .db
+                .prepare("SELECT DISTINCT run FROM attempts WHERE project=?1 AND terminal=0")?;
+            let rows =
+                query.query_map(params![self.context.project_id.to_string()], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let mut queued = 0;
+        for run in runs {
+            let Ok(run) = RunId::parse(&run) else {
+                continue;
+            };
+            let Ok(attempts) = self.pending_attempts(run, call) else {
+                continue;
+            };
+            let reapable = attempts.iter().any(|attempt| match attempt.state {
+                AttemptState::Running { .. } => true,
+                AttemptState::Starting { .. } => self
+                    .attempt_dir(run, attempt.attempt_id, false)
+                    .and_then(|dir| read_sealed(&dir, "cancel.json", RECORD_LIMIT))
+                    .is_ok_and(|found| found.is_some()),
+                _ => false,
+            });
+            if reapable && self.queue_reconcile_with(run, call, &spawn).is_ok() {
+                queued += 1;
+            }
+        }
+        Ok(queued)
+    }
     /// Check every attempt of `run` against supervisor custody.
     /// A durable exit is committed and released; a launch that provably never
     /// reached a guardian is withdrawn. Terminal temporary data is retried

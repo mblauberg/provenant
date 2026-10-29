@@ -4180,6 +4180,7 @@ fn render_lanes(
     cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
 ) -> (Value, String) {
     let mut human = String::new();
+    let now_wall = SystemClock::new().wall_now().ok();
     let rows: Vec<Value> = lanes
         .iter()
         .map(|lane| {
@@ -4377,6 +4378,8 @@ fn render_lanes(
                 "finished_at": finished_at,
                 "last_output_at": lane.last_output_at,
                 "runtime_deadline": lane.runtime_deadline,
+                "overdue": now_wall.is_some_and(|now| run::overdue_at(lane, now)),
+                "stale": run::holder_absent(root, lane),
                 "partial_signals": lane.partial_signals,
                 "delivery_id": lane.delivery_id,
                 "write_grants": lane.write_grants,
@@ -4982,6 +4985,8 @@ fn lanes_inner(
             .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid cursor"))?,
         None => 0,
     };
+    // A lane whose guardian died is settled by the next read, not left running.
+    let _ = session.store.reap(&call);
     let mut query = lane_query(
         &session,
         &command.id,

@@ -46,6 +46,7 @@ pub use admission::{
 };
 pub use controls::{
     CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,
+    holder_absent, overdue_at,
 };
 pub use delivery::HostDeliveryContext;
 pub use git_context::{GitContext, continuation_history, resolve_git_base, review_merge_base};
