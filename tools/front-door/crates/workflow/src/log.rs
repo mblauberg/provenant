@@ -12,7 +12,6 @@ pub const PAGE_LIMIT: usize = 100;
 pub const FUTURE_SKEW_SECONDS: i64 = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Append {
     pub operation_id: OperationId,
     /// Unix seconds, fixed by the caller when the operation is first created.
@@ -31,6 +30,14 @@ pub struct Append {
     pub channel: String,
     #[serde(default)]
     pub correction_of: Option<u64>,
+}
+impl Append {
+    pub fn from_json(
+        source: &str,
+        bytes: &[u8],
+    ) -> Result<(Self, Vec<provenant_records::InputWarning>), serde_json::Error> {
+        provenant_records::decode_input(source, bytes)
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -576,6 +583,18 @@ mod tests {
             channel: "chat".into(),
             correction_of: None,
         }
+    }
+    #[test]
+    fn log_input_reports_unknown_fields_and_preserves_required_values() {
+        let mut value = serde_json::to_value(update("op-open", 1, "kept")).unwrap();
+        value["future"] = serde_json::json!({"nested":true});
+        let (input, warnings) =
+            Append::from_json("log.json", &serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(input.markdown, "kept");
+        assert_eq!(warnings[0].source, "log.json");
+        assert_eq!(warnings[0].key, "future");
+        value["issued_at"] = serde_json::json!("invalid");
+        assert!(Append::from_json("log.json", &serde_json::to_vec(&value).unwrap()).is_err());
     }
     fn retention() -> Retention {
         Retention {

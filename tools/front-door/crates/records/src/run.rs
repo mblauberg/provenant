@@ -55,6 +55,44 @@ impl CanonicalRequest {
     pub fn digest(&self) -> Result<Digest, CanonicalError> {
         CanonicalV1::record_digest("run-request", 1, self)
     }
+
+    /// The host-derived run ID for this request under `operation`, or `None`
+    /// for a legacy, unversioned request. Version 1 binds the ID to the whole
+    /// proposal and the host's namespace, so no proposed ID is ever adopted.
+    pub fn child_run_id(
+        &self,
+        project: ProjectId,
+        operation: &OperationId,
+    ) -> Result<Option<RunId>, ChildIdError> {
+        match self.child_attempt_id_version {
+            None => Ok(None),
+            Some(1) => {
+                let parent = self.parent_attempt.ok_or(ChildIdError::MissingParent)?;
+                use sha2::{Digest as _, Sha256};
+                let mut hash = Sha256::new();
+                hash.update(b"provenant-child-run-v1\0");
+                hash.update(project.as_bytes());
+                hash.update(parent.as_bytes());
+                hash.update(CanonicalV1::file_digest(operation.as_str().as_bytes()).bytes());
+                hash.update(self.digest()?.as_bytes());
+                let digest = hash.finalize();
+                let mut id = [0; 16];
+                id.copy_from_slice(&digest[..16]);
+                Ok(Some(RunId::from_bytes(id)))
+            }
+            Some(_) => Err(ChildIdError::UnsupportedVersion),
+        }
+    }
+}
+/// Why a request cannot yield a host-derived child run ID.
+#[derive(Debug, thiserror::Error)]
+pub enum ChildIdError {
+    #[error("unsupported child attempt ID version")]
+    UnsupportedVersion,
+    #[error("derived child IDs require a parent attempt")]
+    MissingParent,
+    #[error(transparent)]
+    Canonical(#[from] CanonicalError),
 }
 /// Effective dispatch policy, sealed with the request and copied to each attempt.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,9 +126,10 @@ impl HarnessProfile {
     }
 }
 /// Descriptive labels only. They do not grant authority. Each value is at most 256 UTF-8 bytes.
-#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkContext {
+    #[serde(flatten)]
+    pub extra: crate::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

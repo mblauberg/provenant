@@ -248,6 +248,8 @@ pub(super) fn evaluate<O: AttemptOwner>(
         names.push(selected);
     }
     let state = observation.state;
+    // Pending with no registered check means CI never started for this head.
+    let unscheduled = state == CiState::Pending && names.is_empty();
     checkpoint.nodes[index].ci = Some(CiEvidence {
         wake_at: None,
         pending_observations,
@@ -274,7 +276,11 @@ pub(super) fn evaluate<O: AttemptOwner>(
         )));
     }
     if prior.is_some() && !superseded && elapsed_seconds >= *timeout_seconds {
-        return Ok(Evaluation::Settled(Some("timeout".into())));
+        return Ok(Evaluation::Settled(Some(if unscheduled {
+            format!("timeout: {NOT_SCHEDULED}")
+        } else {
+            "timeout".into()
+        })));
     }
     Ok(match state {
         CiState::Pending => {
@@ -309,8 +315,15 @@ pub(super) fn evaluate<O: AttemptOwner>(
         CiState::Passed => Evaluation::Settled(None),
         CiState::Failed => Evaluation::Settled(Some("failed".into())),
         CiState::Unavailable => Evaluation::Settled(Some("unavailable".into())),
+        CiState::Conflict => Evaluation::Settled(Some(
+            "conflict; next: rebase the branch onto its base and push".into(),
+        )),
+        CiState::NotScheduled => Evaluation::Settled(Some(NOT_SCHEDULED.into())),
     })
 }
+
+const NOT_SCHEDULED: &str =
+    "not_scheduled; next: check the workflow triggers or push an empty commit to start CI";
 
 pub(super) fn outputs(passed: bool, ci: Option<&CiEvidence>) -> NodeOutputs {
     let mut outputs = gate_outputs(passed);

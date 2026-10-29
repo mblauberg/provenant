@@ -17,6 +17,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 
+[features]
+# Lets tests seed associations sealed before derived child run IDs existed.
+retained-seed = []
+
 [dev-dependencies]
 rusqlite = { workspace = true }
 provenant-os = { workspace = true, features = ["fixture"] }

@@ -5,6 +5,7 @@ home_hosts = {}
 peers = {}
 commands = {} # named command tables, e.g. fmt-check = { argv = ["cargo", "fmt", "--check"], runtimes = [] }
 [lanes]
+memory_pressure_threshold = "critical"
 # A build throttle for cooperative fair sharing of CPU and memory among lanes, not a hard cap:
 # lanes' `cargo` commands that compile wait for a slot; direct `~/.cargo/bin/cargo`, rustc and non-cargo builds are not gated.
 max_concurrent_builds = -1 # host-wide builds at once, 1-64; automatic: max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))

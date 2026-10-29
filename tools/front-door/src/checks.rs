@@ -77,6 +77,14 @@ pub fn run(check: Check, globals: &Globals) -> u8 {
             ("check writing", Inspectable::Writing { paths, rules, page })
         }
     };
+    run_inspection(name, check, globals)
+}
+
+pub fn config(page: provenant_cli::Page, globals: &Globals) -> u8 {
+    run_inspection("config check", Inspectable::Config(page), globals)
+}
+
+fn run_inspection(name: &str, check: Inspectable, globals: &Globals) -> u8 {
     let result = inspect(check, globals);
     match result {
         Ok(page) => match page.human() {

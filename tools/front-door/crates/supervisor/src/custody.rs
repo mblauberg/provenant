@@ -17,7 +17,6 @@ use thiserror::Error;
 pub(crate) const RECORD_LIMIT: u64 = 1024 * 1024;
 pub(crate) const EXIT_LIMIT: u64 = 16 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Scope {
     pub run: RunId,
     pub attempt: AttemptId,
@@ -86,7 +85,7 @@ pub(crate) enum LaunchState {
 #[derive(Clone, Debug, Serialize)]
 pub struct WriterBinding(StoredWriterBinding);
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum StoredWriterBinding {
     Worktree {
         worktree_device: u64,
@@ -157,20 +156,17 @@ impl StoredWriterBinding {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct OwnershipJournal {
     schema_version: u64,
     scope: Scope,
     binding: StoredWriterBinding,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SettlementJournal {
     schema_version: u64,
     scope: Scope,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Reservation {
     pub schema_version: u64,
     pub scope: Scope,
@@ -843,7 +839,6 @@ pub fn launch(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct CancelRequest {
     pub schema_version: u64,
     pub scope: Scope,
@@ -1694,7 +1689,6 @@ pub struct SettlementCommit {
     _custody: LockGuard,
 }
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ReleaseReceipt {
     schema_version: u64,
     scope: Scope,

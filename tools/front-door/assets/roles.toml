@@ -86,9 +86,11 @@ references = [
 prompt = """
 Turn the scouts' evidence into one approved slice for: ${prompt}
 State the acceptance criteria, the literal write scope, the checks that prove
-completion and any open question the user must answer. If a question blocks
-the work, say so under NEEDS-USER and finish with VERDICT: FAIL; otherwise
-finish with VERDICT: PASS.
+completion and the authority the implementer holds. Decide engineering
+questions yourself: pick the reversible option, state it as an assumption and
+record it under DECISIONS. Raise NEEDS-USER only for an owner decision or a
+need to expand authority, and finish with VERDICT: FAIL; otherwise finish with
+VERDICT: PASS.
 """
 
 [roles."plan.slices"]
@@ -99,7 +101,8 @@ references = [{ ref = "skill:scope/references/architect.md", when = "when slices
 prompt = """
 Split the approved scope for ${prompt} into bounded slices. Give each slice a
 name, a literal write scope, acceptance criteria and its dependencies. Prefer
-slices that can land independently.
+slices that can land independently. Carry the approved objective and the
+authority into every slice, so each implementer can decide within them.
 """
 
 [roles."plan.review"]
@@ -268,10 +271,20 @@ worktree = "${worktree}"
 write_scope = "${scope}"
 source = "${subject}"
 delivery = "${delivery}"
-card = "You implement one bounded approved slice inside the write scope."
+card = "You implement one bounded slice inside the write scope, within the authority envelope below."
 acceptance_checks = ["Run targeted tests and required static checks", "Commit the completed slice"]
 prompt = """
-Implement one bounded approved slice: ${prompt}
+Implement one bounded slice: ${prompt}
 Spec (acceptance criteria): ${spec}
 Keep changes within the supplied write scope. Run targeted checks and commit.
+
+Authority envelope. The objective above and the acceptance criteria are
+approved. You hold authority to make any engineering decision that serves them
+and is reversible: names, structure, tests, helper code and the order of work.
+Do not stop to ask about those. Make the call, state it as an assumption and
+record it in your final report under DECISIONS (decision, reason, how to
+reverse). Ask only when the decision belongs to the owner (product direction,
+scope, cost, irreversible or externally visible effects) or when the work needs
+authority beyond the write scope and this envelope; then report NEEDS-USER
+with the specific question and the option you would take.
 """

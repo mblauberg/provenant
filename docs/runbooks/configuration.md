@@ -4,6 +4,7 @@ Anchor: config/harness-knobs.json
 
 Read effective configuration with `provenant config show`. The Rust config
 owner reads the selected state root's `config.toml` and validates owner sections.
+Run `provenant config check` to list every warning with its file and key.
 Use `--state-dir /absolute/path` to select an isolated root. Change the
 profile or a knob with `provenant config set profile economy` or
 `provenant config set lanes.max_concurrency 4`; `config unset KNOB` reverts it.
@@ -15,8 +16,26 @@ with `provenant run --knob NAME=VALUE` (the terminal path; agents use
 ## Precedence and stamps
 
 The header requires `schema_version = 1`. `profile` selects `balanced`,
-`economy` or `rigorous`, and a missing file selects defaults; a malformed or
-unsupported file fails. Knob overrides live in a `[knobs]` table:
+`economy` or `rigorous`, and a missing file selects defaults. Unknown keys
+and invalid optional values warn and use defaults; invalid optional rows are
+isolated so valid rows still apply. Effective values retain their source in
+`config show`. Each warning names the offending key, so an invalid value
+inside a table drops only that value and its valid siblings still apply.
+Syntax, file size and schema-version errors remain hard failures, as do
+invalid known credentials, authority, confinement and Git-boundary settings.
+Recovery never widens an enforced restriction, so these also refuse the file:
+
+- knobs marked `strict` in the registry (`lanes.publish`,
+  `fabric.accept_handoff`, `chair.auto_switch`, `chair.switch_accounts` and
+  `lanes.max_depth`), whose defaults could grant what the user withheld;
+- enforced model policy (`lane.read_only`, `lane.max_context`,
+  `lane.max_turns`), and a malformed rule that carries one;
+- Fabric protocol caps (`limits.*`, which may only be lowered), graph limits
+  and budgets, `graph.allowed_read_roots`, `home_hosts` and executable
+  overrides;
+- quota probe and history ceilings.
+
+Bundled assets remain strict. Knob overrides live in a `[knobs]` table:
 
 ```toml
 schema_version = 1
@@ -54,9 +73,11 @@ caps writer lanes at `max_writer_lanes` (default 40) and at
 `max_project_writer_lanes` per project (default 30), inside fixed ceilings of
 64 active lanes per host and 32 per project. A writer at a cap waits until the
 admission deadline and is then refused with a reason that names the cap, its
-scope and the key to raise. On macOS it defers starts at warning
-or critical kernel memory pressure; on other platforms the 5 % memory floor
-applies. The disk floor applies to both classes. `lanes` shows a queued or starting lane's
+scope and the key to raise. On macOS it defers starts at critical kernel
+memory pressure by default. Set `domains.fabric.lanes.memory_pressure_threshold`
+to `warning` to defer at warning and critical, or `never` to disable this gate.
+The 5 % memory floor applies on every platform and the disk floor
+applies to both classes. `lanes` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s
 left of 2.0 s`.
 

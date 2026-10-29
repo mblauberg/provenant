@@ -414,6 +414,10 @@ pub enum CiState {
     Failed,
     Pending,
     Unavailable,
+    /// The pull request conflicts with its base, so CI never starts.
+    Conflict,
+    /// No check has registered for the head, so CI was never scheduled.
+    NotScheduled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1627,6 +1631,7 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
     let graph = plan.context.as_ref().unwrap_or(&defaults);
     let context = node.context.as_ref().unwrap_or(&defaults);
     provenant_records::run::WorkContext {
+        extra: Default::default(),
         graph_id: Some(plan.graph_id.clone()),
         node_id: Some(node.id.clone()),
         role: context

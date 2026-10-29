@@ -108,10 +108,12 @@ impl DomainConfig for Settings {
         errors
     }
 }
+/// Probe and history ceilings are a boundary: configuration may only lower them.
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "quota",
     |_| "max_parallel = 3\nwall_budget_seconds = 55\n\n[display]\nheadline = \"auto\"\nicon = \"most_constrained\"\n",
-);
+)
+.with_boundary_check(|error| error.code == "ceiling");
 
 #[cfg(test)]
 mod tests {

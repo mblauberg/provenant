@@ -80,12 +80,7 @@ impl From<RouteName> for String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum RouteChoice {
     Model(ModelId),
     NamedRoute(RouteName),
@@ -122,19 +117,13 @@ impl<const N: usize> From<BoundedModels<N>> for Vec<ModelId> {
     }
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "models",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
+#[serde(tag = "kind", content = "models", rename_all = "snake_case")]
 pub enum Fallback {
     #[default]
     None,
     Models(BoundedModels<2>),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RouteRequest {
     #[serde(default)]
     pub intent: crate::RouteIntent,
@@ -148,10 +137,65 @@ pub struct RouteRequest {
     pub fallback: Fallback,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RouteListQuery {
     #[serde(default)]
     pub valid: bool,
     pub adapter: Option<String>,
     pub pool: Option<String>,
+}
+
+impl RouteRequest {
+    pub fn from_json(
+        source: &str,
+        bytes: &[u8],
+    ) -> Result<(Self, Vec<provenant_records::InputWarning>), serde_json::Error> {
+        provenant_records::decode_input(source, bytes)
+    }
+}
+impl RouteListQuery {
+    pub fn from_json(
+        source: &str,
+        bytes: &[u8],
+    ) -> Result<(Self, Vec<provenant_records::InputWarning>), serde_json::Error> {
+        provenant_records::decode_input(source, bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_input_reports_ignored_fields_without_changing_the_selection() {
+        let (request, warnings) = RouteRequest::from_json(
+            "route.json",
+            br#"{"choice":{"kind":"model","value":"codex/a","future":1},"intent":{"future":1},"pool":"principal"}"#,
+        ).unwrap();
+        assert_eq!(
+            request.choice,
+            RouteChoice::Model(ModelId::parse("codex/a").unwrap())
+        );
+        assert_eq!(
+            warnings.iter().map(|w| w.key.as_str()).collect::<Vec<_>>(),
+            ["choice.future", "intent.future", "pool"]
+        );
+        assert!(warnings.iter().all(|w| w.source == "route.json"));
+        let (_, warnings) =
+            RouteListQuery::from_json("query.json", br#"{"valid":true,"future":1}"#).unwrap();
+        assert_eq!(warnings[0].key, "future");
+        assert!(
+            RouteRequest::from_json(
+                "route.json",
+                br#"{"choice":{"kind":"future","value":"codex/a"}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            RouteRequest::from_json(
+                "route.json",
+                br#"{"choice":{"kind":"model","value":false}}"#
+            )
+            .is_err()
+        );
+    }
 }

@@ -219,6 +219,37 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
     }
 }
 
+#[test]
+fn implementer_and_scope_briefs_carry_the_authority_envelope() {
+    let mut expanded = expand(
+        &Layers::empty(),
+        "generator-evaluator",
+        "approved brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    pin_fixture_sources(&mut expanded.document);
+    let brief = expanded.document["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "implement")
+        .unwrap()["prompt"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for needle in [
+        "approved brief",
+        "Spec (acceptance criteria)",
+        "Authority envelope",
+        "reversible",
+        "DECISIONS",
+        "NEEDS-USER",
+    ] {
+        assert!(brief.contains(needle), "{needle}: {brief}");
+    }
+}
+
 fn bundled_fixture(name: &str) -> provenant_fabric_runtime::graph::GraphDocument {
     let overrides = match name {
         "generator-evaluator" | "review-council" => vec!["parameters.worktree='/repo/lane'".into()],

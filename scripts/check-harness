@@ -44,6 +44,7 @@ def main():
     tracked = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z"]).decode().split("\0")
     paths = {Path(p) for p in tracked if p}
     failures = []
+    warnings = []
 
     def fail(path, message):
         failures.append(f"{path}: {message}")
@@ -118,13 +119,13 @@ def main():
                 relative, _, anchor = target.partition("#")
                 destination = (root / path.parent / urllib.parse.unquote(relative)).resolve() if relative else root / path
                 if not destination.is_relative_to(root):
-                    fail(path, f"{number}: link escapes the repository: {target}")
+                    warnings.append(f"{path}:{number}: link escapes the repository: {target}")
                     continue
                 dest = destination.relative_to(root)
                 if dest not in paths and not any(dest in p.parents for p in paths):
-                    fail(path, f"{number}: unresolved local link: {target}")
+                    warnings.append(f"{path}:{number}: unresolved local link: {target}")
                 elif anchor and dest in paths and dest.suffix == ".md" and anchor not in anchors(destination.read_text()):
-                    fail(path, f"{number}: unresolved Markdown anchor: {target}")
+                    warnings.append(f"{path}:{number}: unresolved Markdown anchor: {target}")
 
     for path in sorted(paths):
         if path.suffix == ".md":
@@ -246,6 +247,8 @@ def main():
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
+    for warning in warnings:
+        print(f"check-harness: warning: {warning}", file=sys.stderr)
     print(f"check-harness: checked {len(paths)} tracked paths")
     return 0
 

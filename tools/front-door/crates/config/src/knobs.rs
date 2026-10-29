@@ -32,6 +32,10 @@ struct Spec {
     #[serde(default)]
     values: Vec<String>,
     default: Value,
+    /// Grants or bounds capability or authority, so an invalid value refuses
+    /// the whole configuration rather than recovering to the default.
+    #[serde(default)]
+    strict: bool,
 }
 #[derive(Deserialize)]
 struct Preset {
@@ -211,6 +215,11 @@ fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
         return text.parse::<i64>().map(Value::from).map_err(|_| "type");
     }
     Ok(Value::from(text))
+}
+
+/// Whether an invalid value of the knob must refuse the configuration.
+pub(crate) fn strict(name: &str) -> bool {
+    registry().is_ok_and(|registry| registry.knobs.get(name).is_some_and(|spec| spec.strict))
 }
 
 /// Registry default, then the profile preset, then the user's `[knobs]`.

@@ -10,6 +10,7 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 
 | Key | Default | Effect |
 |---|---|---|
+| `memory_pressure_threshold` | critical | Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The memory and disk floors still apply. (critical, warning or never). |
 | `max_concurrent_builds` | max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) | A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated. (1 to 64 or -1 for auto). |
 | `build_wait_minutes` | 30 | Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error. (1 to 1440 or -1 for auto). |
 | `max_writer_lanes` | 40 | Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap. (1 to 64 or -1 for auto). |
@@ -135,6 +136,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `effect` | `"Allow the Claude UserPromptSubmit hook to checkpoint and switch accounts at the quota threshold."` |
 | `reader` | `"tools/front-door/src/chair.rs"` |
 | `status` | `"wired"` |
+| `strict` | `true` |
 | `trade_off` | `"Off keeps switching manual; on opens a new chair pane when an explicitly allowed account has headroom."` |
 | `type` | `"bool"` |
 
@@ -146,6 +148,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `effect` | `"Ordered registered Claude account labels allowed as switch targets; empty allows none."` |
 | `reader` | `"tools/front-door/src/chair.rs"` |
 | `status` | `"wired"` |
+| `strict` | `true` |
 | `trade_off` | `"An explicit list controls which signed-in accounts may receive the chair."` |
 | `type` | `"string_list"` |
 
@@ -234,6 +237,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `effect` | `"Let a Fabric peer start a Claude session on this host through a session hand-off."` |
 | `reader` | `"tools/front-door/src/handoff.rs"` |
 | `status` | `"wired"` |
+| `strict` | `true` |
 | `trade_off` | `"Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."` |
 | `type` | `"bool"` |
 
@@ -271,6 +275,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `effect` | `"Maximum nested lane depth, including the first dispatched lane."` |
 | `min` | `1` |
 | `status` | `"wired"` |
+| `strict` | `true` |
 | `trade_off` | `"Lower limits delegation chains; higher permits deeper nested work."` |
 | `type` | `"int"` |
 
@@ -282,6 +287,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `effect` | `"Let worktree-write lanes with open network read gh configuration, push branches and open pull requests."` |
 | `reader` | `"tools/front-door/crates/cli/src/run/provider.rs"` |
 | `status` | `"wired"` |
+| `strict` | `true` |
 | `trade_off` | `"Off keeps publishing with the chair; on exposes the existing gh login read-only to the writer lane."` |
 | `type` | `"bool"` |
 

@@ -28,11 +28,10 @@ class ReferenceTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text('{"knobs": {"example": {"default": false}}, "schema_version": 1}')
         files, gaps = GEN['generate'](self.root)
-        self.assertEqual(len(gaps), 3)
+        self.assertEqual(len(gaps), 2)
         self.assertIn('## `example`', files['config-keys.md'])
         self.assertIn('Cargo.toml is missing', files['cli.md'])
         self.assertIn('tool-schemas.json is missing', files['mcp-tools.md'])
-        self.assertIn('Seatbelt goldens unavailable', files['seatbelt/README.md'])
         for text in files.values():
             self.assertIn('scripts/generate-reference', text.splitlines()[0])
 
@@ -113,20 +112,10 @@ class ReferenceTests(unittest.TestCase):
             GEN['catalogue'](self.root, self.root / 'built-cli')
             globals_['cargo'].assert_not_called()
 
-    def test_seatbelt_goldens_are_copied_byte_for_byte_after_header_without_cargo(self):
-        snapshots = self.root / GEN['SNAPSHOTS']
-        snapshots.mkdir(parents=True)
-        profile = '; fixture\n(version 1)\n'
-        (snapshots / 'fixture-read-only.sb').write_text(profile)
-        with patch.dict(GLOBALS, cargo=unittest.mock.Mock()):
-            files, _ = GEN['generate'](self.root)
-            GLOBALS['cargo'].assert_not_called()
-        self.assertEqual(files['seatbelt/fixture-read-only.sb'].split('\n', 1)[1], profile)
-
     def test_diff_detects_edits_and_both_missing_and_extra_files(self):
         actual, expected = self.root / 'actual', self.root / 'expected'
-        GEN['write_files'](expected, {'cli.md': 'expected\n', 'seatbelt/a.sb': '; profile\n'})
-        GEN['write_files'](actual, {'cli.md': 'expected\n', 'seatbelt/a.sb': '; profile\n'})
+        GEN['write_files'](expected, {'cli.md': 'expected\n'})
+        GEN['write_files'](actual, {'cli.md': 'expected\n'})
         with redirect_stdout(io.StringIO()):
             self.assertFalse(GEN['differences'](expected, actual))
             (actual / 'cli.md').write_text('hand edit\n')

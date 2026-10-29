@@ -1176,7 +1176,9 @@ impl HostDeliveryContext {
             let stderr = if output.stderr.filter_failed {
                 "diagnostic redaction failed".into()
             } else {
-                redact_url_userinfo(&String::from_utf8_lossy(&output.stderr.bytes))
+                provenant_confinement::redact::delivery_diagnostics(&String::from_utf8_lossy(
+                    &output.stderr.bytes,
+                ))
             };
             return Err(failure(format!(
                 "{tool} {:?} (timed out: {}): {stderr}",
@@ -1769,50 +1771,6 @@ pub(super) fn cap_pr_body(mut body: String) -> String {
     body
 }
 
-// Git may include remote URLs in diagnostics. Usernames alone can be access
-// tokens, so remove all URL userinfo, including passwordless userinfo.
-pub(super) fn redact_url_userinfo(detail: &str) -> String {
-    let mut result = String::with_capacity(detail.len());
-    let mut rest = detail;
-    while let Some(scheme_end) = rest.find("://") {
-        let authority_start = scheme_end + 3;
-        result.push_str(&rest[..authority_start]);
-        rest = &rest[authority_start..];
-        let token_end = rest
-            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')'))
-            .unwrap_or(rest.len());
-        let token = &rest[..token_end];
-        if let Some(at) = token.rfind('@') {
-            result.push_str("[REDACTED]");
-            result.push_str(&token[at..]);
-            rest = &rest[token_end..];
-        } else {
-            // A malformed or truncated authority may have lost its '@'.
-            result.push_str("[REDACTED]");
-            let authority_end = token.find(['/', '?', '#']).unwrap_or(token.len());
-            rest = &rest[authority_end..];
-        }
-    }
-    result.push_str(rest);
-    // Git also accepts scp-style remotes such as user@host:path. The user
-    // can itself be a credential, so redact it even without a URL scheme.
-    let mut safe = String::with_capacity(result.len());
-    for token in result.split_inclusive(|c: char| {
-        c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '(' | ')')
-    }) {
-        if let Some(at) = token.rfind('@')
-            && token[at + 1..].contains(':')
-            && !token.contains("://")
-        {
-            safe.push_str("[REDACTED]");
-            safe.push_str(&token[at..]);
-        } else {
-            safe.push_str(token);
-        }
-    }
-    safe
-}
-
 /// A name with its non-ASCII characters escaped, so two spellings of one
 /// name read differently.
 fn spelled(name: &str) -> String {
@@ -1829,9 +1787,7 @@ fn spelled(name: &str) -> String {
 
 pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {
     let detail = detail.to_string();
-    let safe = provenant_confinement::redact::known_shapes(detail.as_bytes())
-        .unwrap_or_else(|_| b"diagnostic redaction failed".to_vec());
-    let redacted = redact_url_userinfo(&String::from_utf8_lossy(&safe));
+    let redacted = provenant_confinement::redact::delivery_diagnostics(&detail);
     let mut reason = redacted.split_whitespace().collect::<Vec<_>>().join(" ");
     if reason.len() > 1024 {
         reason.truncate(reason.floor_char_boundary(1024));

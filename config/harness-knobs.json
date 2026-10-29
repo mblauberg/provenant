@@ -91,6 +91,7 @@
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {
+      "memory_pressure_threshold": {"type": "enum", "allowed": "critical, warning or never", "default": "critical", "effect": "Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The memory and disk floors still apply."},
       "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
       "build_wait_minutes": {"type": "int", "min": 1, "max": 1440, "auto_value": -1, "default": 30, "effect": "Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error."},
       "max_writer_lanes": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": 40, "effect": "Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap."},
@@ -147,12 +148,14 @@
       "trade_off": "Off keeps project identity out of usage logs; on makes project-level usage visible to anyone who can read them."
     },
     "fabric.accept_handoff": {
+      "strict": true,
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/handoff.rs",
       "effect": "Let a Fabric peer start a Claude session on this host through a session hand-off.",
       "trade_off": "Off refuses every hand-off with HANDOFF_DISABLED; on lets a peer open an unconfined session under a registered account."
     },
     "chair.auto_switch": {
+      "strict": true,
       "type": "bool", "default": false, "status": "wired",
       "reader": "tools/front-door/src/chair.rs",
       "effect": "Allow the Claude UserPromptSubmit hook to checkpoint and switch accounts at the quota threshold.",
@@ -165,6 +168,7 @@
       "trade_off": "Lower switches sooner; higher leaves less headroom for the handoff."
     },
     "chair.switch_accounts": {
+      "strict": true,
       "type": "string_list", "default": [], "status": "wired",
       "reader": "tools/front-door/src/chair.rs",
       "effect": "Ordered registered Claude account labels allowed as switch targets; empty allows none.",
@@ -189,11 +193,13 @@
       "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged. Read-only lanes start 2 s apart whatever this value."
     },
     "lanes.max_depth": {
+      "strict": true,
       "type": "int", "min": 1, "default": 2, "status": "wired",
       "effect": "Maximum nested lane depth, including the first dispatched lane.",
       "trade_off": "Lower limits delegation chains; higher permits deeper nested work."
     },
     "lanes.publish": {
+      "strict": true,
       "type": "bool", "default": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider.rs",
       "effect": "Let worktree-write lanes with open network read gh configuration, push branches and open pull requests.",

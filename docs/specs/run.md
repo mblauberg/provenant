@@ -368,8 +368,10 @@ supervisor call happens inside a transaction. Admission bounds active lanes
 at the fixed ceilings of 64 per host and 32 per project (writers also by the configured caps below) and queued lanes at 256 per host, with
 memory and disk floors, startup spacing and a deadline.
 
-On macOS, Warning or Critical kernel memory pressure defers both classes.
-Normal pressure still requires the memory floor. An unavailable or unknown
+On macOS, Critical kernel memory pressure defers both classes by default.
+`domains.fabric.lanes.memory_pressure_threshold` accepts `critical`, `warning`
+(Warning or Critical) or `never`. The memory floor applies at every pressure
+level, including when the pressure gate is disabled. An unavailable or unknown
 pressure sample is logged and falls back to the floor; Linux uses the floor.
 Disk and memory floors apply to both classes. Build slots do not gate
 admission: a host-wide build throttle (not a hard cap), by default

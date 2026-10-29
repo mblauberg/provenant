@@ -1,7 +1,8 @@
 //! Routing's frozen clap leaves and read-only composition/rendering edge.
 use crate::Globals;
 use clap::{Args, Subcommand, ValueEnum};
-use provenant_core::{Roots, WallTime};
+use provenant_core::{Clock, Roots, WallTime};
+use provenant_os::clock::SystemClock;
 use provenant_os::fs::FsError;
 use provenant_providers::{AvailabilityRecord, REGISTRY};
 use provenant_records::{CommandError, CommandResult, Outcome, RouteReadiness};
@@ -506,7 +507,7 @@ fn migrate_pacing_override_value(value: toml_edit::Value, now: i64) -> Option<to
     }
     Some(toml_edit::Value::InlineTable(row))
 }
-fn override_line(row: &provenant_routing::PacingOverride) -> String {
+fn override_line(row: &provenant_routing::PacingOverride, now: i64) -> String {
     let scope = match (&row.account, &row.provider) {
         (Some(account), _) => format!("account {account}"),
         (None, Some(provider)) => format!("provider {provider}"),
@@ -515,9 +516,7 @@ fn override_line(row: &provenant_routing::PacingOverride) -> String {
     let until = row.schedule.expires.map_or_else(
         || "no expiry".into(),
         |expiry| {
-            let remaining = expiry
-                .saturating_sub(jiff::Timestamp::now().as_second())
-                .max(0);
+            let remaining = expiry.saturating_sub(now).max(0);
             format!("until {} ({remaining}s remaining)", expiry_text(expiry))
         },
     );
@@ -731,7 +730,8 @@ fn with_context<T>(
     };
     // Cached accounts also supply reset_of references outside the probed route.
     // Quota facts never grant executable or account readiness.
-    let timestamp = jiff::Timestamp::now();
+    let timestamp = SystemClock::new().wall_now()?;
+    let timestamp = timestamp.as_timestamp();
     domains
         .quota
         .apply_calibration(&mut quota_records, timestamp.as_second());
@@ -1264,9 +1264,9 @@ fn reset_pool(roots: &Roots, request: &RouteReset) -> Result<(), EdgeError> {
 }
 
 /// Record the request and describe what was recorded; `None` only lists.
-fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<Option<String>, EdgeError> {
+fn set_pacing(roots: &Roots, request: &RoutePacing, now: i64) -> Result<Option<String>, EdgeError> {
     if request.target == "override" {
-        return set_pacing_override(roots, request);
+        return set_pacing_override(roots, request, now);
     }
     if request.account.is_some()
         || request.provider.is_some()
@@ -1307,7 +1307,7 @@ fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<Option<String>, Ed
     Ok(Some(format!("provider {} pacing {policy}", request.target)))
 }
 
-fn override_expiry(value: &str) -> Option<i64> {
+fn override_expiry(value: &str, now: i64) -> Option<i64> {
     if let Ok(timestamp) = value.parse::<jiff::Timestamp>() {
         return Some(timestamp.as_second());
     }
@@ -1319,12 +1319,18 @@ fn override_expiry(value: &str) -> Option<i64> {
         _ => return None,
     };
     let seconds = digits.parse::<i64>().ok()?.checked_mul(multiplier)?;
-    (seconds > 0)
-        .then(|| jiff::Timestamp::now().as_second().checked_add(seconds))
-        .flatten()
+    (seconds > 0).then(|| now.checked_add(seconds)).flatten()
 }
 
-fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<String>, EdgeError> {
+fn expiry_is_future(expiry: i64, now: i64) -> bool {
+    expiry > now
+}
+
+fn set_pacing_override(
+    roots: &Roots,
+    request: &RoutePacing,
+    now: i64,
+) -> Result<Option<String>, EdgeError> {
     let options = request.account.is_some()
         || request.provider.is_some()
         || request.all
@@ -1370,8 +1376,8 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<St
     let expiry = request
         .until
         .as_deref()
-        .and_then(override_expiry)
-        .filter(|expiry| *expiry > jiff::Timestamp::now().as_second())
+        .and_then(|value| override_expiry(value, now))
+        .filter(|expiry| expiry_is_future(*expiry, now))
         .ok_or(EdgeError::Pacing(
             "--until must be a future RFC 3339 timestamp or positive duration",
         ))?;
@@ -1383,7 +1389,6 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<St
         .as_deref()
         .map(|name| resolve_account_reference(name, "--account", &settings))
         .transpose()?;
-    let now = jiff::Timestamp::now().as_second();
     edit_config(roots, |document| {
         let routing = routing_table(document)?;
         let mut values = match routing.remove("pacing_overrides") {
@@ -1451,10 +1456,10 @@ fn set_pacing_override(roots: &Roots, request: &RoutePacing) -> Result<Option<St
             windows: Vec::new(),
         },
     };
-    Ok(Some(format!("override {}", override_line(&recorded))))
+    Ok(Some(format!("override {}", override_line(&recorded, now))))
 }
 
-fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
+fn execute(command: &Route, roots: &Roots, now: i64) -> Result<Data, EdgeError> {
     match command {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
         Route::Resolve(query) => {
@@ -1545,7 +1550,7 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
             )?))
         }
         Route::Pacing(request) => {
-            let recorded = set_pacing(roots, request)?;
+            let recorded = set_pacing(roots, request, now)?;
             let list = list_data(
                 roots,
                 &RouteListRequest {
@@ -1563,7 +1568,6 @@ fn execute(command: &Route, roots: &Roots) -> Result<Data, EdgeError> {
             let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
                 .domains
                 .routing;
-            let now = jiff::Timestamp::now().as_second();
             let mut overrides = Vec::new();
             for row in &config.pacing_overrides {
                 overrides.push(OverrideRow {
@@ -1630,7 +1634,15 @@ pub fn run(
         Route::Pacing(_) => "route pacing",
         Route::Override(_) => "route override list",
     };
-    let result = match execute(&command, roots) {
+    let now = SystemClock::new().wall_now();
+    let now_seconds = now
+        .as_ref()
+        .map(|time| time.as_timestamp().as_second())
+        .unwrap_or_default();
+    let result = match now
+        .map_err(EdgeError::from)
+        .and_then(|_| execute(&command, roots, now_seconds))
+    {
         Ok(data) => CommandResult::new(name, Outcome::Ok, Some(data)),
         Err(error) => {
             let (status, code) = match &error {
@@ -1806,7 +1818,7 @@ pub fn run(
                     report
                         .active_overrides
                         .iter()
-                        .map(|row| format!("override {}", override_line(row))),
+                        .map(|row| format!("override {}", override_line(row, now_seconds))),
                 );
                 format!("{}\n", lines.join("\n"))
             }
@@ -1884,7 +1896,7 @@ pub fn run(
                 report
                     .active_overrides
                     .iter()
-                    .map(|row| format!("override {}", override_line(row)))
+                    .map(|row| format!("override {}", override_line(row, now_seconds)))
                     .collect(),
                 Some(next.to_owned()),
             ))
@@ -1931,6 +1943,17 @@ mod route_tests {
     use std::error::Error;
 
     #[test]
+    fn pacing_override_expiry_uses_the_supplied_instant() {
+        use super::{expiry_is_future, override_expiry};
+
+        let expiry = override_expiry("1s", 99).expect("positive duration should resolve");
+        assert_eq!(expiry, 100);
+        assert!(expiry_is_future(expiry, 99));
+        assert!(!expiry_is_future(expiry, 100));
+        assert!(!expiry_is_future(expiry, 101));
+    }
+
+    #[test]
     fn pacing_override_write_drops_expired_legacy_removed_account_rows()
     -> Result<(), Box<dyn Error>> {
         use super::{PacingChoice, RoutePacing};
@@ -1967,6 +1990,7 @@ mod route_tests {
                 policy: Some(PacingChoice::Max),
                 until: Some("1h".into()),
             },
+            2,
         )?;
 
         let saved = std::fs::read_to_string(path)?;
@@ -2192,7 +2216,7 @@ mod route_tests {
                 fallback: vec![],
             },
         });
-        match super::execute(&preview, &roots) {
+        match super::execute(&preview, &roots, 0) {
             Err(error) => assert!(error.to_string().contains("$20")),
             Ok(_) => panic!("preview must refuse the model"),
         }

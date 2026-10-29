@@ -1,5 +1,5 @@
 //! Exact-head observations for deterministic graph gates.
-use super::{Check, encode, required_checks, summarise_ci};
+use super::{Check, encode, mark_conflict, required_checks, summarise_ci};
 use provenant_fabric_runtime::graph::{CiFailedCheck, CiObservation, CiState};
 use serde::Deserialize;
 use std::path::Path;
@@ -123,7 +123,9 @@ fn observe_with(
             .as_ref()
             .map(|(policy, names)| (*policy, names.as_slice())),
     );
-    if result.state == CiState::Unavailable
+    // A fresh head may not have registered its checks yet. Wait for them;
+    // the gate timeout reports a head whose checks never registered.
+    if matches!(result.state, CiState::Unavailable | CiState::NotScheduled)
         && evidence.as_ref().is_some_and(|evidence| {
             let selected: Vec<_> = evidence
                 .iter()
@@ -145,7 +147,13 @@ fn observe_with(
         })
     {
         result.state = CiState::Pending;
+        let next = result
+            .summary
+            .find(" next:")
+            .map(|at| result.summary.split_off(at))
+            .unwrap_or_default();
         result.summary.push_str(" awaiting check registration");
+        result.summary.push_str(&next);
     }
     result.head_sha = Some(before.sha.clone());
     if let Some(evidence) = evidence {
@@ -165,6 +173,7 @@ fn observe_with(
             })
             .collect();
     }
+    mark_conflict(&mut result, || mergeable(target, &before, read));
     // Checks and the mutable branch are separate API reads. Never let a green
     // result for the previous push settle the gate after the branch has moved.
     match resolve_head(target, read) {
@@ -191,6 +200,23 @@ fn observe_with(
             extra: Default::default(),
         },
     }
+}
+
+/// `gh pr view` mergeable state: `MERGEABLE`, `CONFLICTING` or `UNKNOWN`.
+/// A node branch reads the PR that carries its exact head, as policy does.
+fn mergeable(
+    target: &str,
+    head: &Head,
+    read: &dyn Fn(&[&str]) -> Option<Vec<u8>>,
+) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Merge {
+        mergeable: String,
+    }
+    let pull = policy_target(target, head, read)?;
+    serde_json::from_slice::<Merge>(&read(&["gh", "pr", "view", &pull, "--json", "mergeable"])?)
+        .ok()
+        .map(|merge| merge.mergeable)
 }
 
 fn resolve_head(target: &str, read: &dyn Fn(&[&str]) -> Option<Vec<u8>>) -> Option<Head> {
@@ -590,6 +616,42 @@ mod tests {
             assert_eq!(observation.state, expected, "{check_pages}");
             if expected == CiState::Pending {
                 assert!(observation.summary.contains("awaiting check registration"));
+            }
+        }
+    }
+
+    #[test]
+    fn ci_probe_reports_a_conflicting_pr_instead_of_waiting_for_checks() {
+        for (check_pages, mergeable, expected) in [
+            (json!([{"check_runs":[]}]), "CONFLICTING", CiState::Conflict),
+            (json!([{"check_runs":[]}]), "MERGEABLE", CiState::Pending),
+            (
+                checks(OLD, "completed", Some("failure")),
+                "CONFLICTING",
+                CiState::Failed,
+            ),
+        ] {
+            let read = |args: &[&str]| {
+                serde_json::to_vec(&if args.ends_with(&["--json", "mergeable"]) {
+                    json!({"mergeable":mergeable})
+                } else if args[1] == "pr" {
+                    pull(OLD)
+                } else if args.last()?.contains("check-runs") {
+                    check_pages.clone()
+                } else {
+                    json!([[]])
+                })
+                .ok()
+            };
+            let observation = observe_with("feature", &[], &read, |_| None);
+            assert_eq!(observation.state, expected, "{check_pages} {mergeable}");
+            assert_eq!(observation.head_sha.as_deref(), Some(OLD));
+            match expected {
+                CiState::Conflict => assert!(observation.summary.contains("next: rebase")),
+                CiState::Pending => assert!(observation.summary.ends_with(
+                    "awaiting check registration next: check the workflow triggers or push an empty commit to start CI"
+                )),
+                _ => {}
             }
         }
     }

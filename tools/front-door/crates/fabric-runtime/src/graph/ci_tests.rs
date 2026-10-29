@@ -113,6 +113,13 @@ fn observation(state: CiState, summary: &str) -> CiObservation {
         truncated: false,
     }
 }
+/// An observation whose checks have registered for the head.
+fn registered(state: CiState, summary: &str) -> CiObservation {
+    CiObservation {
+        check_names: vec!["build".into()],
+        ..observation(state, summary)
+    }
+}
 
 #[test]
 fn ci_optional_evidence_fields_remain_absent() {
@@ -127,6 +134,18 @@ fn ci_outcomes_are_recorded_and_fail_closed() {
         (CiState::Passed, NodeState::Succeeded, None),
         (CiState::Failed, NodeState::Failed, Some("failed")),
         (CiState::Unavailable, NodeState::Failed, Some("unavailable")),
+        (
+            CiState::Conflict,
+            NodeState::Failed,
+            Some("conflict; next: rebase the branch onto its base and push"),
+        ),
+        (
+            CiState::NotScheduled,
+            NodeState::Failed,
+            Some(
+                "not_scheduled; next: check the workflow triggers or push an empty commit to start CI",
+            ),
+        ),
     ] {
         let mut owner = Owner {
             observations: VecDeque::from([observation(state, "checks: fixture")]),
@@ -365,8 +384,8 @@ fn ci_backoff_never_delays_the_gate_timeout() {
             max_seconds: u64::MAX,
         },
         observations: VecDeque::from([
-            observation(CiState::Pending, "waiting"),
-            observation(CiState::Pending, "still waiting"),
+            registered(CiState::Pending, "waiting"),
+            registered(CiState::Pending, "still waiting"),
         ]),
         ..Default::default()
     };
@@ -395,8 +414,8 @@ fn ci_backoff_never_delays_the_gate_timeout() {
 fn ci_pending_times_out_using_original_observation_time() {
     let mut owner = Owner {
         observations: VecDeque::from([
-            observation(CiState::Pending, "waiting"),
-            observation(CiState::Pending, "still waiting"),
+            registered(CiState::Pending, "waiting"),
+            registered(CiState::Pending, "still waiting"),
         ]),
         ..Default::default()
     };
@@ -420,14 +439,37 @@ fn ci_pending_times_out_using_original_observation_time() {
 }
 
 #[test]
+fn ci_timeout_without_registered_checks_reports_not_scheduled() {
+    let mut owner = Owner {
+        observations: VecDeque::from([
+            observation(CiState::Pending, "awaiting check registration"),
+            observation(CiState::Pending, "awaiting check registration"),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    advance(&document(), &mut owner, &mut journal).unwrap();
+    owner.monotonic_micros = 7_200_000_000;
+    let timed_out = advance(&document(), &mut owner, &mut journal).unwrap();
+    let node = &timed_out.checkpoint.nodes[0];
+    assert_eq!(node.state, NodeState::Failed);
+    assert_eq!(
+        node.gate.as_ref().unwrap().reason.as_deref(),
+        Some(
+            "timeout: not_scheduled; next: check the workflow triggers or push an empty commit to start CI"
+        )
+    );
+}
+
+#[test]
 fn ci_timeout_ignores_wall_clock_steps_and_reanchors_after_boot() {
     let mut owner = Owner {
         observations: VecDeque::from([
-            observation(CiState::Pending, "first"),
-            observation(CiState::Pending, "forward wall step"),
-            observation(CiState::Pending, "backward wall step"),
-            observation(CiState::Pending, "new boot"),
-            observation(CiState::Pending, "timeout"),
+            registered(CiState::Pending, "first"),
+            registered(CiState::Pending, "forward wall step"),
+            registered(CiState::Pending, "backward wall step"),
+            registered(CiState::Pending, "new boot"),
+            registered(CiState::Pending, "timeout"),
         ]),
         boot: "boot-a".into(),
         ..Default::default()

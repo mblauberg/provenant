@@ -28,10 +28,38 @@ Chair, inbox and console
 Fabric and MCP
 Telemetry and providers'
 
+normalise() {
+  printf '%s\n' "$1" | awk '{$1=$1; print tolower($0)}'
+}
+
+section_of() {
+  first=$(sed -n 1p "$1")
+  case "$first" in '## '*) value=${first#\#\# } ;; *) value= ;; esac
+  case "$(normalise "$value")" in
+    'breaking changes') printf '%s\n' '## Breaking changes' ;;
+    'behaviour changes') printf '%s\n' '## Behaviour changes' ;;
+    additions) printf '%s\n' '## Additions' ;;
+    fixes) printf '%s\n' '## Fixes' ;;
+    *) printf '%s\n' '## Additions' ;;
+  esac
+}
+
 area_of() {
   second=$(sed -n 2p "$1")
   case "$second" in
-    '### '*) printf '%s\n' "${second#\#\#\# }" ;;
+    '### '*) value=${second#\#\#\# } ;;
+    *) return ;;
+  esac
+  case "$(normalise "$value")" in
+    'cli and install') printf '%s\n' 'CLI and install' ;;
+    'lanes and settlement') printf '%s\n' 'Lanes and settlement' ;;
+    'git and safety') printf '%s\n' 'Git and safety' ;;
+    'accounts, quota and routing') printf '%s\n' 'Accounts, quota and routing' ;;
+    'pipelines and graphs') printf '%s\n' 'Pipelines and graphs' ;;
+    'chair, inbox and console') printf '%s\n' 'Chair, inbox and console' ;;
+    'fabric and mcp') printf '%s\n' 'Fabric and MCP' ;;
+    'telemetry and providers') printf '%s\n' 'Telemetry and providers' ;;
+    *) ;;
   esac
 }
 
@@ -48,19 +76,26 @@ check() {
   for f in "$dir"/*.md; do
     [ -e "$f" ] || continue
     [ "$f" = "$dir/_intro.md" ] && continue
+    if ! awk 'NF { found = 1 } END { exit !found }' "$f"; then
+      echo "collate-release-notes: $f: fragment is empty" >&2
+      status=1
+      continue
+    fi
     first=$(sed -n 1p "$f")
-    if ! printf '%s\n' "$sections" | grep -qxF -- "$first"; then
-      echo "collate-release-notes: $f: first line must be one of: $(printf '%s' "$sections" | paste -sd, -)" >&2
-      status=1
+    if [ "$(section_of "$f")" = '## Additions' ] && [ "$(normalise "${first#\#\# }")" != additions ]; then
+      echo "collate-release-notes: $f: unknown section; using Additions" >&2
+    elif ! printf '%s\n' "$sections" | grep -qxF -- "$(section_of "$f")"; then
+      echo "collate-release-notes: $f: malformed section heading; using Additions" >&2
     fi
-    area=$(area_of "$f")
-    if [ -n "$area" ] && ! printf '%s\n' "$areas" | grep -qxF -- "$area"; then
-      echo "collate-release-notes: $f: unknown area \"$area\"; use one of: $(printf '%s' "$areas" | paste -sd, -)" >&2
-      status=1
-    fi
+    second=$(sed -n 2p "$f")
+    case "$second" in '### '*)
+      if [ -z "$(area_of "$f")" ]; then
+        echo "collate-release-notes: $f: unknown area; leaving untagged" >&2
+      fi
+    esac
     if awk 'NR > 1 && /^## / { found = 1 } END { exit !found }' "$f"; then
       echo "collate-release-notes: $f: section headings are only allowed on line 1" >&2
-      status=1
+      echo "collate-release-notes: $f: later section heading ignored" >&2
     fi
   done
   return $status
@@ -71,7 +106,7 @@ section_count() {
   for f in "$dir"/*.md; do
     [ -e "$f" ] || continue
     [ "$f" = "$dir/_intro.md" ] && continue
-    [ "$(sed -n 1p "$f")" = "$1" ] || continue
+    [ "$(section_of "$f")" = "$1" ] || continue
     grep -c '^- ' "$f" || true
   done | awk '{ n += $1 } END { print n + 0 }'
 }
@@ -82,10 +117,10 @@ section_part() {
   for f in "$dir"/*.md; do
     [ -e "$f" ] || continue
     [ "$f" = "$dir/_intro.md" ] && continue
-    [ "$(sed -n 1p "$f")" = "$1" ] || continue
+    [ "$(section_of "$f")" = "$1" ] || continue
     [ "$(area_of "$f")" = "$2" ] || continue
     skip=0
-    [ -z "$2" ] || skip=2
+    [ -z "$(sed -n 2p "$f" | sed -n '/^### /p')" ] || skip=2
     # Drop the heading, the area line and any blank lines around the bullets.
     awk -v skip="$skip" 'NR > 1 && NR != skip { if ($0 == "") { held = held "\n"; next } if (started) printf "%s", held; held = ""; started = 1; print }' "$f"
   done

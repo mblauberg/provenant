@@ -33,10 +33,12 @@ Add one file per user-visible change under `next.d/`, named `<issue>-<topic>.md`
 - `status` no longer reports a finished run as running (#123).
 ```
 
-- **First line.** Exactly one of `## Breaking changes`, `## Behaviour changes`,
-  `## Additions` or `## Fixes`. No other `##` heading is allowed.
+- **First line.** Use `## Breaking changes`, `## Behaviour changes`,
+  `## Additions` or `## Fixes`. The collator normalises case and whitespace;
+  an unknown heading is warned about and treated as Additions. Later `##`
+  headings are warned about and ignored.
 - **Second line (area).** `### <Area>`, from the project list below. Tag every
-  fragment; an unknown area fails `scripts/collate-release-notes --check`. The
+  fragment; an unknown area is warned about and treated as untagged. The
   collator decides whether to show the tag: it renders `### Area` sub-headings,
   in the order below, only in a section with more than 12 entries, and lists a
   smaller section flat in the same order, with untagged entries last.

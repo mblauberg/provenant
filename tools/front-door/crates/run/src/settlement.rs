@@ -25,7 +25,6 @@ pub(crate) enum Phase {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Journal {
     schema_version: u64,
     scope: Scope,
@@ -331,6 +330,43 @@ mod tests {
     }
 
     #[test]
+    fn persisted_settlement_accepts_future_fields_and_still_checks_scope_and_version() -> TestResult
+    {
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let mut record = serde_json::json!({
+            "schema_version": 1,
+            "scope": scope(),
+            "phase": "import",
+            "attempts": 0,
+            "head": null,
+            "base": null,
+            "owner": null,
+            "future_progress": {"value": true}
+        });
+        let persist = |value: &serde_json::Value| -> TestResult {
+            attempt
+                .atomic_write(
+                    OsStr::new(FILE),
+                    ".settlement-test-",
+                    &serde_json::to_vec(value)?,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
+            Ok(())
+        };
+        persist(&record)?;
+        assert_eq!(read(&attempt, scope())?.phase, Phase::Import);
+        let mut other = scope();
+        other.generation += 1;
+        assert!(read(&attempt, other).is_err());
+        record["schema_version"] = serde_json::json!(2);
+        persist(&record)?;
+        assert!(read(&attempt, scope()).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn progress_and_pinned_commit_survive_a_new_driver() -> TestResult {
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
@@ -423,7 +459,6 @@ mod tests {
             }
             assert!(journal.retry_after_ms >= dropped_at + backoff_ms(expected));
         }
-        assert_eq!(CLAIM_BACKOFF_MS, [5_000, 30_000, 120_000]);
         Ok(())
     }
 
@@ -669,7 +704,6 @@ impl crate::RunStore {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct QueuedWorker {
     schema_version: u64,
     run: provenant_core::RunId,

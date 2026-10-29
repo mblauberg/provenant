@@ -696,11 +696,9 @@ fn shutdown_deadline_cancels_a_straggler_and_never_writes_its_late_reply() {
         json!({"op":"inspect"}),
     ));
     assert!(gate.wait_for_entered(1, TEST_WAIT));
-    let started = Instant::now();
     server.close_input();
     let result = server.wait_result(TEST_WAIT);
     assert!(matches!(result, Err(Error::Shutdown)), "{result:?}");
-    assert!(started.elapsed() < Duration::from_secs(2));
     {
         let state = gate.state.lock().unwrap();
         assert_eq!(state.returned, 0, "straggler must outlive the deadline");

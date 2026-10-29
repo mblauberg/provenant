@@ -3,12 +3,21 @@ set -eu
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_INDEX_FILE GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 script=$(cd "$(dirname "$0")" && pwd -P)/collate-release-notes
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL \
+  GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
 PATH="/usr/bin:/bin:$PATH"
 export PATH
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-release-notes.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 git -C "$tmp" init -q
 cd "$tmp"
+mkdir -p "$tmp/bin"
+# The stub expands $TEST_GIT_ROOT when it runs, so it stays literal here.
+# shellcheck disable=SC2016
+printf '#!/bin/sh\nprintf "%%s\\n" "$TEST_GIT_ROOT"\n' > "$tmp/bin/git"
+chmod +x "$tmp/bin/git"
+export PATH="$tmp/bin:$PATH" TEST_GIT_ROOT="$tmp"
 dir=docs/release-notes/next.d
 mkdir -p "$dir"
 printf 'Release introduction.\n' > "$dir/_intro.md"
@@ -16,11 +25,8 @@ printf '## Additions\n\n- A valid fragment.\n### Details\n' > "$dir/valid.md"
 "$script" --check
 for heading in '## Fixes' '## Unexpected'; do
   printf '## Additions\n\n- First section.\n%s\n- Second section.\n' "$heading" > "$dir/invalid.md"
-  if "$script" --check > "$tmp/out" 2> "$tmp/err"; then
-    echo "collate-release-notes accepted a second heading: $heading" >&2
-    exit 1
-  fi
-  grep -F "$dir/invalid.md" "$tmp/err" > /dev/null
+  "$script" --check > "$tmp/out" 2> "$tmp/err"
+  grep -F 'later section heading ignored' "$tmp/err" > /dev/null
 done
 rm -f "$dir/invalid.md"
 printf 'See [policy](../../release-notes/README.md).\n' > "$dir/_intro.md"
@@ -62,12 +68,23 @@ awk '/^## Fixes/ { f = 1 } f && /^### / { print }' "$tmp/out" | head -3 | paste 
 [ "$(cat "$tmp/headings")" = '### CLI and install|### Git and safety|### Fabric and MCP' ] || { echo "unexpected sub-headings" >&2; exit 1; }
 [ "$(tail -n 1 "$tmp/out")" = '- Untagged fix.' ]
 sed -n '/^## Additions/,/^## Fixes/p' "$tmp/out" | grep -q '^### ' && { echo "small section got sub-headings" >&2; exit 1; }
-printf '## Fixes\n### Nowhere\n\n- Bad.\n' > "$dir/e.md"
+printf '## fIxEs  \n### nowhere\n\n- Bad.\n' > "$dir/e.md"
+printf '## Unlisted section\n\n- Defaults to additions.\n' > "$dir/f.md"
+"$script" --check > "$tmp/out" 2> "$tmp/err"
+grep -F 'unknown area' "$tmp/err" > /dev/null
+grep -F 'unknown section' "$tmp/err" > /dev/null
+"$script" > "$tmp/out" 2> "$tmp/err"
+grep -q '^## Fixes$' "$tmp/out"
+grep -q '^- Bad\.' "$tmp/out"
+grep -q '^## Additions$' "$tmp/out"
+grep -q '^- Defaults to additions\.' "$tmp/out"
+printf '   \n\t\n' > "$dir/empty.md"
 if "$script" --check > "$tmp/out" 2> "$tmp/err"; then
-  echo "collate-release-notes accepted an unknown area" >&2
+  echo "collate-release-notes accepted an empty fragment" >&2
   exit 1
 fi
-grep -F 'unknown area' "$tmp/err" > /dev/null
+grep -F 'fragment is empty' "$tmp/err" > /dev/null
+rm -f "$dir/empty.md"
 
 # A release cut records one milestone when a session is known, and a missing
 # logger cannot turn a completed cut into a failure.
@@ -99,4 +116,4 @@ printf 'Intro.\n' > "$dir/_intro.md"
 unset PROVENANT_SESSION_ID
 PATH="$tmp/bin:$PATH" "$script" v1.2.4
 [ ! -e "$tmp/log-calls" ]
-echo 'release notes heading validation passed'
+echo 'release notes normalisation, warning and milestone checks passed'

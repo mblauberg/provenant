@@ -465,6 +465,8 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
 }
 #[derive(Debug, Subcommand)]
 pub enum Config {
+    /// List configuration warnings with their source file and key.
+    Check(Page),
     /// Print the effective configuration and knobs with their source layer.
     Show,
     /// Set `profile` (balanced, economy or rigorous) or a registry knob such

@@ -1317,12 +1317,11 @@ fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
     assert!(
         serde_json::from_str::<BoundedModels<2>>(r#"["codex/a","codex/b","codex/c"]"#).is_err()
     );
-    assert!(
-        serde_json::from_str::<RouteRequest>(
-            r#"{"choice":{"kind":"model","value":"codex/a"},"effort":null,"pool":"principal"}"#
-        )
-        .is_err()
-    );
+    let (_, warnings) = RouteRequest::from_json(
+        "request.json",
+        br#"{"choice":{"kind":"model","value":"codex/a"},"effort":null,"pool":"principal"}"#,
+    )?;
+    assert_eq!(warnings[0].key, "pool");
     Ok(())
 }
 #[test]
@@ -1592,18 +1591,102 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         layered.domains.routing.review.select.by_risk["medium"],
         "custom"
     );
-    for invalid in [
-        "schema_version=1\n[domains.routing.review.select]\ntypo=true\n",
-        "schema_version=1\n[domains.routing.review.shapes.quick]\ntypo=true\n",
-        "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='junior',count=1}]\ntypo=true\n",
-        "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers='wrong'\n",
+    // Review shapes are tuning, not authority: invalid input recovers to the
+    // bundled shapes with a warning naming the offending key.
+    for (invalid, key) in [
+        (
+            "schema_version=1\n[domains.routing.review.select]\ntypo=true\n",
+            "domains.routing.review.select.typo",
+        ),
+        (
+            "schema_version=1\n[domains.routing.review.shapes.quick]\ntypo=true\n",
+            "domains.routing.review.shapes.quick.typo",
+        ),
+        (
+            "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers=[{pool='junior',count=1}]\ntypo=true\n",
+            "domains.routing.review.shapes.custom.typo",
+        ),
+        (
+            "schema_version=1\n[domains.routing.review.shapes.custom]\nreviewers='wrong'\n",
+            "domains.routing.review.shapes.custom",
+        ),
     ] {
+        let config =
+            provenant_config::load_with_domains(&roots, Some(invalid.as_bytes()), &sections)?;
         assert!(
-            provenant_config::load_with_domains(&roots, Some(invalid.as_bytes()), &sections)
-                .is_err(),
-            "{invalid}"
+            config
+                .warnings
+                .iter()
+                .any(|warning| warning.message.starts_with(key)),
+            "{invalid}: {:?}",
+            config.warnings
+        );
+        assert_eq!(config.domains.routing.review.select.by_risk["low"], "quick");
+        assert_eq!(
+            config.domains.routing.review.shapes["quick"].reviewers[0].pool,
+            RoutingConfig::default().review.shapes["quick"].reviewers[0].pool
         );
     }
+
+    // An enforced restriction survives an invalid sibling, and the warning
+    // names the sibling, not its parent.
+    let write = crate::RouteIntent {
+        workload: crate::Workload::General,
+        writes: true,
+    };
+    let model = crate::ModelId::parse("codex/gpt-6.1-terra")?;
+    for text in [
+        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nread_only=true\nmax_continuations=9\n",
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='codex/gpt-6.1-terra'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\nmax_continuations=9\n",
+    ] {
+        let config = provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)?;
+        let policy = config
+            .domains
+            .routing
+            .model_policy
+            .effective(&model, None, 0)
+            .policy;
+        assert_eq!(policy.lane.read_only, Some(true), "{text}");
+        assert_ne!(policy.lane.max_continuations, Some(9), "{text}");
+        assert!(!policy.permits(write), "{text}");
+        assert_eq!(config.warnings.len(), 1, "{text}");
+        assert!(
+            config.warnings[0]
+                .message
+                .contains(".lane.max_continuations:"),
+            "{}",
+            config.warnings[0].message
+        );
+    }
+    // Input whose recovery would lift an enforced restriction refuses.
+    for text in [
+        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nmax_context=0\n",
+        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nmax_turns=0\n",
+        "schema_version=1\n[domains.routing.model_policy.defaults.lane]\nread_only='yes'\n",
+        "schema_version=1\n[domains.routing.model_policy.defaults]\nlane='read_only'\n",
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\nadapter='codex'\nmodel='claude/claude-opus-5-5'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\n",
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts=10, expires=5 }\n[domains.routing.model_policy.rules.policy.lane]\nmax_turns=4\n",
+    ] {
+        let error = provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
+            .err()
+            .ok_or(text)?;
+        assert!(
+            error.to_string().contains("model_policy"),
+            "{text}: {error}"
+        );
+    }
+    // A malformed rule that restricts nothing is dropped whole, with a warning.
+    let config = provenant_config::load_with_domains(
+        &roots,
+        Some("schema_version=1\n[[domains.routing.model_policy.rules]]\nschedule={ starts=10, expires=5 }\n[domains.routing.model_policy.rules.policy.cache]\nprice_multiplier=2.0\n".as_bytes()),
+        &sections,
+    )?;
+    assert!(config.domains.routing.model_policy.rules.is_empty());
+    assert!(
+        config.warnings[0]
+            .message
+            .starts_with("domains.routing.model_policy.rules.0")
+    );
     let cfg: RoutingConfig = toml_edit::de::from_str(
         "[routes.review]\nmodel = 'opencode/opencode/glm-5.3-flash-free'\n",
     )?;

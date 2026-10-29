@@ -10,8 +10,8 @@ mod domains;
 mod gc;
 mod github_policy;
 pub use gc::{
-    ForeignWorktrees, GcSettings, LaneBuildSettings, ProjectGcSettings, deserialize_auto,
-    parse_cache_size,
+    ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold, ProjectGcSettings,
+    deserialize_auto, parse_cache_size,
 };
 pub use github_policy::GithubPolicy;
 mod harness;
@@ -36,6 +36,8 @@ mod splice;
 mod test_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tolerance_tests;
 
 pub use domains::{
     DomainConfig, DomainSection, DomainSections, NoDomains, SectionError, read_domain,
@@ -182,6 +184,9 @@ pub struct ResolvedConfig<D = NoDomains> {
     /// Effective knobs with the layer that set each; not part of `origins`.
     pub knobs: BTreeMap<String, KnobValue>,
     pub origins: BTreeMap<String, Origin>,
+    /// Every ignored user setting, ordered by source location.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Finding>,
 }
 
 /// A bounded first page, ordered by source line, column, key and rule. `count`

@@ -1000,6 +1000,30 @@ fn requirements(path: &str, name: &str) -> Vec<String> {
 mod tests {
     use super::*;
     #[test]
+    fn config_check_reuses_the_check_config_page_arguments() {
+        let config = valid(&["config", "check", "--limit", "75", "--cursor", "cursor"]);
+        let check = valid(&["check", "config", "--limit", "75", "--cursor", "cursor"]);
+        let Command::Config(Config::Check(config)) = config.command else {
+            panic!("config check");
+        };
+        let Command::Check(Check::Config(check)) = check.command else {
+            panic!("check config");
+        };
+        assert_eq!(config.limit, check.limit);
+        assert_eq!(config.cursor, check.cursor);
+        invalid(&["config", "check", "--limit", "0"]);
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "config", "check", "--json"])
+        else {
+            panic!("config check help");
+        };
+        assert!(
+            catalog
+                .commands
+                .iter()
+                .any(|command| command.command == "provenant config check")
+        );
+    }
+    #[test]
     fn core_path_help_and_defaults() {
         for words in [&[][..], &["help"][..]] {
             let ParseOutcome::Help { text, .. } = parsed(words) else {

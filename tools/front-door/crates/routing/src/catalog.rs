@@ -872,7 +872,9 @@ mod pacing_profile_tests {
 fn defaults(_: Profile) -> &'static str {
     include_str!("../assets/review-defaults.toml")
 }
-pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing", defaults);
+/// Enforced model policy restrictions are a boundary; other routing input recovers.
+pub const SECTION: DomainSection = DomainSection::new::<RoutingConfig>("routing", defaults)
+    .with_boundary_check(crate::policy::boundary);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

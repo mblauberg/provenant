@@ -19,6 +19,7 @@ struct Header {
 struct Site {
     value: Location,
     key: Location,
+    offset: Option<usize>,
 }
 #[derive(Clone)]
 struct Issue {
@@ -44,10 +45,10 @@ impl Issue {
 }
 struct Inspection<T> {
     snapshot: ResolvedConfig<T>,
-    issues: Vec<Issue>,
+    error: Option<ConfigError>,
 }
 
-/// Absence alone selects compiled defaults. The reader, when present, must
+/// Invalid optional settings warn and select defaults. The reader, when present, must
 /// already be opened at `<roots.state>/config.toml`. `None` means absent only.
 pub fn load<R: Read>(roots: &Roots, reader: Option<R>) -> Result<ResolvedConfig, ConfigError> {
     load_with_domains(roots, reader, &NO_DOMAINS)
@@ -61,8 +62,11 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
         .map(|r| bounded_text(r, &roots.state.as_path().join("config.toml")))
         .transpose()?;
     let inspection = inspect(text.as_deref(), sections)?;
-    if let Some(issue) = inspection.issues.into_iter().next() {
-        return Err(issue.error());
+    for warning in &inspection.snapshot.warnings {
+        warn(&roots.state.as_path().join("config.toml"), warning);
+    }
+    if let Some(error) = inspection.error {
+        return Err(error);
     }
     Ok(inspection.snapshot)
 }
@@ -124,24 +128,9 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
         }
         Err(error) => return Err(error),
     };
-    let path = user_path()?;
-    let findings: Vec<Finding> = inspection
-        .issues
-        .into_iter()
-        .map(|issue| {
-            // Bound the message even for a hostile, nearly 1 MiB key. Never include
-            // values, parser excerpts or domain-provided prose.
-            let key: String = issue.location.key_path.chars().take(256).collect();
-            Finding {
-                rule: issue.rule.into(),
-                path: path.clone(),
-                line: issue.location.line,
-                message: format!("{key}: invalid configuration ({})", issue.rule),
-            }
-        })
-        .collect();
+    let findings = inspection.snapshot.warnings;
     Ok(ConfigInspection {
-        error: None,
+        error: inspection.error,
         check: ConfigCheck {
             schema_version: inspection.snapshot.schema_version,
             profile: inspection.snapshot.profile,
@@ -189,91 +178,76 @@ fn inspect<T: DeserializeOwned + Serialize>(
         .transpose()?
         .unwrap_or_default();
     let user_sites = sites(&user, text.unwrap_or(""), &user_origin, "");
-    let install_item = user.remove("install");
-    let install = if let Some(item) = &install_item {
-        let mut table = Table::new();
-        table.insert("install", item.clone());
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Settings {
-            install: crate::InstallSettings,
-        }
-        let settings: Settings = decode(table.clone())
-            .map_err(|error| section_error(&error, &table, "install", &user_sites, &user_origin))?;
-        settings
-            .install
-            .validate()
-            .map_err(|_| ConfigError::Schema {
-                location: site(&user_sites, "install", &user_origin, false),
-                rule: "absolute_path",
-            })?;
-        settings.install
-    } else {
-        crate::InstallSettings::default()
-    };
-
-    let gc_item = user.remove("gc");
-    let gc = if let Some(item) = &gc_item {
-        let mut table = Table::new();
-        table.insert("gc", item.clone());
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Settings {
-            gc: crate::GcSettings,
-        }
-        let settings: Settings = decode(table.clone())
-            .map_err(|error| section_error(&error, &table, "gc", &user_sites, &user_origin))?;
-        settings.gc.validate().map_err(|rule| ConfigError::Schema {
-            location: site(&user_sites, "gc", &user_origin, false),
-            rule,
-        })?;
-        settings.gc
-    } else {
-        crate::GcSettings::default()
-    };
-
-    let retention_item = user.remove("retention");
-    let retention = if let Some(item) = &retention_item {
-        let mut table = Table::new();
-        table.insert("retention", item.clone());
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Settings {
-            retention: crate::RetentionSettings,
-        }
-        let settings: Settings = decode(table.clone()).map_err(|error| {
-            section_error(&error, &table, "retention", &user_sites, &user_origin)
-        })?;
-        settings
-            .retention
-            .validate()
-            .map_err(|rule| ConfigError::Schema {
-                location: site(&user_sites, "retention", &user_origin, false),
-                rule,
-            })?;
-        settings.retention
-    } else {
-        crate::RetentionSettings::default()
-    };
-
-    let providers_item = user.remove("providers");
+    normalise_tables(&mut user);
+    let mut issues = Vec::new();
+    let mut install_item = user.remove("install");
+    let install = recover_settings::<crate::InstallSettings>(
+        &mut install_item,
+        "install",
+        &user_sites,
+        &user_origin,
+        &mut issues,
+        |value| value.validate().map_err(|_| "absolute_path"),
+    );
+    let mut gc_item = user.remove("gc");
+    let gc = recover_settings::<crate::GcSettings>(
+        &mut gc_item,
+        "gc",
+        &user_sites,
+        &user_origin,
+        &mut issues,
+        crate::GcSettings::validate,
+    );
+    let mut retention_item = user.remove("retention");
+    let retention = recover_settings::<crate::RetentionSettings>(
+        &mut retention_item,
+        "retention",
+        &user_sites,
+        &user_origin,
+        &mut issues,
+        crate::RetentionSettings::validate,
+    );
+    let mut providers_item = user.remove("providers");
     let mut providers = crate::providers::defaults();
-    if let Some(item) = &providers_item {
-        let mut table = Table::new();
-        table.insert("providers", item.clone());
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Settings {
-            providers: BTreeMap<String, crate::ProviderSettings>,
+    if let Some(item) = &mut providers_item {
+        if let Some(table) = item.as_table_mut() {
+            let keys: Vec<_> = table.iter().map(|(key, _)| key.to_owned()).collect();
+            for key in keys {
+                let mut row = table.remove(&key);
+                let prefix = format!("providers.{key}");
+                if provenant_records::AdapterSpec::get(&key).is_none() {
+                    issues.push(Issue {
+                        location: site(&user_sites, &prefix, &user_origin, false),
+                        rule: "provider_id",
+                        source: None,
+                        rejected: String::new(),
+                    });
+                    continue;
+                }
+                let settings = recover_settings::<crate::ProviderSettings>(
+                    &mut row,
+                    &prefix,
+                    &user_sites,
+                    &user_origin,
+                    &mut issues,
+                    |value| {
+                        crate::providers::validate(&BTreeMap::from([(key.clone(), value.clone())]))
+                    },
+                );
+                providers.insert(key.clone(), settings);
+                if let Some(row) = row {
+                    table.insert(&key, row);
+                }
+            }
+        } else {
+            issues.push(Issue {
+                location: site(&user_sites, "providers", &user_origin, false),
+                rule: "type",
+                source: None,
+                rejected: String::new(),
+            });
+            providers_item = None;
         }
-        let settings: Settings = decode(table.clone()).map_err(|error| {
-            section_error(&error, &table, "providers", &user_sites, &user_origin)
-        })?;
-        crate::providers::validate(&settings.providers).map_err(|rule| ConfigError::Schema {
-            location: site(&user_sites, "providers", &user_origin, false),
-            rule,
-        })?;
-        providers.extend(settings.providers);
     }
 
     let knobs_item = user.remove("knobs");
@@ -289,6 +263,12 @@ fn inspect<T: DeserializeOwned + Serialize>(
             {
                 return Err(ConfigError::UnsupportedVersion { location });
             }
+            Some(item) if item.as_integer().is_none() => {
+                return Err(ConfigError::Schema {
+                    location,
+                    rule: "type",
+                });
+            }
             _ => {}
         }
     }
@@ -298,19 +278,45 @@ fn inspect<T: DeserializeOwned + Serialize>(
         .and_then(Item::as_str)
         .and_then(Profile::from_name)
         .unwrap_or_default();
-    let overrides = knobs_item.as_ref().map(Item::as_table_like);
-    if matches!(overrides, Some(None)) {
-        return Err(ConfigError::Schema {
+    let mut valid_knobs = knobs_item.clone().and_then(|item| item.into_table().ok());
+    if knobs_item.is_some() && valid_knobs.is_none() {
+        issues.push(Issue {
             location: site(&user_sites, "knobs", &user_origin, false),
             rule: "type",
+            source: None,
+            rejected: String::new(),
         });
     }
-    let knobs = crate::knobs::resolve(profile, overrides.flatten()).map_err(|(key, rule)| {
-        ConfigError::Schema {
-            location: site(&user_sites, &key, &user_origin, false),
-            rule,
+    let mut knob_boundary = None;
+    let knobs = loop {
+        match crate::knobs::resolve(
+            profile,
+            valid_knobs
+                .as_ref()
+                .map(|table| table as &dyn toml_edit::TableLike),
+        ) {
+            Ok(knobs) => break knobs,
+            Err((key, rule)) if key.starts_with("knobs.") => {
+                let location = site(&user_sites, &key, &user_origin, rule == "unknown_key");
+                // An invalid capability or authority knob never recovers to
+                // its default, which could grant what the user withheld.
+                if crate::knobs::strict(key.trim_start_matches("knobs.")) {
+                    knob_boundary.get_or_insert(ConfigError::Schema { location, rule });
+                } else {
+                    issues.push(Issue {
+                        location,
+                        rule,
+                        source: None,
+                        rejected: String::new(),
+                    });
+                }
+                if let Some(table) = &mut valid_knobs {
+                    table.remove(key.trim_start_matches("knobs."));
+                }
+            }
+            Err(_) => return Err(ConfigError::KnobRegistry),
         }
-    })?;
+    };
     let compiled = Origin::Compiled { profile };
     let header = format!(
         "schema_version={}\nprofile='{}'",
@@ -409,6 +415,12 @@ fn inspect<T: DeserializeOwned + Serialize>(
             origins.insert(key.into(), user_origin.clone());
         });
     }
+    for project in retention.projects.keys() {
+        origins.insert(
+            format!("retention.projects.{project}.checkpoint_soft_bytes"),
+            compiled.clone(),
+        );
+    }
     if let Some(item) = &retention_item {
         walk_item(item, "retention", None, &mut |key, _, _| {
             origins.insert(key.into(), user_origin.clone());
@@ -420,7 +432,6 @@ fn inspect<T: DeserializeOwned + Serialize>(
         });
     }
     let mut effective = defaults.clone();
-    let mut issues = Vec::new();
     let mut semantic_sites = compiled_sites.clone();
     Overrides {
         defaults: &defaults,
@@ -433,23 +444,95 @@ fn inspect<T: DeserializeOwned + Serialize>(
         semantic_sites: &mut semantic_sites,
     }
     .apply::<T>(&mut effective, &user, &mut Vec::new());
-    let domain_table = effective
+    let mut boundary_error = knob_boundary;
+    for issue in &issues {
+        if boundary_error.is_none() && boundary_issue(issue, sections) {
+            boundary_error = Some(issue.clone().error());
+            break;
+        }
+    }
+    let mut domain_table = effective
         .get("domains")
         .and_then(Item::as_table)
         .cloned()
         .unwrap_or_default();
     for entry in sections.entries {
-        if let Some(table) = domain_table.get(entry.name).and_then(Item::as_table) {
-            for error in (entry.validate)(table) {
+        if let Some(table) = domain_table
+            .get_mut(entry.name)
+            .and_then(Item::as_table_mut)
+        {
+            let errors = (entry.validate)(table);
+            if let Some(error) = errors.iter().find(|error| (entry.boundary)(error))
+                && boundary_error.is_none()
+            {
+                boundary_error = Some(
+                    domain_issue(
+                        entry.name,
+                        error.clone(),
+                        table,
+                        &semantic_sites,
+                        &user_origin,
+                    )
+                    .error(),
+                );
+            }
+            for error in &errors {
                 let key = qualify(entry.name, &error.field);
                 let origin = origins.get(&key).unwrap_or(&compiled);
                 issues.push(domain_issue(
                     entry.name,
-                    error,
+                    error.clone(),
                     table,
                     &semantic_sites,
                     origin,
                 ));
+            }
+            let baseline = defaults
+                .get("domains")
+                .and_then(|item| item.get(entry.name))
+                .and_then(Item::as_table);
+            let prefix = format!("domains.{}", entry.name);
+            let mut repairs: Vec<_> = errors
+                .iter()
+                .map(|error| {
+                    let path: Vec<String> = error.field.split('.').map(String::from).collect();
+                    let mut candidate = Item::Table(table.clone());
+                    if remove_item_path(&mut candidate, &path)
+                        && candidate.as_table().is_some_and(|table| {
+                            !(entry.validate)(table)
+                                .iter()
+                                .any(|error| error.code == "schema")
+                        })
+                    {
+                        path
+                    } else {
+                        semantic_repair_path(table, baseline, &path)
+                    }
+                })
+                .collect();
+            repairs.sort_by(|a, b| {
+                b.iter()
+                    .map(|part| (part.parse::<usize>().unwrap_or(0), part))
+                    .cmp(
+                        a.iter()
+                            .map(|part| (part.parse::<usize>().unwrap_or(0), part)),
+                    )
+            });
+            repairs.dedup();
+            for path in repairs {
+                repair_semantic(table, baseline, &path, &prefix, &mut origins, &compiled);
+            }
+            if !(entry.validate)(table).is_empty() {
+                *table = defaults["domains"][entry.name]
+                    .as_table()
+                    .cloned()
+                    .unwrap_or_default();
+                replace_origins(
+                    &prefix,
+                    Some(&Item::Table(table.clone())),
+                    &mut origins,
+                    &compiled,
+                );
             }
         }
     }
@@ -473,11 +556,25 @@ fn inspect<T: DeserializeOwned + Serialize>(
         location: location("", 0, &compiled, "$"),
         rule: "registration",
     })?;
-    let domains = decode(domain_table).map_err(|_| ConfigError::Schema {
+    let domains: T = decode(domain_table).map_err(|_| ConfigError::Schema {
         location: location("", 0, &compiled, "domains"),
         rule: "registration",
     })?;
+    for (prefix, value) in [
+        ("install", serde_json::to_value(&install)),
+        ("gc", serde_json::to_value(&gc)),
+        ("retention", serde_json::to_value(&retention)),
+        ("providers", serde_json::to_value(&providers)),
+        ("domains", serde_json::to_value(&domains)),
+    ] {
+        let value = value.map_err(|_| ConfigError::Schema {
+            location: location("", 0, &compiled, prefix),
+            rule: "registration",
+        })?;
+        seed_origins(&value, prefix, &mut origins, &compiled);
+    }
     Ok(Inspection {
+        error: boundary_error,
         snapshot: ResolvedConfig {
             schema_version: header.schema_version,
             profile: header.profile,
@@ -488,8 +585,449 @@ fn inspect<T: DeserializeOwned + Serialize>(
             providers,
             knobs,
             origins,
+            warnings: issues
+                .iter()
+                .filter(|issue| !boundary_issue(issue, sections))
+                .map(issue_finding)
+                .collect::<Result<_, _>>()?,
         },
-        issues,
+    })
+}
+fn boundary_issue<T>(issue: &Issue, sections: &DomainSections<T>) -> bool {
+    if issue.rule == "unknown_key" {
+        return false;
+    }
+    sections.entries.iter().any(|entry| {
+        let prefix = format!("domains.{}", entry.name);
+        let field = if issue.location.key_path == prefix {
+            Some("")
+        } else {
+            issue.location.key_path.strip_prefix(&format!("{prefix}."))
+        };
+        field.is_some_and(|field| {
+            (entry.boundary)(&SectionError {
+                field: field.to_owned(),
+                code: issue
+                    .source
+                    .as_ref()
+                    .map_or(issue.rule, |source| source.code),
+            })
+        })
+    })
+}
+fn seed_origins(
+    value: &serde_json::Value,
+    prefix: &str,
+    origins: &mut BTreeMap<String, Origin>,
+    compiled: &Origin,
+) {
+    match value {
+        serde_json::Value::Object(map) if !map.is_empty() => {
+            for (key, value) in map {
+                seed_origins(value, &join(prefix, key), origins, compiled);
+            }
+        }
+        serde_json::Value::Array(array) if !array.is_empty() => {
+            for (index, value) in array.iter().enumerate() {
+                seed_origins(value, &join(prefix, &index.to_string()), origins, compiled);
+            }
+        }
+        _ => {
+            origins
+                .entry(prefix.to_owned())
+                .or_insert_with(|| compiled.clone());
+        }
+    }
+}
+fn warn(path: &Path, warning: &Finding) {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "warning: {}:{}: {}",
+        path.display(),
+        warning.line,
+        warning.message
+    );
+}
+
+/// Shared bounded reader for setting owners that cannot link the aggregate.
+pub(crate) fn read_settings<T: DeserializeOwned + Default>(
+    state: &Path,
+    prefix: &str,
+    validate: impl Fn(&T) -> Result<(), &'static str>,
+) -> std::io::Result<T> {
+    read_section(state, prefix, validate, false)
+}
+pub(crate) fn read_boundary_settings<T: DeserializeOwned + Default>(
+    state: &Path,
+    prefix: &str,
+) -> std::io::Result<T> {
+    read_section(state, prefix, |_| Ok(()), true)
+}
+fn read_section<T: DeserializeOwned + Default>(
+    state: &Path,
+    prefix: &str,
+    validate: impl Fn(&T) -> Result<(), &'static str>,
+    strict_types: bool,
+) -> std::io::Result<T> {
+    let path = state.join("config.toml");
+    let directory = match provenant_os::fs::Directory::open_anchor(state) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(T::default()),
+        Err(error) => return Err(std::io::Error::other(error)),
+    };
+    let reader = match directory.open_read(OsStr::new("config.toml")) {
+        Ok(reader) => reader,
+        Err(error) if error.is_not_found() => return Ok(T::default()),
+        Err(error) => return Err(std::io::Error::other(error)),
+    };
+    let text = bounded_text(reader, &path).map_err(std::io::Error::other)?;
+    let origin = Origin::User {
+        path: user_path().map_err(std::io::Error::other)?,
+    };
+    let mut root = parse(&text, &origin, "").map_err(std::io::Error::other)?;
+    match root.get("schema_version").and_then(Item::as_integer) {
+        Some(version) if version == crate::CONFIG_SCHEMA_VERSION as i64 => {}
+        _ => {
+            return Err(std::io::Error::other(
+                "unsupported or missing config schema_version",
+            ));
+        }
+    }
+    let sites = sites(&root, &text, &origin, "");
+    normalise_tables(&mut root);
+    let mut item = prefix
+        .split('.')
+        .try_fold(&root, |table, key| table.get(key).and_then(Item::as_table))
+        .map(|table| Item::Table(table.clone()));
+    // Preserve a scalar at the requested key so it produces a type warning.
+    if item.is_none() {
+        let mut parts: Vec<_> = prefix.split('.').collect();
+        if let Some(last) = parts.pop() {
+            item = parts
+                .iter()
+                .try_fold(&root, |table, key| table.get(key).and_then(Item::as_table))
+                .and_then(|table| table.get(last))
+                .cloned();
+        }
+    }
+    if strict_types {
+        let mut item = item.unwrap_or_else(|| Item::Table(Table::new()));
+        loop {
+            let table = item
+                .clone()
+                .into_table()
+                .map_err(|_| std::io::Error::other("invalid domain table"))?;
+            match decode::<T>(table) {
+                Ok(value) => return Ok(value),
+                Err(error) if error.message().starts_with("unknown field ") => {
+                    let offset = error.span().map_or(0, |span| span.start);
+                    let key = remove_unknown(&mut item, offset)
+                        .ok_or_else(|| std::io::Error::other("invalid domain key"))?;
+                    let issue = Issue {
+                        location: site(&sites, &join(prefix, &key.join(".")), &origin, true),
+                        rule: "unknown_key",
+                        source: None,
+                        rejected: String::new(),
+                    };
+                    warn(
+                        &path,
+                        &issue_finding(&issue).map_err(std::io::Error::other)?,
+                    );
+                }
+                Err(_) => return Err(std::io::Error::other("invalid domain value")),
+            }
+        }
+    }
+    let mut issues = Vec::new();
+    let value = recover_settings(&mut item, prefix, &sites, &origin, &mut issues, validate);
+    for issue in &issues {
+        warn(&path, &issue_finding(issue).map_err(std::io::Error::other)?);
+    }
+    Ok(value)
+}
+
+// Keep schemas closed, repairing only user-owned optional input.
+fn recover_settings<T: DeserializeOwned + Default>(
+    item: &mut Option<Item>,
+    prefix: &str,
+    sites: &BTreeMap<String, Site>,
+    origin: &Origin,
+    issues: &mut Vec<Issue>,
+    validate: impl Fn(&T) -> Result<(), &'static str>,
+) -> T {
+    let mut table = match item.as_ref().and_then(table) {
+        Some(table) => table,
+        None => {
+            if item.is_some() {
+                issues.push(Issue {
+                    location: site(sites, prefix, origin, false),
+                    rule: "type",
+                    source: None,
+                    rejected: String::new(),
+                });
+                *item = None;
+            }
+            return T::default();
+        }
+    };
+    loop {
+        match decode::<T>(table.clone()) {
+            Ok(value) => match validate(&value) {
+                Ok(()) => {
+                    *item = Some(Item::Table(table));
+                    return value;
+                }
+                Err(rule) => {
+                    let mut bad = Vec::new();
+                    invalid_settings::<T>(&table, &[], &validate, &mut bad);
+                    if bad.is_empty() {
+                        issues.push(Issue {
+                            location: site(sites, prefix, origin, false),
+                            rule,
+                            source: None,
+                            rejected: String::new(),
+                        });
+                        *item = None;
+                        return T::default();
+                    }
+                    for (key, rule) in bad {
+                        issues.push(Issue {
+                            location: site(sites, &join(prefix, &key.join(".")), origin, false),
+                            rule,
+                            source: None,
+                            rejected: String::new(),
+                        });
+                        remove_path(&mut table, &key);
+                    }
+                }
+            },
+            Err(error) => {
+                let mut key = error
+                    .span()
+                    .map(|span| key_at(&table, span.start))
+                    .unwrap_or_default();
+                let unknown = error.message().starts_with("unknown field ");
+                if key.is_empty() {
+                    key = table
+                        .iter()
+                        .next()
+                        .map(|(key, _)| key.to_owned())
+                        .unwrap_or_default();
+                }
+                let rule = if unknown { "unknown_key" } else { "type" };
+                issues.push(Issue {
+                    location: site(sites, &join(prefix, &key), origin, unknown),
+                    rule,
+                    source: None,
+                    rejected: String::new(),
+                });
+                if key.is_empty() {
+                    *item = None;
+                    return T::default();
+                }
+                let path: Vec<_> = key.split('.').map(String::from).collect();
+                if !remove_path(&mut table, &path) {
+                    let first = table.iter().next().map(|(key, _)| key.to_owned());
+                    if let Some(first) = first {
+                        table.remove(&first);
+                    }
+                }
+            }
+        }
+    }
+}
+fn invalid_settings<T: DeserializeOwned>(
+    table: &Table,
+    prefix: &[String],
+    validate: &impl Fn(&T) -> Result<(), &'static str>,
+    output: &mut Vec<(Vec<String>, &'static str)>,
+) {
+    for (key, item) in table.iter() {
+        let mut path = prefix.to_vec();
+        path.push(key.to_owned());
+        let mut candidate = item.clone();
+        for key in path.iter().rev() {
+            let mut wrapper = Table::new();
+            wrapper.insert(key, candidate);
+            candidate = Item::Table(wrapper);
+        }
+        let Some(rule) = candidate
+            .into_table()
+            .ok()
+            .and_then(|table| decode::<T>(table).ok())
+            .and_then(|value| validate(&value).err())
+        else {
+            continue;
+        };
+        let before = output.len();
+        if let Some(child) = item.as_table() {
+            invalid_settings::<T>(child, &path, validate, output);
+        }
+        if output.len() == before {
+            output.push((path, rule));
+        }
+    }
+}
+fn remove_path(table: &mut Table, path: &[String]) -> bool {
+    for length in (1..=path.len()).rev() {
+        let key = path[..length].join(".");
+        if length == path.len() {
+            if table.remove(&key).is_some() {
+                return true;
+            }
+        } else if let Some(child) = table.get_mut(&key).and_then(Item::as_table_mut)
+            && remove_path(child, &path[length..])
+        {
+            return true;
+        }
+    }
+    false
+}
+fn replace_origins(
+    prefix: &str,
+    item: Option<&Item>,
+    origins: &mut BTreeMap<String, Origin>,
+    origin: &Origin,
+) {
+    let dotted = format!("{prefix}.");
+    origins.retain(|key, _| key != prefix && !key.starts_with(&dotted));
+    if let Some(item) = item {
+        walk_item(item, prefix, None, &mut |key, _, _| {
+            origins.insert(key.to_owned(), origin.clone());
+        });
+    }
+}
+fn semantic_repair_path(table: &Table, defaults: Option<&Table>, path: &[String]) -> Vec<String> {
+    let Some((first, tail)) = path.split_first() else {
+        return Vec::new();
+    };
+    let mut result = vec![first.clone()];
+    let default = defaults.and_then(|table| table.get(first));
+    if default.is_none() {
+        return result;
+    }
+    if let Some(item) = table.get(first) {
+        if array(item).is_some() {
+            if let Some(index) = tail.first() {
+                result.push(index.clone());
+            }
+        } else if let Some(child) = item.as_table()
+            && !tail.is_empty()
+        {
+            result.extend(semantic_repair_path(
+                child,
+                default.and_then(Item::as_table),
+                tail,
+            ));
+        }
+    }
+    result
+}
+fn repair_semantic(
+    table: &mut Table,
+    defaults: Option<&Table>,
+    path: &[String],
+    prefix: &str,
+    origins: &mut BTreeMap<String, Origin>,
+    compiled: &Origin,
+) {
+    let Some((first, tail)) = path.split_first() else {
+        *table = defaults.cloned().unwrap_or_default();
+        replace_origins(prefix, Some(&Item::Table(table.clone())), origins, compiled);
+        return;
+    };
+    let dotted = join(prefix, first);
+    if let Some(item) = table.get_mut(first) {
+        // A field inside a row: drop only that field, keeping its siblings.
+        if tail.len() > 1
+            && tail[0].parse::<usize>().is_ok()
+            && array(item).is_some()
+            && remove_item_path(item, tail)
+        {
+            replace_origins(&join(&dotted, &tail.join(".")), None, origins, compiled);
+            return;
+        }
+        if let Some(index) = tail.first().and_then(|key| key.parse::<usize>().ok()) {
+            let removed = if let Some(array) = item.as_array_mut() {
+                if index < array.len() {
+                    array.remove(index);
+                    true
+                } else {
+                    false
+                }
+            } else if let Some(array) = item.as_array_of_tables_mut() {
+                if index < array.len() {
+                    array.remove(index);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if removed {
+                let old = origins.clone();
+                replace_origins(&dotted, None, origins, compiled);
+                let array_prefix = format!("{dotted}.");
+                for (key, origin) in old {
+                    if let Some(rest) = key.strip_prefix(&array_prefix) {
+                        let (number, suffix) = rest.split_once('.').unwrap_or((rest, ""));
+                        if let Ok(old_index) = number.parse::<usize>() {
+                            if old_index == index {
+                                continue;
+                            }
+                            let new_index = old_index - usize::from(old_index > index);
+                            let suffix = if suffix.is_empty() {
+                                String::new()
+                            } else {
+                                format!(".{suffix}")
+                            };
+                            origins.insert(format!("{dotted}.{new_index}{suffix}"), origin);
+                        }
+                    }
+                }
+                if array(item).is_some_and(|array| array.is_empty()) {
+                    origins.insert(dotted, compiled.clone());
+                }
+                return;
+            }
+        }
+        if !tail.is_empty()
+            && let Some(child) = item.as_table_mut()
+        {
+            repair_semantic(
+                child,
+                defaults
+                    .and_then(|table| table.get(first))
+                    .and_then(Item::as_table),
+                tail,
+                &dotted,
+                origins,
+                compiled,
+            );
+            return;
+        }
+    }
+    let value = defaults.and_then(|table| table.get(first));
+    replace_origins(&dotted, value, origins, compiled);
+    match value {
+        Some(value) => {
+            table.insert(first, value.clone());
+        }
+        None => {
+            table.remove(first);
+        }
+    }
+}
+
+fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
+    let key: String = issue.location.key_path.chars().take(256).collect();
+    Ok(Finding {
+        rule: issue.rule.into(),
+        path: user_path()?,
+        line: issue.location.line,
+        message: format!("{key}: ignored invalid configuration ({})", issue.rule),
     })
 }
 fn qualify(name: &str, field: &str) -> String {
@@ -547,41 +1085,185 @@ fn domain_issue(
         }
     }
 }
-/// A serde-decoded section's failure: an unknown key reports `unknown_key` at
-/// that key (found by the error's span, so equal names at two depths stay
-/// apart), any other decode failure reports `type` at the section.
-fn section_error(
-    error: &toml_edit::de::Error,
-    table: &Table,
-    section: &str,
-    sites: &BTreeMap<String, Site>,
-    origin: &Origin,
-) -> ConfigError {
-    if error.message().starts_with("unknown field `") {
-        let path = error
-            .span()
-            .map(|span| key_at(table, span.start))
-            .filter(|path| sites.contains_key(path));
-        return ConfigError::Schema {
-            location: site(sites, path.as_deref().unwrap_or(section), origin, true),
-            rule: "unknown_key",
-        };
-    }
-    ConfigError::Schema {
-        location: site(sites, section, origin, false),
-        rule: "type",
-    }
-}
 fn decode<T: DeserializeOwned>(table: Table) -> Result<T, toml_edit::de::Error> {
     toml_edit::de::from_document(DocumentMut::from(table))
 }
-fn decodes<T: DeserializeOwned>(table: &Table) -> bool {
+fn remove_unknown(item: &mut Item, offset: usize) -> Option<Vec<String>> {
+    if let Some(table) = item.as_table_mut() {
+        let keys: Vec<_> = table.iter().map(|(key, _)| key.to_owned()).collect();
+        for key in keys {
+            if table
+                .key(&key)
+                .and_then(|key| key.span())
+                .is_some_and(|span| span.contains(&offset))
+                || table.get(&key).is_some_and(|item| {
+                    item.as_value().is_some_and(|value| {
+                        !matches!(value, Value::InlineTable(_) | Value::Array(_))
+                    }) && item.span().is_some_and(|span| span.contains(&offset))
+                })
+            {
+                table.remove(&key);
+                return Some(vec![key]);
+            }
+            if let Some(child) = table.get_mut(&key)
+                && let Some(mut path) = remove_unknown(child, offset)
+            {
+                path.insert(0, key);
+                return Some(path);
+            }
+            if table
+                .get(&key)
+                .and_then(Item::span)
+                .is_some_and(|span| span.contains(&offset))
+            {
+                table.remove(&key);
+                return Some(vec![key]);
+            }
+        }
+    } else if let Some(items) = item.as_array_of_tables_mut() {
+        for (index, table) in items.iter_mut().enumerate() {
+            let mut child = Item::Table(table.clone());
+            if let Some(mut path) = remove_unknown(&mut child, offset) {
+                *table = child.into_table().ok()?;
+                path.insert(0, index.to_string());
+                return Some(path);
+            }
+        }
+    } else if let Some(array) = item.as_array_mut() {
+        for (index, value) in array.iter_mut().enumerate() {
+            let mut child = Item::Value(value.clone());
+            if let Some(mut path) = remove_unknown(&mut child, offset) {
+                *value = child.into_value().ok()?;
+                path.insert(0, index.to_string());
+                return Some(path);
+            }
+        }
+    } else if item.as_inline_table().is_some() {
+        let mut table = item.clone().into_table().ok()?;
+        let mut child = Item::Table(table.clone());
+        let path = remove_unknown(&mut child, offset)?;
+        table = child.into_table().ok()?;
+        *item = Item::Table(table);
+        return Some(path);
+    }
+    None
+}
+fn remove_array_member_at(item: &mut Item, offset: usize) -> Option<Vec<String>> {
+    if let Some(mut items) = array(item) {
+        for index in 0..items.len() {
+            let mut found = remove_array_member_at(&mut items[index], offset);
+            if found.is_none()
+                && items[index]
+                    .span()
+                    .is_some_and(|span| span.contains(&offset))
+            {
+                items.remove(index);
+                found = Some(Vec::new());
+            }
+            if let Some(mut path) = found {
+                let mut values = toml_edit::Array::new();
+                for item in items {
+                    values.push(item.into_value().ok()?);
+                }
+                *item = Item::Value(Value::Array(values));
+                path.insert(0, index.to_string());
+                return Some(path);
+            }
+        }
+    } else if let Some(mut table) = table(item) {
+        let found = table.iter_mut().find_map(|(key, child)| {
+            let mut path = remove_array_member_at(child, offset)?;
+            path.insert(0, key.to_owned());
+            Some(path)
+        });
+        if let Some(path) = found {
+            *item = Item::Table(table);
+            return Some(path);
+        }
+    }
+    None
+}
+fn remove_item_path(item: &mut Item, path: &[String]) -> bool {
+    // An array of tables keeps its form, so a nested field can be removed
+    // without discarding the whole row.
+    if let Item::ArrayOfTables(tables) = item {
+        let Some(index) = path.first().and_then(|part| part.parse::<usize>().ok()) else {
+            return false;
+        };
+        if index >= tables.len() {
+            return false;
+        }
+        if path.len() == 1 {
+            tables.remove(index);
+            return true;
+        }
+        let Some(row) = tables.get_mut(index) else {
+            return false;
+        };
+        let mut child = Item::Table(row.clone());
+        if !remove_item_path(&mut child, &path[1..]) {
+            return false;
+        }
+        let Ok(table) = child.into_table() else {
+            return false;
+        };
+        *row = table;
+        return true;
+    }
+    if let Some(items) = array(item) {
+        let Some(index) = path.first().and_then(|part| part.parse::<usize>().ok()) else {
+            return false;
+        };
+        let mut items = items;
+        if index >= items.len() {
+            return false;
+        }
+        if path.len() == 1 {
+            items.remove(index);
+        } else if !remove_item_path(&mut items[index], &path[1..]) {
+            return false;
+        }
+        let mut values = toml_edit::Array::new();
+        for item in items {
+            let Ok(value) = item.into_value() else {
+                return false;
+            };
+            values.push(value);
+        }
+        *item = Item::Value(Value::Array(values));
+        return true;
+    }
+    let Some(mut table) = table(item) else {
+        return false;
+    };
+    for length in (1..=path.len()).rev() {
+        let key = path[..length].join(".");
+        let removed = if length == path.len() {
+            table.remove(&key).is_some()
+        } else {
+            table
+                .get_mut(&key)
+                .is_some_and(|child| remove_item_path(child, &path[length..]))
+        };
+        if removed {
+            *item = Item::Table(table);
+            return true;
+        }
+    }
+    false
+}
+fn decode_probe<T: DeserializeOwned>(table: &Table) -> Result<(), toml_edit::de::Error> {
     let mut header = table.clone();
     let domains = header
         .remove("domains")
         .and_then(|item| item.into_table().ok())
         .unwrap_or_default();
-    decode::<Header>(header).is_ok() && decode::<T>(domains).is_ok()
+    decode::<Header>(header)?;
+    decode::<T>(domains)?;
+    Ok(())
+}
+fn decodes<T: DeserializeOwned>(table: &Table) -> bool {
+    decode_probe::<T>(table).is_ok()
 }
 
 // Validate against complete defaults while all user spans still identify their
@@ -621,6 +1303,116 @@ impl Overrides<'_> {
             rejected,
         });
     }
+    fn strip_unknown<T: DeserializeOwned>(
+        &mut self,
+        value: &mut Item,
+        path: &[String],
+        index: Option<usize>,
+    ) {
+        loop {
+            let Some(candidate) = probe(&Item::Table(self.defaults.clone()), path, value)
+                .and_then(|item| item.into_table().ok())
+            else {
+                return;
+            };
+            let Err(error) = decode_probe::<T>(&candidate) else {
+                return;
+            };
+            if !error.message().starts_with("unknown field ") {
+                return;
+            }
+            let Some(offset) = error.span().map(|span| span.start) else {
+                return;
+            };
+            let Some(mut relative) = remove_unknown(value, offset) else {
+                return;
+            };
+            if let Some(index) = index
+                && !relative.is_empty()
+            {
+                relative[0] = index.to_string();
+            }
+            let mut key = path.to_vec();
+            key.extend(relative);
+            self.issue(&key, "unknown_key");
+        }
+    }
+    // Removing a field is safe only if serde supplies a default and the whole
+    // candidate then decodes. Required fields never acquire invented values.
+    fn recover_optional_fields<T: DeserializeOwned>(
+        &mut self,
+        value: &mut Item,
+        path: &[String],
+        index: Option<usize>,
+    ) {
+        let mut projected = value.clone();
+        let mut discarded: Vec<Vec<String>> = Vec::new();
+        loop {
+            let Some(candidate) = probe(&Item::Table(self.defaults.clone()), path, &projected)
+                .and_then(|item| item.into_table().ok())
+            else {
+                return;
+            };
+            match decode_probe::<T>(&candidate) {
+                Ok(()) => {
+                    *value = projected;
+                    for key in discarded {
+                        self.issue(&key, "type");
+                    }
+                    return;
+                }
+                Err(error) => {
+                    if error.message().starts_with("unknown field ") {
+                        return;
+                    }
+                    let Some(offset) = error.span().map(|span| span.start) else {
+                        return;
+                    };
+                    if error.message().starts_with("missing field ") {
+                        if index.is_some() && !discarded.is_empty() {
+                            return;
+                        }
+                        let Some(mut relative) = remove_array_member_at(&mut projected, offset)
+                        else {
+                            return;
+                        };
+                        if let Some(index) = index
+                            && !relative.is_empty()
+                        {
+                            relative[0] = index.to_string();
+                        }
+                        let mut key = path.to_vec();
+                        key.extend(relative);
+                        discarded.push(key);
+                        continue;
+                    }
+                    let mut repaired = projected.clone();
+                    let Some(mut relative) = remove_unknown(&mut repaired, offset) else {
+                        return;
+                    };
+                    if let Some(array_index) = relative
+                        .iter()
+                        .rposition(|part| part.parse::<usize>().is_ok())
+                        && (index.is_none() || array_index > 0)
+                    {
+                        if !remove_item_path(&mut projected, &relative[..=array_index]) {
+                            return;
+                        }
+                    } else {
+                        projected = repaired;
+                    }
+                    if let Some(index) = index
+                        && !relative.is_empty()
+                    {
+                        relative[0] = index.to_string();
+                    }
+                    let mut key = path.to_vec();
+                    key.extend(relative);
+                    discarded.push(key);
+                }
+            }
+        }
+    }
     fn apply<T: DeserializeOwned>(
         &mut self,
         effective: &mut Table,
@@ -629,6 +1421,29 @@ impl Overrides<'_> {
     ) {
         for (key, value) in user.iter() {
             path.push(key.into());
+            let mut cleaned = value.clone();
+            if let Some(items) = array(value) {
+                let mut values = toml_edit::Array::new();
+                for (index, item) in items.into_iter().enumerate() {
+                    let mut singleton = toml_edit::Array::new();
+                    if let Ok(item) = item.into_value() {
+                        singleton.push(item);
+                    }
+                    let mut row = Item::Value(Value::Array(singleton));
+                    self.strip_unknown::<T>(&mut row, path, Some(index));
+                    self.recover_optional_fields::<T>(&mut row, path, Some(index));
+                    if let Some(item) = row.as_array().and_then(|array| array.get(0)) {
+                        values.push(item.clone());
+                    }
+                }
+                cleaned = Item::Value(Value::Array(values));
+            } else {
+                self.strip_unknown::<T>(&mut cleaned, path, None);
+                if at(self.defaults, path).is_none() {
+                    self.recover_optional_fields::<T>(&mut cleaned, path, None);
+                }
+            }
+            let value = &cleaned;
             let expected = at(self.defaults, path);
             if expected.is_none() {
                 // The aggregate's closed serde types (deny_unknown_fields for
@@ -645,7 +1460,49 @@ impl Overrides<'_> {
                         }
                     });
                 } else {
-                    self.issue(path, "unknown_key");
+                    let error = candidate
+                        .as_ref()
+                        .and_then(|candidate| decode_probe::<T>(candidate).err());
+                    let rule = if error
+                        .as_ref()
+                        .is_none_or(|error| error.message().starts_with("unknown field "))
+                    {
+                        "unknown_key"
+                    } else {
+                        "type"
+                    };
+                    let precise = error
+                        .as_ref()
+                        .filter(|error| !error.message().starts_with("missing field "))
+                        .and_then(|error| error.span())
+                        .map(|span| key_at(self.user, span.start))
+                        .filter(|key| key.starts_with(&format!("{}.", path.join("."))));
+                    if let Some(key) = precise {
+                        self.issue(&key.split('.').map(String::from).collect::<Vec<_>>(), rule);
+                    } else if let Some(missing) = error
+                        .as_ref()
+                        .and_then(|error| error.message().strip_prefix("missing field "))
+                        .and_then(|text| text.split(char::from(96)).nth(1))
+                    {
+                        let mut key = path.clone();
+                        key.push(missing.to_owned());
+                        self.issue(&key, rule);
+                    } else {
+                        self.issue(path, rule);
+                    }
+                    // Keep structural context for owners whose map IDs may
+                    // contain dots and resemble optional metadata field names.
+                    if error
+                        .as_ref()
+                        .is_some_and(|error| error.message().contains("expected struct"))
+                        && let Some(issue) = self.issues.last_mut()
+                        && issue.location.key_path == path.join(".")
+                    {
+                        issue.source = Some(SectionError {
+                            field: issue.location.key_path.clone(),
+                            code: "row_type",
+                        });
+                    }
                 }
             } else if let Some(table) = table(value).filter(|_| {
                 expected.and_then(table).is_some_and(|table| {
@@ -739,6 +1596,26 @@ impl Overrides<'_> {
             {
                 return;
             }
+            if expected_items.as_ref().is_some_and(Vec::is_empty) {
+                for (index, value) in items.iter().enumerate() {
+                    let mut singleton = toml_edit::Array::new();
+                    if let Ok(value) = value.clone().into_value() {
+                        singleton.push(value);
+                    }
+                    let candidate = probe(
+                        &Item::Table(self.defaults.clone()),
+                        path,
+                        &Item::Value(Value::Array(singleton)),
+                    )
+                    .and_then(|item| item.into_table().ok());
+                    if !candidate.as_ref().is_some_and(decodes::<T>) {
+                        path.push(index.to_string());
+                        self.issue(path, "type");
+                        path.pop();
+                    }
+                }
+                return;
+            }
             for (index, value) in items.iter().enumerate() {
                 path.push(index.to_string());
                 self.check::<T>(
@@ -763,6 +1640,17 @@ impl Overrides<'_> {
         source: &str,
         target: &str,
     ) -> Option<Item> {
+        if self
+            .issues
+            .iter()
+            .any(|issue| issue.location.key_path == source && issue.rule != "unknown_key")
+            && source
+                .rsplit('.')
+                .next()
+                .is_some_and(|part| part.parse::<usize>().is_ok())
+        {
+            return None;
+        }
         if let (Some(expected_table), Some(user_table)) = (expected.and_then(table), table(user)) {
             let mut result = Table::new();
             for (key, default) in expected_table.iter() {
@@ -850,7 +1738,7 @@ impl Overrides<'_> {
 }
 // Diagnostics for a typed-valid projection retain original source positions,
 // even if an empty-default array has to omit an undecodable member. This map
-// is used only while checking a refused file; no projected snapshot is exposed.
+// also supplies the provenance of the recovered effective snapshot.
 fn copy_sites(
     item: &Item,
     source: &str,
@@ -858,9 +1746,16 @@ fn copy_sites(
     input: &BTreeMap<String, Site>,
     output: &mut BTreeMap<String, Site>,
 ) {
-    walk_item(item, target, None, &mut |key, _, _| {
+    walk_item(item, target, None, &mut |key, key_span, value_span| {
         let source_key = format!("{source}{}", key.strip_prefix(target).unwrap_or(""));
-        if let Some(site) = input.get(&source_key) {
+        let offset = value_span.or(key_span).map(|span| span.start);
+        let direct = input.get(&source_key);
+        let site = if offset.is_some() && direct.is_none_or(|site| site.offset != offset) {
+            input.values().find(|site| site.offset == offset).or(direct)
+        } else {
+            direct
+        };
+        if let Some(site) = site {
             output.insert(key.into(), site.clone());
         }
     });
@@ -1123,6 +2018,10 @@ fn sites(table: &Table, text: &str, origin: &Origin, prefix: &str) -> BTreeMap<S
         result.insert(
             key.into(),
             Site {
+                offset: value_span
+                    .as_ref()
+                    .or(key_span.as_ref())
+                    .map(|span| span.start),
                 value: location(
                     text,
                     value_span

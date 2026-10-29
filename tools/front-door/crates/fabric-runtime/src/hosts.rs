@@ -2096,16 +2096,30 @@ mod tests {
         assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
     }
 
-    // A real child and the wall clock bound the overrun a hung SSH can cause.
+    // The deadline is shared out between the SSH timeout and the executor's
+    // termination and reap allowances, so their sum never exceeds it.
     #[test]
-    #[allow(clippy::disallowed_methods)]
     fn peer_exchange_within_a_deadline_includes_termination_and_reap() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        // An SSH wrapper that ignores TERM, so only the kill ends it.
-        let ssh = dir.path().join("ssh");
-        std::fs::write(&ssh, "#!/bin/sh\ntrap '' TERM\nwhile :; do :; done\n").unwrap();
-        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        struct Budgets(Mutex<Vec<(Duration, Duration, Duration)>>);
+        impl Executor for Budgets {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                self.0.lock().unwrap().push((
+                    options.timeout,
+                    options.terminate_grace,
+                    options.reap_timeout,
+                ));
+                Ok(ExecOutcome {
+                    termination: Termination::Signal(9),
+                    stdout: CapturedStream::default(),
+                    stderr: CapturedStream::default(),
+                    timed_out: true,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
         let clock = TestClock::new(WallTime::from_micros(1).unwrap(), MonoTime::from_micros(1));
         // The whole-second budget has far longer left than the deadline.
         let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
@@ -2139,28 +2153,45 @@ mod tests {
             remote_executable: None,
             connect_timeout_seconds: 10,
         };
-        let executor = provenant_os::exec::SystemExecutor::new(2).unwrap();
+        let executor = Budgets(Mutex::new(Vec::new()));
         let transport = SshTransport {
             executor: &executor,
             clock: &clock,
-            home: dir.path(),
-            cwd: dir.path(),
-            executable: ssh,
+            home: Path::new("/home/a"),
+            cwd: Path::new("/home/a/repo"),
+            executable: "/usr/bin/ssh".into(),
             seconds: 30,
         };
-
-        let started = std::time::Instant::now();
-        let result = transport.exchange_within(
-            &peer,
-            &request,
-            budget,
-            &CancelToken::new(),
-            Duration::from_millis(10),
+        let ms = Duration::from_millis;
+        let us = Duration::from_micros;
+        for within in [ms(10), ms(2000)] {
+            let result =
+                transport.exchange_within(&peer, &request, budget, &CancelToken::new(), within);
+            assert!(matches!(result, Err(PeerError::Failed(_))), "{result:?}");
+        }
+        // A short deadline gives each allowance a quarter; a long one keeps the
+        // usual grace. Either way the child's whole lifetime fits the deadline.
+        // A cap alone keeps the executor's own allowances on top of the cap.
+        transport
+            .exchange_with_cap(&peer, &request, budget, &CancelToken::new(), ms(250))
+            .unwrap_err();
+        let recorded = executor.0.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            [
+                (ms(5), us(2500), us(2500)),
+                (ms(1500), TERMINATE_GRACE, REAP_TIMEOUT),
+                (ms(250), ms(250), ms(250)),
+            ]
         );
-        let elapsed = started.elapsed();
-        assert!(matches!(result, Err(PeerError::Failed(_))), "{result:?}");
-        // Without the carve-out the child gets its full timeout, then the
-        // termination and reap grace (a quarter second each) on top.
-        assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+        for ((timeout, grace, reap), within) in recorded.iter().zip([ms(10), ms(2000)]) {
+            assert!(*timeout + *grace + *reap <= within);
+        }
+        // A deadline too short to leave any timeout fails before SSH starts.
+        assert!(matches!(
+            transport.exchange_within(&peer, &request, budget, &CancelToken::new(), Duration::ZERO),
+            Err(PeerError::Unavailable)
+        ));
+        assert_eq!(executor.0.lock().unwrap().len(), 3);
     }
 }

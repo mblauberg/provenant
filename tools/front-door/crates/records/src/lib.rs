@@ -12,6 +12,7 @@ mod attempt_file;
 mod canonical;
 mod finding;
 pub mod handoff;
+mod input;
 mod install;
 mod json;
 mod jsonc;
@@ -27,6 +28,7 @@ pub use attempt_fact::{
 pub use attempt_file::{AttemptFile, AttemptFileClass};
 pub use canonical::{CanonicalBytes, CanonicalError, CanonicalV1, FileDigest, record_digest};
 pub use finding::Finding;
+pub use input::{InputWarning, decode_input};
 pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};
 pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError};

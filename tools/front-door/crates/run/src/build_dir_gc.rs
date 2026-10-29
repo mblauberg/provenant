@@ -908,7 +908,7 @@ mod tests {
         fs::write(
             &config,
             format!(
-                "[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes={}\n",
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes={}\n",
                 size * 2
             ),
         )
@@ -920,7 +920,7 @@ mod tests {
         fs::write(
             &config,
             format!(
-                "[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes={}\n",
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes]\nbuild_dir_max_bytes={}\n",
                 size * 2 - 1
             ),
         )
@@ -931,14 +931,18 @@ mod tests {
         // A floor no volume can meet empties every idle directory, but the
         // default 15 minute grace spares one written a minute ago.
         let recent = fixture.profile('c', "debug", 8192, 60);
-        fs::write(&config, "[gc]\nfree_floor='900000000000000B'\n").unwrap();
+        fs::write(
+            &config,
+            "schema_version=1\n[gc]\nfree_floor='900000000000000B'\n",
+        )
+        .unwrap();
         let report = reclaim(state.path(), fixture.home.path()).unwrap();
         assert_eq!(report.removed, vec![new.clone()]);
         assert_eq!(report.recent, vec![recent.clone()]);
         // The configured grace applies.
         fs::write(
             &config,
-            "[gc]\nfree_floor='900000000000000B'\n[domains.fabric.lanes]\nbuild_dir_grace_seconds=0\n",
+            "schema_version=1\n[gc]\nfree_floor='900000000000000B'\n[domains.fabric.lanes]\nbuild_dir_grace_seconds=0\n",
         )
         .unwrap();
         let report = reclaim(state.path(), fixture.home.path()).unwrap();

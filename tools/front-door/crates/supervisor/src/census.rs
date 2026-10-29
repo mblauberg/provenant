@@ -11,7 +11,6 @@ pub const MAX_CENSUS_ENTRIES: usize = 65_536;
 const MAX_BOOT_ID_BYTES: usize = 256;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProcessIdentity {
     pub boot: String,
     pub pid: i64,
@@ -59,7 +58,6 @@ impl ProcessIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProcessFact {
     pub identity: ProcessIdentity,
     pub parent_pid: i64,
@@ -86,7 +84,6 @@ impl ProcessFact {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum ObservationIssue {
     PermissionDenied,
     Malformed,
@@ -103,7 +100,6 @@ pub enum CensusCompleteness {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Census {
     processes: BTreeMap<i64, ProcessFact>,
     unknown_pids: BTreeMap<i64, ObservationIssue>,
@@ -390,7 +386,6 @@ pub enum Ancestry {
 /// A validated child registration from Run. Only crate code that has decoded
 /// and checked a durable registration should create this value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OwnerRegistration {
     identity: ProcessIdentity,
 }
@@ -565,6 +560,20 @@ pub trait ProcessObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_census_accepts_future_fields_without_changing_process_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let census = Census::from_observations([fact(1, 100, 0)], [], [], true, false, 10)?;
+        let mut value = serde_json::to_value(&census)?;
+        value["future_census"] = serde_json::json!({"value": true});
+        value["processes"]["1"]["future_fact"] = serde_json::json!(42);
+        value["processes"]["1"]["identity"]["future_identity"] = serde_json::json!([1, 2]);
+        let decoded: Census = serde_json::from_value(value)?;
+        assert_eq!(decoded, census);
+        assert!(matches!(decoded.process(1), ProcessLookup::Present(_)));
+        Ok(())
+    }
 
     fn identity(pid: i64, start: u64) -> ProcessIdentity {
         ProcessIdentity {
