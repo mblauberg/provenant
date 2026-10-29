@@ -467,8 +467,34 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
 pub enum Config {
     /// List configuration warnings with their source file and key.
     Check(Page),
-    /// Print the effective configuration and knobs with their source layer.
+    /// Print the effective configuration and knobs with their source layer
+    /// and the configuration revision.
     Show,
+    /// List each editable field with its type, bounds, default, effective
+    /// value, source layer and whether a restart is needed.
+    Schema,
+    /// Validate a JSON patch of `{"field": value}` (null clears a field) and
+    /// commit all of it or none, if the configuration is still at the revision.
+    Apply {
+        /// JSON patch file
+        #[arg(long, value_name = "PATCH.json")]
+        file: PathBuf,
+        /// Revision from `config show`; a stale revision is refused
+        #[arg(long, value_name = "REV")]
+        expect_revision: String,
+        /// Validate and report the change without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List the bounded history of applied configuration changes, newest first.
+    History {
+        /// Only entries since this RFC3339 time or this many seconds ago
+        #[arg(long, value_parser = since)]
+        since: Option<jiff::Timestamp>,
+        /// Maximum entries (1 to 500)
+        #[arg(long, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=500))]
+        limit: u64,
+    },
     /// Set `profile` (balanced, economy or rigorous) or a registry knob such
     /// as `lanes.max_concurrency`.
     Set {

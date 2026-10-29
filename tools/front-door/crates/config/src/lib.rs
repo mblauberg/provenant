@@ -7,8 +7,11 @@
 
 mod account_sync;
 mod domains;
+mod edit;
 mod gc;
 mod github_policy;
+mod history;
+mod schema;
 pub use gc::{
     ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold, ProjectGcSettings,
     STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings, deserialize_auto, parse_cache_size,
@@ -31,6 +34,8 @@ mod release;
 mod retention;
 pub mod shared_settings;
 pub use retention::{ProjectRetentionSettings, RetentionSettings};
+#[cfg(test)]
+mod edit_tests;
 mod splice;
 #[cfg(test)]
 mod test_support;
@@ -42,7 +47,9 @@ mod tolerance_tests;
 pub use domains::{
     DomainConfig, DomainSection, DomainSections, NoDomains, SectionError, read_domain,
 };
-pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config};
+pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
+pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
+pub use knobs::{KnobEdit, KnobSource, KnobValue};
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;
 pub use project_binding::{
@@ -51,6 +58,7 @@ pub use project_binding::{
     transient_location,
 };
 pub use provenant_records::Finding;
+pub use schema::{Layer, Schema, SchemaField, apply_patch, schema};
 
 use serde::{Deserialize, Serialize, Serializer};
 use std::{collections::BTreeMap, fmt, path::PathBuf};
@@ -99,6 +107,12 @@ pub enum ConfigError {
     },
     #[error("config edit refused: {reason}")]
     Edit { reason: &'static str },
+    #[error("config edit refused: {0}")]
+    Refused(String),
+    #[error("config changed since revision was read; current revision is {current}")]
+    StaleRevision { current: String },
+    #[error("another config edit holds the lock")]
+    Locked,
     #[error("unknown knob {name}; close matches: {}", .close.join(", "))]
     UnknownKnob { name: String, close: Vec<String> },
     #[error("invalid value for knob {name} ({rule})")]

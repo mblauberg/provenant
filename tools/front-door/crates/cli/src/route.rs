@@ -1296,7 +1296,10 @@ fn edit_config(
     let _ = provenant_config::edit_config::<crate::domains::Domains>(
         roots,
         &crate::domains::SECTIONS,
-        |document| edit(document).map_err(|reason| provenant_config::ConfigError::Edit { reason }),
+        &provenant_config::EditOptions::new("cli"),
+        |document, _| {
+            edit(document).map_err(|reason| provenant_config::ConfigError::Edit { reason })
+        },
     )?;
     Ok(())
 }
