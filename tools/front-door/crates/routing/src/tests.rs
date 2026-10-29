@@ -3574,3 +3574,70 @@ fn agy_exhaustion_follows_the_models_serving_windows() -> Result<(), Box<dyn std
     assert!(!ready(gemini, QuotaStatus::Exhausted, lapsed)?);
     Ok(())
 }
+#[test]
+fn unsupported_pool_effort_is_dropped_with_a_warning() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model": "codex/gpt-6-luna", "effort": "retired", "efforts": ["low", "retired"]}
+        ]}
+    }))?;
+    assert!(config.validate().is_empty());
+    let context = context(&catalogue, &config, now()?);
+    let listed = list(
+        &RouteListQuery {
+            pool: Some("trial".into()),
+            ..RouteListQuery::default()
+        },
+        &context,
+    )?;
+    let member = &listed.pools["trial"][0];
+    assert_eq!(member.efforts, ["low"]);
+    assert_eq!(member.effort, None);
+    let warnings = config.pool_effort_warnings(&catalogue);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("domains.routing.pools.trial[0].efforts"));
+    assert!(warnings[0].contains("retired"));
+    Ok(())
+}
+#[test]
+fn supported_default_effort_survives_reconciliation() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "pools": {"trial": [
+            {"model": "codex/gpt-6-luna", "effort": "low", "efforts": ["low", "retired"]}
+        ]}
+    }))?;
+    let context = context(&catalogue, &config, now()?);
+    let listed = list(&RouteListQuery::default(), &context)?;
+    let member = &listed.pools["trial"][0];
+    assert_eq!(member.effort.as_deref(), Some("low"));
+    assert_eq!(member.efforts, ["low"]);
+    Ok(())
+}
+#[test]
+fn malformed_duplicate_or_excess_pool_efforts_still_fail() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fails = |member: serde_json::Value| -> Result<bool, serde_json::Error> {
+        let config: RoutingConfig =
+            serde_json::from_value(serde_json::json!({"pools": {"trial": [member]}}))?;
+        Ok(config
+            .validate()
+            .iter()
+            .any(|error| error.code == "unsupported_effort"))
+    };
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "efforts": ["bad effort"]})
+    )?);
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "efforts": ["low", "low"]})
+    )?);
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "effort": "bad effort"})
+    )?);
+    let many: Vec<String> = (0..17).map(|n| format!("e{n}")).collect();
+    assert!(fails(
+        serde_json::json!({"model": "codex/gpt-6-luna", "efforts": many})
+    )?);
+    Ok(())
+}
