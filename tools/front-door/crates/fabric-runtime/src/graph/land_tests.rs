@@ -708,3 +708,24 @@ fn a_head_source_must_name_an_upstream_writer() {
         assert!(refused.contains("head source"), "{target}: {refused}");
     }
 }
+
+#[test]
+fn a_composite_verdict_binds_to_the_head_its_producer_reviewed() {
+    // write H1, CI, repair H2, then a council pinned to H1: its boundary
+    // follows the repair, but the exported verdict judged H1, so H2 never lands.
+    let mut nodes = nodes("routine");
+    let mut review = nodes[3].clone();
+    review["source"] = json!({"type":"node", "node":"write"});
+    review["depends_on"] = json!([]);
+    nodes[3] = json!({"id":"review", "kind":"composite", "access":"read_only",
+        "depends_on":["repair", "write"],
+        "composite":{"nodes":[review], "exports":[{"node":"review", "outputs":["verdict"]}]}});
+    let (owner, land) = land_outcome(nodes, "VERDICT: PASS");
+    assert!(owner.lands.is_empty(), "{:?}", owner.lands);
+    assert_eq!(land.state, NodeState::Failed);
+    let error = land.advance_error.unwrap();
+    assert!(
+        error.contains(REPAIR_HEAD) && error.contains(&format!("accepted passed {WRITE_HEAD}")),
+        "{error}"
+    );
+}

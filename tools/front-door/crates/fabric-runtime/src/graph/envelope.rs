@@ -248,6 +248,7 @@ fn node_bound(
                 branch: Some(String::new()),
                 commit: Some(String::new()),
                 warnings: Vec::new(),
+                remaining: Some(String::new()),
             }
         }),
         attempts: Vec::new(),
@@ -334,9 +335,11 @@ fn node_bound(
         } else {
             RESULT_EXCERPT_BYTES
         };
-        // digest, excerpt, path, verdict, verdict error, findings, branch, commit, warnings
+        // digest, excerpt, path, verdict, verdict error, findings, branch,
+        // commit, warnings, remaining
         bytes += 80
             + excerpt
+            + REMAINING_BYTES
             + OUTPUT_FIELD_BYTES
             + OUTPUT_FIELD_BYTES
             + 64

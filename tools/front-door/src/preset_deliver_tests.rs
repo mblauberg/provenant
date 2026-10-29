@@ -62,6 +62,10 @@ struct Host {
     lands: Vec<(String, String)>,
     asks: Vec<(String, String)>,
     ci_polls: usize,
+    /// The writer's final report; `WRITER_REPORT` when unset.
+    writer_report: Option<String>,
+    /// The attempts each launch was asked to route away from.
+    distinct: Vec<(String, Vec<String>)>,
 }
 
 impl CiStatus for Host {
@@ -138,9 +142,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
             .push((key.node_id.clone(), node.prompt.to_owned()));
         self.sources
             .push((key.node_id.clone(), node.source_commit.map(str::to_owned)));
+        self.distinct
+            .push((key.node_id.clone(), node.distinct_from_attempts.to_vec()));
         let writer = access == AccessMode::WorktreeWrite;
-        let text = if key.node_id == "write" {
-            WRITER_REPORT.to_owned()
+        let text = if key.node_id.ends_with("write") {
+            self.writer_report
+                .clone()
+                .unwrap_or_else(|| WRITER_REPORT.to_owned())
         } else if writer {
             format!("Repaired in {}.\n", key.node_id)
         } else {
@@ -271,6 +279,7 @@ fn deliver_lowers_to_write_gate_repair_loop_review_and_land() {
     assert_eq!(ci[0]["condition"]["checks"], json!(["build"]));
     assert_eq!(tuned["decision_session"], "chair");
     assert_eq!(tuned["nodes"][4]["land"]["tier"], "crucial");
+    assert_eq!(tuned["nodes"][4]["land"]["session"], "chair");
     let parked = expand(
         &Layers::empty(),
         "deliver",
@@ -506,4 +515,147 @@ fn deliver_nests_inside_another_preset() {
     let run = drive(&document, &mut host, &mut journal);
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint);
     assert_eq!(host.lands.len(), 1);
+
+    // The child's decision session reaches its land node, so a crucial tier
+    // asks the wrapper's chair instead of failing for want of a session.
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "ship",
+            "stages = [{ id = \"ship\", preset = \"deliver\", parameters = { worktree = \"/repo/lane\", decision_session = \"chair\", land_tier = \"crucial\" } }]\n",
+        )
+        .unwrap();
+    let expanded = expand(
+        &layers,
+        "ship",
+        "approved brief",
+        &[format!("ship.subject.commit='{BASE}'")],
+    )
+    .unwrap();
+    let document: GraphDocument = serde_json::from_value(expanded.document).unwrap();
+    let mut host = Host::default();
+    let mut journal = Journal::default();
+    let run = drive(&document, &mut host, &mut journal);
+    let land = progress(&run.checkpoint, "ship--land");
+    assert_eq!(land.state, NodeState::Running, "{:?}", land.advance_error);
+    assert!(host.lands.is_empty());
+    assert!(
+        host.asks
+            .iter()
+            .any(|(ask, session)| ask == "ship--land.ask-1" && session == "chair"),
+        "{:?}",
+        host.asks
+    );
+}
+
+#[test]
+fn a_council_pinned_to_the_writer_commit_never_lands_the_repaired_head() {
+    // The council reviews the writer's commit, then a repair moves the head:
+    // the passing verdict judged the old head, so land refuses the new one.
+    fn pin_to_writer(value: &mut Value) {
+        if value == &json!({"type":"head", "node":"write"}) {
+            *value = json!({"type":"node", "node":"write"});
+        }
+        match value {
+            Value::Array(items) => items.iter_mut().for_each(pin_to_writer),
+            Value::Object(map) => map.values_mut().for_each(pin_to_writer),
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(deliver(&[])).unwrap();
+    pin_to_writer(&mut value);
+    let document: GraphDocument = serde_json::from_value(value).unwrap();
+    let mut host = Host {
+        ci: VecDeque::from([Ci::Fail("tests", "assertion failed")]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let run = drive(&document, &mut host, &mut journal);
+    let reviewed: Vec<_> = host
+        .sources
+        .iter()
+        .filter(|(id, _)| id.starts_with("review--"))
+        .collect();
+    assert!(!reviewed.is_empty());
+    assert!(
+        reviewed
+            .iter()
+            .all(|(_, source)| source.as_deref() == Some(commit(1).as_str())),
+        "{reviewed:?}"
+    );
+    assert!(host.lands.is_empty(), "{:?}", host.lands);
+    let land = progress(&run.checkpoint, "land");
+    assert_eq!(land.state, NodeState::Failed);
+    let error = land.advance_error.as_deref().unwrap();
+    assert!(
+        error.contains(&commit(2)) && error.contains(&format!("accept passed {}", commit(1))),
+        "{error}"
+    );
+}
+
+#[test]
+fn reviewers_route_away_from_the_writer_and_every_repair_author() {
+    let document = deliver(&[]);
+    let mut host = Host {
+        ci: VecDeque::from([Ci::Fail("tests", "assertion failed")]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let run = drive(&document, &mut host, &mut journal);
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint);
+    let separated: Vec<_> = host
+        .distinct
+        .iter()
+        .filter(|(id, _)| id.contains("correctness-spec"))
+        .collect();
+    assert!(!separated.is_empty(), "{:?}", host.distinct);
+    for (id, attempts) in separated {
+        assert_eq!(
+            attempts,
+            &["fixture/ci--repair--r1--fix", "fixture/write"],
+            "{id}"
+        );
+    }
+}
+
+#[test]
+fn remaining_work_at_the_end_of_a_long_report_reaches_every_repair_round() {
+    let mut report = String::from("Implemented the parser.\n");
+    while report.len() < 3 * 4096 {
+        report.push_str("Notes: the tokenizer keeps byte offsets for every span.\n");
+    }
+    report.push_str("Remaining: wire the docs table.\n");
+    let document = deliver(&[]);
+    let mut host = Host {
+        ci: VecDeque::from([
+            Ci::Fail("tests", "first red"),
+            Ci::Fail("tests", "second red"),
+        ]),
+        writer_report: Some(report),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let run = drive(&document, &mut host, &mut journal);
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint);
+    let brief = |id: &str| {
+        host.prompts
+            .iter()
+            .find(|(launched, _)| launched == id)
+            .map(|(_, prompt)| prompt.clone())
+            .unwrap_or_else(|| panic!("no {id}"))
+    };
+    for round in ["ci--repair--r1--fix", "ci--repair--r2--fix"] {
+        let prompt = brief(round);
+        assert!(
+            prompt.contains("Remaining: wire the docs table."),
+            "{round}: {prompt}"
+        );
+    }
+    let second = brief("ci--repair--r2--fix");
+    assert!(second.contains("second red"), "{second}");
+    assert!(
+        second.contains("Repaired in ci--repair--r1--fix."),
+        "{second}"
+    );
 }

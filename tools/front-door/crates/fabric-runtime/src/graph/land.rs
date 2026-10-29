@@ -269,6 +269,9 @@ fn delivered_within(
 /// The head a reviewer judged: its pinned source commit or, without one, the
 /// newest head of `writer`'s chain among its own upstream nodes. A review that
 /// ran before a continuation therefore never judges the continuation's head.
+/// A composite boundary has no subject of its own, so its verdict resolves to
+/// the member that exported it: a council pinned to an earlier head never
+/// vouches for a later one that merely precedes the boundary.
 fn reviewed_head(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
@@ -277,6 +280,13 @@ fn reviewed_head(
     writer: &str,
 ) -> Option<String> {
     let index = *positions.get(reviewer)?;
+    if let Some(spec) = &plan.nodes[index].composite {
+        let producer = spec
+            .exports
+            .iter()
+            .find(|export| export.outputs.contains(&OutputKind::Verdict))?;
+        return reviewed_head(plan, checkpoint, positions, &producer.node, writer);
+    }
     if let Some(commit) = &checkpoint.nodes[index].source_commit {
         return Some(commit.clone());
     }
@@ -295,6 +305,33 @@ pub(super) fn chain_head(
     let upstream = ancestors(&plan.nodes, positions, node);
     delivered_within(plan, checkpoint, writer, |index| upstream.contains(&index))
         .map(|(_, head)| head)
+}
+
+/// Attempt references of `writer` and of the writers that continue it among
+/// `node`'s upstream nodes: every author of the head a `head` binding pins.
+pub(super) fn chain_attempts(
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    node: &str,
+    writer: &str,
+) -> Vec<String> {
+    let upstream = ancestors(&plan.nodes, positions, node);
+    let mut attempts: Vec<String> = plan
+        .nodes
+        .iter()
+        .zip(&checkpoint.nodes)
+        .enumerate()
+        .filter(|(index, (chain, _))| {
+            (chain.id == writer || chain.continues.as_deref() == Some(writer))
+                && upstream.contains(index)
+        })
+        .flat_map(|(_, (_, progress))| &progress.attempts)
+        .filter_map(|attempt| attempt.attempt_ref.clone())
+        .collect();
+    attempts.sort();
+    attempts.dedup();
+    attempts
 }
 
 /// Why no passing verdict gate after `writer` accepted `head`, if none did.
@@ -463,6 +500,7 @@ fn outputs(record: &LandRecord) -> NodeOutputs {
         branch: Some(record.branch.clone()),
         commit: Some(record.head.clone()),
         warnings: Vec::new(),
+        remaining: None,
     }
 }
 
