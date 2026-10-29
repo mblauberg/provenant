@@ -567,6 +567,7 @@ mod tests {
         original.lane_depth = Some(1);
         original.chair = Some(run::ChairBinding {
             extra: Default::default(),
+            session: None,
             host: provenant_core::HostId::from_bytes([78; 16]),
             actor: ActorId::from_bytes([79; 16]),
         });

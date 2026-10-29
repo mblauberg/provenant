@@ -20,6 +20,10 @@ pub struct ChairBinding {
     pub extra: crate::ExtraFields,
     pub host: HostId,
     pub actor: ActorId,
+    /// The chair's host session, when its harness names one. It addresses the
+    /// chair log that settlement appends to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -4896,6 +4896,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let mut run = input();
     run.request.chair = Some(ChairBinding {
         extra: Default::default(),
+        session: None,
         host: provenant_core::HostId::from_bytes([30; 16]),
         actor: provenant_core::ActorId::from_bytes([31; 16]),
     });
@@ -5186,6 +5187,7 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
     let mut original = input();
     original.request.chair = Some(ChairBinding {
         extra: Default::default(),
+        session: None,
         host: provenant_core::HostId::from_bytes([32; 16]),
         actor: provenant_core::ActorId::from_bytes([33; 16]),
     });

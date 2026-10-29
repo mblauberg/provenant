@@ -38,6 +38,7 @@ mod preset_tests;
 mod provider_retention;
 mod release_smoke;
 mod roots;
+mod settlement;
 mod target_seed_build;
 mod usage;
 #[cfg(test)]

@@ -89,6 +89,14 @@ pub fn in_lane() -> bool {
         || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0")
 }
 
+/// The calling chair's host session ID, when its harness names one. Runs
+/// record it so settlement can append to that session's chair log.
+pub fn current_session() -> Option<String> {
+    ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+}
+
 impl Context {
     pub fn open(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
         // Validate configuration before allocating identities or opening SQLite.

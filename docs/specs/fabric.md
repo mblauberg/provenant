@@ -204,6 +204,15 @@ by their tool names.
 Run submission can wait for a result in the same bounded call; a timeout
 returns a receipt and continuation instructions. Run listings are bounded and
 newest first, and compact status, wait and cancel responses can request detail.
+Waiting is optional: every settlement passes one post-settlement seam that
+runs its reactions in order, each isolated from the others and idempotent by
+attempt ID. Graphs advance, then the dispatching chair's inbox receives one
+note of at most 300 bytes (attempt, outcome, `(partial)`, model, staged
+recovery, head, pull request), then the chair's session log gains a
+`lane_settled` entry. Notices report outcomes and never instruct. A lane
+dispatched by a lane has no chair and stays quiet, and read-only lanes notify
+only when `[domains.fabric.lanes.settlement] notice_read_only` is set; `notice`
+and `chair_log` switch the other two reactions.
 Run operation IDs are generated when omitted and returned for retries;
 explicit IDs preserve planned retry identity.
 Chair log appends generate an operation ID when omitted and return it in the

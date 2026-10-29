@@ -527,6 +527,7 @@ impl F3Facade for BoundFacade<'_> {
             actor: None,
             chair: Some(provenant_run::ChairBinding {
                 extra: Default::default(),
+                session: provenant_cli::fabric::current_session(),
                 host: self.factory.context.identity.inbox.host,
                 actor: self.factory.context.identity.inbox.actor,
             }),
@@ -3334,6 +3335,11 @@ fn graph_result_warning(error: &provenant_run::RunError) -> &'static str {
     }
 }
 
+/// The one post-settlement seam. Every settlement, including a partial or
+/// stopped-early one, passes through here once. The reactions run in order,
+/// each isolated from the others: graphs advance, the chair is notified, then
+/// the chair log is appended. A staged successor launches around them, and a
+/// delayed retry runs them before its wait rather than after it.
 pub(crate) fn advance_settled_graphs(
     holder: &provenant_cli::run::HostHolder<'_>,
     workers: &'static dyn WorkerObserver,
@@ -3341,13 +3347,39 @@ pub(crate) fn advance_settled_graphs(
     let Some(settled) = holder.settled()? else {
         return Ok(());
     };
-    // A delayed retry advances graphs before its wait, not after it.
-    let mut advanced = None;
+    let mut reacted = None;
     provenant_cli::run::launch_policy_successor(&settled, || {
-        advanced = Some(advance_graphs_after_settlement(&settled, workers));
+        reacted = Some(settlement_reactions(&settled, workers));
     })
     .map_err(std::io::Error::other)?;
-    advanced.unwrap_or_else(|| advance_graphs_after_settlement(&settled, workers))
+    reacted.unwrap_or_else(|| settlement_reactions(&settled, workers))
+}
+
+fn settlement_reactions(
+    settled: &provenant_run::HolderContext,
+    workers: &'static dyn WorkerObserver,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut first_error = advance_graphs_after_settlement(settled, workers).err();
+    let reports = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let Some(host) = &settled.launch else {
+            return Ok(());
+        };
+        let roots = crate::roots::child(
+            &settled.roots.home,
+            &settled.roots.checkout,
+            host.configuration_root.clone(),
+        )?;
+        let Some(facts) = crate::settlement::Facts::read(settled, &roots)? else {
+            return Ok(());
+        };
+        let notice = facts.post_notice();
+        let log = facts.append_chair_log();
+        notice.and(log)
+    })();
+    if let Err(error) = reports {
+        first_error.get_or_insert(error);
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn advance_graphs_after_settlement(
