@@ -1518,6 +1518,62 @@ mod tests {
         ]);
     }
     #[test]
+    fn run_refuses_adapter_unsupported_flags_before_side_effects() {
+        for (model, effort, refused) in [
+            ("claude/id", "high", false),
+            ("codex/id", "high", false),
+            ("agy/id", "high", false),
+            ("opencode/id", "high", false),
+            ("cursor/id", "high", true),
+        ] {
+            let invocation = valid(&[
+                "run",
+                "--prompt-stdin",
+                "--model",
+                model,
+                "--effort",
+                effort,
+                "--worktree-branch",
+                "feat/x",
+            ]);
+            let Command::Run(request) = invocation.command else {
+                panic!("run")
+            };
+            let result = run::check_flag_capabilities(&request, None);
+            assert_eq!(result.is_err(), refused, "{model}");
+            if let Err(fail) = result {
+                assert!(fail.message.contains("does not support effort"), "{model}");
+            }
+        }
+    }
+    #[test]
+    fn manifest_task_is_refused_before_any_launch_side_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+        let write = |model: &str| {
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"schema_version":1,"tasks":[{{"prompt":"p","route":{{"kind":"model","provider":"cursor","model":"{model}","effort":"high"}}}}]}}"#
+                ),
+            )
+            .unwrap();
+        };
+        write("cursor/m");
+        let invocation = valid(&["run", "--manifest", path.to_str().unwrap()]);
+        let Command::Run(request) = invocation.command else {
+            panic!("run")
+        };
+        let fail = run::check_flag_capabilities(&request, None).unwrap_err();
+        assert!(fail.message.contains("cursor does not support effort"));
+    }
+    #[test]
+    fn pool_effort_is_refused_only_when_no_member_takes_it() {
+        assert!(run::pool_effort_refusal(&["cursor", "codex"], "high").is_none());
+        assert!(run::pool_effort_refusal(&["cursor"], "high").is_some());
+        assert!(run::pool_effort_refusal(&[], "high").is_none());
+    }
+    #[test]
     fn run_accepts_dispatch_effort_and_network() {
         let invocation = valid(&[
             "run",

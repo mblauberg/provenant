@@ -200,7 +200,7 @@ trains_on_prompts = false
 
 [[models]]
 model = "cursor/grok-4.7"
-efforts = ["low", "medium", "high", "xhigh"]
+efforts = []
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
 
@@ -250,7 +250,7 @@ senior = [
     { model = "claude/claude-sonnet-5-5", weight = 4, efforts = ["medium", "high", "xhigh"] },
     { model = "agy/gemini-3.8-flash", weight = 2, effort = "high", efforts = ["low", "medium", "high"] },
     { model = "agy/claude-opus-4-6-thinking", weight = 1, efforts = [] },
-    { model = "cursor/grok-4.7", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },
+    { model = "cursor/grok-4.7", weight = 1, efforts = [] },
 ]
 principal = [
     { model = "claude/claude-opus-5-5", weight = 1, efforts = ["low", "medium", "high", "xhigh"] },

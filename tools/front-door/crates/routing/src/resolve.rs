@@ -1145,6 +1145,17 @@ fn admissible<'c>(
         .find(|r| r.adapter.id() == model.adapter())
         .ok_or(RoutingError::UnknownAdapter)?;
     let entry = context.catalogue.model(model);
+    // Backstop for uncatalogued models; catalogued ones record their own efforts.
+    if let Some(effort) = effort
+        && let Some(spec) = provenant_records::AdapterSpec::get(model.adapter())
+        && !spec.launch.effort
+    {
+        return Err(RoutingError::UnsupportedEffort {
+            model: model.as_str().to_owned(),
+            effort: effort.to_owned(),
+            support: format!("{} takes no effort control", spec.name),
+        });
+    }
     if let Some(effort) = effort.filter(|e| {
         !crate::request::effort_valid(e)
             || entry.is_none_or(|row| !row.efforts.iter().any(|v| v == e))

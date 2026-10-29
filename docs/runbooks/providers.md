@@ -7,6 +7,30 @@ OpenCode) are enabled by default in every access and session mode with a launch
 form; recordings serve replay tests only. Use `provenant route list`
 to inspect the catalogue; readiness is decided at dispatch.
 
+## Launch capabilities
+
+One declared table per adapter (`AdapterSpec::launch` in
+`tools/front-door/crates/records/src/adapters.rs`) is the source for dispatch,
+`run`, resume and graph validation. A request outside it is refused with the
+adapter and field named (`cursor does not support effort`) before admission,
+worktree preparation, reservation or receipt creation. A named route is checked
+once routing resolves its adapter; a model's recorded effort controls in the
+catalogue still apply on top.
+
+| Adapter  | Effort | Resume | Steering | Network modes          | Image input | Write |
+| -------- | ------ | ------ | -------- | ---------------------- | ----------- | ----- |
+| claude   | yes    | yes    | no       | provider, local, open  | no          | yes   |
+| codex    | yes    | yes    | no       | provider, local, open  | no          | yes   |
+| cursor   | no     | yes    | no       | provider, local, open  | no          | yes   |
+| agy      | yes    | yes    | no       | provider, local, open  | no          | yes   |
+| opencode | yes    | yes    | no       | provider, local, open  | no          | yes   |
+
+Only effort can refuse today. Resume, network and write never refuse for any
+adapter; they are declared so a future adapter can narrow them. Steering (input
+into a live session) and image input are declared likewise, and no request
+surface exists for either yet. Cursor has no
+effort control on its command line, so its catalogue models record none.
+
 ## Claude network access
 
 With open network (the default, or `--network on`), Claude enables `WebFetch`
