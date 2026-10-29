@@ -960,8 +960,8 @@ impl RunStore {
         let cancelled = cancellation.is_some();
         if cancelled {
             decoded.outcome = Outcome::Cancelled;
-            if !exit.never_spawned {
-                let reason = cancellation_reason(cancellation.as_deref());
+            let reason = cancellation_reason(cancellation.as_deref());
+            if !exit.never_spawned || reason != "unknown" {
                 decoded.reason = Some(format!("cancelled: {reason}"));
             }
         }
@@ -1056,11 +1056,45 @@ impl RunStore {
                 });
             }
         }
+        if decoded.outcome == Outcome::Failed
+            && review_changes(
+                task.context
+                    .as_ref()
+                    .and_then(|context| context.role.as_deref()),
+                &decoded.result,
+            )
+        {
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("review_verdict: changes; {reason}"),
+                None => "review_verdict: changes".into(),
+            });
+        }
         // Delivery keys off the outcome before a declared stop, so partial work
         // is still delivered. The stop changes only the settled state.
         let succeeded_before_stop = decoded.outcome == Outcome::Succeeded;
         // A declared stop requires review even when the provider succeeded.
         let mut partial = std::mem::take(&mut decoded.partial_signals);
+        if decoded.outcome == Outcome::Succeeded
+            && provenant_records::handoff::Handoff::from_result(&decoded.result)
+                .ok()
+                .flatten()
+                .is_none()
+        {
+            partial.push(PartialSignal::HandoffMissing);
+        }
+        if matches!(
+            decoded.outcome,
+            Outcome::Cancelled | Outcome::ReviewRequired
+        ) && handoff
+            .as_ref()
+            .is_some_and(|handoff| !handoff.unfinished())
+        {
+            let note = "handoff declared done but settlement was not successful";
+            decoded.reason = Some(match decoded.reason.take() {
+                Some(reason) => format!("{reason}; {note}"),
+                None => note.into(),
+            });
+        }
         if matches!(
             decoded.outcome,
             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
@@ -1155,9 +1189,19 @@ impl RunStore {
                     &format!("Run {}\nAttempt {id}", record.run_id),
                 )
             })?;
-            if read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some() {
+            if let Some(cancellation) = read_sealed(attempt, "cancel.json", RECORD_LIMIT)? {
                 decoded.outcome = Outcome::Cancelled;
-                decoded.reason = Some("cancelled during delivery".into());
+                let mut reason = format!(
+                    "cancelled during delivery: {}",
+                    cancellation_reason(Some(&cancellation))
+                );
+                if handoff
+                    .as_ref()
+                    .is_some_and(|handoff| !handoff.unfinished())
+                {
+                    reason.push_str("; handoff declared done but settlement was not successful");
+                }
+                decoded.reason = Some(reason);
             }
         }
         let publication = TerminalPublication {
@@ -1556,6 +1600,23 @@ fn cancellation_reason(bytes: Option<&[u8]>) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+fn review_changes(role: Option<&str>, result: &str) -> bool {
+    role.is_some_and(|role| {
+        role == "reviewer"
+            || role == "review"
+            || role.starts_with("review.")
+            || role == "lens"
+            || role.starts_with("lens.")
+    }) && result
+        .split("\n```handoff")
+        .next()
+        .unwrap_or(result)
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.trim().eq_ignore_ascii_case("VERDICT: changes"))
+}
+
 #[cfg(test)]
 mod friction_tests {
     #[test]
@@ -1565,5 +1626,22 @@ mod friction_tests {
             "explicit_cancellation"
         );
         assert_eq!(super::cancellation_reason(Some(b"{}")), "unknown");
+    }
+
+    #[test]
+    fn changes_verdict_requires_review_role_and_final_verdict() {
+        assert!(super::review_changes(
+            Some("reviewer"),
+            "finding\nVERDICT: changes\n\n```handoff\n{}\n```"
+        ));
+        assert!(!super::review_changes(Some("writer"), "VERDICT: changes"));
+        assert!(!super::review_changes(
+            Some("reviewer"),
+            "> VERDICT: changes"
+        ));
+        assert!(!super::review_changes(
+            Some("reviewer"),
+            "VERDICT: changes\nmore"
+        ));
     }
 }
