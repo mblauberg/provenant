@@ -378,8 +378,9 @@ pub fn run_wait(
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: getppid has no preconditions and cannot fail.
-        let parent = unsafe { libc::getppid() };
+        // The pid the child must still have as its parent after fork.
+        // SAFETY: getpid has no preconditions and cannot fail.
+        let parent = unsafe { libc::getpid() };
         let hook = move || {
             // A child must not outlive a shim that was killed outright
             // (SIGKILL cannot be forwarded), or it would keep building
