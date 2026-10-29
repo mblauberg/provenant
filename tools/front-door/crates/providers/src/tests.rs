@@ -4967,6 +4967,7 @@ fn registration_org_refuses_a_different_org_and_upgrades_legacy_records() {
         hidden: false,
         order: None,
         headline: None,
+        settings: Default::default(),
     };
     assert_eq!(entry.check_org(Some("a")).unwrap().as_deref(), Some("a"));
     assert_eq!(entry.check_org(None).unwrap(), None);

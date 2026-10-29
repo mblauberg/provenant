@@ -54,16 +54,32 @@ pub enum Accounts {
         #[arg(long)]
         billing_anchor: Option<String>,
     },
-    /// Repair managed settings, hooks and skills in every registered account
+    /// Bring every registered account directory to the installed release
     ///
     /// Reapplies the installed release to each registered account directory and
-    /// to every recorded install target, so all of them hold the same managed
-    /// content. User-owned settings, edited hooks and credentials are never
-    /// touched. `provenant check install` reports the drift this repairs.
+    /// to every recorded install target. What is synced: the managed hooks, the
+    /// managed skills, the Fabric MCP entry, and the allow-listed keys of the
+    /// shared Claude `settings.json` (`[domains.accounts.shared_settings]`).
+    /// Never touched: identity and credentials, `.claude.json` identity fields,
+    /// settings keys outside the allow-list, and hooks you edited or removed.
+    /// A shared setting you edited in one account is reported as
+    /// `settings_conflict`, not overwritten. `provenant check install` reports
+    /// the drift this repairs.
     Sync {
         /// Plan the repair without changing anything
         #[arg(long)]
         dry_run: bool,
+        /// Pull this account's locally edited shared settings into the source
+        /// settings file, then sync every account (ACCOUNT as for `accounts set`)
+        #[arg(long, value_name = "ACCOUNT")]
+        adopt: Option<String>,
+        /// Overwrite locally edited shared settings with the source's values
+        #[arg(long)]
+        force_settings: bool,
+        /// Remove managed content from install targets whose account is no
+        /// longer registered
+        #[arg(long)]
+        prune_orphans: bool,
     },
     /// Set how an account appears in the menu bar
     ///
@@ -111,17 +127,24 @@ pub fn resolve(settings: &Settings, account: &str) -> Result<String, String> {
 /// accounts are separate configuration directories (`registered_account`:
 /// Claude and Codex) qualify. For the others the registered directory is an
 /// identity or ledger location, not where the client reads skills and settings.
+/// Directories are canonical (symlinks and `..` resolved), and two
+/// registrations of one directory count once.
 pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
+    let mut seen = std::collections::BTreeSet::new();
     settings
         .entries
         .values()
         .filter_map(|entry| {
             let spec = provenant_records::AdapterSpec::get(&entry.adapter)?;
-            spec.registered_account
+            if !spec.registered_account {
+                return None;
+            }
+            let home = provenant_config::shared_settings::canonical(&entry.directory);
+            seen.insert((spec.name, home.clone()))
                 .then(|| provenant_config::AccountHome {
                     harness: spec.id,
                     label: entry.label.clone(),
-                    home: entry.directory.clone(),
+                    home,
                 })
         })
         .collect()
@@ -237,6 +260,7 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             hidden: false,
             order: None,
             headline: None,
+            settings: Default::default(),
         };
         entry.registered().map_err(|e| e.to_string())?;
         // The config lock and held parent make the read/edit/replace one operation.
@@ -518,6 +542,7 @@ mod tests {
             hidden: false,
             order: None,
             headline: None,
+            settings: Default::default(),
         }
     }
 

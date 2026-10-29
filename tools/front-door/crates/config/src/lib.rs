@@ -29,6 +29,7 @@ pub use providers::{ProviderSettings, ProviderUpdate};
 mod project_binding;
 mod release;
 mod retention;
+pub mod shared_settings;
 pub use retention::{ProjectRetentionSettings, RetentionSettings};
 mod splice;
 #[cfg(test)]

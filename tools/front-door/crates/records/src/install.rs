@@ -74,6 +74,10 @@ pub struct ResolvedHarnessTarget {
     pub mcp_file: AbsolutePath,
     pub hook_file: Option<AbsolutePath>,
     pub instruction: Option<AbsolutePath>,
+    /// The account removed every managed hook on purpose, so a later install
+    /// does not add them again from its sibling accounts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hooks_relinquished: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

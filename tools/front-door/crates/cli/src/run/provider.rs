@@ -222,6 +222,7 @@ fn prepare_with(
                 hidden: false,
                 order: None,
                 headline: None,
+                settings: Default::default(),
             });
         }
     }
@@ -251,6 +252,7 @@ fn prepare_with(
                 hidden: false,
                 order: None,
                 headline: None,
+                settings: Default::default(),
             });
         }
     }
@@ -261,6 +263,7 @@ fn prepare_with(
             .enumerate()
             .map(|(i, entry)| (i.to_string(), entry))
             .collect(),
+        ..Default::default()
     }
     .with_derived_accounts();
     let entries: Vec<_> = settings.entries.into_values().collect();

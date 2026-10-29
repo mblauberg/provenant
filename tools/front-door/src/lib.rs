@@ -262,8 +262,8 @@ fn report_account_sync(
         }
     }
 }
-/// Registration is saved before this runs. Install the managed settings,
-/// hooks and skills into the new account directory, so the account matches the
+/// Registration is saved before this runs. Install the managed hooks, skills,
+/// MCP entry and shared settings into the new account directory, so it matches the
 /// others without a further command. A failure leaves the registration in place.
 fn sync_registered_account(
     globals: &provenant_cli::Globals,
@@ -272,9 +272,33 @@ fn sync_registered_account(
     match install::sync_after_registration(globals) {
         Ok(Some(outcome)) => {
             reply.human.push_str(&format!(
-                "synced managed content: {} changes\n",
+                "synced hooks, skills, the Fabric MCP entry and shared settings: {} changes\n",
                 outcome.actions.len()
             ));
+            for finding in &outcome.findings {
+                let path = finding
+                    .path
+                    .to_path_buf()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                let detail = finding
+                    .detail
+                    .as_ref()
+                    .map(|detail| format!(" ({detail})"))
+                    .unwrap_or_default();
+                reply
+                    .human
+                    .push_str(&format!("  {}: {path}{detail}\n", finding.rule));
+            }
+            if outcome
+                .findings
+                .iter()
+                .any(|finding| finding.rule == "settings_conflict")
+            {
+                reply.human.push_str(
+                    "  keep an account's value: `provenant accounts sync --adopt <account>`; use the source's: `provenant accounts sync --force-settings`\n",
+                );
+            }
             reply.result.data["sync"] = serde_json::json!({
                 "changes": outcome.actions.len(),
                 "findings": outcome.findings,
@@ -452,9 +476,18 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Hosts {
             command: Some(command),
         } => hosts::run(command, globals),
-        Command::Accounts(provenant_cli::accounts::Accounts::Sync { dry_run }) => {
-            install::run_sync(dry_run, globals)
-        }
+        Command::Accounts(provenant_cli::accounts::Accounts::Sync {
+            dry_run,
+            adopt,
+            force_settings,
+            prune_orphans,
+        }) => install::run_sync(
+            dry_run,
+            adopt.as_deref(),
+            force_settings,
+            prune_orphans,
+            globals,
+        ),
         Command::Accounts(command) => {
             run_edge(
                 &inv.leaf,

@@ -122,13 +122,16 @@ fn presence(home: &Path, config: &Path) -> CredentialPresence {
 /// Reads the receipt and the files it owns, never a credential. A configuration
 /// or receipt defect is reported in place of rows rather than failing doctor.
 fn managed(roots: &provenant_core::Roots, home: &Path) -> (Vec<Managed>, Option<String>) {
-    let accounts =
-        match provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS) {
-            Ok(config) => provenant_cli::accounts::homes(&config.domains.accounts),
-            Err(error) => return (Vec::new(), Some(error.to_string())),
-        };
+    let config = match provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+    {
+        Ok(config) => config,
+        Err(error) => return (Vec::new(), Some(error.to_string())),
+    };
     let mut targets = provenant_config::Targets::new(roots.clone(), home, &[]);
-    targets.accounts = accounts;
+    targets.accounts = provenant_cli::accounts::homes(&config.domains.accounts);
+    targets.shared_settings = crate::install::shared_settings(&config.domains.accounts, home)
+        .ok()
+        .flatten();
     match provenant_config::inspect_accounts(&targets) {
         Ok(statuses) => (
             statuses
@@ -283,7 +286,12 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                 }
                 text.push_str("; token validity unverified\n");
             }
-            for row in &report.managed {
+            // Without a receipt there is nothing to be out of step with.
+            for row in report
+                .managed
+                .iter()
+                .filter(|row| row.state != provenant_config::AccountState::NotInstalled)
+            {
                 let state = serde_json::to_value(row.state)
                     .ok()
                     .and_then(|v| v.as_str().map(str::to_owned))

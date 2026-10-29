@@ -104,6 +104,9 @@ fn get_with_limits(bytes: &[u8], sel: &str, limits: Limits) -> Result<Option<Jso
     if sel.starts_with("hook:") {
         return crate::hooks::get(bytes, sel);
     }
+    if let Some(key) = sel.strip_prefix(crate::shared_settings::PREFIX) {
+        return crate::splice::get_with_limits(bytes, &[key], limits);
+    }
     if let Some(expected) = sel.strip_prefix("array:") {
         let value = crate::splice::get_with_limits(bytes, &["instructions"], limits)?;
         let Some(array) = value.as_ref().and_then(Json::as_array) else {
@@ -152,6 +155,9 @@ fn set_with_limits(
 ) -> Result<Vec<u8>, InstallError> {
     if sel.starts_with("hook:") {
         return crate::hooks::set(bytes, sel, value);
+    }
+    if let Some(key) = sel.strip_prefix(crate::shared_settings::PREFIX) {
+        return crate::splice::set_with_limits(bytes, &[key], value, limits);
     }
     if let Some(expected) = sel.strip_prefix("array:") {
         let array = crate::splice::get_with_limits(bytes, &["instructions"], limits)?;
@@ -341,6 +347,8 @@ pub(crate) struct HarnessPlan {
     pub owned: Vec<OwnedEntry>,
     pub changes: BTreeMap<PathBuf, Vec<SelectorChange>>,
     pub findings: Vec<managed::InstallFinding>,
+    /// Targets whose account deliberately holds none of the managed hooks.
+    pub relinquished: BTreeSet<managed::TargetId>,
 }
 fn capture_one(
     path: &Path,
@@ -425,6 +433,16 @@ pub(crate) fn capture(
                 })
             });
         let hooks = targets.hooks || inherited_hooks;
+        let was_relinquished = previous.is_some_and(|receipt| {
+            receipt.harness_targets.iter().any(|recorded| {
+                recorded.hooks_relinquished
+                    && managed::recorded_id(recorded).is_ok_and(|id| id == target.id())
+            })
+        });
+        // An explicit `--hooks on` or off ends a relinquishment; otherwise it persists.
+        if was_relinquished && !targets.hooks && !targets.remove_hooks {
+            plan.relinquished.insert(target.id());
+        }
         if let Some(hook) = &target.hook_file
             && (hooks || targets.remove_hooks)
             && target.harness == Harness::Claude
@@ -437,6 +455,7 @@ pub(crate) fn capture(
             };
             let mut removed_changes = Vec::new();
             let mut inherited = BTreeSet::new();
+            let mut had_own_hooks = false;
             if let Some(previous) = previous {
                 for entry in &previous.entries {
                     if entry.harness != Some(target.harness)
@@ -445,6 +464,7 @@ pub(crate) fn capture(
                     {
                         continue;
                     }
+                    had_own_hooks = true;
                     if hooks && !targets.hooks && !entry_matches(&base, entry)? {
                         add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
                         continue;
@@ -483,11 +503,19 @@ pub(crate) fn capture(
             let (mut updated, mut changes, owned) = if hooks && target.harness == Harness::Claude {
                 // A target with no hooks of its own yet takes the full set its
                 // siblings own; an established target keeps what it relinquished.
-                let follows_siblings = inherited_hooks && inherited.is_empty();
+                // One that removed them all (`hooks_relinquished`) stays without.
+                let follows_siblings =
+                    inherited_hooks && inherited.is_empty() && !had_own_hooks && !was_relinquished;
                 let registration =
                     crate::hooks::register(&base, targets, &inherited, follows_siblings)?;
                 if registration.relinquished_modified {
                     add_finding(&mut plan.findings, "relinquished_modified_entry", hook)?;
+                }
+                if !targets.hooks
+                    && registration.owned.is_empty()
+                    && (had_own_hooks || was_relinquished)
+                {
+                    plan.relinquished.insert(target.id());
                 }
                 (registration.bytes, registration.changes, registration.owned)
             } else {
@@ -515,6 +543,78 @@ pub(crate) fn capture(
                     .entry(hook.clone())
                     .or_default()
                     .extend(changes);
+            }
+        }
+        if let Some(settings) = &targets.shared_settings
+            && target.harness == Harness::Claude
+            && let Some(hook) = &target.hook_file
+            && !same_file(hook, &settings.source_file)
+        {
+            let (old, mode) = match plan.files.get(hook) {
+                Some(Value::File { bytes, mode }) => (bytes.clone(), *mode),
+                _ => file(&capture_one(hook, entries)?, hook)?,
+            };
+            let wire = AbsolutePath::new(hook)?;
+            let previous_values: BTreeMap<String, Json> = previous
+                .into_iter()
+                .flat_map(|receipt| &receipt.entries)
+                .filter(|entry| entry.path == wire)
+                .filter_map(|entry| {
+                    let key = entry
+                        .selector
+                        .strip_prefix(crate::shared_settings::PREFIX)?;
+                    match &entry.expected {
+                        OwnedValue::Selector { value } => Some((key.to_owned(), value.clone())),
+                        _ => None,
+                    }
+                })
+                .collect();
+            let home = hook.parent().map(crate::shared_settings::canonical);
+            let desired = settings.desired(home.as_deref());
+            let synced = crate::shared_settings::plan(
+                &old,
+                &settings.keys,
+                &desired,
+                &previous_values,
+                targets.force_settings,
+            )?;
+            for key in &synced.conflicts {
+                plan.findings.push(managed::InstallFinding {
+                    rule: "settings_conflict".into(),
+                    detail: Some(crate::shared_settings::detail(
+                        &targets.accounts,
+                        hook.parent(),
+                        key,
+                    )),
+                    path: wire.clone(),
+                });
+            }
+            for (key, value) in synced.owned {
+                plan.owned.push(OwnedEntry {
+                    path: wire.clone(),
+                    harness: Some(target.harness),
+                    selector: format!("{}{key}", crate::shared_settings::PREFIX),
+                    expected: OwnedValue::Selector { value },
+                });
+            }
+            if synced.bytes != old {
+                // Existing bytes stay as they are; only a new file is laid out.
+                let updated = if old == b"{}\n" {
+                    crate::splice::pretty_json(&synced.bytes)?
+                } else {
+                    synced.bytes
+                };
+                plan.files.insert(
+                    hook.clone(),
+                    Value::File {
+                        bytes: updated,
+                        mode,
+                    },
+                );
+                plan.changes
+                    .entry(hook.clone())
+                    .or_default()
+                    .extend(synced.changes);
             }
         }
         if target.harness == Harness::Opencode {
@@ -558,6 +658,9 @@ pub(crate) fn capture(
     }
     Ok(plan)
 }
+fn same_file(a: &Path, b: &Path) -> bool {
+    crate::shared_settings::canonical(a) == crate::shared_settings::canonical(b)
+}
 fn safe_adoption(value: &Json) -> bool {
     let Some(obj) = value.as_object() else {
         return false;
@@ -580,6 +683,11 @@ pub(crate) fn permitted_selector(
         return Ok(
             target.harness == Harness::Claude && target.hook_file.as_ref() == Some(&entry.path)
         );
+    }
+    if let Some(key) = entry.selector.strip_prefix(crate::shared_settings::PREFIX) {
+        return Ok(target.harness == Harness::Claude
+            && target.hook_file.as_ref() == Some(&entry.path)
+            && crate::shared_settings::check_key(key).is_ok());
     }
     if entry.path != target.mcp_file {
         return Ok(false);
@@ -846,6 +954,7 @@ fn add_finding(
     {
         findings.push(managed::InstallFinding {
             rule: rule.into(),
+            detail: None,
             path,
         });
     }

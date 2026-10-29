@@ -233,10 +233,15 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
             let mut targets = Targets::new(roots.clone(), &home, &[]);
             // A configuration defect is `check config`'s finding. It must not
             // stop this check, which then has no registered accounts to compare.
-            targets.accounts =
+            if let Ok(config) =
                 provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)
-                    .map(|config| provenant_cli::accounts::homes(&config.domains.accounts))
-                    .unwrap_or_default();
+            {
+                targets.accounts = provenant_cli::accounts::homes(&config.domains.accounts);
+                targets.shared_settings =
+                    crate::install::shared_settings(&config.domains.accounts, &home)
+                        .ok()
+                        .flatten();
+            }
             let inspection = provenant_config::inspect_install(
                 &targets,
                 release.as_ref(),

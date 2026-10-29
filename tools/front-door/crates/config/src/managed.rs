@@ -177,6 +177,10 @@ pub struct Targets {
     /// Registered account directories, which `check install` expects to be
     /// recorded targets. Supplied only by the process edge.
     pub accounts: Vec<AccountHome>,
+    /// Allow-listed Claude settings kept identical across accounts.
+    pub shared_settings: Option<crate::shared_settings::SharedSettings>,
+    /// Overwrite locally edited shared settings instead of reporting them.
+    pub force_settings: bool,
     pub protected_roots: Vec<PathBuf>,
     pub(crate) configured_homes: BTreeSet<Harness>,
     pub(crate) configured_configs: BTreeSet<Harness>,
@@ -243,6 +247,8 @@ impl Targets {
             peer_agent_previous: None,
             hook_specs: Vec::new(),
             accounts: Vec::new(),
+            shared_settings: None,
+            force_settings: false,
             protected_roots: Vec::new(),
             configured_homes: BTreeSet::new(),
             configured_configs: BTreeSet::new(),
@@ -983,6 +989,7 @@ pub fn plan_install(
             } else if entry.selector == "gc-agent" {
                 snapshots.harness.findings.push(InstallFinding {
                     rule: "relinquished_modified_entry".into(),
+                    detail: None,
                     path: entry.path.clone(),
                 });
             }
@@ -1031,6 +1038,7 @@ pub fn plan_install(
                     .as_deref()
                     .map(AbsolutePath::new)
                     .transpose()?,
+                hooks_relinquished: snapshots.harness.relinquished.contains(&target.id()),
             },
         );
     }
@@ -1636,6 +1644,9 @@ fn snapshot_at_inspected(
 pub struct InstallFinding {
     pub rule: String,
     pub path: AbsolutePath,
+    /// What the rule names beyond the path, such as the setting in conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 #[cfg(test)]
 pub(crate) fn read_receipt(targets: &Targets) -> Result<Option<InstallReceipt>, InstallError> {
@@ -1695,11 +1706,13 @@ impl Decoded {
         if let Some(old_state) = &self.moved {
             findings.push(InstallFinding {
                 rule: "state_root_moved".into(),
+                detail: None,
                 path: AbsolutePath::new(old_state)?,
             });
         }
         findings.extend(self.stale.iter().map(|entry| InstallFinding {
             rule: "relocated_stale_entry".into(),
+            detail: None,
             path: entry.path.clone(),
         }));
         Ok(findings)
@@ -2088,6 +2101,7 @@ fn check_install_inspected(
     let Some(decoded) = read_receipt_inspected(targets, Some(evidence))? else {
         return Ok(vec![InstallFinding {
             rule: "missing_receipt".into(),
+            detail: None,
             path: AbsolutePath::new(&receipt_path)?,
         }]);
     };
@@ -2122,6 +2136,7 @@ fn check_install_inspected(
             } else {
                 findings.push(InstallFinding {
                     rule: "release_drift".into(),
+                    detail: None,
                     path: AbsolutePath::new(&release_path)?,
                 });
             }
@@ -2129,12 +2144,14 @@ fn check_install_inspected(
         Err(InstallError::Tampered(_)) | Err(InstallError::Manifest(_)) => {
             findings.push(InstallFinding {
                 rule: "release_drift".into(),
+                detail: None,
                 path: AbsolutePath::new(&release_path)?,
             });
         }
         Err(InstallError::Fs(error)) if error.is_not_found() => {
             findings.push(InstallFinding {
                 rule: "missing_release".into(),
+                detail: None,
                 path: AbsolutePath::new(&release_path)?,
             });
         }
@@ -2150,6 +2167,7 @@ fn check_install_inspected(
         {
             findings.push(InstallFinding {
                 rule: "source_digest".into(),
+                detail: None,
                 path: AbsolutePath::new(&receipt_path)?,
             });
         }
@@ -2183,6 +2201,7 @@ fn owned_entry_drift(
         if !matches {
             findings.push(InstallFinding {
                 rule: "owned_entry_drift".into(),
+                detail: None,
                 path: entry.path.clone(),
             });
         }
@@ -2232,14 +2251,22 @@ pub fn inspect_accounts(targets: &Targets) -> Result<Vec<AccountStatus>, Install
         None => Vec::new(),
     };
     let mut statuses = Vec::new();
+    // A finding belongs to the account whose directory is its longest prefix,
+    // as `check install` attributes it, so nested directories do not both claim it.
+    let owner = |path: &Path| {
+        targets
+            .accounts
+            .iter()
+            .filter(|account| path.starts_with(&account.home))
+            .max_by_key(|account| account.home.components().count())
+    };
     for account in &targets.accounts {
         let findings: Vec<_> = findings
             .iter()
             .filter(|finding| {
-                finding
-                    .path
-                    .to_path_buf()
-                    .is_ok_and(|path| path.starts_with(&account.home))
+                finding.path.to_path_buf().is_ok_and(|path| {
+                    owner(&path).is_some_and(|found| std::ptr::eq(found, account))
+                })
             })
             .cloned()
             .collect();
@@ -2281,6 +2308,7 @@ fn not_installed(
         0,
         InstallFinding {
             rule: "not_installed".into(),
+            detail: None,
             path: AbsolutePath::new(receipt_path)?,
         },
     );
@@ -2398,6 +2426,7 @@ pub fn uninstall(
                 } else {
                     findings.push(InstallFinding {
                         rule: "relinquished_modified_entry".into(),
+                        detail: None,
                         path: entry.path.clone(),
                     });
                 }
@@ -2430,6 +2459,7 @@ pub fn uninstall(
         } else {
             findings.push(InstallFinding {
                 rule: "relinquished_modified_entry".into(),
+                detail: None,
                 path: entry.path.clone(),
             });
         }

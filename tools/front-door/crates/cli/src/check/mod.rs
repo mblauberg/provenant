@@ -512,6 +512,14 @@ pub fn install_page(
                 account.label,
                     account.harness.spec().name
             ),
+            ("settings_drift", _) => format!(
+                "shared setting is out of step ({}); run `provenant accounts sync`",
+                finding.detail.as_deref().unwrap_or("unknown")
+            ),
+            ("settings_conflict", _) => format!(
+                "shared setting was edited locally ({}); run `provenant accounts sync --adopt <account>` to keep it or `--force-settings` to overwrite it",
+                finding.detail.as_deref().unwrap_or("unknown")
+            ),
             (_, Some(account)) => format!(
                 "account {} ({}): managed installation differs from its recorded identity",
                 account.label,

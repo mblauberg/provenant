@@ -15,6 +15,20 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub entries: std::collections::BTreeMap<String, Registration>,
+    /// Claude settings kept identical across account directories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_settings: Option<SharedSettings>,
+}
+/// `[domains.accounts.shared_settings]`. Both fields are optional: the source
+/// defaults to `~/.claude/settings.json` when it exists, the keys to
+/// `provenant_config::shared_settings::DEFAULT_KEYS`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +59,10 @@ pub struct Registration {
     /// Per-account headline override; absent follows the global choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headline: Option<provenant_quota::Headline>,
+    /// Shared Claude settings this account holds instead of the source's:
+    /// key to value, each key on the allow-list.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub settings: std::collections::BTreeMap<String, serde_json::Value>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +107,7 @@ impl Settings {
             entry.hidden = false;
             entry.order = None;
             entry.headline = None;
+            entry.settings.clear();
             let mut id = format!("{}-{key}", spec.name);
             while settings.entries.contains_key(&id) {
                 id.push('_');
@@ -96,6 +115,42 @@ impl Settings {
             settings.entries.insert(id, entry);
         }
         settings
+    }
+}
+const DENIED_KEY: &str =
+    "an identity, credential or hook key can never be synced; remove it from `keys` or `settings`";
+const NOT_ALLOWED: &str =
+    "a per-account `settings` key is not in `shared_settings.keys`; add it there first";
+impl Settings {
+    /// The allow-list, configured or default.
+    pub fn settings_keys(&self) -> Vec<String> {
+        match self.shared_settings.as_ref().and_then(|s| s.keys.as_ref()) {
+            Some(keys) => keys.clone(),
+            None => provenant_config::shared_settings::DEFAULT_KEYS
+                .map(str::to_owned)
+                .to_vec(),
+        }
+    }
+    /// Why the shared-settings configuration must be refused, if it must.
+    /// Identity, credential or hook keys in the allow-list, an override or an
+    /// `env` name; or an override of a key the allow-list does not name.
+    pub fn settings_error(&self) -> Option<&'static str> {
+        use provenant_config::shared_settings::{check_key, check_value};
+        let keys = self.settings_keys();
+        if keys.iter().any(|key| check_key(key).is_err()) {
+            return Some(DENIED_KEY);
+        }
+        for entry in self.entries.values() {
+            for (key, value) in &entry.settings {
+                if check_key(key).is_err() || check_value(key, value).is_err() {
+                    return Some(DENIED_KEY);
+                }
+                if !keys.contains(key) {
+                    return Some(NOT_ALLOWED);
+                }
+            }
+        }
+        None
     }
 }
 impl Registration {
@@ -137,6 +192,12 @@ impl DomainConfig for Settings {
             errors.push(SectionError {
                 field: "entries".into(),
                 code: "display",
+            });
+        }
+        if let Some(code) = self.settings_error() {
+            errors.push(SectionError {
+                field: "shared_settings".into(),
+                code,
             });
         }
         errors

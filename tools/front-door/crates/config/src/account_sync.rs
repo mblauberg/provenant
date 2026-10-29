@@ -3,6 +3,7 @@
 //! every registered account directory.
 use crate::inspection::InspectionEvidence;
 use crate::managed::{self, InstallError, InstallFinding, TargetId, Targets};
+use crate::shared_settings;
 use provenant_records::{AbsolutePath, Harness, InstallReceipt, OwnedValue};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -32,6 +33,7 @@ pub(crate) fn findings(
     let mut finding = |rule: &str, path: &Path| -> Result<(), InstallError> {
         findings.push(InstallFinding {
             rule: rule.into(),
+            detail: None,
             path: AbsolutePath::new(path)?,
         });
         Ok(())
@@ -77,7 +79,7 @@ pub(crate) fn findings(
         ) else {
             continue;
         };
-        if stale_targets.contains(&owner) {
+        if stale_targets.contains(&owner) || entry.selector.starts_with(shared_settings::PREFIX) {
             continue;
         }
         let content = match &entry.expected {
@@ -93,11 +95,30 @@ pub(crate) fn findings(
         union.entry(harness).or_default().insert(content.clone());
         owned.entry(owner).or_default().insert(content);
     }
+    let mut settings_drift = Vec::new();
+    if let Some(settings) = &targets.shared_settings {
+        for target in &live {
+            settings_findings(
+                &targets.accounts,
+                target,
+                settings,
+                receipt,
+                state_root,
+                evidence,
+                &mut settings_drift,
+            )?;
+        }
+    }
     for target in live {
         let id = managed::recorded_id(target)?;
+        // An account that removed every hook on purpose is not out of step.
+        let skips_hooks = target.hooks_relinquished;
         let have = owned.get(&id);
         for content in union.get(&target.harness).into_iter().flatten() {
             if have.is_some_and(|have| have.contains(content)) {
+                continue;
+            }
+            if skips_hooks && matches!(content, Content::Selector(s) if s.starts_with("hook:")) {
                 continue;
             }
             let path = match content {
@@ -114,5 +135,71 @@ pub(crate) fn findings(
             }
         }
     }
+    drop(finding);
+    findings.extend(settings_drift);
     Ok(findings)
+}
+
+/// `settings_drift` where a Claude target lacks, or holds an older value of,
+/// a shared key, and `settings_conflict` where its value was edited locally.
+/// Each names the key. The source account's own file is never judged.
+fn settings_findings(
+    accounts: &[managed::AccountHome],
+    target: &provenant_records::ResolvedHarnessTarget,
+    settings: &shared_settings::SharedSettings,
+    receipt: &InstallReceipt,
+    state_root: &Path,
+    evidence: &mut InspectionEvidence,
+    findings: &mut Vec<InstallFinding>,
+) -> Result<(), InstallError> {
+    let Some(hook) = target
+        .hook_file
+        .as_ref()
+        .filter(|_| target.harness == Harness::Claude)
+    else {
+        return Ok(());
+    };
+    let path = hook.to_path_buf()?;
+    if shared_settings::canonical(&path) == shared_settings::canonical(&settings.source_file) {
+        return Ok(());
+    }
+    let home = path.parent().map(shared_settings::canonical);
+    let desired = settings.desired(home.as_deref());
+    let bytes = match managed::snapshot_scoped_inspected(&path, state_root, Some(evidence))? {
+        Some(managed::Snapshot {
+            value: managed::Value::File { bytes, .. },
+            ..
+        }) => bytes,
+        _ => b"{}".to_vec(),
+    };
+    for (key, want) in &desired {
+        let current = crate::splice::get(&bytes, &[key.as_str()])?;
+        if current.as_ref() == Some(want) {
+            continue;
+        }
+        let last =
+            receipt
+                .entries
+                .iter()
+                .find_map(|entry| match (&entry.expected, entry.path == *hook) {
+                    (OwnedValue::Selector { value }, true)
+                        if entry.selector.strip_prefix(shared_settings::PREFIX) == Some(key) =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                });
+        let rule = match (&current, last) {
+            (None, Some(_)) => continue,
+            (Some(have), Some(last)) if have != last => "settings_conflict",
+            (Some(_), None) => "settings_conflict",
+            _ => "settings_drift",
+        };
+        findings.push(InstallFinding {
+            rule: rule.into(),
+            detail: Some(shared_settings::detail(accounts, path.parent(), key)),
+            path: hook.clone(),
+        });
+    }
+    Ok(())
 }
