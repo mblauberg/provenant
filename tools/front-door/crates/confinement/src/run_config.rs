@@ -2,7 +2,7 @@
 //! paths, and the repository paths a writer may change without forcing review.
 use crate::permissions::{PathGrant, PathScope, is_credential_root};
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
-use provenant_config::{DomainConfig, DomainSection, SectionError};
+use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -18,6 +18,7 @@ pub const DEFAULT_REVIEW_EXEMPT: [&str; 4] = [
 ];
 const DEFAULTS: &str = r#"writer_writes = []
 review_exempt = ["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock", ".tracker-input"]
+push_conflict_markers = true
 
 [projects]
 "#;
@@ -188,8 +189,15 @@ fn project_key(key: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
-pub const SECTION: DomainSection =
-    DomainSection::new::<RunConfig>("run", |_| DEFAULTS).with_boundary_checks();
+pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("push_conflict_markers", "bool"),
+    FieldMetadata::new("writer_writes", "array"),
+    FieldMetadata::new("review_exempt", "array"),
+    FieldMetadata::new("projects.{project}.review_exempt", "array"),
+];
+pub const SECTION: DomainSection = DomainSection::new::<RunConfig>("run", |_| DEFAULTS)
+    .with_boundary_checks()
+    .with_fields(FIELD_METADATA);
 
 #[cfg(test)]
 mod tests {

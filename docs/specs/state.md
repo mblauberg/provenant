@@ -45,6 +45,52 @@ provider signal.
 
 ## Records
 
+### Owner change generations
+
+Owners publish local invalidations in `changes.json` in the state root after
+committing inbox, board, chair summary or log, quota, and configuration changes.
+`provenant console changes --json` reads this small signal without opening the
+owner databases. Pass its `generations` object as JSON to `--since` to compare:
+`changed` contains true or false for comparable generations and null for an
+unknown value or reset. Unknown requires a full bounded re-read. File events
+are hints; watch the state directory as well as the file and reattach watches
+after replacement or directory recreation, watching an existing ancestor when
+the state directory is absent. Remote freshness remains the CLI's peer reads,
+explicit refresh and slow bounded fallback.
+The signal is a hint and never part of the commit. An owner commits first, then
+bumps. A failed or skipped bump does not fail the write, which still reports
+success. The first failure per process is printed once to stderr, and a later
+committed write publishes a fresh generation.
+- Watch window: watchers coalesce file events over 250 ms. A commit in any scope
+  is visible to a watcher on the state directory within that window.
+- Null-on-busy read: a read never waits. If a writer holds the signal lock, or
+  the entry is stray, the read returns null generations (unknown) and the client
+  does a full bounded re-read.
+- Lock: a bump takes the signal lock with five attempts 10 ms apart (about 50 ms)
+  and skips the bump on timeout. One bump covers several scopes with one lock
+  and one write.
+- Stray entries: a symlink, hard link, foreign owner, group- or world-writable
+  mode, or non-regular entry at the signal name is unlinked and recreated by the
+  next bump. Links are never written through. The new file starts a new epoch,
+  so readers see a reset.
+- No fsync: the signal is written without fsync. After a power loss it can roll
+  back to an earlier generation, so a client that compares for equality could
+  miss a change until its next full re-read. The owner's commit is already
+  durable.
+- Scopes: Inbox and Board bump on each Fabric commit, Quota on each committed
+  quota write, and Configuration on each config edit. Chair bumps on log appends
+  and prunes, and on saves by a chair-bound session store only. Other session
+  saves do not bump Chair.
+- Cost: `cargo test -p provenant-os --lib signal_bump_cost -- --ignored --nocapture`
+  measured 100 single-scope bumps in about 8 ms and 100 two-scope bumps in about
+  16 ms on macOS. The fsynced single-scope bumps measured 508 ms per 100 before
+  this change, so about 5 ms each.
+- Owner: `crates/os/src/changes.rs`, with bumps at each committing owner
+- Test: `crates/cli/src/console.rs::changes_reports_unknown_and_comparison`;
+  `crates/fabric-store/src/tests.rs::signal_failure_reports_a_committed_fabric_write`;
+  `crates/config/src/tests.rs::config_edit_commits_when_the_change_signal_cannot_publish`;
+  `crates/workflow/src/session.rs::session_save_without_chair_identity_does_not_signal_chair`
+
 ### Strict, bounded records
 
 Stored records are typed serde models with `schema_version`, closed enums and

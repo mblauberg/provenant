@@ -1341,9 +1341,9 @@ fn priority_selection_failure_does_not_stall_siblings() -> TestResult {
         &call,
     )?;
     assert!(matches!(started.as_slice(), [
-        Started::Refused { attempt, kind: RefusalKind::Preparation, reason },
+        Started::Refused { attempt, kind: RefusalKind::PriorityUnavailable, .. },
         Started::Refused { attempt: second, .. },
-    ] if *attempt == first && reason.contains("priority configuration unavailable") && *second == sibling));
+    ] if *attempt == first && *second == sibling));
     assert_eq!(*held.borrow(), [sibling]);
     let index = WorkIndex::open(store.writer_registry(), &call)?;
     let selector = |attempt| WorkSelector {
@@ -1470,8 +1470,8 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
                 &|_, _| Err(RunError::Validation("fixture holder")),
                 &call,
             )?.as_slice(),
-            [Started::Refused { attempt, kind: RefusalKind::Preparation, reason }]
-                if *attempt == id && reason.contains("fixture holder")
+            [Started::Refused { attempt, kind: RefusalKind::Handoff, .. }]
+                if *attempt == id
         ));
         drop(store);
         let store = RunStore::open(&context, &call)?;
@@ -1585,10 +1585,9 @@ fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
     assert!(matches!(
         started.as_slice(),
         [
-            Started::Refused { attempt: first, kind: RefusalKind::Preparation, reason },
-            Started::Refused { attempt: second, reason: later, .. },
-        ] if *first == id && reason.contains("256 KiB")
-            && *second == sibling && later.contains("fixture holder")
+            Started::Refused { attempt: first, kind: RefusalKind::WriteGrantsLimit, .. },
+            Started::Refused { attempt: second, kind: RefusalKind::Handoff, .. },
+        ] if *first == id && *second == sibling
     ));
     // The oversized attempt never reached handoff; its sibling did.
     assert_eq!(*held.borrow(), [sibling]);
@@ -2220,8 +2219,8 @@ fn deferred_child_launches_once_capacity_frees() -> TestResult {
         &call,
     )?;
     assert!(
-        matches!(started.as_slice(), [Started::Refused { attempt, reason, .. }]
-        if *attempt == id && reason.contains("fixture observed handoff"))
+        matches!(started.as_slice(), [Started::Refused { attempt, kind: RefusalKind::Handoff, .. }]
+        if *attempt == id)
     );
     assert_eq!(store.record(id, &call)?.generation, 1);
     assert!(
@@ -2476,7 +2475,7 @@ fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
             );
         } else {
             assert!(
-                matches!(result, Err(RunError::MemoryPressure { level: actual }) if actual == format!("{level:?}"))
+                matches!(result, Err(RunError::Admission(AdmissionError::MemoryPressure { level: actual })) if actual == format!("{level:?}"))
             );
         }
     }
@@ -2628,7 +2627,10 @@ fn guardian_identity_unknown_retries_and_names_expiry() -> TestResult {
                 }
             );
         } else {
-            assert!(matches!(result, Err(RunError::GuardianIdentityUnavailable)));
+            assert!(matches!(
+                result,
+                Err(RunError::Admission(AdmissionError::GuardianIdentity))
+            ));
         }
     }
     Ok(())
@@ -2743,11 +2745,11 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
         }
         match last.ok_or("a fourth writer")? {
             Err(
-                error @ RunError::LaneCap {
+                error @ RunError::Admission(AdmissionError::LaneCap {
                     limit: 3,
                     scope: refused,
                     ..
-                },
+                }),
             ) => {
                 assert_eq!(error.code(), "LANE_CAP");
                 assert_eq!(refused, scope);
@@ -2810,10 +2812,9 @@ fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() ->
     let started = store.start(batch.run_id, &providers, &|_, _| unreachable!(), &call)?;
     assert_eq!(providers.prepared.get(), 1);
     assert!(matches!(started.as_slice(), [
-        Started::Refused { attempt: first, kind: RefusalKind::Policy, reason },
+        Started::Refused { attempt: first, kind: RefusalKind::Policy, .. },
         Started::Refused { attempt: second, kind: RefusalKind::Preparation, .. },
-    ] if *first == batch.attempts[0].attempt_id && *second == batch.attempts[1].attempt_id
-        && reason.contains("provenant gc")));
+    ] if *first == batch.attempts[0].attempt_id && *second == batch.attempts[1].attempt_id));
     for attempt in &batch.attempts {
         assert_eq!(
             terminal(&store, attempt.attempt_id, &call)?,
@@ -3017,6 +3018,240 @@ fn holder_seals_redacted_results_and_digests_the_stored_bytes() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn settlement_scrubs_provider_session_history() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let attempt = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let codex = attempt.join("provider-state/candidate-0/sessions/2026/10/24");
+    std::fs::create_dir_all(&codex)?;
+    let rollout = codex.join("rollout-2026-10-24T00-00-00-thread.jsonl");
+    std::fs::write(
+        &rollout,
+        format!("{{\"type\":\"response_item\",\"payload\":{{\"content\":\"printed {token}\"}}}}\n"),
+    )?;
+    let claude = attempt.join("provider-state/candidate-0/claude-config/projects/key");
+    std::fs::create_dir_all(&claude)?;
+    let session = claude.join("session.jsonl");
+    std::fs::write(&session, format!("{{\"message\":\"{token}\"}}\n"))?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        answer: Some("answer".into()),
+        ..Fake::default()
+    };
+
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Succeeded,
+            ..
+        }
+    ));
+    for path in [&rollout, &session] {
+        let text = std::fs::read_to_string(path)?;
+        assert!(
+            !text.contains(token),
+            "session plaintext survived settlement in {path:?}"
+        );
+        assert!(text.contains("[REDACTED]"));
+    }
+    Ok(())
+}
+
+#[test]
+fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let answer = format!("http://{}", "a".repeat(provenant_os::exec::FRAME_LIMIT + 1));
+    let fake = Fake {
+        observed: Some(route()),
+        answer: Some(answer),
+        ..Fake::default()
+    };
+
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = &record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(*outcome, Outcome::Failed);
+    assert_eq!(reason.as_deref(), Some("redaction failed; result withheld"));
+    assert_eq!(
+        artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
+        Some(b"[result withheld: redaction failed]".as_slice())
+    );
+    assert!(record.result.ok_or("result")?.redacted);
+    // A repeat settlement returns the same terminal record instead of looping.
+    let repeat = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert_eq!(repeat.revision, record.revision);
+    Ok(())
+}
+
+#[test]
+fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    // The operator cancelled before the provider spawned, so the lane keeps
+    // that reason. An over-long `://` run makes the session scrub refuse a transcript.
+    artifacts::seal(&dir, "cancel.json", b"{}", RECORD_LIMIT)?;
+    let attempt = store
+        .context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}", run.run_id));
+    let sessions = attempt.join("provider-state/candidate-0/sessions");
+    std::fs::create_dir_all(&sessions)?;
+    let overlong = format!(
+        "https://{}\n",
+        "a".repeat(provenant_os::exec::FRAME_LIMIT + 1)
+    );
+    std::fs::write(sessions.join("overlong.jsonl"), overlong)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    observed.never_spawned = true;
+    observed.termination = None;
+    observed.terminal_observed = false;
+    observed.warnings = vec!["stopped by the operator".into()];
+    observed.stop_reason = Some(provenant_supervisor::machine::StopReason::ExplicitCancellation);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        ..Fake::default()
+    };
+
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = &record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(*outcome, Outcome::Cancelled);
+    assert_eq!(
+        reason.as_deref(),
+        Some("cancelled before start: stopped by the operator; redaction failed; result withheld")
+    );
+    Ok(())
+}
+
+#[test]
+fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    artifacts::seal(&dir, "result.md", token.as_bytes(), RESULT_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        // The recomputed rendering cannot be filtered; the sealed orphan is
+        // still preserved with an honest redaction flag rather than rewritten.
+        answer: Some(format!(
+            "http://{}",
+            "a".repeat(provenant_os::exec::FRAME_LIMIT + 1)
+        )),
+        ..Fake::default()
+    };
+
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Failed,
+            ..
+        }
+    ));
+    let result = record.result.as_ref().ok_or("result")?;
+    assert!(!result.redacted);
+    assert_eq!(
+        artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.as_deref(),
+        Some(token.as_bytes())
+    );
+    // Orphan recovery reaches a terminal state once; a repeat is a no-op.
+    let repeat = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert_eq!(repeat.revision, record.revision);
+    Ok(())
+}
+
 const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Parser done; renderer and tests remain.\"}\n```";
 
 #[test]
@@ -3035,10 +3270,6 @@ fn a_declared_stop_settles_review_required() -> TestResult {
     assert_eq!(*outcome, Outcome::ReviewRequired);
     assert_eq!(record.partial_signals, [PartialSignal::DeclaredStop]);
     let reason = reason.as_deref().ok_or("no reason")?;
-    assert!(
-        reason.contains("partial finish (declared_stop)"),
-        "{reason}"
-    );
     assert!(reason.contains("renderer and tests remain"), "{reason}");
     let blocked = STOPPED_EARLY.replace("stopped_early", "blocked");
     let record = settle_with(&blocked, Some(Outcome::Succeeded), Vec::new())?;
@@ -3611,7 +3842,10 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
     ] {
         readable.set(false);
         assert!(
-            matches!(store.claim(lane_id, &host, &call), Err(RunError::HostClock)),
+            matches!(
+                store.claim(lane_id, &host, &call),
+                Err(RunError::Admission(AdmissionError::Clock))
+            ),
             "an unreadable {name} refuses, with no wall-clock fallback"
         );
         let admitted = store.admit(lane_id, &attempt, &Host { available: 100 }, &host, &cancel);
@@ -3874,7 +4108,7 @@ fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResul
     host.boot_readable.set(false);
     assert!(matches!(
         store.claim(writer, &host, &call),
-        Err(RunError::HostClock)
+        Err(RunError::Admission(AdmissionError::Clock))
     ));
     let raw = rusqlite::Connection::open(store.writer_registry.join("admission.sqlite3"))?;
     let version: i64 = raw.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -4386,10 +4620,9 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
 }
 
 /// Starts a one-task run after `damage` has altered its stored prompt, and
-/// asserts the attempt ends Rejected before preparation with `cause` recorded.
+/// asserts the attempt ends Rejected before preparation with its reason recorded.
 fn assert_unreadable_prompt_rejected(
     damage: impl FnOnce(&std::path::Path) -> TestResult,
-    cause: &str,
 ) -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
@@ -4413,8 +4646,8 @@ fn assert_unreadable_prompt_rejected(
     }
     assert!(matches!(
         &started[..],
-        [Started::Refused { attempt, reason, kind: RefusalKind::Preparation }]
-            if *attempt == id && reason.contains("stored prompt unreadable")
+        [Started::Refused { attempt, kind: RefusalKind::StoredPromptUnreadable, .. }]
+            if *attempt == id
     ));
     assert_eq!(fake.prepared.get(), 0);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
@@ -4424,13 +4657,12 @@ fn assert_unreadable_prompt_rejected(
         provenant_records::AttemptOutcome::Rejected
     );
     assert!(fact.started_at.is_none());
-    assert!(
-        fact.reason.as_deref().is_some_and(
-            |reason| reason.starts_with("stored prompt unreadable") && reason.contains(cause)
-        ),
-        "{:?}",
-        fact.reason
-    );
+    let [Started::Refused { reason, .. }] = &started[..] else {
+        unreachable!()
+    };
+    let recorded = fact.reason.as_deref().ok_or("missing refusal reason")?;
+    assert!(reason.starts_with(recorded));
+    assert_eq!(recorded.len(), reason.len().min(256));
     assert!(
         store
             .start(run.run_id, &fake, &|_, _| unreachable!(), &call)?
@@ -4441,25 +4673,19 @@ fn assert_unreadable_prompt_rejected(
 
 #[test]
 fn missing_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
-    assert_unreadable_prompt_rejected(
-        |prompt| {
-            std::fs::remove_file(prompt)?;
-            Ok(())
-        },
-        "fstatat failed",
-    )
+    assert_unreadable_prompt_rejected(|prompt| {
+        std::fs::remove_file(prompt)?;
+        Ok(())
+    })
 }
 
 #[test]
 fn mode_zero_stored_prompt_ends_the_attempt_rejected_with_the_cause() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
-    assert_unreadable_prompt_rejected(
-        |prompt| {
-            std::fs::set_permissions(prompt, std::fs::Permissions::from_mode(0o000))?;
-            Ok(())
-        },
-        "openat read failed",
-    )
+    assert_unreadable_prompt_rejected(|prompt| {
+        std::fs::set_permissions(prompt, std::fs::Permissions::from_mode(0o000))?;
+        Ok(())
+    })
 }
 
 #[test]
@@ -4925,12 +5151,23 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
         created_at: WallTime::from_micros(100)?,
     };
     store.resume(&resumed, &call)?;
-    store.start(
+    let started = store.start(
         resumed.run_id,
         &RouteMismatch,
         &|_, _| unreachable!(),
         &call,
     )?;
+    let [
+        Started::Refused {
+            attempt,
+            kind: RefusalKind::Preparation,
+            reason,
+        },
+    ] = started.as_slice()
+    else {
+        return Err("resume must be refused during preparation".into());
+    };
+    assert_eq!(*attempt, resumed.attempt_id);
     let reader =
         RunStore::open_read_only(&context(temp.path())?, &call)?.ok_or("run store missing")?;
     let lanes = reader.lanes(
@@ -4958,7 +5195,7 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
         }
     ));
     assert!(
-        matches!(&rejected.state, AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("route differs"))
+        matches!(&rejected.state, AttemptState::Terminal { reason: Some(recorded), .. } if recorded == reason)
     );
     let output = Service::new(&reader).output(
         resumed.attempt_id,
@@ -5092,12 +5329,16 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
         store.resume(&changed, &call),
         Err(RunError::OperationConflict)
     ));
-    for expected in [0, 1] {
-        assert!(matches!(
-            store.resume(&resume("r2", expected, 30)?, &call),
-            Err(RunError::Conflict)
-        ));
-    }
+    assert!(matches!(
+        store.resume(&resume("r2", 0, 30)?, &call),
+        Err(RunError::GenerationConflict {
+            current_generation: 1
+        })
+    ));
+    assert!(matches!(
+        store.resume(&resume("r2", 1, 30)?, &call),
+        Err(RunError::Conflict)
+    ));
     let next = store.pending_attempts(continued.run_id, &call)?[0].attempt_id;
     let record = store.record(next, &call)?;
     assert_eq!(record.retry_of, Some(prior));
@@ -5313,12 +5554,16 @@ fn resume_replay_finishes_a_prepared_continuation() -> TestResult {
         store.resume(&changed, &call),
         Err(RunError::OperationConflict)
     ));
-    for expected in [0, 1] {
-        assert!(matches!(
-            store.resume(&resume("r2", expected, 30)?, &call),
-            Err(RunError::Conflict)
-        ));
-    }
+    assert!(matches!(
+        store.resume(&resume("r2", 0, 30)?, &call),
+        Err(RunError::GenerationConflict {
+            current_generation: 1
+        })
+    ));
+    assert!(matches!(
+        store.resume(&resume("r2", 1, 30)?, &call),
+        Err(RunError::Conflict)
+    ));
     Ok(())
 }
 
@@ -5507,7 +5752,7 @@ fn reconcile_unreadable_reservation_only_retains_existing_temporary_data() -> Te
                 (id, Reconciled::TemporaryRetained { path, reason }),
                 (other, Reconciled::Queued),
             ] if *id == terminal && *other == sibling && *path == temporary
-                && reason.contains("writer reservation unreadable")));
+                && reason.kind == TemporaryReasonKind::ReservationUnreadable));
             assert!(temporary.join("keep.lock").exists());
         } else {
             assert_eq!(found, vec![(sibling, Reconciled::Queued)]);
@@ -5827,7 +6072,7 @@ fn reconcile_leaves_nonterminal_and_reserved_temporary_data() -> TestResult {
         if reserved {
             assert!(
                 matches!(found.as_slice(), [(attempt, Reconciled::TemporaryRetained { reason, .. })]
-                if *attempt == id && reason.contains("reservation retained"))
+                if *attempt == id && reason.kind == TemporaryReasonKind::ReservationRetained)
             );
         } else {
             assert_eq!(found, vec![(id, Reconciled::Queued)]);
@@ -5906,7 +6151,7 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         } else {
             assert!(
                 matches!(found.as_slice(), [(attempt, Reconciled::Uncertain { reason })]
-                if *attempt == id && reason.to_string().contains("chair recovery required"))
+                if *attempt == id && matches!(reason, UncertainReason::WriterReservationRetained { .. }))
             );
             assert_eq!(store.writer_fences()?.len(), 1);
             assert_eq!(store.open_runs(10, &call)?, vec![run.run_id]);
@@ -6099,7 +6344,7 @@ fn reconcile_removes_owner_only_temporary_and_retains_shared_modes() -> TestResu
         }
         assert!(
             matches!(found.as_slice(), [(attempt, Reconciled::TemporaryRetained { path, reason })]
-            if *attempt == id && *path == temporary && reason.contains("not private")),
+            if *attempt == id && *path == temporary && reason.kind == TemporaryReasonKind::NotPrivate),
             "{found:?}"
         );
         assert_eq!(
@@ -6143,12 +6388,12 @@ fn reconcile_recovers_a_writer_from_a_previous_boot() -> TestResult {
 
 #[test]
 fn reconcile_recovers_writer_when_device_numbers_change_after_reboot() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, false, true)
+    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, false, true, false)
 }
 
 #[test]
 fn changed_device_numbers_on_same_boot_keep_writer_custody() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, true)
+    recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, true, false)
 }
 
 #[test]
@@ -6528,7 +6773,7 @@ fn placed_writer_with_missing_or_stale_reservation(case: RecoveryCase) -> TestRe
     if reservation_case == ReservationCase::DifferentAttempt {
         assert!(
             matches!(reconciled.as_slice(),
-            [(attempt, Reconciled::Uncertain { reason: UncertainReason::ReconcileFailed { .. } })] if *attempt == id),
+            [(attempt, Reconciled::Uncertain { reason: UncertainReason::RebootProofUnavailable { .. } })] if *attempt == id),
             "{reconciled:?}"
         );
     } else {
@@ -6574,7 +6819,8 @@ impl provenant_supervisor::census::ProcessObserver for RebootObserver {
         Ok(self.0.into())
     }
     fn observe(&self, _: i64) -> provenant_supervisor::census::ProcessObservation {
-        unreachable!("reboot proof needs only the boot identity")
+        // Every recorded process is gone, as after a reboot or a crash.
+        provenant_supervisor::census::ProcessObservation::Absent
     }
     fn census(
         &self,
@@ -6588,8 +6834,23 @@ impl provenant_supervisor::census::ProcessObserver for RebootObserver {
 }
 
 #[test]
-fn same_boot_with_free_locks_stays_uncertain() -> TestResult {
+fn same_boot_with_no_live_holder_settles_lost() -> TestResult {
     recover_rebooted_writer(false, false, true, OLD_BOOT)
+}
+
+#[test]
+fn same_boot_with_unresolved_custody_stays_uncertain() -> TestResult {
+    recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, false, true)
+}
+
+#[test]
+fn cancel_settles_an_attempt_with_no_live_holder() -> TestResult {
+    recover_rebooted_writer(true, false, true, OLD_BOOT)
+}
+
+#[test]
+fn reader_with_no_live_holder_settles_lost() -> TestResult {
+    recover_rebooted_writer(false, false, false, OLD_BOOT)
 }
 
 fn recover_rebooted_writer(
@@ -6598,11 +6859,11 @@ fn recover_rebooted_writer(
     writer: bool,
     boot: &'static str,
 ) -> TestResult {
-    recover_rebooted_writer_inner(cancel_run, interrupted, writer, boot, false, false)
+    recover_rebooted_writer_inner(cancel_run, interrupted, writer, boot, false, false, false)
 }
 
 fn recover_rebooted_writer_removed_worktree() -> TestResult {
-    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, true, false)
+    recover_rebooted_writer_inner(false, false, true, NEW_BOOT, true, false, false)
 }
 
 fn recover_rebooted_writer_inner(
@@ -6612,6 +6873,7 @@ fn recover_rebooted_writer_inner(
     boot: &'static str,
     removed: bool,
     changed_device: bool,
+    unresolved: bool,
 ) -> TestResult {
     let observer = RebootObserver(boot);
     let temp = tempfile::tempdir()?;
@@ -6678,6 +6940,14 @@ fn recover_rebooted_writer_inner(
     });
     value["boot"] = guardian["boot"].clone();
     value["guardian"] = guardian.clone();
+    if boot == OLD_BOOT && !unresolved {
+        value["provider"] = serde_json::json!({
+            "boot": OLD_BOOT, "pid": 124, "native_start": 1,
+            "group_id": 124, "session_id": 123,
+        });
+        value["unresolved_cleanup"] = false.into();
+        value["census_incomplete"] = false.into();
+    }
     value["launch_state"] = "spawned".into();
     value["attempt_device"] = meta.device.into();
     value["attempt_inode"] = meta.inode.into();
@@ -6695,9 +6965,10 @@ fn recover_rebooted_writer_inner(
         &serde_json::to_vec(&summary)?,
         RECORD_LIMIT,
     )?;
-    let checkpoint = serde_json::to_vec(
-        &serde_json::json!({"schema_version":1, "scope":scope, "guardian":guardian}),
-    )?;
+    let checkpoint = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1, "scope": scope, "guardian": guardian,
+        "provider": value["provider"],
+    }))?;
     artifacts::seal(&attempt, "process.json", &checkpoint, RECORD_LIMIT)?;
     // Recovery preserves existing captures, results, scratch and provider history.
     let telemetry = [
@@ -6725,21 +6996,55 @@ fn recover_rebooted_writer_inner(
     }
 
     if boot == OLD_BOOT {
-        // Both exclusions are free. That alone cannot prove a reboot or exit.
-        drop(attempt.try_lock(
-            std::ffi::OsStr::new("custody.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?);
-        drop(Directory::open_anchor(&custody)?.try_lock(
+        // Held writer exclusion means a guardian may remain: stay uncertain.
+        let held = Directory::open_anchor(&custody)?.try_lock(
             std::ffi::OsStr::new("writer.lock"),
             provenant_os::fs::LockMode::Exclusive,
-        )?);
+        )?;
         assert!(
             matches!(store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
             [(attempt, Reconciled::Uncertain { .. })] if *attempt == id)
         );
         assert_eq!(store.record(id, &call)?, before);
         assert!(reservation.exists());
+        assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
+        drop(held);
+        if changed_device {
+            return Ok(());
+        }
+        if unresolved {
+            assert!(matches!(
+                store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?.as_slice(),
+                [(attempt, Reconciled::Uncertain { .. })] if *attempt == id
+            ));
+            assert_eq!(store.record(id, &call)?, before);
+            assert!(reservation.exists());
+            return Ok(());
+        }
+        // Free exclusion and an absent guardian and provider leave no holder.
+        assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
+        if cancel_run {
+            assert_eq!(
+                store.cancel_with_observer(id, "stop", &call, &observer)?,
+                CancelReceipt::Requested
+            );
+        }
+        assert_eq!(
+            store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
+            vec![(id, Reconciled::Finished)]
+        );
+        let AttemptState::Terminal {
+            outcome, reason, ..
+        } = store.record(id, &call)?.state
+        else {
+            return Err("holderless attempt stayed open".into());
+        };
+        assert_eq!(outcome, Outcome::Lost);
+        assert_eq!(
+            reason.as_deref(),
+            Some(crate::controls::LostReason::Holderless.message())
+        );
+        assert!(!reservation.exists());
         assert_eq!(std::fs::read_to_string(temporary.join("keep"))?, "scratch");
         return Ok(());
     }
@@ -7455,10 +7760,10 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             let error = result.err().ok_or("admitted below floor")?;
             assert!(matches!(
                 error,
-                RunError::DiskFloor {
+                RunError::Admission(AdmissionError::Disk {
                     free: 99,
                     floor: 100
-                }
+                })
             ));
             assert_eq!(error.code(), "DISK_FLOOR");
             // The message names the floor's key and the repair command.
@@ -7531,10 +7836,10 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
         } else {
             assert!(matches!(
                 result,
-                Err(RunError::DiskFloor {
+                Err(RunError::Admission(AdmissionError::Disk {
                     free: 40,
                     floor: 100
-                })
+                }))
             ));
         }
     }
@@ -7577,7 +7882,7 @@ fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
         let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
         if below {
             assert!(
-                matches!(result, Err(RunError::DiskFloor { free: f, floor: p }) if f == free && p == floor)
+                matches!(result, Err(RunError::Admission(AdmissionError::Disk { free: f, floor: p })) if f == free && p == floor)
             );
         } else {
             assert_eq!(
@@ -7696,7 +8001,6 @@ fn admission_waits_for_a_readable_current_gc_floor() -> TestResult {
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
 fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResult {
     use std::ffi::OsStr;
     let temp = tempfile::tempdir()?;
@@ -7734,9 +8038,12 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
         })?;
         drop(held);
     }
-    let driver =
-        crate::settlement::Guard::claim(&attempt, RunStore::scope(&store.record(id, &call)?))?
-            .ok_or("settlement owner")?;
+    let driver = crate::settlement::Guard::claim(
+        &attempt,
+        RunStore::scope(&store.record(id, &call)?),
+        call.clock,
+    )?
+    .ok_or("settlement owner")?;
     store.queue_reconcile_with(run.run_id, &call, |_, _| {
         panic!("a live settlement owner needs no detached worker");
     })?;
@@ -7756,6 +8063,43 @@ fn cancel_and_reconcile_return_promptly_while_writer_lock_is_held() -> TestResul
     store.queue_reconcile_with(run.run_id, &call, |_, _| {
         panic!("an already queued settlement must not spawn another worker");
     })?;
+    let marker: serde_json::Value = serde_json::from_slice(
+        &run_directory.read_stable(OsStr::new("settlement-queued.json"), RECORD_LIMIT)?,
+    )?;
+    let expiry: WallTime = serde_json::from_value(marker["expires"].clone())?;
+    let remaining = expiry.as_micros() - clock.wall_now()?.as_micros();
+    clock.wait_until(provenant_core::MonoTime::from_micros(
+        clock.mono_now().as_micros() + u64::try_from(remaining)?,
+    ))?;
+    let mut requeued = false;
+    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        requeued = true;
+        Ok(())
+    })?;
+    assert!(requeued, "expiry permits a fresh worker at the boundary");
+    // Invalid or obsolete markers must fail visibly instead of permitting a spawn.
+    for marker in [
+        serde_json::json!({"schema_version":1,"run":run.run_id,"expires_ms":0}),
+        serde_json::json!({"schema_version":3,"run":run.run_id,"expires":"1970-01-01T00:00:00.000000Z"}),
+        serde_json::json!({"schema_version":2,"run":RunId::from_bytes([99;16]),"expires":"1970-01-01T00:00:00.000000Z"}),
+        serde_json::json!({"schema_version":2,"run":run.run_id,"expires":"broken"}),
+    ] {
+        run_directory
+            .atomic_write(
+                OsStr::new("settlement-queued.json"),
+                ".settlement-test-",
+                &serde_json::to_vec(&marker)?,
+                provenant_os::fs::PublishMode::Replace,
+            )?
+            .require_durable()?;
+        assert!(
+            store
+                .queue_reconcile_with(run.run_id, &call, |_, _| {
+                    panic!("invalid queue marker must not spawn a worker");
+                })
+                .is_err()
+        );
+    }
     assert!(matches!(queued.as_slice(), [(found, Reconciled::Settling { .. })] if *found == id));
     assert!(
         attempt

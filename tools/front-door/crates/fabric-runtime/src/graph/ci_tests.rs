@@ -719,13 +719,9 @@ fn ci_node_target_requires_a_delivered_branch_and_upstream_dependency() {
     let mut owner = Owner::default();
     let result = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
     assert_eq!(result.checkpoint.nodes[1].state, NodeState::Failed);
-    assert!(
-        result.checkpoint.nodes[1]
-            .ci
-            .as_ref()
-            .unwrap()
-            .summary
-            .contains("no delivered branch")
+    assert_eq!(
+        result.checkpoint.nodes[1].ci.as_ref().unwrap().state,
+        CiState::Unavailable
     );
     assert!(owner.targets.is_empty());
     let mut doc = doc;
@@ -989,11 +985,8 @@ fn ci_evidence_configuration_cannot_outgrow_the_checkpoint_envelope() {
         unreachable!()
     };
     *failed_checks_max_bytes = Some(usize::MAX);
-    assert!(
-        doc.expanded(&Default::default())
-            .unwrap_err()
-            .contains("checkpoint could reach")
-    );
+    let error = advance(&doc, &mut Owner::default(), &mut Journal::default()).unwrap_err();
+    assert_eq!(error.code(), "invalid_graph");
 }
 
 #[test]

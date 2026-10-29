@@ -9,6 +9,7 @@ pub use provenant_fabric_runtime::coordination::{
     MailInput, Mutation, TaskInput,
 };
 use provenant_fabric_runtime::inbox::{InboxError, InboxInput};
+use provenant_records::control::CONTROL_UNSUPPORTED;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -41,6 +42,17 @@ pub enum ConsoleInput {
         limit: u64,
         cursor: Option<String>,
         hosts: Option<String>,
+    },
+    Detail {
+        id: String,
+    },
+    Search {
+        query: String,
+        part: String,
+        session: Option<String>,
+        #[serde(default = "page_default")]
+        limit: u64,
+        cursor: Option<String>,
     },
     Tree {
         #[serde(default = "depth_default")]
@@ -92,6 +104,15 @@ impl ConsoleInput {
                 if !(1..=100).contains(limit) =>
             {
                 Err(bad("limit"))
+            }
+            Self::Search {
+                query, part, limit, ..
+            } if query.is_empty()
+                || query.len() > 1_024
+                || !matches!(part.as_str(), "prompt" | "result")
+                || !(1..=100).contains(limit) =>
+            {
+                Err(bad("search"))
             }
             Self::Tree { max_depth, .. } if !(1..=16).contains(max_depth) => Err(bad("max_depth")),
             Self::Tree { max_nodes, .. } if !(1..=100).contains(max_nodes) => Err(bad("max_nodes")),
@@ -251,6 +272,10 @@ impl ToolCall {
                 _,
             ) => body(text, "text"),
             Self::Inbox(InboxInput::Close { reason, .. }, _) => body(reason, "reason"),
+            Self::Inbox(
+                InboxInput::Steer { text, .. } | InboxInput::ChairMessage { text, .. },
+                _,
+            ) => body(text, "text"),
             Self::Mail(MailInput::Send { body: value, .. }, _) => body(value, "body"),
             Self::Mail(MailInput::Read { limit, .. }, _) => page(*limit),
             Self::Task(
@@ -491,12 +516,26 @@ impl ToolCall {
             });
         }
         let mut arguments = arguments;
-        if let Some(operation) = schema::sole_operation(name)
+        // `fabric_context` defaults to inspect; a single-operation tool has one operation.
+        let default_operation = match schema::tool_kind(name) {
+            Some(schema::ToolKind::Identity) => Some("inspect"),
+            _ => schema::sole_operation(name),
+        };
+        if let Some(operation) = default_operation
             && let Some(object) = arguments.as_object_mut()
         {
             object
                 .entry("op")
                 .or_insert_with(|| Value::String(operation.to_owned()));
+        }
+        // Optional on the wire; the runtime input always carries the list.
+        if schema::tool_kind(name) == Some(schema::ToolKind::Mail)
+            && arguments["op"] == "send"
+            && let Some(object) = arguments.as_object_mut()
+        {
+            object
+                .entry("artifacts")
+                .or_insert_with(|| Value::Array(Vec::new()));
         }
         let operation = arguments["op"].as_str().unwrap_or("").to_owned();
         if let Some(path) = schema::invalid_path(name, &arguments) {
@@ -550,7 +589,7 @@ impl ToolCall {
         }
         let host = if schema::tool_kind(name) == Some(schema::ToolKind::Inbox) {
             let host = arguments.as_object_mut().and_then(|o| o.remove("host"));
-            if host.is_some() && operation == "ask" {
+            if host.is_some() && matches!(operation.as_str(), "ask" | "steer" | "chair_message") {
                 return Err(InvalidInput::Arguments {
                     path: "arguments.host".into(),
                 });
@@ -708,7 +747,9 @@ impl ToolCall {
             InboxInput::Ask { operation_id, .. }
             | InboxInput::Answer { operation_id, .. }
             | InboxInput::Close { operation_id, .. }
-            | InboxInput::Acknowledge { operation_id, .. },
+            | InboxInput::Acknowledge { operation_id, .. }
+            | InboxInput::Steer { operation_id, .. }
+            | InboxInput::ChairMessage { operation_id, .. },
             _,
         ) = &mut self
             && operation_id.is_none()
@@ -735,7 +776,9 @@ impl ToolCall {
                 InboxInput::Ask { operation_id, .. }
                 | InboxInput::Answer { operation_id, .. }
                 | InboxInput::Close { operation_id, .. }
-                | InboxInput::Acknowledge { operation_id, .. },
+                | InboxInput::Acknowledge { operation_id, .. }
+                | InboxInput::Steer { operation_id, .. }
+                | InboxInput::ChairMessage { operation_id, .. },
                 _,
             ) => operation_id.clone(),
             Self::Chair(
@@ -845,10 +888,18 @@ impl ToolCall {
             ($owner:ident, $method:ident, $input:ident) => {{ response(tool_name, service.$owner.$method($input, budget, cancel)?) }};
         }
         let result = match self {
-            Self::Inbox(input, host) => response(
-                tool_name,
-                service.facade.inbox_owner(input, host, budget, cancel)?,
-            ),
+            Self::Inbox(input, host) => {
+                let result = service.facade.inbox_owner(input, host, budget, cancel)?;
+                // Refused as the CLI refuses it, with the receipt kept as structured data.
+                if let Some(receipt) = result.unsupported_control() {
+                    return Err(ServiceError::Cli {
+                        code: CONTROL_UNSUPPORTED.into(),
+                        message: receipt.refusal_message(),
+                        data: serde_json::to_value(receipt)?,
+                    });
+                }
+                response(tool_name, result)
+            }
             Self::Console(input) => {
                 response(tool_name, service.facade.console(input, budget, cancel)?)
             }
@@ -1244,8 +1295,14 @@ impl ServiceError {
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
         if let Self::Coordination(CoordinationError::Store(error)) = self {
+            if let provenant_fabric_runtime::StoreError::Invalid(field) = error {
+                return serde_json::json!({"code":self.code(),"field":field,"message":error.to_string(),"hint":"Check the field and retry."});
+            }
             let facade = FacadeError::from(error);
-            if matches!(facade, FacadeError::UpgradeRequired { .. }) {
+            if matches!(
+                facade,
+                FacadeError::UpgradeRequired { .. } | FacadeError::Io { .. }
+            ) {
                 return Self::Facade(facade).structured_error();
             }
         }
@@ -1281,11 +1338,16 @@ impl ServiceError {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
             }
             Self::Facade(
-                error @ (FacadeError::Io { .. } | FacadeError::WorktreeUnregistered { .. }),
+                error @ (FacadeError::Io { .. }
+                | FacadeError::WorktreeUnregistered { .. }
+                | FacadeError::GenerationConflict { .. }),
             ) => serde_json::to_value(error)
                 .unwrap_or_else(|_| serde_json::json!({"code":self.code()})),
             Self::Coordination(CoordinationError::Input(error)) => {
                 serde_json::json!({"code":self.code(),"path":error.path})
+            }
+            Self::Inbox(InboxError::Invalid(field)) => {
+                serde_json::json!({"code":self.code(),"field":field})
             }
             Self::Facade(FacadeError::LaunchUnknown { operation_id })
             | Self::Coordination(CoordinationError::Peer(
@@ -1295,6 +1357,7 @@ impl ServiceError {
             }
             _ => serde_json::json!({"code":self.code()}),
         };
+        detail["code"] = Value::String(self.code().into());
         if self.code() == "busy" {
             detail["retryable"] = Value::Bool(true);
         }

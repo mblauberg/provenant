@@ -146,8 +146,11 @@ fn fixture() -> Result {
             Some(".claude-pro" | "claude-config")
         ));
         if args.iter().any(|v| v == "provenant-refresh-probe") {
-            let expiry =
-                u64::try_from(jiff::Timestamp::now().as_millisecond())?.saturating_add(3_600_000);
+            let expiry = u64::try_from(
+                provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())?
+                    .unix_millis(),
+            )?
+            .saturating_add(3_600_000);
             fs::write(
                 dir.join(".credentials.json"),
                 serde_json::to_vec(
@@ -211,13 +214,20 @@ fn fixture() -> Result {
         .find(|pair| pair[0] == "-m")
         .map(|pair| pair[1].as_str());
     if !prompt.contains("missing") {
+        // Real rollouts record tool output. A printed credential must be
+        // scrubbed from this transcript at settlement, not only from captures.
+        let recorded = if prompt.contains("fixture printed credential") {
+            "printed ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+        } else {
+            "must not be retained"
+        };
         fs::write(
             sessions.join(format!("rollout-2026-10-24T00-00-00-{session}.jsonl")),
             format!(
                 "{}\n{}\n{}\n",
                 json!({"type":"session_meta","payload":{"id":recorded_session}}),
                 json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
-                json!({"type":"response_item","payload":{"content":"must not be retained"}})
+                json!({"type":"response_item","payload":{"content":recorded}})
             ),
         )?;
     }
@@ -980,20 +990,27 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
             ("opencode-limit", "free limit", "quota_limited"),
         ] {
             fs::write(&prompt, text)?;
-            let model = if expected == "model_unavailable" {
-                "opencode/opencode/misspelt-free"
+            let (model, provider, session_model) = if expected == "model_unavailable" {
+                (
+                    "opencode/opencode/deepseek-v4.1-flash-free",
+                    "opencode",
+                    "misspelt-free",
+                )
             } else if operation == "opencode-zen" {
-                "opencode/opencode/beam-free"
+                (
+                    "opencode/opencode/glm-5.3-flash-free",
+                    "opencode",
+                    "glm-5.3-flash-free",
+                )
             } else {
-                "opencode/opencode-go/beam-free"
-            };
-            let provider = if model.starts_with("opencode/opencode-go/") {
-                "opencode-go"
-            } else {
-                "opencode"
+                (
+                    "opencode/opencode-go/glm-5.3-flash",
+                    "opencode-go",
+                    "glm-5.3-flash",
+                )
             };
             db.execute("UPDATE session_message SET data = ?1", [
-                serde_json::to_string(&json!({"model": {"providerID": provider, "id": "beam-free"}, "finish": "stop"}))?
+                serde_json::to_string(&json!({"model": {"providerID": provider, "id": session_model}, "finish": "stop"}))?
             ])?;
             let out = rig.command(&[
                 "dispatch",
@@ -1728,7 +1745,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     fs::write(
         rig.home.join(".claude-pro/.credentials.json"),
         serde_json::to_vec(
-            &json!({"claudeAiOauth":{"accessToken":"fixture-refreshed-token","expiresAt":jiff::Timestamp::now().as_millisecond() + 3_600_000}}),
+            &json!({"claudeAiOauth":{"accessToken":"fixture-refreshed-token","expiresAt":provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())?.unix_millis() + 3_600_000}}),
         )?,
     )?;
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -2374,6 +2391,7 @@ struct PersistedAttemptOptions {
     extra_task: bool,
     nonterminal: bool,
     lost_before_route: bool,
+    stalled_import: bool,
 }
 
 fn persisted_attempt_with(
@@ -2403,6 +2421,38 @@ fn persisted_attempt_with(
     use provenant_supervisor::custody::SettlementEvidence;
 
     let rig = TestRig::new()?;
+    if options.stalled_import {
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let seeded = rig.execute(
+            &git,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "seed",
+            ],
+            None,
+        )?;
+        assert_eq!(code(&seeded), 0);
+        let created = rig.command(&[
+            "worktree",
+            "create",
+            "receipt-writer",
+            "--base",
+            "HEAD",
+            "--json",
+        ])?;
+        assert_eq!(
+            code(&created),
+            0,
+            "{}",
+            String::from_utf8_lossy(&created.stdout.bytes)
+        );
+    }
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
@@ -2509,6 +2559,9 @@ fn persisted_attempt_with(
     let started_at = clock.wall_now()?;
     let mut running = store.record(attempt_id, &call)?;
     running.revision = 2;
+    if options.stalled_import {
+        running.generation = 1;
+    }
     running.resolved_route = Some(applied.clone());
     running.applied_route = Some(applied.clone());
     running.started_at = Some(started_at);
@@ -2523,7 +2576,7 @@ fn persisted_attempt_with(
         rusqlite::params![2_i64, running_bytes, attempt_id.to_string()],
     )?;
 
-    if options.nonterminal {
+    if options.nonterminal && !options.stalled_import {
         return Ok((rig, running));
     }
 
@@ -2559,7 +2612,7 @@ fn persisted_attempt_with(
         scope: Scope {
             run: run_id,
             attempt: attempt_id,
-            generation: 0,
+            generation: running.generation,
         },
         termination: Some(Termination::Exit(exit_code)),
         never_spawned: false,
@@ -2607,6 +2660,74 @@ fn persisted_attempt_with(
     stderr_file.write_all(stderr)?;
     stderr_file.sync_all()?;
     let attempt = Directory::open_anchor(&attempt_dir)?;
+    if options.stalled_import {
+        use std::os::unix::fs::MetadataExt;
+        let writer = prepared.request.tasks[0].writer.as_ref().ok_or("writer")?;
+        let slot = rig
+            .state
+            .join("worktrees")
+            .join(project_id.to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(
+                &writer.worktree,
+            ));
+        fs::create_dir_all(&slot)?;
+        let scope = exit.scope;
+        let launch = provenant_run::prepare_writer(writer, &rig.state, project_id)?;
+        let head = rig.execute(
+            &provenant_os::git::git_executable().ok_or("Git unavailable")?,
+            &["rev-parse", "HEAD"],
+            None,
+        )?;
+        let base = provenant_core::GitOid::parse(std::str::from_utf8(&head.stdout.bytes)?.trim())?;
+        let binding = provenant_supervisor::custody::WriterBinding::from_verified(
+            launch.worktree.repo().root_dir(),
+            launch.worktree.repo().private_dir(),
+            launch.branch.as_str(),
+            base,
+        )?;
+        drop(
+            provenant_supervisor::fixture::acquire_writer_with_binding(
+                Directory::open_anchor(&slot)?,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )
+            .map_err(|error| format!("acquire fixture writer: {error}"))?,
+        );
+        let reservation = slot
+            .join(scope.attempt.to_string())
+            .join("reservation.json");
+        let mut value: Value = serde_json::from_slice(&fs::read(&reservation)?)?;
+        let metadata = fs::metadata(&attempt_dir)?;
+        value["launch_state"] = "settling".into();
+        value["guardian"] = json!({"boot":value["boot"], "pid":123, "native_start":1, "group_id":123, "session_id":123});
+        value["unresolved_cleanup"] = false.into();
+        value["census_incomplete"] = false.into();
+        value["attempt_device"] = metadata.dev().into();
+        value["attempt_inode"] = metadata.ino().into();
+        fs::write(reservation, serde_json::to_vec(&value)?)?;
+        for (name, value) in [
+            (
+                "launch.json",
+                json!({"schema_version":1,"scope":scope,"requester":actor_id}),
+            ),
+            (
+                "settlement-progress.json",
+                json!({"schema_version":1,"scope":scope,"phase":"import","attempts":3,"head":null,"base":null,"owner":null,"owner_since_ms":0,"retry_after_ms":0}),
+            ),
+        ] {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(attempt_dir.join(name))?;
+            file.write_all(&serde_json::to_vec(&value)?)?;
+            file.sync_all()?;
+        }
+        return Ok((rig, running));
+    }
     let terminal = if options.writer {
         // Publish real terminal artifacts through the production commit path.
         // No launch grants are recorded, matching older writer attempts.
@@ -2647,6 +2768,53 @@ fn persisted_attempt_with(
             .map_err(|error| format!("finish persisted provider fixture: {error:?}"))?
     };
     Ok((rig, terminal))
+}
+
+fn cancel_wait_settles_stalled_import_with_durable_exit() -> Result {
+    let (rig, running) = persisted_attempt_with(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "fixture"),
+        b"",
+        b"",
+        0,
+        PersistedAttemptOptions {
+            writer: true,
+            nonterminal: true,
+            stalled_import: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("stalled import fixture: {error}"))?;
+    let _cleanup = rig.process_cleanup();
+    let started = std::time::Instant::now();
+    let output = rig.command(&[
+        "cancel",
+        &running.attempt_id.to_string(),
+        "--wait",
+        "10s",
+        "--json",
+    ])?;
+    let elapsed = started.elapsed();
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(value["data"]["condition_met"], true, "{value}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "cancel took {elapsed:?}: {value}"
+    );
+    let lanes = rig.command(&[
+        "lanes",
+        "--id",
+        &running.attempt_id.to_string(),
+        "--all",
+        "--json",
+    ])?;
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let lane = &lanes["data"]["lanes"][0];
+    assert_eq!(lane["state"], "cancelled", "{lanes}");
+    assert_eq!(lane["reason"], "provider output is partial", "{lanes}");
+    Ok(())
 }
 
 fn receipt_output_resolves_run_task_and_attempt() -> Result {
@@ -2780,6 +2948,90 @@ fn receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
             );
         }
     }
+    Ok(())
+}
+
+fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
+    let (rig, terminal) = persisted_attempt(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "fixture"),
+        b"",
+        b"provider 500: upstream failed\n",
+        1,
+    )?;
+    let run = terminal.run_id.to_string();
+    let task = terminal.task_id.to_string();
+    let attempt = terminal.attempt_id.to_string();
+    let target = format!("{run}/{task}/{attempt}");
+    // A run or task names its settled attempt, and the reply says which one.
+    for named in [run.clone(), format!("{run}/{task}")] {
+        let output = rig.command(&["output", &named, "--part", "stderr", "--json"])?;
+        let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(code(&output), 0, "{data}");
+        assert_eq!(data["data"]["attempt_id"], attempt);
+        assert_eq!(data["data"]["selected"]["attempts"], 1);
+        assert_eq!(data["data"]["selected"]["rule"], "newest settled");
+    }
+    // A failed attempt's result names its provider error and its result path.
+    let output = rig.command(&["output", &target, "--json"])?;
+    let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(code(&output), 0, "{data}");
+    assert_eq!(data["data"]["state"], "failed");
+    assert_eq!(
+        data["data"]["provider_error"],
+        "provider 500: upstream failed"
+    );
+    // A launched attempt has a custody lock, which the wait path inspects.
+    fs::write(
+        rig.state
+            .join("runs")
+            .join(&run)
+            .join("attempts")
+            .join(&attempt)
+            .join("custody.lock"),
+        b"",
+    )?;
+    for args in [
+        vec!["lanes", "--id", &attempt],
+        vec!["lanes", "--id", &attempt, "--wait", "1"],
+    ] {
+        let listing = rig.command(&args)?;
+        assert_eq!(
+            code(&listing),
+            0,
+            "{args:?}: {}",
+            String::from_utf8_lossy(&listing.stderr.bytes)
+        );
+        let human = String::from_utf8(listing.stdout.bytes)?;
+        assert!(
+            human.contains("provider 500: upstream failed"),
+            "{args:?}: {human}"
+        );
+        assert!(human.contains("result:"), "{human}");
+    }
+    let path = rig.command(&["output", &target, "--part", "stderr", "--path", "--json"])?;
+    let data: Value = serde_json::from_slice(&path.stdout.bytes)?;
+    assert_eq!(code(&path), 0, "{data}");
+    assert!(
+        data["data"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("stderr.log")),
+        "{data}"
+    );
+    let saved = rig.root.join("saved.txt");
+    let written = rig.command(&[
+        "output",
+        &target,
+        "--part",
+        "stderr",
+        "--to",
+        saved.to_str().ok_or("saved path is not UTF-8")?,
+        "--json",
+    ])?;
+    let data: Value = serde_json::from_slice(&written.stdout.bytes)?;
+    assert_eq!(code(&written), 0, "{data}");
+    assert_eq!(std::fs::read(&saved)?, b"provider 500: upstream failed\n");
     Ok(())
 }
 
@@ -3430,7 +3682,9 @@ fn main() -> ExitCode {
         provenant_supervisor::fixture::run_libtest(
             &args,
             &[
+                "cancel_wait_settles_stalled_import_with_durable_exit",
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",
+                "output_names_the_attempt_it_reads_and_writes_or_locates_parts",
                 "receipt_output_resolves_run_task_and_attempt",
                 "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
                 "owned_dispatch_retains_failed_attempt_and_replays",
@@ -3461,8 +3715,12 @@ fn main() -> ExitCode {
             ],
             |name| {
                 let result = match name {
+                    "cancel_wait_settles_stalled_import_with_durable_exit" => cancel_wait_settles_stalled_import_with_durable_exit(),
                     "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
                         receipt_output_reports_unknown_route_for_settled_lost_attempt()
+                    }
+                    "output_names_the_attempt_it_reads_and_writes_or_locates_parts" => {
+                        output_names_the_attempt_it_reads_and_writes_or_locates_parts()
                     }
                     "receipt_output_resolves_run_task_and_attempt" => {
                         receipt_output_resolves_run_task_and_attempt()

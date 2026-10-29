@@ -86,6 +86,13 @@ fn copy_tree(from: &Path, to: &Path) -> Result {
 #[test]
 fn console_chair_schema_parity() -> Result {
     let rig = TestRig::new()?;
+    let search = invoke(
+        &rig,
+        "fabric_console",
+        json!({"op":"search","query":"--limit","part":"prompt"}),
+    )?;
+    assert_eq!(search["query"], "--limit");
+    assert_eq!(search["coverage"]["peers"], "not_searched");
     let checkpoint = rig.root.join("checkpoint.md");
     std::fs::write(&checkpoint, "# Checkpoint\nOriginal.\n")?;
     let checkpoint = checkpoint.to_str().ok_or("checkpoint path")?;

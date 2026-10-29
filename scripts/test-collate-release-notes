@@ -1,11 +1,8 @@
 #!/bin/sh
 set -eu
-unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_INDEX_FILE GIT_ALTERNATE_OBJECT_DIRECTORIES
-
+# shellcheck source=scripts/test-git-env.sh disable=SC1091
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/test-git-env.sh"
 script=$(cd "$(dirname "$0")" && pwd -P)/collate-release-notes
-unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL \
-  GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
 PATH="/usr/bin:/bin:$PATH"
 export PATH
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-release-notes.XXXXXX")

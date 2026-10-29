@@ -1,0 +1,93 @@
+{
+ "schema_version": 1,
+ "command": "inbox",
+ "status": "ok",
+ "data": {
+  "result": "item",
+  "item": {
+   "request": {
+    "schema_version": 1,
+    "id": "11111111111111111111111111111111",
+    "revision": 5,
+    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-10-30T01:00:00Z",
+    "updated_at": "2026-10-30T01:05:00Z",
+    "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "project_key": "provenant",
+    "owner_host": "cccccccccccccccccccccccccccccccc",
+    "chair_session_id": "3f9c2a10d4e84b7f",
+    "chair_actor": "dddddddddddddddddddddddddddddddd",
+    "request": {
+     "kind": "decision",
+     "title": "Pick the storage layer",
+     "body": "Body of Pick the storage layer",
+     "blocking": true,
+     "options": [
+      {
+       "id": "sqlite",
+       "label": "Sqlite",
+       "description": "Choose sqlite"
+      },
+      {
+       "id": "files",
+       "label": "Files",
+       "description": "Choose files"
+      }
+     ],
+     "recommended_option_id": "sqlite",
+     "proceeding_with": null,
+     "deadline": null,
+     "work": null,
+     "supersedes": null
+    },
+    "state": "superseded",
+    "answer_id": null,
+    "closure_reason": null
+   },
+   "answer": null,
+   "delivery": null,
+   "history": [
+    {
+     "schema_version": 1,
+     "id": "11111111111111111111111111111111",
+     "revision": 3,
+     "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "created_at": "2026-10-30T01:00:00Z",
+     "updated_at": "2026-10-30T01:05:00Z",
+     "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "project_key": "provenant",
+     "owner_host": "cccccccccccccccccccccccccccccccc",
+     "chair_session_id": "3f9c2a10d4e84b7f",
+     "chair_actor": "dddddddddddddddddddddddddddddddd",
+     "request": {
+      "kind": "decision",
+      "title": "Pick the storage layer",
+      "body": "Body of Pick the storage layer",
+      "blocking": true,
+      "options": [
+       {
+        "id": "sqlite",
+        "label": "Sqlite",
+        "description": "Choose sqlite"
+       },
+       {
+        "id": "files",
+        "label": "Files",
+        "description": "Choose files"
+       }
+      ],
+      "recommended_option_id": "sqlite",
+      "proceeding_with": null,
+      "deadline": null,
+      "work": null,
+      "supersedes": null
+     },
+     "state": "open",
+     "answer_id": null,
+     "closure_reason": null
+    }
+   ]
+  }
+ },
+ "error": null
+}

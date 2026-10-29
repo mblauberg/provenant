@@ -202,10 +202,10 @@ pub(crate) fn lease(
             "INSERT INTO spacing(class,boot,last_start) VALUES (?1,?2,?3) ON CONFLICT(class) DO UPDATE SET boot=excluded.boot, last_start=excluded.last_start",
             params![class.as_str(), &host.boot, sql_int(host.micros)?],
         )?;
-        let identity = observe().ok_or(RunError::GuardianIdentityUnavailable)?;
+        let identity = observe().ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
         let identity = serde_json::to_string(&identity).map_err(|_| RunError::Refused)?;
         let owner_id = store_identity(&store.join("run.sqlite3"))
-            .ok_or(RunError::GuardianIdentityUnavailable)?;
+            .ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
         tx.execute(
             "INSERT INTO leases(attempt,project,store,class,boot,guardian,owner_id) VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![
@@ -229,10 +229,12 @@ struct HostInstant {
 impl HostInstant {
     fn read(time: &dyn Clock) -> Result<Self> {
         Ok(Self {
-            boot: time.boot_identity().map_err(|_| RunError::HostClock)?,
+            boot: time
+                .boot_identity()
+                .map_err(|_| RunError::Admission(AdmissionError::Clock))?,
             micros: time
                 .host_monotonic_micros()
-                .map_err(|_| RunError::HostClock)?,
+                .map_err(|_| RunError::Admission(AdmissionError::Clock))?,
         })
     }
 }
@@ -339,7 +341,9 @@ pub(crate) fn cap_hit(
 /// Inspect at most 256 of the oldest existing leases. Normal admission caps
 /// the ledger at 64, so every lease is covered without an unbounded scan.
 fn prune(tx: &Connection, time: &dyn Clock) -> Result<()> {
-    let boot = time.boot_identity().map_err(|_| RunError::HostClock)?;
+    let boot = time
+        .boot_identity()
+        .map_err(|_| RunError::Admission(AdmissionError::Clock))?;
     let leases = {
         let mut statement = tx.prepare(
             "SELECT rowid, CAST(store AS BLOB), CAST(attempt AS BLOB), CAST(boot AS BLOB), CAST(guardian AS BLOB), CAST(owner_id AS BLOB) FROM leases ORDER BY rowid LIMIT 256",

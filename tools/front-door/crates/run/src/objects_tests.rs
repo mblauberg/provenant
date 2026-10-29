@@ -74,7 +74,7 @@ fn git(
     objects: Option<&Path>,
     args: &[&str],
 ) -> TestResult<Output> {
-    let mut command = Command::new(executable);
+    let mut command = provenant_os::fixture::git_command_at(executable);
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -224,7 +224,7 @@ impl Fixture {
     }
 
     fn git_overlay(&self, scratch: &Path, args: &[&str]) -> TestResult<Output> {
-        let output = Command::new(&self.git)
+        let output = provenant_os::fixture::git_command_at(&self.git)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
@@ -1035,7 +1035,7 @@ fn receive_pack(fixture: &Fixture, pack: &[u8], tip: GitOid, cap: u64) -> TestRe
     request.extend_from_slice(command.as_bytes());
     request.extend_from_slice(b"0000");
     request.extend_from_slice(pack);
-    let mut child = Command::new(&fixture.git)
+    let mut child = provenant_os::fixture::git_command_at(&fixture.git)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("GIT_CONFIG_NOSYSTEM", "1")

@@ -1,6 +1,6 @@
 //! `pr open`: the repository's template filled from the attempts' receipts.
 use super::git::{Git, plain_ref};
-use super::{Result, execute_with, successful};
+use super::{Refused, Result, code_of, execute_with, successful};
 use crate::{emit, fail, roots};
 use provenant_cli::{
     Attempt, Globals, PrOpen, Target,
@@ -19,11 +19,17 @@ const CREATE_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn read_text(path: &Path, what: &str) -> Result<String> {
     let mut text = String::new();
+    let unreadable = |error: std::io::Error| {
+        Refused::new(
+            "PR_FILE_UNREADABLE",
+            format!("cannot read {what} {}: {error}", path.display()),
+        )
+    };
     std::fs::File::open(path)
-        .map_err(|error| format!("cannot read {what} {}: {error}", path.display()))?
+        .map_err(unreadable)?
         .take(TEXT_LIMIT + 1)
         .read_to_string(&mut text)
-        .map_err(|error| format!("cannot read {what} {}: {error}", path.display()))?;
+        .map_err(unreadable)?;
     if text.len() as u64 > TEXT_LIMIT {
         return Err(format!("{what} is over {} KiB", TEXT_LIMIT / 1024).into());
     }
@@ -66,7 +72,7 @@ fn plan(
     let template = read_text(&project.join(TEMPLATE), "the pull request template")?;
     let summary = read_text(&command.summary_file, "the summary file")?;
     if summary.trim().is_empty() {
-        return Err("the summary file is empty".into());
+        return Err(Refused::new("PR_SUMMARY_EMPTY", "the summary file is empty").into());
     }
     let edge = Edge {
         roots: &resolved.roots,
@@ -80,9 +86,12 @@ fn plan(
         .map_err(fail)?
         .remove(0);
     if !matches!(author.state.as_str(), "succeeded" | "review_required") {
-        return Err(format!(
-            "attempt {} ended {}; only a succeeded or review_required attempt can back a pull request",
-            author.attempt_id, author.state
+        return Err(Refused::new(
+            "PR_ATTEMPT_STATE",
+            format!(
+                "attempt {} ended {}; only a succeeded or review_required attempt can back a pull request",
+                author.attempt_id, author.state
+            ),
         )
         .into());
     }
@@ -192,7 +201,10 @@ pub(super) fn run(command: PrOpen, globals: &Globals) -> u8 {
     let project = resolved.project.clone();
     let plan = match plan(&command, globals, &project, &resolved) {
         Ok(plan) => plan,
-        Err(error) => return fail(LEAF, Outcome::Invalid, "PR", &error.to_string(), globals),
+        Err(error) => {
+            let code = code_of(error.as_ref(), "PR");
+            return fail(LEAF, Outcome::Invalid, code, &error.to_string(), globals);
+        }
     };
     let mut data = json!({
         "title": plan.title,

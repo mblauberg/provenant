@@ -1,5 +1,5 @@
 //! Opt-in metadata import from a Claude Code session's subagents directory.
-use crate::{Categories, PriceTable, TokenTotal};
+use crate::{Categories, PriceTable, TokenTotal, claude::Raw as Usage};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -18,33 +18,6 @@ struct Message {
     id: Option<String>,
     model: Option<String>,
     usage: Option<Usage>,
-}
-#[derive(Clone, Deserialize)]
-struct Usage {
-    input_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-}
-impl Usage {
-    fn counts(&self) -> [Option<u64>; 4] {
-        [
-            self.input_tokens,
-            self.cache_read_input_tokens,
-            self.cache_creation_input_tokens,
-            self.output_tokens,
-        ]
-    }
-    fn merge(&mut self, other: Self) {
-        self.input_tokens = self.input_tokens.max(other.input_tokens);
-        self.cache_read_input_tokens = self
-            .cache_read_input_tokens
-            .max(other.cache_read_input_tokens);
-        self.cache_creation_input_tokens = self
-            .cache_creation_input_tokens
-            .max(other.cache_creation_input_tokens);
-        self.output_tokens = self.output_tokens.max(other.output_tokens);
-    }
 }
 #[derive(Serialize)]
 pub struct NativeModel {
@@ -72,18 +45,41 @@ pub struct NativeReport {
 #[derive(Debug, thiserror::Error)]
 pub enum NativeError {
     #[error("{0}")]
-    Input(String),
+    Input(NativeInput),
     #[error("{0}")]
     Io(String),
 }
-impl From<&str> for NativeError {
-    fn from(value: &str) -> Self {
-        Self::Input(value.into())
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct NativeInput {
+    code: &'static str,
+    message: &'static str,
+}
+
+impl From<NativeInput> for String {
+    fn from(input: NativeInput) -> Self {
+        input.message.into()
+    }
+}
+
+impl NativeError {
+    /// Stable machine-readable refusal code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Input(input) => input.code,
+            Self::Io(_) => "io",
+        }
+    }
+
+    fn input(code: &'static str, message: &'static str) -> Self {
+        Self::Input(NativeInput { code, message })
     }
 }
 
 pub fn claude_subagents(path: &Path, prices: &PriceTable) -> Result<NativeReport, NativeError> {
-    let home = std::env::var_os("HOME").ok_or("cannot determine home directory")?;
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| NativeError::input("home_unavailable", "cannot determine home directory"))?;
     import_subagents(path, Path::new(&home), prices)
 }
 
@@ -101,13 +97,19 @@ fn import_subagents(
 ) -> Result<NativeReport, NativeError> {
     let home = home
         .canonicalize()
-        .map_err(|_| "cannot resolve home directory")?;
-    let path = path
-        .canonicalize()
-        .map_err(|_| "cannot resolve Claude subagents directory")?;
-    let relative = path
-        .strip_prefix(&home)
-        .map_err(|_| "expected a Claude session subagents directory under home")?;
+        .map_err(|_| NativeError::input("home_unavailable", "cannot resolve home directory"))?;
+    let path = path.canonicalize().map_err(|_| {
+        NativeError::input(
+            "directory_unavailable",
+            "cannot resolve Claude subagents directory",
+        )
+    })?;
+    let relative = path.strip_prefix(&home).map_err(|_| {
+        NativeError::input(
+            "invalid_directory",
+            "expected a Claude session subagents directory under home",
+        )
+    })?;
     let parts: Vec<_> = relative.components().collect();
     if parts.len() != 5
         || !parts[0]
@@ -117,7 +119,10 @@ fn import_subagents(
         || parts[1].as_os_str() != "projects"
         || parts[4].as_os_str() != "subagents"
     {
-        return Err("expected ~/.claude*/projects/<project>/<session>/subagents".into());
+        return Err(NativeError::input(
+            "invalid_directory",
+            "expected ~/.claude*/projects/<project>/<session>/subagents",
+        ));
     }
     let entries = std::fs::read_dir(&path)
         .map_err(|e| NativeError::Io(format!("cannot read subagents directory: {e}")))?;
@@ -138,10 +143,16 @@ fn import_subagents(
             .map_err(|e| NativeError::Io(e.to_string()))?
             .is_file()
         {
-            return Err("subagent transcript is not a regular file".into());
+            return Err(NativeError::input(
+                "not_regular_file",
+                "subagent transcript is not a regular file",
+            ));
         }
         if files.len() == MAX_FILES {
-            return Err("too many native subagent transcripts".into());
+            return Err(NativeError::input(
+                "too_many_transcripts",
+                "too many native subagent transcripts",
+            ));
         }
         files.push(entry.path());
     }
@@ -165,7 +176,10 @@ fn import_subagents(
             .map_err(|e| NativeError::Io(e.to_string()))?
             .is_file()
         {
-            return Err("subagent transcript is not a regular file".into());
+            return Err(NativeError::input(
+                "not_regular_file",
+                "subagent transcript is not a regular file",
+            ));
         }
         let allowance = MAX_FILE_BYTES.min(MAX_TOTAL_BYTES - bytes);
         let mut reader = BufReader::new(file.take(allowance + 1));
@@ -183,14 +197,23 @@ fn import_subagents(
             file_bytes += read;
             bytes += read;
             if file_bytes > MAX_FILE_BYTES {
-                return Err("subagent transcript exceeds 32 MiB".into());
+                return Err(NativeError::input(
+                    "transcript_too_large",
+                    "subagent transcript exceeds 32 MiB",
+                ));
             }
             if bytes > MAX_TOTAL_BYTES {
-                return Err("native transcripts exceed 64 MiB".into());
+                return Err(NativeError::input(
+                    "transcripts_too_large",
+                    "native transcripts exceed 64 MiB",
+                ));
             }
             let terminated = line.last() == Some(&b'\n');
             if read - u64::from(terminated) > MAX_LINE_BYTES {
-                return Err("subagent transcript line exceeds 4 MiB".into());
+                return Err(NativeError::input(
+                    "line_too_large",
+                    "subagent transcript line exceeds 4 MiB",
+                ));
             }
             let record: Record = match serde_json::from_slice(&line) {
                 Ok(record) => record,
@@ -198,7 +221,12 @@ fn import_subagents(
                     skipped_incomplete_lines += 1;
                     break;
                 }
-                Err(_) => return Err("invalid subagent transcript JSON".into()),
+                Err(_) => {
+                    return Err(NativeError::input(
+                        "invalid_json",
+                        "invalid subagent transcript JSON",
+                    ));
+                }
             };
             if record.kind.as_deref() != Some("assistant") {
                 continue;
@@ -207,16 +235,17 @@ fn import_subagents(
                 continue;
             };
             let Some(usage) = message.usage else { continue };
-            let id = message
-                .id
-                .filter(|s| !s.is_empty())
-                .ok_or("subagent usage missing message ID")?;
-            let model = message
-                .model
-                .filter(|s| !s.is_empty())
-                .ok_or("subagent usage missing model")?;
+            let id = message.id.filter(|s| !s.is_empty()).ok_or_else(|| {
+                NativeError::input("missing_message_id", "subagent usage missing message ID")
+            })?;
+            let model = message.model.filter(|s| !s.is_empty()).ok_or_else(|| {
+                NativeError::input("missing_model", "subagent usage missing model")
+            })?;
             if !messages.contains_key(&id) && messages.len() == 100_000 {
-                return Err("too many native messages".into());
+                return Err(NativeError::input(
+                    "too_many_messages",
+                    "too many native messages",
+                ));
             }
             match messages.entry(id) {
                 std::collections::btree_map::Entry::Vacant(e) => {
@@ -224,7 +253,10 @@ fn import_subagents(
                 }
                 std::collections::btree_map::Entry::Occupied(mut e) => {
                     if e.get().0 != model {
-                        return Err("subagent message model changed".into());
+                        return Err(NativeError::input(
+                            "model_changed",
+                            "subagent message model changed",
+                        ));
                     }
                     e.get_mut().1.merge(usage);
                     e.get_mut().2.insert(agent);
@@ -238,9 +270,12 @@ fn import_subagents(
         if !by_model.contains_key(&model) {
             model_key_bytes = model_key_bytes
                 .checked_add(model.len())
-                .ok_or("too many native models")?;
+                .ok_or_else(|| NativeError::input("too_many_models", "too many native models"))?;
             if by_model.len() == MAX_MODELS || model_key_bytes > MAX_MODEL_KEY_BYTES {
-                return Err("too many native models".into());
+                return Err(NativeError::input(
+                    "too_many_models",
+                    "too many native models",
+                ));
             }
         }
         let row = by_model.entry(model).or_default();
@@ -273,11 +308,15 @@ fn import_subagents(
             {
                 match count {
                     Some(n) => {
-                        total.known = total.known.checked_add(n).ok_or("native usage overflow")?;
+                        total.known = total.known.checked_add(n).ok_or_else(|| {
+                            NativeError::input("usage_overflow", "native usage overflow")
+                        })?;
                         if let Some(rate) = rate {
                             numerator = numerator
                                 .checked_add(u128::from(n) * u128::from(rate))
-                                .ok_or("native cost overflow")?;
+                                .ok_or_else(|| {
+                                    NativeError::input("cost_overflow", "native cost overflow")
+                                })?;
                         } else if n > 0 {
                             complete = false;
                         }
@@ -297,7 +336,10 @@ fn import_subagents(
             usage: totals,
             cost_basis: "api_equivalent_estimate",
             cost_usd: if complete {
-                Some(crate::Money::from_numerator(numerator).map_err(|_| "native cost overflow")?)
+                Some(
+                    crate::Money::from_numerator(numerator)
+                        .map_err(|_| NativeError::input("cost_overflow", "native cost overflow"))?,
+                )
             } else {
                 None
             },
@@ -355,6 +397,13 @@ cache_write = 1000000
 output_excluding_reasoning = 2000000
 "#,
         )?;
+        std::fs::write(
+            session.join("agent-split.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"split\",\"model\":\"example\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_1h_input_tokens\":7},\"output_tokens\":0}}}\n",
+        )?;
+        let split_report = import_subagents(&session, dir.path(), &validate_prices(&config)?)?;
+        assert_eq!(split_report.models[0].usage.cache_write.known, 7);
+        std::fs::remove_file(session.join("agent-split.jsonl"))?;
         let report = import_subagents(&session, dir.path(), &validate_prices(&config)?)?;
         assert_eq!(report.agents, 2);
         assert_eq!(report.models[0].agents, 2);
@@ -379,22 +428,18 @@ output_excluding_reasoning = 2000000
         let report = import_subagents(&session, dir.path(), &validate_prices(&config)?)?;
         assert_eq!(report.skipped_incomplete_lines, 1);
         std::fs::write(session.join("agent-torn.jsonl"), b"{invalid}\n")?;
-        assert!(
+        assert_eq!(
             import_subagents(&session, dir.path(), &validate_prices(&config)?)
                 .err()
                 .unwrap()
-                .to_string()
-                .contains("invalid subagent transcript JSON")
+                .code(),
+            "invalid_json"
         );
         std::fs::remove_file(session.join("agent-torn.jsonl"))?;
         std::fs::write(session.join("unexpected.jsonl"), "{}\n")?;
-        assert!(
-            import_subagents(&session, dir.path(), &validate_prices(&config)?)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("invalid or non-regular")
-        );
+        let report = import_subagents(&session, dir.path(), &validate_prices(&config)?)?;
+        assert_eq!(report.agents, 2);
+        assert_eq!(report.models[0].messages, 1);
         std::fs::remove_file(session.join("unexpected.jsonl"))?;
         let mut max_line = b"{}".to_vec();
         max_line.resize(MAX_LINE_BYTES as usize, b' ');
@@ -407,23 +452,23 @@ output_excluding_reasoning = 2000000
             session.join("agent-too-long.jsonl"),
             vec![b'x'; MAX_LINE_BYTES as usize + 1],
         )?;
-        assert!(
+        assert_eq!(
             import_subagents(&session, dir.path(), &validate_prices(&config)?)
                 .err()
                 .unwrap()
-                .to_string()
-                .contains("line exceeds")
+                .code(),
+            "line_too_large"
         );
         std::fs::remove_file(session.join("agent-too-long.jsonl"))?;
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("agent-a.jsonl", session.join("agent-link.jsonl"))?;
-            assert!(
+            assert_eq!(
                 import_subagents(&session, dir.path(), &validate_prices(&config)?)
                     .err()
                     .unwrap()
-                    .to_string()
-                    .contains("non-regular")
+                    .code(),
+                "not_regular_file"
             );
         }
         Ok(())
@@ -452,12 +497,12 @@ output_excluding_reasoning = 2000000
             records.push_str(&format!("{{\"type\":\"assistant\",\"message\":{{\"id\":\"{i}\",\"model\":\"model-{i}\",\"usage\":{{}}}}}}\n"));
         }
         std::fs::write(&path, records)?;
-        assert!(
+        assert_eq!(
             import_subagents(&session, dir.path(), &prices)
                 .err()
                 .unwrap()
-                .to_string()
-                .contains("too many native models")
+                .code(),
+            "too_many_models"
         );
         Ok(())
     }

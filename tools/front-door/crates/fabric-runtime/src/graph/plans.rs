@@ -120,10 +120,23 @@ fn pattern_summary(spec: &PlanSpec) -> String {
                 .iter()
                 .map(|(name, parameter)| {
                     let kind = parameter.kind.name();
-                    match &parameter.doc {
-                        Some(doc) => format!("{name}:{kind} ({doc})"),
-                        None => format!("{name}:{kind}"),
+                    let mut details = vec![match &parameter.default {
+                        Some(value) => format!("default={value}"),
+                        None => "required".into(),
+                    }];
+                    if let Some(value) = &parameter.min {
+                        details.push(format!("min={value}"));
                     }
+                    if let Some(value) = &parameter.max {
+                        details.push(format!("max={value}"));
+                    }
+                    if !parameter.allowed.is_empty() {
+                        details.push(format!("enum={}", serde_json::json!(parameter.allowed)));
+                    }
+                    if let Some(doc) = &parameter.doc {
+                        details.push(doc.clone());
+                    }
+                    format!("{name}:{kind} ({})", details.join(", "))
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -379,12 +392,12 @@ fn prepare(
                 child.id
             ));
         }
-        if !spec.kinds.contains(&child.kind.unwrap_or(NodeKind::Task)) {
-            return Err(format!(
-                "fragment kind {:?} was not declared",
-                child.kind.unwrap_or(NodeKind::Task)
-            ));
-        }
+    }
+    if !spec.kinds.contains(&child.kind.unwrap_or(NodeKind::Task)) {
+        return Err(format!(
+            "fragment kind {:?} was not declared",
+            child.kind.unwrap_or(NodeKind::Task)
+        ));
     }
     // Gate evidence lives in its condition and a decision in its question.
     // Writer nodes carry explicit scope; all agents carry acceptance prose.
@@ -459,8 +472,23 @@ fn fragment(
     json: &str,
 ) -> Result<Expansion, String> {
     let spec = node.plan.as_ref().ok_or("missing plan configuration")?;
-    let mut fragment: Fragment =
+    let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("invalid fragment: {e}"))?;
+    if let Some(instances) = value
+        .get_mut("patterns")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for instance in instances {
+            let name = instance
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unknown>");
+            serde_json::from_value::<pattern_plan::PatternInstance>(instance.clone())
+                .map_err(|e| format!("pattern {name}: {e}"))?;
+        }
+    }
+    let mut fragment: Fragment =
+        serde_json::from_value(value).map_err(|e| format!("invalid fragment: {e}"))?;
     if fragment.schema_version != 1
         || (fragment.nodes.is_empty() && fragment.patterns.is_empty())
         || fragment.nodes.len() > spec.max_nodes
@@ -482,8 +510,13 @@ fn fragment(
             .find(|pattern| pattern.name == instance.pattern)
             .ok_or_else(|| {
                 format!(
-                    "pattern {} is not in this plan's allow-list",
-                    instance.pattern
+                    "pattern {} is not in this plan's allow-list: {}",
+                    instance.pattern,
+                    spec.patterns
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             })?;
         let (mut wrapper, instantiation) = pattern_plan::instantiate(pattern, instance)?;
@@ -868,6 +901,10 @@ pub(super) fn settle(
                     .nodes
                     .iter()
                     .find_map(|n| n.expansion_pause.clone());
+                checkpoint.pause_code = checkpoint
+                    .pause_reason
+                    .as_ref()
+                    .map(|_| "invalid_plan_expansion".into());
             }
             checkpoint.expansions.push(addition);
             loops::reconcile(checkpoint, &plan);
@@ -881,6 +918,7 @@ pub(super) fn settle(
             );
             checkpoint.nodes[index].expansion_pause = Some(reason.clone());
             checkpoint.pause_reason = Some(reason);
+            checkpoint.pause_code = Some("invalid_plan_expansion".into());
             None
         }
     }

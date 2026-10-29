@@ -38,36 +38,45 @@ pub enum CustodyError {
     Cancelled,
     #[error("wait budget expired; custody is retained")]
     Timeout,
-    /// Admission could not judge startup spacing. The reason is fixed text, so
-    /// it can reach the user without any path.
-    #[error("startup spacing cannot be judged: host clock or boot identity unreadable")]
-    AdmissionClock,
-    #[error(
-        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs and cargo_debug"
-    )]
-    AdmissionBuildSettings,
-    #[error("guardian process identity unavailable; retry when process observation is available")]
-    AdmissionGuardianIdentity,
-    /// Numeric host observations are safe to publish as the lane's refusal.
-    #[error(
-        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
-    )]
-    AdmissionDisk { free: u64, floor: u64 },
-    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
-    AdmissionMemoryPressure { level: String },
-    #[error(
-        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
-        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
-    )]
-    AdmissionLaneCap {
-        active: u64,
-        limit: u64,
-        scope: &'static str,
-    },
+    #[error(transparent)]
+    Admission(#[from] AdmissionError),
     #[error("custody I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
     Filesystem(#[from] FsError),
+}
+/// Why admission could not judge a lane start. The guardian publishes these
+/// refusals, so each message is fixed text that cannot expose a path.
+#[derive(Debug, Error)]
+pub enum AdmissionError {
+    /// Admission could not judge startup spacing. The reason is fixed text, so
+    /// it can reach the user without any path.
+    #[error(
+        "startup spacing cannot be judged: the host monotonic clock or boot identity cannot be read"
+    )]
+    Clock,
+    #[error(
+        "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs and cargo_debug"
+    )]
+    BuildSettings,
+    #[error("guardian process identity unavailable; retry when process observation is available")]
+    GuardianIdentity,
+    /// Numeric host observations are safe to publish as the lane's refusal.
+    #[error(
+        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
+    )]
+    Disk { free: u64, floor: u64 },
+    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
+    MemoryPressure { level: String },
+    #[error(
+        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
+        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
+    )]
+    LaneCap {
+        active: u64,
+        limit: u64,
+        scope: &'static str,
+    },
 }
 pub type Result<T> = std::result::Result<T, CustodyError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1214,6 +1223,29 @@ pub fn checkpoint_before_reboot(
             .boot_identity()
             .is_ok_and(|boot| !boot.is_empty() && boot != guardian.boot)
 }
+/// Whether the guardian and provider recorded for this attempt are both gone
+/// in this boot. Only an observed absence counts; an unreadable process or
+/// record leaves the attempt open.
+pub fn holder_gone(directory: &Directory, scope: Scope, observer: &dyn ProcessObserver) -> bool {
+    let record = match read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT) {
+        Ok(record) => record,
+        // No process was ever recorded, so the reservation alone speaks for it.
+        Err(CustodyError::Filesystem(error)) if error.is_not_found() => return true,
+        Err(_) => return false,
+    };
+    let Some(guardian) = record.guardian else {
+        return false;
+    };
+    let gone = |identity: &ProcessIdentity| match observer.observe(identity.pid) {
+        ProcessObservation::Absent => true,
+        ProcessObservation::Present(fact) => fact.identity != *identity || fact.zombie,
+        ProcessObservation::Unknown(_) => false,
+    };
+    record.scope == scope
+        && !record.publication_pending
+        && gone(&guardian)
+        && record.provider.as_ref().is_none_or(gone)
+}
 /// Whether any of these PIDs may still be alive (a signal-0 probe, no effect).
 pub fn any_pid_alive(pids: &[i64]) -> bool {
     crate::process_os::provider::any_pid_alive(pids)
@@ -1631,6 +1663,11 @@ impl Recovery {
         self.ensure_writer_lock()?;
         clear_reservation(&self.directory, self.scope())
     }
+    /// Release custody of an attempt the Run owner has committed Lost after
+    /// `holder_gone`. No attempt artefacts or worktree contents are removed.
+    pub fn release_lost(mut self) -> Result<()> {
+        self.clear_settled_reservation()
+    }
     pub fn observe(&self) -> RecoveryState {
         self.observe_with(&SystemProcessObserver)
     }
@@ -1685,7 +1722,8 @@ impl Recovery {
             _custody: custody,
         }))
     }
-    pub(crate) fn observe_with(&self, observer: &dyn ProcessObserver) -> RecoveryState {
+    /// Classify custody with the same process observer used by the caller.
+    pub fn observe_with(&self, observer: &dyn ProcessObserver) -> RecoveryState {
         if self.guardian_quiescent {
             return RecoveryState::Absent;
         }

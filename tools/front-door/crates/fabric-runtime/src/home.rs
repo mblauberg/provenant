@@ -309,10 +309,13 @@ impl RemoteCoordination<'_> {
 }
 
 fn is_retryable_refusal(error: &facade::FacadeError) -> bool {
-    matches!(
-        error,
-        facade::FacadeError::Busy | facade::FacadeError::Timeout | facade::FacadeError::Cancelled
-    )
+    use provenant_core::retry::{RetryCause, is_transient};
+    is_transient(match error {
+        facade::FacadeError::Busy => RetryCause::Contention,
+        facade::FacadeError::Timeout => RetryCause::Timeout,
+        facade::FacadeError::Cancelled => RetryCause::Cancelled,
+        _ => RetryCause::Permanent,
+    })
 }
 
 fn is_definitive_refusal(error: &facade::FacadeError) -> bool {
@@ -322,6 +325,7 @@ fn is_definitive_refusal(error: &facade::FacadeError) -> bool {
         FacadeError::InvalidInput
             | FacadeError::NotFound
             | FacadeError::Conflict
+            | FacadeError::GenerationConflict { .. }
             | FacadeError::NotTerminal
             | FacadeError::OperationConflict
             | FacadeError::StaleFence

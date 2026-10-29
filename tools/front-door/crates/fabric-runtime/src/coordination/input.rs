@@ -26,6 +26,11 @@ impl std::fmt::Display for InputError {
 impl std::error::Error for InputError {}
 
 impl InputError {
+    /// The wire refusal code; `path` identifies the invalid field.
+    pub fn code(&self) -> &'static str {
+        super::facade::FacadeError::InvalidInput.code()
+    }
+
     pub(crate) fn new(path: impl Into<String>) -> Self {
         Self { path: path.into() }
     }
@@ -102,6 +107,13 @@ pub const MAX_FETCH_BYTES: u64 = 131_072;
 
 fn field(path: &str) -> InputError {
     InputError::new(path)
+}
+
+fn mail_session(session: Option<&str>) -> Result<(), InputError> {
+    match session {
+        Some(session) => crate::inbox::session_id(session).map_err(|_| field("session")),
+        None => Ok(()),
+    }
 }
 
 fn bounded_text(value: &str, path: &str, max: usize) -> Result<(), InputError> {
@@ -236,14 +248,26 @@ impl ValidateInput for MailInput {
                 artifacts(values, "artifacts")?;
                 Ok(())
             }
-            Self::Read { after, limit, .. } => {
+            Self::Read {
+                after,
+                limit,
+                session,
+                ..
+            } => {
                 if after.is_some_and(|value| value < 0) {
                     return Err(field("after"));
                 }
+                mail_session(session.as_deref())?;
                 page(*limit, "limit")
             }
-            Self::MarkRead { through, .. } if *through < 0 => Err(field("through")),
-            Self::MarkRead { .. } => Ok(()),
+            Self::MarkRead {
+                through, session, ..
+            } => {
+                if *through < 0 {
+                    return Err(field("through"));
+                }
+                mail_session(session.as_deref())
+            }
         }
     }
 }
@@ -557,15 +581,24 @@ mod tests {
 
     #[test]
     fn submit_rejects_control_characters_in_titles() {
+        use super::ValidateInput;
         for title in ["line\nbreak", "tab\there", "escape\u{1b}", "unicode\u{85}"] {
-            let error = serde_json::from_value::<SubmitInput>(json!({
+            let value = json!({
                 "op":"submit", "operation_id":"work-1",
                 "tasks":[{"prompt":"do work", "title":title, "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
-            })).unwrap_err().to_string();
-            assert!(
-                error.contains("tasks[0].title") && error.contains("control characters"),
-                "{error}"
-            );
+            });
+            assert!(serde_json::from_value::<SubmitInput>(value).is_err());
+            let mut input: SubmitInput = serde_json::from_value(json!({
+                "op":"submit", "operation_id":"work-1",
+                "tasks":[{"prompt":"do work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]
+            })).unwrap();
+            let SubmitInput::Submit { tasks, .. } = &mut input;
+            tasks[0].title = Some(title.into());
+            let error = input
+                .validate_input(provenant_core::WaitTransport::Cli)
+                .unwrap_err();
+            assert_eq!(error.code(), "invalid_input");
+            assert_eq!(error.path, "tasks[0].title");
         }
     }
 

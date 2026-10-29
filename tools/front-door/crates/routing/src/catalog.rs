@@ -3,7 +3,7 @@ use crate::{
     ModelId, RoutingError,
     request::{effort_valid, identifier},
 };
-use provenant_config::{DomainConfig, DomainSection, Profile, SectionError};
+use provenant_config::{DomainConfig, DomainSection, FieldMetadata, Profile, SectionError};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -361,39 +361,6 @@ impl RoutingConfig {
         }
         warnings
     }
-    pub fn model_policy_fallback_warnings(&self, catalogue: &Catalogue) -> Vec<String> {
-        let mut warnings = Vec::new();
-        let mut inspect = |policy: &crate::ModelPolicy, field: &str| {
-            if let Some(model) = policy.result.fallback.as_ref() {
-                let entry = catalogue.model(model);
-                let reason = if entry.is_none() {
-                    Some("unknown model")
-                } else if policy
-                    .result
-                    .fallback_effort
-                    .as_ref()
-                    .is_some_and(|effort| {
-                        !entry.is_some_and(|entry| entry.efforts.contains(effort))
-                    })
-                {
-                    Some("unsupported effort")
-                } else {
-                    None
-                };
-                if let Some(reason) = reason {
-                    warnings.push(format!(
-                        "warning: domains.routing.{field}.result.fallback: {} ({reason}); dropped",
-                        model.as_str()
-                    ));
-                }
-            }
-        };
-        inspect(&self.model_policy.defaults, "model_policy.defaults");
-        for (index, rule) in self.model_policy.rules.iter().enumerate() {
-            inspect(&rule.policy, &format!("model_policy.rules.{index}"));
-        }
-        warnings
-    }
     /// Suggest a cheaper route in the applied tier. Exact models and custom
     /// pools use the model's highest bundled implementation tier.
     pub fn opus_writer_advisory(
@@ -731,9 +698,9 @@ mod go_allowance_tests {
         let mut config: RoutingConfig = toml_edit::de::from_str("[opencode_go]\n")?;
         assert_eq!(config.opencode_go.min_monthly_allowance_usd, 60);
         for id in [
-            "opencode/opencode-go/beam-free",
-            "opencode/opencode-go/glm-5.3-flash",
             "opencode/opencode-go/deepseek-v4.1-flash",
+            "opencode/opencode-go/glm-5.3-flash",
+            "opencode/opencode/deepseek-v4.1-flash-free",
             "opencode/opencode/glm-5.3-flash-free",
         ] {
             assert!(
@@ -741,31 +708,25 @@ mod go_allowance_tests {
                 "{id}"
             );
         }
-        for (id, expected) in [
-            ("opencode/opencode-go/minimax-m3.1-flash", "$20"),
-            ("opencode/opencode-go/unlisted", "unknown"),
-        ] {
-            let model = ModelId::parse(id)?;
-            let error = check_go_allowance(&model, &config, &catalogue).unwrap_err();
-            assert!(
-                error.contains(id)
-                    && error.contains(expected)
-                    && error.contains("domains.routing.opencode_go.min_monthly_allowance_usd"),
-                "{error}"
-            );
-            config.opencode_go.min_monthly_allowance_usd = 0;
-            assert!(check_go_allowance(&model, &config, &catalogue).is_ok());
-            config.opencode_go.min_monthly_allowance_usd = 60;
-        }
-        config.opencode_go.min_monthly_allowance_usd = 61;
+        let model = ModelId::parse("opencode/opencode-go/unlisted")?;
+        let error = check_go_allowance(&model, &config, &catalogue).unwrap_err();
         assert!(
-            check_go_allowance(
-                &ModelId::parse("opencode/opencode-go/glm-5.3-flash")?,
-                &config,
-                &catalogue
-            )
-            .is_err()
+            error.contains("opencode-go/unlisted")
+                && error.contains("unknown")
+                && error.contains("domains.routing.opencode_go.min_monthly_allowance_usd"),
+            "{error}"
         );
+        config.opencode_go.min_monthly_allowance_usd = 0;
+        assert!(check_go_allowance(&model, &config, &catalogue).is_ok());
+        config.opencode_go.min_monthly_allowance_usd = 61;
+        let error = check_go_allowance(
+            &ModelId::parse("opencode/opencode-go/glm-5.3-flash")?,
+            &config,
+            &catalogue,
+        )
+        .unwrap_err();
+        assert!(error.contains("$60"), "{error}");
+        config.opencode_go.min_monthly_allowance_usd = 60;
         Ok(())
     }
 }
@@ -856,10 +817,26 @@ fn defaults(_: Profile) -> &'static str {
 }
 /// Enforced model policy restrictions, including a retired schedule key in a
 /// restricting rule, are a boundary; other routing input recovers.
+pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::int("settlement_retries", 0, MAX_SETTLEMENT_RETRIES as i64),
+    FieldMetadata::int("capacity_retry_seconds", 0, MAX_RETRY_WAIT_SECONDS as i64),
+    FieldMetadata::int(
+        "capacity_retry_max_seconds",
+        0,
+        MAX_RETRY_WAIT_SECONDS as i64,
+    ),
+    FieldMetadata::int(
+        "retry_delay_ceiling_seconds",
+        0,
+        MAX_RETRY_WAIT_SECONDS as i64,
+    ),
+];
 pub const SECTION: DomainSection = DomainSection {
     validate: validate_section,
+    advisories: crate::policy::fallback_advisories,
     ..DomainSection::new::<RoutingConfig>("routing", defaults)
         .with_boundary_check(crate::policy::boundary)
+        .with_fields(FIELD_METADATA)
 };
 /// Retired timing keys are named first; serde never reads their values.
 fn validate_section(table: &toml_edit::Table) -> Vec<SectionError> {
@@ -885,7 +862,7 @@ pub struct ModelEntry {
     pub efforts: Vec<String>,
     pub evidence_ref: String,
     pub family: Option<String>,
-    /// Unknown is treated as training for confidential selection.
+    /// Covers prompt training and retention. Unknown is ineligible for confidential selection.
     #[serde(default)]
     pub trains_on_prompts: Option<bool>,
     #[serde(default)]
@@ -1301,7 +1278,6 @@ mod tests {
                 choice: RouteChoice::Model(ModelId::parse(id)?),
                 effort: None,
                 confidential: false,
-                allow_free: false,
                 fallback: Fallback::None,
             })
         };
@@ -1354,7 +1330,6 @@ mod tests {
             choice: RouteChoice::Model(ModelId::parse(id)?),
             effort: None,
             confidential: false,
-            allow_free: false,
             fallback: Fallback::None,
         })
     }
@@ -1505,54 +1480,83 @@ mod tests {
     }
 
     #[test]
-    fn model_policy_fallbacks_are_warned_and_reconciled() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn model_policy_fallbacks_are_reported_for_the_effective_route()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut config = RoutingConfig::default();
         config.model_policy.defaults.result.fallback =
             Some(ModelId::parse("codex/not-catalogued")?);
         assert!(config.validate().is_empty());
-        assert!(
-            config
-                .model_policy_fallback_warnings(&Catalogue::bundled()?)
-                .len()
-                == 1
+        let effective = config.model_policy.effective(
+            &ModelId::parse("codex/gpt-6-luna")?,
+            None,
+            provenant_core::WallTime::from_unix_seconds(1)?,
         );
-        let effective =
-            config
-                .model_policy
-                .effective(&ModelId::parse("codex/gpt-6-luna")?, None, 1);
         assert!(effective.policy.result.fallback.is_none());
+        assert_eq!(
+            effective.dropped_fallback,
+            Some((ModelId::parse("codex/not-catalogued")?, "unknown model"))
+        );
 
         config.model_policy.defaults.result.fallback = Some(ModelId::parse("codex/gpt-6-luna")?);
         config.model_policy.defaults.result.fallback_effort = Some("unsupported".into());
         assert!(config.validate().is_empty());
-        assert!(
-            config
-                .model_policy_fallback_warnings(&Catalogue::bundled()?)
-                .len()
-                == 1
+        let effective = config.model_policy.effective(
+            &ModelId::parse("codex/gpt-6-luna")?,
+            None,
+            provenant_core::WallTime::from_unix_seconds(1)?,
         );
-        config.model_policy.rules.push(crate::ModelPolicyRule {
-            schedule: crate::Schedule {
-                expires: Some(1),
-                ..Default::default()
-            },
-            policy: crate::ModelPolicy {
-                result: crate::ResultPolicy {
-                    fallback: Some(ModelId::parse("codex/not-catalogued")?),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-        assert!(config.validate().is_empty());
         assert_eq!(
-            config
-                .model_policy_fallback_warnings(&Catalogue::bundled()?)
-                .len(),
-            2
+            effective.dropped_fallback,
+            Some((ModelId::parse("codex/gpt-6-luna")?, "unsupported effort"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_pools_prefer_free_flash_and_exclude_other_opencode_models()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let junior = &catalogue.pools["junior"];
+        for name in ["deepseek-v4.1-flash", "glm-5.3-flash"] {
+            let free = ModelId::parse(&format!("opencode/opencode/{name}-free"))?;
+            let paid = ModelId::parse(&format!("opencode/opencode-go/{name}"))?;
+            let free_member = junior
+                .iter()
+                .find(|member| member.model == free)
+                .ok_or("free flash missing")?;
+            let paid_member = junior
+                .iter()
+                .find(|member| member.model == paid)
+                .ok_or("Go flash missing")?;
+            assert!(catalogue.is_free_model(&free));
+            assert_eq!(
+                catalogue
+                    .model(&free)
+                    .ok_or("free model missing")?
+                    .trains_on_prompts,
+                Some(false)
+            );
+            assert_eq!(free_member.weight, 50);
+            assert!(free_member.weight > paid_member.weight);
+            assert!(free_member.efforts.is_empty());
+        }
+        for members in catalogue.pools.values() {
+            for member in members {
+                let name = member.model.as_str();
+                if name.starts_with("opencode/") {
+                    assert!(
+                        [
+                            "opencode/opencode/deepseek-v4.1-flash-free",
+                            "opencode/opencode/glm-5.3-flash-free",
+                            "opencode/opencode-go/deepseek-v4.1-flash",
+                            "opencode/opencode-go/glm-5.3-flash"
+                        ]
+                        .contains(&name),
+                        "unexpected default pool model: {name}"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1561,7 +1565,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let catalogue = Catalogue::bundled()?;
         let config = RoutingConfig::default();
-        let model_names = ["deepseek-v4.1-flash", "glm-5.3-flash", "mimo-v2.6-flash"];
+        let model_names = ["deepseek-v4.1-flash", "glm-5.3-flash"];
         let availability = [AvailabilityRecord {
             schema_version: 1,
             adapter: "opencode".into(),
@@ -1607,7 +1611,6 @@ mod tests {
                     choice: RouteChoice::Model(model.clone()),
                     effort: None,
                     confidential: true,
-                    allow_free: false,
                     fallback: Fallback::None,
                 },
                 &context,

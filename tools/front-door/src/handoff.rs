@@ -40,7 +40,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 const COMMAND: &str = "workflow session handoff";
@@ -69,6 +69,9 @@ impl Refusal {
         self.data = Some((data, human));
         self
     }
+    fn code(&self) -> &str {
+        &self.code
+    }
     fn invalid(message: impl Into<String>) -> Self {
         Self::new(Outcome::Invalid, "INVALID", message)
     }
@@ -80,14 +83,6 @@ impl<E: std::fmt::Display> From<E> for Refusal {
     fn from(error: E) -> Self {
         Self::new(Outcome::Error, "IO", error.to_string())
     }
-}
-
-// Handoff lease records use current UTC wall time at this production edge.
-#[allow(clippy::disallowed_methods)]
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |t| i64::try_from(t.as_secs()).unwrap_or(i64::MAX))
 }
 
 fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), Refusal> {
@@ -149,12 +144,31 @@ fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refu
         workers,
         |context, cancel| Ok(worktrees::list(context, cancel)?),
     )?;
-    let (_, common) = git(
-        project,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        GIT_TIMEOUT,
-    )?;
-    let common = PathBuf::from(common.trim());
+    let common =
+        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)
+            .map_err(|error| {
+            if matches!(
+                error
+                    .get_ref()
+                    .and_then(|cause| cause.downcast_ref::<provenant_os::git::DiscoveryError>()),
+                Some(provenant_os::git::DiscoveryError::TimedOut)
+            ) {
+                Refusal::new(
+                    Outcome::Timeout,
+                    "GIT",
+                    "git rev-parse --path-format=absolute --git-common-dir timed out",
+                )
+            } else if matches!(
+                error
+                    .get_ref()
+                    .and_then(|cause| cause.downcast_ref::<provenant_os::git::DiscoveryError>()),
+                Some(provenant_os::git::DiscoveryError::Unavailable)
+            ) {
+                Refusal::new(Outcome::Error, "GIT", error.to_string())
+            } else {
+                Refusal::from(error)
+            }
+        })?;
     let primary = common
         .file_name()
         .is_some_and(|name| name == ".git")
@@ -393,13 +407,12 @@ fn open_source(globals: &Globals) -> Result<Source, Refusal> {
     })
 }
 
-// Operation identity includes the current wall-time sample.
-#[allow(clippy::disallowed_methods)]
 fn execute(
     args: &Handoff,
     globals: &Globals,
     workers: &dyn WorkerObserver,
 ) -> Result<(Value, String), Refusal> {
+    let clock = SystemClock::new();
     if provenant_cli::fabric::in_lane() {
         return Err(Refusal::refused(
             "lane_coordination_refused",
@@ -499,9 +512,9 @@ fn execute(
     let attachments = read_attachments(&args.attachments)?;
     let operation_id = OperationId::parse(&format!(
         "handoff-{}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |t| t.as_micros()),
+        clock
+            .wall_now()
+            .map_or(0, provenant_core::WallTime::as_micros),
         std::process::id()
     ))
     .map_err(|e| Refusal::invalid(e.to_string()))?;
@@ -688,7 +701,6 @@ fn execute(
 
     // 4. Send one peer action. The checkpoint and lease change only after
     // the peer accepts, so a retry starts from the same checkpoint.
-    let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), context.config.limits.peer_seconds)?;
     let reply = context.peer(
@@ -799,7 +811,7 @@ fn execute(
             previous: Some(local),
             operation_id,
             session_id: session.map(String::from),
-            at_unix: now_unix(),
+            at_unix: clock.unix_seconds(),
         };
         let lease_error = write_owner(&lease_dir, &lease).err().map(|e| e.to_string());
         data["owner"] = serde_json::to_value(&lease)?;
@@ -912,7 +924,7 @@ pub fn run(args: Handoff, globals: &Globals, workers: &dyn WorkerObserver) -> u8
         Err(refusal) => crate::fail(
             COMMAND,
             refusal.status,
-            &refusal.code,
+            refusal.code(),
             &refusal.message,
             globals,
         ),
@@ -1146,7 +1158,7 @@ pub(crate) fn receive(
                 previous: Some(target.source),
                 operation_id: input.operation_id.clone(),
                 session_id: None,
-                at_unix: now_unix(),
+                at_unix: target.clock.unix_seconds(),
             },
         );
     }
@@ -1302,7 +1314,7 @@ mod tests {
             provenant_core::ActorId::from_bytes([6; 16]),
         );
         let refusal = checkpoint_identity(&other, &repair).err().unwrap();
-        assert_eq!(refusal.code, "IDENTITY");
+        assert_eq!(refusal.code(), "IDENTITY");
         assert!(refusal.message.contains("provenant --state-dir '/custom state' --project '/selected project' workflow session save handoff-session --client codex --rebind --file <checkpoint.md>"));
     }
 

@@ -85,6 +85,11 @@ impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
         use provenant_fabric_runtime::coordination::facade::FacadeError;
         let detail = match &error {
+            run::RunError::GenerationConflict { current_generation } => {
+                Some(FacadeError::GenerationConflict {
+                    current_generation: *current_generation,
+                })
+            }
             run::RunError::WorktreeUnregistered(path) => Some(FacadeError::WorktreeUnregistered {
                 path: path.to_string_lossy().into_owned(),
             }),
@@ -286,7 +291,9 @@ impl run::Providers for Registry<'_> {
             }
             None => Default::default(),
         };
-        let now = jiff::Timestamp::now().as_second();
+        let now = SystemClock::new()
+            .wall_now()
+            .map_err(|error| error.to_string())?;
         let policy = routing
             .model_policy
             .effective(&model, route.account_key.as_deref(), now)
@@ -316,7 +323,7 @@ impl run::Providers for Registry<'_> {
                 key,
                 &model,
                 model_pool.as_deref(),
-                now,
+                now.unix_seconds(),
             )
         };
         Ok(assess_settlement_retry(
@@ -326,7 +333,7 @@ impl run::Providers for Registry<'_> {
             record,
             decoded,
             policy_attempt,
-            now,
+            now.unix_seconds(),
         ))
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
@@ -950,7 +957,7 @@ impl Registry<'_> {
             let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
             if !lane && (pool.is_some() || route.account_key.is_some()) {
                 if let Some(state_root) = provider_state.ancestors().nth(5) {
-                    let now = jiff::Timestamp::now().as_second();
+                    let now = SystemClock::new().unix_seconds();
                     let resets = resets_in_seconds
                         .and_then(|seconds| i64::try_from(seconds).ok())
                         .and_then(|seconds| now.checked_add(seconds));
@@ -998,7 +1005,7 @@ impl Registry<'_> {
                             let _ = crate::quota::persist_capacity_cooldown(
                                 self.state_root.unwrap_or_else(|| roots.state.as_path()),
                                 route,
-                                jiff::Timestamp::now().as_second(),
+                                SystemClock::new().unix_seconds(),
                                 duration,
                             );
                         }
@@ -1048,7 +1055,7 @@ impl Registry<'_> {
             let _ = crate::quota::persist_provider_success(
                 state_root,
                 route,
-                jiff::Timestamp::now().as_second(),
+                SystemClock::new().unix_seconds(),
             );
         }
         if decoded.outcome == run::Outcome::ModelUnavailable
@@ -1126,7 +1133,6 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         effort,
         fallback,
         confidential: false,
-        allow_free: false,
     })
 }
 
@@ -1423,15 +1429,34 @@ fn network_access(switch: Option<Switch>, postgres: bool) -> Option<run::Network
 /// existing directories, stored canonically, and clear of the state root;
 /// the confinement compiler refuses credential, broad and Git roots.
 pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
-    let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
+    lane_access_checked(access, state_root)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AccessError {
+    #[error(
+        "unknown capability {0}; known: postgres (Rust and Node toolchains are granted to every lane)"
+    )]
+    UnknownCapability(String),
+    #[error("{flag} {} is not an existing directory", path.display())]
+    MissingDirectory { flag: &'static str, path: PathBuf },
+    #[error("{flag} {} overlaps the Provenant state root", path.display())]
+    StateOverlap { flag: &'static str, path: PathBuf },
+    #[error("--write-root {} overlaps the --worktree; worktree-write already grants the worktree", .0.display())]
+    WorktreeOverlap(PathBuf),
+}
+
+fn lane_access_checked(
+    access: &crate::Access,
+    state_root: &Path,
+) -> Result<run::LaneAccess, AccessError> {
     let mut postgres = false;
     for name in &access.capability {
         match name.as_str() {
             "postgres" => postgres = true,
             other => {
-                return Err(invalid(format!(
-                    "unknown capability {other}; known: postgres (Rust and Node toolchains are granted to every lane)"
-                )));
+                return Err(AccessError::UnknownCapability(other.into()));
             }
         }
     }
@@ -1439,28 +1464,26 @@ pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::Lan
     // A first dispatch can precede the state root's creation; compare lexically then.
     let state =
         provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
-    let resolve = |paths: &[PathBuf], flag: &str| {
+    let resolve = |paths: &[PathBuf], flag: &'static str| {
         paths
             .iter()
             .map(|path| {
                 let canonical = provenant_os::fs::canonicalize(path)
                     .ok()
                     .filter(|canonical| canonical.is_dir())
-                    .ok_or_else(|| {
-                        invalid(format!(
-                            "{flag} {} is not an existing directory",
-                            path.display()
-                        ))
+                    .ok_or_else(|| AccessError::MissingDirectory {
+                        flag,
+                        path: path.clone(),
                     })?;
                 if canonical.starts_with(&state) || state.starts_with(&canonical) {
-                    return Err(invalid(format!(
-                        "{flag} {} overlaps the Provenant state root",
-                        path.display()
-                    )));
+                    return Err(AccessError::StateOverlap {
+                        flag,
+                        path: path.clone(),
+                    });
                 }
                 Ok(canonical)
             })
-            .collect::<Result<Vec<_>, Fail>>()
+            .collect::<Result<Vec<_>, AccessError>>()
     };
     let write_roots = resolve(&access.write_root, "--write-root")?;
     // Worktree-write protects `.git` inside the worktree, so a write root that
@@ -1470,10 +1493,7 @@ pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::Lan
         let worktree =
             provenant_os::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
         if let Some(root) = write_roots.iter().find(|root| worktree.starts_with(root)) {
-            return Err(invalid(format!(
-                "--write-root {} overlaps the --worktree; worktree-write already grants the worktree",
-                root.display()
-            )));
+            return Err(AccessError::WorktreeOverlap(root.clone()));
         }
     }
     Ok(run::LaneAccess {
@@ -1526,13 +1546,27 @@ pub fn submit(
 #[derive(Debug)]
 enum DiskCheck {
     Unobserved(String),
-    Low(String),
+    Low {
+        path: PathBuf,
+        available: u64,
+        floor: u64,
+        reclaimed: u64,
+    },
 }
 
 impl From<DiskCheck> for String {
     fn from(check: DiskCheck) -> Self {
         match check {
-            DiskCheck::Unobserved(message) | DiskCheck::Low(message) => message,
+            DiskCheck::Unobserved(message) => message,
+            DiskCheck::Low {
+                path,
+                available,
+                floor,
+                reclaimed,
+            } => format!(
+                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
+                path.display()
+            ),
         }
     }
 }
@@ -1650,10 +1684,12 @@ fn check_writer_disk_with_collection(
             }
         }
         if minimum < floor {
-            return Err(DiskCheck::Low(format!(
-                "insufficient disk space on {}: {minimum} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
-                limiting.display()
-            )));
+            return Err(DiskCheck::Low {
+                path: limiting.to_path_buf(),
+                available: minimum,
+                floor,
+                reclaimed,
+            });
         }
     }
     Ok(())
@@ -1685,7 +1721,7 @@ pub fn submit_with_host(
                 )
                 .map_err(|check| {
                     let (kind, status) = match &check {
-                        DiskCheck::Low(_) => (ErrorKind::DiskFloor, Status::Refused),
+                        DiskCheck::Low { .. } => (ErrorKind::DiskFloor, Status::Refused),
                         DiskCheck::Unobserved(_) => (ErrorKind::Io, Status::Error),
                     };
                     let message = String::from(check);
@@ -1981,6 +2017,8 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                     tail: Some(20),
                     max_bytes: 8192,
                     trace: false,
+                    to: None,
+                    path: false,
                 },
                 edge,
             );
@@ -2051,6 +2089,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 ));
             };
             let session = Session { store, context };
+            let _ = session.store.reap(&call);
             let full = command.all || command.id.is_some();
             let mut query = lane_query(
                 &session,
@@ -2153,6 +2192,8 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                             .and_then(|route| route.model.clone())
                             .unwrap_or_else(|| "unresolved".into()),
                         reason: reason.unwrap_or_default(),
+                        provider_error: None,
+                        result_path: None,
                     }
                 })
                 .collect();
@@ -2178,6 +2219,8 @@ struct LaneLine {
     state: String,
     model: String,
     reason: String,
+    provider_error: Option<String>,
+    result_path: Option<String>,
 }
 /// Needs action (0), still moving (1), or finished well (2).
 fn lane_rank(state: &str) -> u8 {
@@ -2244,7 +2287,26 @@ fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> crate::Summ
             }
         })
     });
-    crate::Summary::new(headline, rows, next)
+    let mut summary = crate::Summary::new(headline, rows, next);
+    for lane in listed.iter().take(crate::limits::SUMMARY_ROWS) {
+        if lane.state == "failed" {
+            if let Some(error) = &lane.provider_error {
+                summary.lines.push(format!(
+                    "  provider error {}: {}",
+                    &lane.id[..lane.id.len().min(8)],
+                    plain_text(error, usize::MAX)
+                ));
+            }
+            if let Some(path) = &lane.result_path {
+                summary.lines.push(format!(
+                    "  result: {} ({})",
+                    plain_text(path, usize::MAX),
+                    &lane.id[..lane.id.len().min(8)]
+                ));
+            }
+        }
+    }
+    summary
 }
 /// The lane rows of a `lanes` or `run` reply, in the shape `lane_summary` reads.
 fn lane_lines(data: &Value) -> Vec<LaneLine> {
@@ -2265,6 +2327,8 @@ fn lane_lines(data: &Value) -> Vec<LaneLine> {
                             .or_else(|| row["waiting_for"].as_str())
                             .unwrap_or_default()
                             .to_owned(),
+                        provider_error: row["provider_error"].as_str().map(str::to_owned),
+                        result_path: row["result_path"].as_str().map(str::to_owned),
                     })
                 })
                 .collect()
@@ -3022,6 +3086,26 @@ struct OwnedWorktree {
     created_at: WallTime,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum OwnWorktreeError {
+    #[error(
+        "--worktree-branch cannot reuse an adopted or foreign owner; its ownership, label and base are unchanged"
+    )]
+    ForeignOwner,
+    #[error(transparent)]
+    Other(run::RunError),
+}
+impl From<OwnWorktreeError> for Fail {
+    fn from(error: OwnWorktreeError) -> Self {
+        match error {
+            OwnWorktreeError::ForeignOwner => {
+                Fail::new(Status::Refused, ErrorKind::Refused, error.to_string())
+            }
+            OwnWorktreeError::Other(error) => error.into(),
+        }
+    }
+}
+
 /// Create or claim the owned tree and publish its lane ownership. A new
 /// tree's owner records the commit creation pinned, so nothing is resolved
 /// again after the side effect and a replay finds the same base.
@@ -3040,7 +3124,7 @@ fn own_worktree(
         provenant_confinement::worktrees::WorktreeInfo,
         provenant_core::GitOid,
     ),
-    Fail,
+    OwnWorktreeError,
 > {
     let OwnedWorktree {
         branch,
@@ -3056,8 +3140,7 @@ fn own_worktree(
         cancel,
         |context| {
             use provenant_confinement::worktrees::{
-                self, WorktreeCondition, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
-                WriterState,
+                self, WorktreeCondition, WorktreeCreate, WorktreeOrigin, WorktreeOwner, WriterState,
             };
             let context = &worktrees::WorktreeContext {
                 workers,
@@ -3145,18 +3228,15 @@ fn own_worktree(
     )
     .map_err(|error| {
         if owner_refused {
-            Fail::new(
-                Status::Refused,
-                ErrorKind::Refused,
-                "--worktree-branch cannot reuse an adopted or foreign owner; its ownership, label and base are unchanged",
-            )
+            OwnWorktreeError::ForeignOwner
         } else {
-            run::RunError::from(error).into()
+            OwnWorktreeError::Other(run::RunError::from(error))
         }
     })
 }
 
-fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
+/// Validate the inherited lane context and determine the next submission depth.
+pub fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
     let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
     let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
@@ -3524,29 +3604,80 @@ fn with_chair_index<T>(
 
 /// New lane-local associations need the same namespace proof as WorkIndex.
 /// A legacy row can be replayed, but a lane cannot create or repair one.
+#[derive(Debug)]
+enum ChairRunError {
+    Unauthorised(Fail),
+    Other(Fail),
+}
+impl From<ChairRunError> for Fail {
+    fn from(error: ChairRunError) -> Self {
+        match error {
+            ChairRunError::Unauthorised(error) | ChairRunError::Other(error) => error,
+        }
+    }
+}
 fn check_chair_run_id(
     session: &Session,
     roots: &Roots,
     run: RunId,
     request: &run::CanonicalRequest,
     call: &run::Request<'_>,
-) -> Result<(), Fail> {
+) -> Result<(), ChairRunError> {
     session
         .store
-        .check_child_run_id(run, request, &session.store.run(run, call)?.operation_id)?;
+        .check_child_run_id(
+            run,
+            request,
+            &session
+                .store
+                .run(run, call)
+                .map_err(Fail::from)
+                .map_err(ChairRunError::Other)?
+                .operation_id,
+        )
+        .map_err(Fail::from)
+        .map_err(ChairRunError::Other)?;
     if request.child_attempt_id_version.is_none() {
-        let digest = request.digest().map_err(run::RunError::from)?;
+        let digest = request
+            .digest()
+            .map_err(run::RunError::from)
+            .map_err(Fail::from)
+            .map_err(ChairRunError::Other)?;
+        let mut identity_refused = false;
         with_chair_index(roots, call, |index, c| {
             match index.read(session.context.project_id, run, c)? {
                 Some(value) if value.request_digest == digest => Ok(()),
                 Some(_) => Err(provenant_fabric_runtime::chairs::Error::Conflict),
-                None => Err(provenant_fabric_runtime::chairs::Error::Invalid(
-                    "new chair associations require host-derived child run IDs",
-                )),
+                None => {
+                    identity_refused = true;
+                    Err(provenant_fabric_runtime::chairs::Error::Invalid(
+                        "new chair associations require host-derived child run IDs",
+                    ))
+                }
+            }
+        })
+        .map_err(|failure| {
+            if identity_refused {
+                ChairRunError::Unauthorised(failure)
+            } else {
+                ChairRunError::Other(failure)
             }
         })?;
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct ChairSourceError;
+
+fn check_chair_source(
+    store: &run::RunStore,
+    request: &run::CanonicalRequest,
+    parent: &run::AttemptRecord,
+) -> Result<(), ChairSourceError> {
+    store
+        .check_child_attempt_id(request, parent)
+        .map_err(|_| ChairSourceError)
 }
 
 fn seal_launch_task(
@@ -3738,14 +3869,11 @@ fn launch_on_host(
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
                 })?;
                 if lane_local {
-                    session
-                        .store
-                        .check_child_attempt_id(&original, &parent)
-                        .map_err(|_| {
-                            provenant_fabric_runtime::chairs::Error::Invalid(
-                                "continuation source identity does not match host-derived IDs",
-                            )
-                        })?;
+                    check_chair_source(&session.store, &original, &parent).map_err(|_| {
+                        provenant_fabric_runtime::chairs::Error::Invalid(
+                            "continuation source identity does not match host-derived IDs",
+                        )
+                    })?;
                     if index
                         .read(session.context.project_id, parent.run_id, index_call)?
                         .is_none()
@@ -4086,6 +4214,7 @@ fn render_lanes(
     cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
 ) -> (Value, String) {
     let mut human = String::new();
+    let now_wall = SystemClock::new().wall_now().ok();
     let rows: Vec<Value> = lanes
         .iter()
         .map(|lane| {
@@ -4238,6 +4367,25 @@ fn render_lanes(
                         .join(", ")
                 ));
             }
+            if review_required {
+                human.push_str(&format!(
+                    "  next: provenant lane deliver --accept-review {}\n",
+                    lane.attempt_id
+                ));
+            }
+            if matches!(
+                lane.state,
+                run::AttemptState::Terminal {
+                    outcome: run::Outcome::Failed,
+                    ..
+                }
+            ) && let Some(path) = &result
+            {
+                human.push_str(&format!(
+                    "  result: {}\n",
+                    plain_text(&path.display().to_string(), usize::MAX)
+                ));
+            }
             if let Some(delivery) = &lane.delivery {
                 human.push_str(&format!(
                     "  delivery {}:{} {} head={}\n",
@@ -4262,6 +4410,9 @@ fn render_lanes(
                         .map(|path| attempt.join(path));
                     json!({ "adapter": adapter, "session": session, "path": path })
                 });
+            // The settled record's own reason, without a waiting lane's note.
+            let settlement = matches!(lane.state, run::AttemptState::Terminal { .. })
+                .then(|| json!({ "reason": state_and_reason(&lane.state).1 }));
             let mut row = json!({
                 "run_id": lane.run_id,
                 "task_id": lane.task_id,
@@ -4270,6 +4421,7 @@ fn render_lanes(
                 "state": state,
                 "exit_code": exit_code,
                 "reason": reason,
+                "settlement": settlement,
                 "lane_class": wait.map(|w| w.lane_class),
                 "waiting_for": wait.map(|w| &w.waiting_for),
                 "requested_route": lane.requested_route,
@@ -4283,6 +4435,8 @@ fn render_lanes(
                 "finished_at": finished_at,
                 "last_output_at": lane.last_output_at,
                 "runtime_deadline": lane.runtime_deadline,
+                "overdue": now_wall.is_some_and(|now| run::overdue_at(lane, now)),
+                "stale": run::holder_absent(root, lane),
                 "partial_signals": lane.partial_signals,
                 "delivery_id": lane.delivery_id,
                 "write_grants": lane.write_grants,
@@ -4471,6 +4625,7 @@ fn select_since(
         },
         since,
     )
+    .map_err(Fail::from)
 }
 /// The candidate lanes for a wait or watch, read afresh on each call. With
 /// `seen`, an unnamed selection holds the unsettled lanes and those settled
@@ -4489,6 +4644,7 @@ fn candidates<'a>(
             clock: &clock,
             cancel: &cancel,
         };
+        let _ = session.store.reap(&call);
         let ids = match picks.since {
             Some(since) if picks.targets.is_empty() => {
                 select_since(session, picks.owner, since, &call)?
@@ -4535,13 +4691,64 @@ fn render_settled(
             cancel: &cancel,
         },
     );
-    Ok(render_lanes(
+    let (mut data, mut human) = render_lanes(
         lanes,
         &waits,
         None,
         session.context.state_root.as_path(),
         cooldowns,
-    ))
+    );
+    append_provider_errors(session, lanes, &mut data, &mut human);
+    attach_handoffs(session, lanes, &mut data);
+    Ok((data, human))
+}
+fn append_provider_errors(
+    session: &Session,
+    lanes: &[run::AttemptRecord],
+    data: &mut Value,
+    human: &mut String,
+) {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let Some(rows) = data["lanes"].as_array_mut() else {
+        return;
+    };
+    for (lane, row) in lanes.iter().zip(rows) {
+        if matches!(
+            lane.state,
+            run::AttemptState::Terminal {
+                outcome: run::Outcome::Failed,
+                ..
+            }
+        ) && let Some(error) = provider_error_line(session, lane.attempt_id, &call)
+        {
+            row["provider_error"] = json!(error);
+            human.push_str(&format!(
+                "  provider error {}: {}\n",
+                lane.attempt_id,
+                plain_text(&error, usize::MAX)
+            ));
+        }
+    }
+}
+/// Each row's `handoff`: the settlement snapshot's parsed object, or null when
+/// the attempt recorded none. Rows follow `lanes`, as `render_lanes` makes them.
+fn attach_handoffs(session: &Session, lanes: &[run::AttemptRecord], data: &mut Value) {
+    let Some(rows) = data["lanes"].as_array_mut() else {
+        return;
+    };
+    for (row, lane) in rows.iter_mut().zip(lanes) {
+        row["handoff"] = session
+            .store
+            .handoff(lane)
+            .ok()
+            .flatten()
+            .map_or(Value::Null, |handoff| json!(handoff));
+    }
 }
 fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, String, bool), Fail> {
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
@@ -4887,6 +5094,8 @@ fn lanes_inner(
             .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid cursor"))?,
         None => 0,
     };
+    // A lane whose guardian died is settled by the next read, not left running.
+    let _ = session.store.reap(&call);
     let mut query = lane_query(
         &session,
         &command.id,
@@ -4901,7 +5110,7 @@ fn lanes_inner(
     let by_session =
         |lane: &run::AttemptRecord| command.session.is_none() || lane.verified_owner == Some(owner);
     let filtered = !command.states.is_empty() || command.since.is_some();
-    query.newest_first = filtered;
+    query.newest_first = filtered || command.all;
     let (lanes, next) = if filtered {
         query.limit = 100;
         let mut matches = Vec::new();
@@ -4943,13 +5152,15 @@ fn lanes_inner(
     };
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
-    let (data, human) = render_lanes(
+    let (mut data, mut human) = render_lanes(
         &lanes,
         &waits,
         next,
         session.context.state_root.as_path(),
         lane_cooldown_view(&cooldowns),
     );
+    append_provider_errors(&session, &lanes, &mut data, &mut human);
+    attach_handoffs(&session, &lanes, &mut data);
     Ok((data, human, false))
 }
 
@@ -5111,16 +5322,32 @@ pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
         .then_some(command.tail)
         .flatten();
     let headed = matches!(command.part, Part::Result) && !command.trace;
+    let to = command.to.clone();
     let mut out = reply(
         "output",
-        output_inner(command, edge).map(|(mut data, mut text)| {
+        output_inner(command, edge).and_then(|(mut data, mut text)| {
             if let Some(lines) = receipt_tail {
                 text =
                     text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
                 data["tail"] = json!(lines.min(limits::TAIL_LINES));
                 data["tail_text"] = json!(text);
             }
-            (data, text)
+            if let Some(path) = &to {
+                let bytes = chunk_bytes(&data).ok_or_else(|| {
+                    Fail::new(
+                        Status::Invalid,
+                        ErrorKind::Invalid,
+                        "--to needs a part that has bytes; use --part result, transcript, stderr or prompt",
+                    )
+                })?;
+                std::fs::write(path, &bytes).map_err(|error| {
+                    Fail::new(Status::Error, ErrorKind::Io, error.to_string())
+                })?;
+                data["to"] = json!(path.display().to_string());
+                data["written"] = json!(bytes.len());
+                text = format!("wrote {} bytes to {}\n", bytes.len(), path.display());
+            }
+            Ok((data, text))
         }),
     );
     out.read_only = true;
@@ -5135,6 +5362,14 @@ pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
 /// Missing changed-file evidence stays null; it must never read as an empty diff.
 fn output_summary(data: &Value, text: &str, headed: bool) -> crate::Summary {
     let mut lines = Vec::new();
+    if let Some(selected) = data.get("selected") {
+        lines.push(format!(
+            "attempt {} chosen: {} of {} attempts",
+            data["attempt_id"].as_str().unwrap_or_default(),
+            selected["rule"].as_str().unwrap_or("newest"),
+            selected["attempts"]
+        ));
+    }
     if headed && let Some(state) = data["state"].as_str() {
         let reason = data["reason"].as_str();
         lines.push(match reason {
@@ -5145,6 +5380,17 @@ fn output_summary(data: &Value, text: &str, headed: bool) -> crate::Summary {
             ),
             None => format!("settlement: {}", crate::bounded_text(state, 64)),
         });
+        if state == "failed" {
+            if let Some(error) = data["provider_error"].as_str() {
+                lines.push(format!(
+                    "provider error: {}",
+                    crate::bounded_text(error, 160)
+                ));
+            }
+            if let Some(path) = data["result_path"].as_str() {
+                lines.push(format!("result: {}", crate::bounded_text(path, 512)));
+            }
+        }
     }
     if headed && let Some(files) = data.get("changed_files") {
         lines.push(match files.as_array() {
@@ -5374,7 +5620,8 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
     let receipt = matches!(command.part, Part::Receipt);
-    let candidate = targets::resolve(edge, &command.attempt.0, receipt)?;
+    // A RUN or RUN/TASK names attempts, so every part resolves runs as receipts do.
+    let candidate = targets::resolve(edge, &command.attempt.0, true)?;
     command.attempt.0 = candidate.target.clone();
     if site.is_none()
         && let Some(placement) = targets::placement(edge, &candidate.target, false)?
@@ -5382,6 +5629,7 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         return remote::output(&command, &placement, edge);
     }
     let (session, target) = targets::read_resolved(edge, candidate, &call)?;
+    let mut selected = None;
     let id = match target.attempt {
         Some(id) => id,
         None if receipt => {
@@ -5399,11 +5647,9 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
             page.lanes[0].attempt_id
         }
         None => {
-            return Err(Fail::new(
-                Status::Invalid,
-                ErrorKind::Invalid,
-                "attempt required",
-            ));
+            let (id, attempts, rule) = newest_attempt(&session, &target, &call)?;
+            selected = Some(json!({ "attempts": attempts, "rule": rule }));
+            id
         }
     };
     let record = session.service().status(id, &call)?;
@@ -5432,6 +5678,32 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         return Ok((
             json!({ "attempt_id": id, "trace": trace, "grants": grants }),
             human,
+        ));
+    }
+    if command.path {
+        let file = match command.part {
+            Part::Result if record.result.is_none() => {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::NotFound,
+                    "attempt has no result to point at",
+                ));
+            }
+            Part::Result => provenant_records::AttemptFile::Result,
+            Part::Prompt => provenant_records::AttemptFile::Prompt,
+            Part::Stderr => provenant_records::AttemptFile::Stderr,
+            _ => {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "--path needs --part result, prompt or stderr",
+                ));
+            }
+        };
+        let path = artifact(session.context.state_root.as_path(), &record, file.name());
+        return Ok((
+            json!({ "attempt_id": id, "part": format!("{:?}", command.part).to_lowercase(), "path": path.display().to_string() }),
+            format!("{}\n", path.display()),
         ));
     }
     let part = match command.part {
@@ -5539,7 +5811,124 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         data["changed_files"] = paths;
         data["changed_files_total"] = total;
     }
+    if matches!(command.part, Part::Result)
+        && matches!(
+            record.state,
+            run::AttemptState::Terminal {
+                outcome: run::Outcome::Failed,
+                ..
+            }
+        )
+    {
+        data["provider_error"] = json!(provider_error_line(&session, id, &call));
+        data["result_path"] = json!(record.result.as_ref().map(|_| {
+            artifact(session.context.state_root.as_path(), &record, "result.md")
+                .display()
+                .to_string()
+        }));
+    }
+    if let Some(selected) = selected {
+        data["selected"] = selected;
+    }
     Ok((data, text))
+}
+
+/// The attempt `output` reads for a RUN or RUN/TASK: the newest settled one,
+/// else the newest. Several tasks in one run are ambiguous, so they are refused.
+fn newest_attempt(
+    session: &Session,
+    target: &Target,
+    call: &run::Request<'_>,
+) -> Result<(AttemptId, usize, &'static str), Fail> {
+    let mut query = lane_query(session, std::slice::from_ref(target), true, 100, 0, call)?;
+    query.newest_first = true;
+    let page = session.service().lanes(&query, call)?;
+    newest_settled_of(&page.lanes)
+}
+
+/// Choose from a page of attempts, newest first. Several tasks are ambiguous.
+fn newest_settled_of(
+    lanes: &[run::AttemptRecord],
+) -> Result<(AttemptId, usize, &'static str), Fail> {
+    let mut tasks: Vec<_> = lanes.iter().map(|lane| lane.task_id).collect();
+    tasks.sort();
+    tasks.dedup();
+    match tasks.len() {
+        0 => {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::NotFound,
+                "no attempt in that run",
+            ));
+        }
+        1 => {}
+        count => {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Conflict,
+                format!("run has {count} tasks; name one as RUN/TASK"),
+            ));
+        }
+    }
+    let settled = lanes
+        .iter()
+        .find(|lane| matches!(lane.state, run::AttemptState::Terminal { .. }));
+    Ok(match settled {
+        Some(lane) => (lane.attempt_id, lanes.len(), "newest settled"),
+        None => (lanes[0].attempt_id, lanes.len(), "newest"),
+    })
+}
+
+/// The last non-empty stderr line of a failed attempt, redacted as reasons are.
+/// The tail is read so a long capture still shows its final error.
+fn provider_error_line(
+    session: &Session,
+    id: AttemptId,
+    call: &run::Request<'_>,
+) -> Option<String> {
+    const TAIL_BYTES: u64 = 8192;
+    let length = session
+        .service()
+        .output(
+            id,
+            run::ArtifactPart::Stderr,
+            run::ByteRange {
+                offset: 0,
+                max_bytes: 1,
+            },
+            call,
+        )
+        .ok()?
+        .len;
+    let tail = session
+        .service()
+        .output(
+            id,
+            run::ArtifactPart::Stderr,
+            run::ByteRange {
+                offset: length.saturating_sub(TAIL_BYTES),
+                max_bytes: TAIL_BYTES,
+            },
+            call,
+        )
+        .ok()?;
+    let text = String::from_utf8_lossy(&tail.bytes);
+    let line = text.lines().rev().find(|line| !line.trim().is_empty())?;
+    let redacted = provenant_confinement::redact::known_shapes(line.as_bytes())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())?;
+    Some(crate::bounded_text(&redacted, 160))
+}
+
+/// The exact bytes of a read, from the lossless encoding `output` reports.
+fn chunk_bytes(data: &Value) -> Option<Vec<u8>> {
+    let bytes = &data["bytes"];
+    let text = bytes["data"].as_str()?;
+    match bytes["encoding"].as_str()? {
+        "utf8" => Some(text.as_bytes().to_vec()),
+        "base64" => provenant_fabric_runtime::handoff::decode_base64(text),
+        _ => None,
+    }
 }
 
 /// Use the recorded base and final head, never the caller's current checkout
@@ -5619,20 +6008,31 @@ fn tail_start(bytes: &[u8], lines: u64) -> usize {
 /// run's submitter lives in its parent's store), which appears as a hop that
 /// knows only its attempt ID. A parent that repeats is a corrupt store and
 /// fails.
+#[derive(Debug, thiserror::Error)]
+enum TraceError {
+    #[error("trace parents loop back to attempt {0}")]
+    Loop(AttemptId),
+    #[error(transparent)]
+    Run(#[from] run::RunError),
+}
+impl From<TraceError> for Fail {
+    fn from(error: TraceError) -> Self {
+        match error {
+            TraceError::Loop(_) => Fail::new(Status::Error, ErrorKind::Io, error.to_string()),
+            TraceError::Run(error) => error.into(),
+        }
+    }
+}
 fn trace_chain(
     store: &run::RunStore,
     record: run::AttemptRecord,
     call: &run::Request<'_>,
-) -> Result<Vec<provenant_records::Trace>, Fail> {
+) -> Result<Vec<provenant_records::Trace>, TraceError> {
     let mut seen = std::collections::HashSet::from([record.attempt_id]);
     let mut chain = vec![record.trace];
     while let Some(parent) = chain.last().and_then(|t| t.parent) {
         if !seen.insert(parent) {
-            return Err(Fail::new(
-                Status::Error,
-                ErrorKind::Io,
-                format!("trace parents loop back to attempt {parent}"),
-            ));
+            return Err(TraceError::Loop(parent));
         }
         match run::Service::new(store).status(parent, call) {
             Ok(record) => chain.push(record.trace),
@@ -5715,6 +6115,31 @@ pub fn align_utf8_tail(chunk: &mut run::OutputChunk) {
         chunk.bytes.truncate(valid);
         chunk.encoding = "utf8";
     }
+}
+
+/// The adapter recorded for a local attempt, read from its run record alone:
+/// no transcript, output or provider is touched.
+pub fn attempt_provider(
+    edge: &Edge<'_>,
+    attempt: provenant_core::AttemptId,
+) -> Result<Option<String>, Fail> {
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let target = Target {
+        selection: None,
+        run: None,
+        task: None,
+        attempt: Some(attempt),
+    };
+    let (session, selected) = targets::open(edge, &target, false, &call)?;
+    let record = session
+        .store
+        .record(selected.attempt.unwrap_or(attempt), &call)?;
+    Ok([&record.applied_route, &record.resolved_route]
+        .into_iter()
+        .flatten()
+        .find_map(|route| route.provider.clone()))
 }
 
 /// Cancel every attempt the target names. Queued work ends at once; started
@@ -6620,7 +7045,7 @@ pub fn stats_by_pr(
 fn cache_kpi_rows(
     facts: &[&provenant_records::AttemptFact],
     domains: &crate::domains::Domains,
-    now: i64,
+    now: provenant_core::WallTime,
 ) -> Value {
     let mut grouped: BTreeMap<(Option<String>, Option<String>), Vec<&provenant_records::Usage>> =
         BTreeMap::new();
@@ -6648,6 +7073,71 @@ fn cache_kpi_rows(
     }).collect();
     json!({"scope": "project terminal attempts", "routes": routes, "lanes": lanes})
 }
+
+/// Attempts still queued or running in the project, or in one run. The window
+/// cannot count them: they have no finish time yet.
+fn unfinished_attempts(
+    store: Option<&run::RunStore>,
+    run_id: Option<RunId>,
+    call: &run::Request<'_>,
+) -> Result<u64, Fail> {
+    let Some(store) = store else {
+        return Ok(0);
+    };
+    let mut count = 0;
+    let mut after = 0;
+    loop {
+        let page = store.lanes(
+            &run::LaneQuery {
+                targets: run_id
+                    .map(|run| {
+                        vec![run::LaneTarget {
+                            run,
+                            task: None,
+                            attempt: None,
+                        }]
+                    })
+                    .unwrap_or_default(),
+                all: false,
+                limit: 100,
+                after,
+                newest_first: false,
+                owner: None,
+                unseen_after: None,
+            },
+            call,
+        )?;
+        // A run selection also returns its terminal lanes, so filter on state.
+        count += page
+            .lanes
+            .iter()
+            .filter(|lane| !matches!(lane.state, run::AttemptState::Terminal { .. }))
+            .count() as u64;
+        match page.next {
+            Some(next) => after = next,
+            None => return Ok(count),
+        }
+    }
+}
+
+/// Names the project the figures cover, and what the window leaves out.
+fn stats_scope_line(project: provenant_core::ProjectId, unfinished: u64) -> String {
+    format!(
+        "scope: project {project}, finished attempts only ({unfinished} queued or running not counted); other projects are excluded, so run stats from their checkout\n"
+    )
+}
+
+/// Reasoning tokens get a line only where a provider reported them.
+fn reasoning_line(totals: &provenant_telemetry::Totals) -> Option<String> {
+    let zero = provenant_telemetry::TokenTotal::default();
+    (totals.usage.reasoning.known > 0).then(|| {
+        format!(
+            "reasoning tokens: {}\n",
+            grouped_token_count(&totals.usage.reasoning, &zero, &zero)
+        )
+    })
+}
+
 fn stats_inner(
     command: Stats,
     edge: &Edge<'_>,
@@ -6744,6 +7234,7 @@ fn stats_inner(
         })
         .transpose()?
         .unwrap_or_default();
+    let unfinished = unfinished_attempts(store.as_ref(), selected_run, &call)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
     let selected: Vec<_> = facts
@@ -6764,8 +7255,21 @@ fn stats_inner(
     let cache_kpis = cache_kpi_rows(
         &selected,
         &config.domains,
-        jiff::Timestamp::now().as_second(),
+        call.clock.wall_now().map_err(|_| {
+            provenant_run::RunError::Admission(provenant_run::AdmissionError::Clock)
+        })?,
     );
+    let pipeline = if command.outcomes || command.suggest {
+        Some(pipeline_report(
+            &selected,
+            &prices,
+            &command.pipeline,
+            edge,
+            context.project_id,
+        )?)
+    } else {
+        None
+    };
     // Chair sessions span projects, so the host's whole window is read. They are
     // best effort: an unreadable usage log must not hide the lane figures.
     let chair_window = (
@@ -6863,11 +7367,15 @@ fn stats_inner(
         provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
     }
     .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let mut human = stats_summary(&report);
+    let mut human = stats_scope_line(context.project_id, unfinished);
+    human.push_str(&stats_summary(&report));
+    if let Some(line) = reasoning_line(&report.totals) {
+        human.push_str(&line);
+    }
     if let Some(groups) = &report.context_groups {
         human.push_str(&format!("by {by_name}: {} groups\n", groups.len()));
         for group in groups {
-            let label = group.value.as_deref().unwrap_or("unknown");
+            let label = group.value.as_deref().unwrap_or("unattributed");
             let input = grouped_token_count(
                 &group.totals.usage.uncached_input,
                 &group.totals.usage.cache_read,
@@ -6951,6 +7459,23 @@ fn stats_inner(
         ));
     }
     data["partial_signals"] = json!(partial);
+    data["unfinished_attempts_excluded"] = json!(unfinished);
+    if let Some(pipeline) = pipeline {
+        human.push_str(&format!(
+            "post-merge outcomes: CI {}; {} unattributed rows; {} suggestions\n",
+            pipeline["outcomes"]["ci"]
+                .as_str()
+                .unwrap_or("not_measured"),
+            pipeline["outcomes"]["unattributed_rows"],
+            pipeline["ranking"]["suggestions"]
+                .as_array()
+                .map_or(0, Vec::len)
+        ));
+        human.push_str(
+            "suggestions are advisory; inspect counts, intervals and expiry with --json\n",
+        );
+        data["pipeline"] = pipeline;
+    }
     attach_freshness(&prices, &mut data, &mut human)?;
     if by == Some(crate::StatsBy::Pr) {
         data["pr_attribution"] = json!({
@@ -6967,6 +7492,350 @@ fn stats_inner(
         data["chair_error"] = Value::String(error);
     }
     Ok((data, human))
+}
+
+/// Read retained facts and checkpoints only. Source findings receive verifier
+/// decisions by graph-local finding identity; synthesis copies never add value.
+fn pipeline_report(
+    facts: &[&provenant_records::AttemptFact],
+    prices: &provenant_telemetry::PriceTable,
+    options: &crate::PipelineOptions,
+    edge: &Edge<'_>,
+    project: provenant_core::ProjectId,
+) -> Result<Value, Fail> {
+    use provenant_fabric_runtime::graph::FileJournal;
+    use provenant_telemetry::outcome::Evidence;
+    let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
+    let mut checkpoints = BTreeMap::new();
+    let mut unreadable_graphs = std::collections::BTreeSet::new();
+    for fact in facts {
+        if let Some(graph) = fact.context.as_ref().and_then(|c| c.graph_id.as_ref())
+            && !checkpoints.contains_key(graph)
+        {
+            let checkpoint = match FileJournal::read_checkpoint(&edge.roots.state, project, graph) {
+                Ok(checkpoint) => checkpoint,
+                Err(_) => {
+                    unreadable_graphs.insert(graph.clone());
+                    None
+                }
+            };
+            checkpoints.insert(graph.clone(), checkpoint);
+        }
+    }
+    let mut nodes =
+        BTreeMap::<(Option<String>, String), Vec<provenant_records::AttemptFact>>::new();
+    for fact in facts {
+        let context = fact.context.as_ref();
+        let graph = context.and_then(|c| c.graph_id.clone());
+        let node = context
+            .filter(|_| graph.is_some())
+            .and_then(|c| c.node_id.clone())
+            .unwrap_or_else(|| fact.attempt_id.to_string());
+        nodes
+            .entry((graph, node))
+            .or_default()
+            .push((*fact).clone());
+    }
+    let mut evidence = Vec::new();
+    for ((graph, node), mut facts) in nodes {
+        facts.sort_by_key(|f| (f.finished_at, f.attempt_number));
+        let latest = facts
+            .last()
+            .ok_or_else(|| invalid("empty node evidence".into()))?;
+        let context = latest.context.as_ref();
+        let extra = |key: &str| {
+            context
+                .and_then(|c| c.extra.get(key))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        let checkpoint = graph
+            .as_ref()
+            .and_then(|g| checkpoints.get(g))
+            .and_then(Option::as_ref);
+        let pr = context
+            .and_then(|c| c.extra.get("pr"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                checkpoint
+                    .and_then(|c| c.pull_request.as_deref())
+                    .and_then(|pr| pr.trim_end_matches('/').rsplit('/').next()?.parse().ok())
+            });
+        let issue = context
+            .and_then(|c| c.work_item.as_deref())
+            .and_then(|s| s.rsplit(['#', '/']).next())
+            .and_then(|s| s.parse().ok());
+        let (confirmed, false_positives) = pipeline_dispositions(checkpoint, &node);
+        let mut row = Evidence {
+            sample: json!([graph, node]).to_string(),
+            graph,
+            pr,
+            issue,
+            pattern: context.and_then(|c| c.pattern.clone()),
+            lens: extra("lens").or_else(|| context.and_then(|c| c.role.clone())),
+            model: pipeline_node_model(&facts),
+            risk_tier: extra("risk_tier"),
+            task_kind: extra("task_kind"),
+            cost_microdollars: None,
+            confirmed,
+            false_positives,
+        };
+        let report =
+            provenant_telemetry::stats(facts, prices, provenant_telemetry::Window::default())
+                .map_err(|e| invalid(e.to_string()))?;
+        row.cost_microdollars = report.totals.cost.complete.map(|m| m.microdollars);
+        evidence.push(row);
+    }
+    let ci: Option<Vec<provenant_telemetry::outcome::CiRun>> = options
+        .ci_file
+        .as_ref()
+        .map(|path| {
+            let bytes = std::fs::read(path).map_err(|e| invalid(e.to_string()))?;
+            if bytes.len() > 16 * 1024 * 1024 {
+                return Err(invalid("CI file exceeds 16 MiB".into()));
+            }
+            serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))
+        })
+        .transpose()?;
+    let now = SystemClock::new()
+        .wall_now()
+        .map_err(|e| invalid(e.to_string()))?
+        .as_timestamp();
+    let mut outcomes = provenant_telemetry::outcome::attribute(
+        edge.cwd,
+        &options.main_ref,
+        evidence,
+        ci.as_deref(),
+        options.outcome_days,
+        now.as_second(),
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    for row in &mut outcomes.rows {
+        if row
+            .evidence
+            .graph
+            .as_ref()
+            .is_some_and(|graph| unreadable_graphs.contains(graph))
+        {
+            row.stratum = "unmeasured";
+            row.signals.unmeasured = true;
+        }
+    }
+    let ranking = provenant_telemetry::suggest::rank(
+        &outcomes,
+        options.min_samples as usize,
+        options.expiry_days,
+        now,
+    )
+    .map_err(invalid)?;
+    Ok(json!({"outcomes": outcomes, "ranking": ranking}))
+}
+
+fn pipeline_dispositions(
+    checkpoint: Option<&provenant_fabric_runtime::graph::GraphCheckpoint>,
+    node: &str,
+) -> (Option<u64>, Option<u64>) {
+    let mut confirmed = None;
+    let mut false_positives = None;
+    if let Some(checkpoint) = checkpoint {
+        let mut decisions = BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
+        let mut origins = BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
+        for source_node in checkpoint.nodes.iter().filter(|n| n.children.is_empty()) {
+            for finding in source_node.outputs.iter().flat_map(|o| &o.findings) {
+                if finding.disposition.is_none() {
+                    origins
+                        .entry(&finding.id)
+                        .or_default()
+                        .insert(&source_node.id);
+                }
+            }
+        }
+        for finding in checkpoint
+            .nodes
+            .iter()
+            .filter(|n| n.children.is_empty())
+            .filter_map(|n| n.outputs.as_ref())
+            .flat_map(|o| &o.findings)
+        {
+            if let Some(disposition) = finding.disposition.as_deref() {
+                decisions
+                    .entry(&finding.id)
+                    .or_default()
+                    .insert(disposition);
+            }
+        }
+        if let Some(source) = checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == node && n.children.is_empty())
+            .and_then(|n| n.outputs.as_ref())
+        {
+            let ids: std::collections::BTreeSet<_> = source
+                .findings
+                .iter()
+                .filter(|f| f.disposition.is_none())
+                .map(|f| f.id.as_str())
+                .collect();
+            let mut c = 0;
+            let mut f = 0;
+            let mut complete = true;
+            for id in ids {
+                if origins.get(id).is_none_or(|nodes| nodes.len() != 1) {
+                    complete = false;
+                    continue;
+                }
+                match decisions
+                    .get(id)
+                    .filter(|d| d.len() == 1)
+                    .and_then(|d| d.first())
+                    .copied()
+                {
+                    Some("accepted") => c += 1,
+                    Some("rejected") => f += 1,
+                    _ => complete = false,
+                }
+            }
+            if complete {
+                confirmed = Some(c);
+                false_positives = Some(f);
+            }
+        }
+    }
+    (confirmed, false_positives)
+}
+
+fn pipeline_node_model(facts: &[provenant_records::AttemptFact]) -> Option<String> {
+    let models: Option<std::collections::BTreeSet<_>> = facts
+        .iter()
+        .map(|fact| {
+            fact.applied_route
+                .as_ref()
+                .or(fact.resolved_route.as_ref())?
+                .model
+                .clone()
+        })
+        .collect();
+    let models = models?;
+    (models.len() == 1)
+        .then(|| models.into_iter().next())
+        .flatten()
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use serde_json::{Value, json};
+    #[test]
+    fn verifier_copies_count_once_and_unknown_dispositions_stay_unknown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::GraphCheckpoint;
+        let finding = |id: &str, disposition: Option<&str>| {
+            json!({
+                "id":id, "severity":"high", "file":"a.rs", "line":1,
+                "summary":"defect", "status":"open", "disposition":disposition,
+            })
+        };
+        let node = |id: &str, findings: Vec<Value>| {
+            json!({
+                "id":id, "state":"succeeded", "attempts":[], "worktree":null,
+                "outputs":{"schema_version":1,"result":null,"verdict":null,"findings":findings,"branch":null,"commit":null,"warnings":[]}
+            })
+        };
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"g","plan_digest":"digest","nodes":[
+                node("review", vec![finding("F1", None), finding("F2", None)]),
+                node("verify", vec![finding("F1", Some("accepted")), finding("F2", Some("rejected"))]),
+                node("copy", vec![finding("F1", Some("accepted")), finding("F2", Some("rejected"))]),
+            ]
+        }))?;
+        assert_eq!(
+            super::pipeline_dispositions(Some(&checkpoint), "review"),
+            (Some(1), Some(1))
+        );
+        assert_eq!(
+            super::pipeline_dispositions(Some(&checkpoint), "verify"),
+            (Some(0), Some(0))
+        );
+        assert_eq!(super::pipeline_dispositions(None, "review"), (None, None));
+        checkpoint.nodes[2]
+            .outputs
+            .as_mut()
+            .ok_or("outputs")?
+            .findings[0]
+            .disposition = Some("deferred".into());
+        assert_eq!(
+            super::pipeline_dispositions(Some(&checkpoint), "review"),
+            (None, None)
+        );
+        checkpoint.nodes[2]
+            .outputs
+            .as_mut()
+            .ok_or("outputs")?
+            .findings[0]
+            .disposition = None;
+        assert_eq!(
+            super::pipeline_dispositions(Some(&checkpoint), "review"),
+            (None, None)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_model_node_stays_unknown_instead_of_charging_the_final_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::{AttemptId, OperationId, ProjectId, TaskId, WallTime};
+        use provenant_records::{AttemptFact, AttemptOutcome, RouteFact, Usage};
+        let mut fact = AttemptFact {
+            context: None,
+            attempt_id: AttemptId::from_bytes([1; 16]),
+            task_id: TaskId::from_bytes([2; 16]),
+            attempt_number: 1,
+            operation_id: OperationId::parse("pipeline-test")?,
+            project_id: ProjectId::from_bytes([3; 16]),
+            terminal_state: AttemptOutcome::Succeeded,
+            exit_code: Some(0),
+            queued_at: WallTime::from_micros(0)?,
+            started_at: None,
+            provider_ms: None,
+            finished_at: WallTime::from_micros(1)?,
+            resolved_route: Some(RouteFact {
+                provider: Some("p".into()),
+                model: Some("p/a".into()),
+                effort: None,
+                account_label: None,
+            }),
+            usage: Usage::default(),
+            reviewer: None,
+            delivery_id: None,
+            subject: None,
+            head: None,
+            output_refs: vec![],
+            requested_route: None,
+            applied_route: None,
+            observed_route: None,
+            verified_owner: None,
+            lineage: vec![],
+            reason: None,
+            trace: Default::default(),
+            transcript: None,
+        };
+        let prior = fact.clone();
+        assert_eq!(
+            super::pipeline_node_model(&[prior.clone(), fact.clone()]).as_deref(),
+            Some("p/a")
+        );
+        fact.applied_route = Some(RouteFact {
+            model: Some("p/b".into()),
+            ..fact.resolved_route.clone().ok_or("route")?
+        });
+        assert_eq!(
+            super::pipeline_node_model(&[prior.clone(), fact.clone()]),
+            None
+        );
+        fact.applied_route = None;
+        fact.resolved_route = None;
+        assert_eq!(super::pipeline_node_model(&[prior, fact]), None);
+        Ok(())
+    }
 }
 
 /// Report the sheet's review age in JSON and, once stale, in the human text.
@@ -7659,8 +8528,9 @@ mod writer_disk_tests {
             let error = result
                 .err()
                 .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
-            let error = String::from(error);
-            assert!(error.contains("insufficient disk space"), "{error}");
+            assert!(
+                matches!(error, DiskCheck::Low { ref path, available: 99, floor: 100, .. } if path == low)
+            );
             assert!(observed.contains(&low.to_path_buf()));
         }
         check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
@@ -7718,8 +8588,15 @@ mod writer_disk_tests {
                 result?;
             } else {
                 let error = result.err().ok_or("writer accepted low disk")?;
-                let error = String::from(error);
-                assert!(error.contains("reported 49 bytes reclaimed"), "{error}");
+                assert!(matches!(
+                    error,
+                    DiskCheck::Low {
+                        available: 99,
+                        floor: 100,
+                        reclaimed: 49,
+                        ..
+                    }
+                ));
             }
         }
         let calls = Cell::new(0);
@@ -8106,7 +8983,11 @@ mod tests {
             partial_signals: Vec::new(),
         };
         let gemini = policies
-            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, 0)
+            .effective(
+                &ModelId::parse("agy/gemini-3.8-flash")?,
+                None,
+                provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
+            )
             .policy;
         let decision = model_assessment(&gemini, task, &record, &decoded, record.attempt_number)?;
         assert!(decision.refusal.is_some());
@@ -8138,7 +9019,11 @@ mod tests {
         }
         decoded.outcome = run::Outcome::Succeeded;
         let terra = policies
-            .effective(&ModelId::parse("codex/gpt-6.1-terra")?, None, 0)
+            .effective(
+                &ModelId::parse("codex/gpt-6.1-terra")?,
+                None,
+                provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
+            )
             .policy;
         record.applied_route = Some(run::RouteRecord {
             provider: Some("codex".into()),
@@ -8683,6 +9568,44 @@ mod tests {
     }
 
     #[test]
+    fn stats_text_names_its_scope_and_reports_reasoning_only_when_present() {
+        let project = provenant_core::ProjectId::from_bytes([1; 16]);
+        let scope = stats_scope_line(project, 2);
+        assert!(
+            scope.starts_with(&format!(
+                "scope: project {project}, finished attempts only (2 queued or running not counted)"
+            )),
+            "{scope}"
+        );
+        assert!(scope.contains("other projects are excluded"), "{scope}");
+        let mut totals = provenant_telemetry::Totals {
+            attempts: 1,
+            usage: Default::default(),
+            cache: Default::default(),
+            cost: provenant_telemetry::CostTotal {
+                cost_basis: "api_equivalent_estimate",
+                subscription_attempts: 0,
+                complete: None,
+                known_lower_bound: None,
+                priced_attempts: 0,
+                missing_attempts: 1,
+            },
+            outcomes: Default::default(),
+        };
+        assert_eq!(reasoning_line(&totals), None);
+        totals.usage.reasoning.known = 42;
+        assert_eq!(
+            reasoning_line(&totals).as_deref(),
+            Some("reasoning tokens: 42\n")
+        );
+        totals.usage.reasoning.missing = 3;
+        assert_eq!(
+            reasoning_line(&totals).as_deref(),
+            Some("reasoning tokens: >=42 (3 unknown)\n")
+        );
+    }
+
+    #[test]
     fn core_run_status_uses_policy_successor_and_retains_receipts()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -9012,14 +9935,10 @@ mod tests {
                 "protected delivery was admitted"
             );
             assert_eq!(reply.result.status, Status::Refused);
-            assert!(
-                reply
-                    .result
-                    .error
-                    .ok_or("refusal")?
-                    .message
-                    .contains("default and primary checkout branches")
-            );
+            assert!(matches!(
+                run::HostDeliveryContext::check_delivery_branch(&project, target),
+                Err(run::RunError::ProtectedDeliveryBranch)
+            ));
             let branch = if delivery == "push" && placement == "owned" {
                 target
             } else {
@@ -9139,15 +10058,9 @@ mod tests {
                 assert_eq!(owner.origin, WorktreeOrigin::Adopted);
                 assert_eq!(owner.operation_id, Some(previous));
                 assert_eq!(owner.label.as_deref(), Some("preserved-label"));
-                assert!(
-                    claimed
-                        .err()
-                        .ok_or("adopted owner was claimed")?
-                        .message
-                        .contains("adopted or foreign owner")
-                );
+                assert!(matches!(claimed, Err(OwnWorktreeError::ForeignOwner)));
             } else {
-                assert_eq!(claimed.map_err(|fail| fail.message)?.0.path, path);
+                assert_eq!(claimed?.0.path, path);
                 assert_eq!(owner.origin, WorktreeOrigin::Lane);
                 assert_eq!(
                     owner.operation_id,
@@ -9337,7 +10250,7 @@ mod tests {
             &clock,
             &cancel,
         )
-        .map_err(|fail| fail.message)?;
+        .map_err(|fail| fail.to_string())?;
         assert_eq!(info.head, pinned);
         let dispatch = |base: &str| run::DispatchRequest {
             chair: None,
@@ -9835,7 +10748,7 @@ mod tests {
         store.create(&first, &call)?;
         store.create(&second, &call)?;
         let leaf = store.record(second.attempts[0].attempt_id, &call)?;
-        let chain = trace_chain(&store, leaf, &call).map_err(|f| f.message)?;
+        let chain = trace_chain(&store, leaf, &call)?;
         let attempts: Vec<_> = chain.iter().map(|t| t.attempt).collect();
         assert_eq!(
             attempts,
@@ -9987,7 +10900,7 @@ mod tests {
             ids.push(parent);
         }
         let leaf = store.record(parent, &call)?;
-        let chain = trace_chain(&store, leaf, &call).map_err(|f| f.message)?;
+        let chain = trace_chain(&store, leaf, &call)?;
         let attempts: Vec<_> = chain.iter().filter_map(|t| t.attempt).collect();
         ids.reverse();
         ids.push(missing);
@@ -10008,11 +10921,12 @@ mod tests {
         store.create(&first, &call)?;
         store.create(&second, &call)?;
         let leaf = store.record(second.attempts[0].attempt_id, &call)?;
-        let Err(fail) = trace_chain(&store, leaf, &call) else {
+        let Err(error) = trace_chain(&store, leaf, &call) else {
             return Err("a looping chain must fail".into());
         };
-        assert_eq!(fail.kind.code(), "IO");
-        assert!(fail.message.contains("loop back"), "{}", fail.message);
+        assert!(
+            matches!(error, TraceError::Loop(attempt) if attempt == second.attempts[0].attempt_id)
+        );
         Ok(())
     }
 
@@ -10351,8 +11265,120 @@ mod tests {
             reason: None,
         };
         lane.protected_paths = vec![];
-        let (_, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
+        let (_, human) = render_lanes_without_cooldowns(
+            std::slice::from_ref(&lane),
+            &[],
+            None,
+            Path::new("/state"),
+        );
         assert!(human.contains("  review head=unknown paths=\n"));
+        assert!(human.contains(&format!(
+            "  next: provenant lane deliver --accept-review {}\n",
+            lane.attempt_id
+        )));
+        Ok(())
+    }
+
+    /// A lane for the lane-view tests: queued until a test sets its state.
+    fn lane_fixture(
+        attempt: u8,
+        task: u8,
+        state: run::AttemptState,
+    ) -> Result<run::AttemptRecord, Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let mut lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([attempt; 16]),
+            "run_id": RunId::from_bytes([9; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([task; 16]),
+            "operation_id": format!("lane-{attempt}"),
+            "attempt_number": attempt,
+            "revision": 1,
+            "generation": 0,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "applied_route": null,
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state":"queued"},
+            "usage": {},
+            "prompt": {
+                "path": {"encoding":"utf8","path":"prompt.txt"},
+                "digest": CanonicalV1::file_digest(b""),
+                "bytes": 0,
+                "complete": true,
+                "redacted": false
+            }
+        }))?;
+        lane.state = state;
+        Ok(lane)
+    }
+
+    #[test]
+    fn lanes_give_a_settled_lane_its_settlement_reason() -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let failed = lane_fixture(
+            1,
+            4,
+            run::AttemptState::Terminal {
+                extra: Default::default(),
+                outcome: run::Outcome::Failed,
+                exit_code: Some(1),
+                finished_at: now,
+                reason: Some("provider failed".into()),
+            },
+        )?;
+        let queued = lane_fixture(
+            2,
+            4,
+            run::AttemptState::Queued {
+                extra: Default::default(),
+            },
+        )?;
+        let (data, _) =
+            render_lanes_without_cooldowns(&[failed, queued], &[], None, Path::new("/state"));
+        assert_eq!(data["lanes"][0]["settlement"]["reason"], "provider failed");
+        assert_eq!(data["lanes"][1]["settlement"], Value::Null);
+        assert_eq!(data["lanes"][1]["reason"], Value::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn newest_settled_of_names_the_settled_attempt_of_one_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let settled = || run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: run::Outcome::Failed,
+            exit_code: Some(1),
+            finished_at: now,
+            reason: None,
+        };
+        let running = || run::AttemptState::Running {
+            extra: Default::default(),
+        };
+        // Newest first: a retry still running, then the attempt it replaced.
+        let (retry, first) = (
+            lane_fixture(2, 4, running())?,
+            lane_fixture(1, 4, settled())?,
+        );
+        let (id, count, rule) =
+            newest_settled_of(&[retry, first.clone()]).map_err(|fail| fail.message)?;
+        assert_eq!((id, count, rule), (first.attempt_id, 2, "newest settled"));
+        // Nothing has settled, so the newest attempt is the one named.
+        let (newest, older) = (
+            lane_fixture(3, 4, running())?,
+            lane_fixture(2, 4, running())?,
+        );
+        let (id, _, rule) =
+            newest_settled_of(&[newest.clone(), older]).map_err(|fail| fail.message)?;
+        assert_eq!((id, rule), (newest.attempt_id, "newest"));
+        // Attempts of two tasks are ambiguous, so RUN/TASK is asked for.
+        let other = lane_fixture(4, 5, running())?;
+        let error = newest_settled_of(&[newest, other])
+            .err()
+            .ok_or("two tasks were accepted")?;
+        assert!(error.message.contains("2 tasks"), "{}", error.message);
         Ok(())
     }
 
@@ -10700,10 +11726,10 @@ mod tests {
             network(Mode::ReadOnly, Some(Switch::On), &[]),
             Ok(Some(run::NetworkAccess::Open))
         );
-        assert!(
-            network(Mode::ReadOnly, None, &["rust"])
-                .is_err_and(|message| message.contains("known: postgres"))
-        );
+        assert!(matches!(
+            lane_access_checked(&access(Mode::ReadOnly, None, &["rust"], Vec::new()), &state),
+            Err(AccessError::UnknownCapability(name)) if name == "rust"
+        ));
         let granted = lane_access(
             &access(Mode::WorktreeWrite, None, &[], vec![project.clone()]),
             &state,
@@ -10747,14 +11773,11 @@ mod tests {
             capability: Vec::new(),
         };
         for overlapping in [worktree.clone(), temp.path().join("work")] {
-            let message = lane_access(&access(Vec::new(), vec![overlapping]), &state)
-                .err()
-                .map(|fail| fail.message)
-                .unwrap_or_default();
-            assert!(
-                message.contains("--write-root") && message.contains("already grants"),
-                "{message}"
-            );
+            let expected = provenant_os::fs::canonicalize(&overlapping)?;
+            assert!(matches!(
+                lane_access_checked(&access(Vec::new(), vec![overlapping]), &state),
+                Err(AccessError::WorktreeOverlap(path)) if path == expected
+            ));
         }
         // A read root on the worktree and a write root beneath it stay valid.
         assert!(lane_access(&access(vec![worktree.clone()], vec![inside]), &state).is_ok());

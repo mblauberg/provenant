@@ -62,7 +62,14 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
     let client = hook.spec().registration.harness;
     match hook.spec().handler {
         Handler::ChairPrompt => crate::chair::hook(false, globals),
-        Handler::ChairStart => crate::chair::hook(true, globals),
+        Handler::ChairStart => {
+            let status = crate::chair::hook(true, globals);
+            // The chair's spend is most of the total, so its SessionStart also
+            // tops up the native ingest store. The call stops at its wall budget
+            // and is silent.
+            crate::usage::ingest_after_chair_hook(globals);
+            status
+        }
         Handler::Guard => guard(globals, deadline, client, hook.spec().registration.event),
         Handler::PreCompact => advisory(Moment::PreCompact, globals, started, client),
         Handler::Compact => advisory(Moment::Compact, globals, started, client),
@@ -104,8 +111,6 @@ fn deny(reason: &str) -> u8 {
         2
     }
 }
-// The hook policy deadline comes from the host's real-time input budget.
-#[allow(clippy::disallowed_methods)]
 fn guard(globals: &Globals, deadline: Instant, client: Option<Harness>, event_name: &str) -> u8 {
     let input = match hook_io::read_stdin(INPUT_CAP, deadline) {
         Ok(bytes) => bytes,
@@ -208,12 +213,10 @@ fn guard_reply(
             crate::roots::Workspace::At(&cwd),
             crate::roots::Product::Optional,
         )?;
-        let config = provenant_config::read_with_domains(
-            &resolved.roots,
-            &provenant_cli::domains::SECTIONS,
-        )?
-        .domains
-        .fabric;
+        let config =
+            provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)?
+                .domains
+                .fabric;
         let label = std::env::var_os("PROVENANT_AGENT_LABEL");
         let reader = crate::local_answers::LocalReader {
             root: &resolved.roots.state,
@@ -459,10 +462,9 @@ fn guard_policy(globals: &Globals, cwd: &Path) -> Result<GuardPolicy, &'static s
         crate::roots::Product::Optional,
     )
     .map_err(|_| "hook input rejected: bounded-input error (guard policy unavailable)")?;
-    let config =
-        provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
-            .map(|read| read.domains.guard)
-            .unwrap_or_default();
+    let config = provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)
+        .map(|read| read.domains.guard)
+        .unwrap_or_default();
     Ok(GuardPolicy {
         config,
         home: resolved.home,
@@ -823,7 +825,7 @@ fn push_conflict_markers(globals: &Globals, cwd: &Path) -> bool {
     ) else {
         return true;
     };
-    provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
+    provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)
         .map(|read| read.domains.run.push_conflict_markers)
         .unwrap_or(true)
 }
@@ -883,6 +885,54 @@ mod answer_delivery_tests {
     use super::*;
     #[allow(unused_imports)]
     use serde_json::json;
+
+    #[test]
+    fn hook_config_read_is_quiet_and_keeps_errors() -> Result<(), Error> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        std::fs::create_dir(&state)?;
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[domains.routing]\npacing_overrides=[{provider='codex',policy='pace',expires_unix_seconds=9}]\n",
+        )?;
+        let globals = Globals {
+            state_dir: Some(state.clone()),
+            ..Default::default()
+        };
+        let resolved = crate::roots::resolve(
+            &globals,
+            crate::roots::Workspace::At(temp.path()),
+            crate::roots::Product::Optional,
+        )?;
+        let snapshot =
+            provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("schedule.expires"))
+        );
+        let event = serde_json::from_value(
+            json!({"hook_event_name":"PreToolUse", "tool_name":"Bash", "tool_input":{"command":"git status"}, "cwd":temp.path()}),
+        )?;
+        assert_eq!(
+            guard_reply(
+                &globals,
+                event,
+                Instant::now() + LOCAL_BUDGET,
+                false,
+                Some(Harness::Claude)
+            ),
+            Ok(None)
+        );
+        assert_eq!(std::fs::read_dir(&state)?.count(), 1);
+        std::fs::write(state.join("config.toml"), "schema_version = [")?;
+        assert!(
+            provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)
+                .is_err()
+        );
+        Ok(())
+    }
 
     #[allow(dead_code)] // Also built by the worktree driver without unit tests.
     fn offer(text: &str, byte: u8) -> AnswerOffer {

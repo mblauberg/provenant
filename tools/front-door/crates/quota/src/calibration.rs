@@ -1,6 +1,7 @@
 //! Expiring dashboard floors are applied to copies of raw ledger observations.
 //! Never persist the adjusted windows: expiry must reveal the original ledger.
 use crate::{AccountRecord, QuotaStatus, QuotaWindow};
+use provenant_core::WallTime;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -9,22 +10,19 @@ pub struct Calibration {
     pub five_hour: Option<u64>,
     pub seven_day: Option<u64>,
     pub thirty_day: Option<u64>,
-    /// RFC 3339 UTC timestamp. A floor stops applying at this instant.
-    pub expires: String,
+    /// RFC 3339 timestamp. A floor stops applying at this instant.
+    #[serde(with = "provenant_core::rfc3339")]
+    pub expires: WallTime,
 }
 
 impl Calibration {
-    fn expiry(&self) -> Option<i64> {
-        self.expires
-            .parse::<jiff::Timestamp>()
-            .ok()
-            .map(|t| t.as_second())
+    fn expiry(&self) -> i64 {
+        self.expires.unix_seconds()
     }
 
     pub(crate) fn valid(&self) -> bool {
         let values = [self.five_hour, self.seven_day, self.thirty_day];
-        self.expiry().is_some()
-            && values.iter().any(Option::is_some)
+        values.iter().any(Option::is_some)
             && values.into_iter().flatten().all(|percent| percent <= 100)
     }
 }
@@ -49,9 +47,10 @@ impl crate::Settings {
             let Some(calibration) = self.calibration.get(&record.account.account_key) else {
                 continue;
             };
-            let Some(expiry) = calibration.expiry().filter(|expiry| now < *expiry) else {
+            let expiry = calibration.expiry();
+            if now >= expiry {
                 continue;
-            };
+            }
             if !calibration.valid() {
                 continue;
             }
@@ -101,7 +100,7 @@ mod tests {
                 five_hour: Some(43),
                 seven_day: Some(17),
                 thirty_day: Some(59),
-                expires: expires.into(),
+                expires: WallTime::parse_rfc3339(expires).unwrap(),
             },
         );
         settings
@@ -139,7 +138,7 @@ mod tests {
     #[test]
     fn calibration_takes_maximum_and_expires_even_with_cached_ledger() {
         let settings = settings("2026-11-04T00:00:00Z");
-        let expiry = settings.calibration["go"].expiry().unwrap();
+        let expiry = settings.calibration["go"].expiry();
         let raw = vec![ledger("go"), ledger("zen")];
         let mut active = raw.clone();
         settings.apply_calibration(&mut active, expiry - 1);
@@ -180,7 +179,6 @@ mod tests {
     #[test]
     fn calibration_is_validated_and_cannot_hide_exhaustion() {
         assert!(settings("2026-11-04T00:00:00Z").validate().is_empty());
-        assert!(!settings("tomorrow").validate().is_empty());
         let mut settings = settings("2026-11-04T00:00:00Z");
         settings.calibration.get_mut("go").unwrap().five_hour = Some(101);
         assert!(!settings.validate().is_empty());
@@ -204,6 +202,13 @@ mod tests {
         assert_eq!(parsed.calibration["go"].five_hour, None);
         assert!(
             toml_edit::de::from_str::<crate::Settings>(&format!("{base}five_hour = 43\n")).is_err()
+        );
+        // An expiry that is not an instant is refused when the entry is read.
+        assert!(
+            toml_edit::de::from_str::<crate::Settings>(&format!(
+                "{base}five_hour = 43\nexpires = \"tomorrow\"\n"
+            ))
+            .is_err()
         );
     }
 }

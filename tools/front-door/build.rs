@@ -10,6 +10,22 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use toml_edit::{DocumentMut, Item};
 
+#[cfg(not(test))]
+#[allow(clippy::disallowed_methods)]
+fn inventory_git() -> io::Result<Command> {
+    let git = provenant_os::git::git_executable()
+        .ok_or_else(|| io::Error::other("Git executable unavailable"))?;
+    Ok(Command::new(git))
+}
+
+#[cfg(test)]
+use provenant_os::fixture as fixture_git;
+
+#[cfg(test)]
+fn inventory_git() -> io::Result<Command> {
+    Ok(fixture_git::git_command())
+}
+
 type BuildResult<T> = Result<T, Box<dyn Error>>;
 
 const MAX_SOURCE_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -85,30 +101,28 @@ struct TrackedFiles {
 }
 
 impl TrackedFiles {
-    // Build-time Git metadata discovery, before the runtime supervisor exists.
-    #[allow(clippy::disallowed_methods)]
     fn load(
         workspace: &Path,
         repository: &Path,
         watched: &mut BTreeSet<PathBuf>,
     ) -> BuildResult<Self> {
-        let top_level = Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .current_dir(workspace)
-            .output()?;
-        if !top_level.status.success() {
-            return Err(invalid("source inventory requires a git checkout").into());
-        }
-        let top_level = top_level
-            .stdout
-            .strip_suffix(b"\n")
-            .ok_or_else(|| invalid("git did not return a repository root"))?;
-        let top_level = fs::canonicalize(std::str::from_utf8(top_level)?)?;
+        let top_level = provenant_os::git::repository_path(
+            workspace,
+            provenant_os::git::RepositoryPath::Toplevel,
+        )
+        .map_err(|error| {
+            io::Error::other(format!("source inventory requires a git checkout: {error}"))
+        })?;
         if top_level != repository {
             return Err(invalid("source workspace is outside its expected git checkout").into());
         }
 
-        let index = Command::new("git")
+        let index = inventory_git()?
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
             .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
             .current_dir(workspace)
             .output()?;
@@ -118,7 +132,12 @@ impl TrackedFiles {
         let index = index_path_from_output(&index.stdout)?;
         watch(watched, index)?;
 
-        let output = Command::new("git")
+        let output = inventory_git()?
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
             .args(["ls-files", "--full-name", "-z", "--", ":/"])
             .current_dir(workspace)
             .output()?;
@@ -871,7 +890,6 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
-    use std::process::Command;
 
     #[test]
     fn dangling_untracked_symlink_is_not_watched() -> BuildResult<()> {
@@ -1114,7 +1132,7 @@ mod tests {
 
     #[allow(clippy::disallowed_methods)]
     fn run_git(repository: &Path, arguments: &[&str]) -> BuildResult<()> {
-        let status = Command::new("git")
+        let status = super::fixture_git::git_command()
             .args(arguments)
             .current_dir(repository)
             .status()?;

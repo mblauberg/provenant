@@ -430,6 +430,29 @@ authority.
 - Merging, syncing or conflict-free replication of checkpoint revisions; the
   history is one writer's bounded chain.
 
+## Pipeline experiments
+
+Projects may opt into named experiments at
+`domains.fabric.pipelines.experiment.NAME`. Each experiment names a control,
+candidate preset arms and a `hash` or `epsilon` assignment strategy. Experiments
+apply only to automatic selection with `--task-id`, because `--preset` cannot
+be combined with `--task-id`. The control must be the rule-selected preset, and
+each arm must pass the same selection and expansion as an ordinary run. Assignment
+is skipped for work without a risk tier and for terminal-tier work. It stops at
+expiry, and at the configured spend budget or cost ratio, using outcome rows from
+the last 14 days read once per run. Unreadable spend skips the experiment.
+
+Graph context retains the experiment ID, assignment seed, executed arm and, in
+shadow mode, the candidate as `shadow_of`. The executed arm is the outcome label
+in ordinary work-context telemetry.
+
+Shadow mode assigns the candidate for comparison but expands and runs the
+control graph, so candidate work cannot gate acceptance. The shadow graph is
+the same as a plain control run, and its outcomes are recorded as control.
+`telemetry experiments show ID` uses the offline pipeline outcomes and ranking
+inputs; arm comparisons remain advisory and are stratified by risk tier and
+task kind. It cannot yet pair shadow runs with their candidate.
+
 ## Lane delivery evidence
 
 Lane delivery modes and later `lane deliver` pickup use the run owner's sealed
@@ -467,13 +490,13 @@ roots. The runtime validates parameters against their schemas and expands the
 pattern at the same composite boundary a statically written preset uses, with
 the pattern name and effective parameters retained in the expansion. Unlisted
 patterns, invalid parameters and widening attempts pause the graph without
-admitting children, and graph node, edge, fan-out and depth ceilings include
-the expanded nodes. Pattern expansion grants no review, delivery or merge
-authority.
+admitting children. Expanded nodes count against the graph node limit and the
+plan's node limit.
 - Why: a plan may grow a pipeline from known-good shapes without letting the
   planner choose authority or exceed host limits.
 - Test: `crates/fabric-runtime/src/graph/plan_tests.rs::allowed_pattern_instantiation_records_parameters_and_matches_a_static_composite`;
   `::plan_patterns_refuse_unlisted_invalid_and_widening_instances`;
-  `::pattern_expansion_counts_against_the_graph_node_limit`.
+  `::pattern_expansion_counts_against_the_graph_node_limit`;
+  `::pattern_children_obey_plan_node_and_kind_limits`.
 - Owner: `crates/fabric-runtime/src/graph/plans.rs`,
   `crates/fabric-runtime/src/graph/pattern_plan.rs`

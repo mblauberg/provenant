@@ -146,13 +146,22 @@ pub enum Mail {
         #[command(flatten)]
         operation: Operation,
     },
-    /// Read inbox messages
-    Read(SequencePage),
+    /// Read inbox messages; --session reads that chair session's control mail
+    Read {
+        #[command(flatten)]
+        page: SequencePage,
+        /// Exact chair session whose mailbox to read, instead of this agent's
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Mark messages read up to a sequence number
     MarkRead {
         /// Last sequence number to mark read
         #[arg(value_parser = clap::value_parser!(i64).range(0..))]
         through: i64,
+        /// Exact chair session whose mailbox to mark, instead of this agent's
+        #[arg(long)]
+        session: Option<String>,
         #[command(flatten)]
         operation: Operation,
     },
@@ -531,6 +540,8 @@ pub enum EdgeError {
     Encode(#[from] serde_json::Error),
     #[error("invalid Fabric input")]
     Invalid,
+    #[error("invalid Fabric input: {0}")]
+    InvalidField(&'static str),
     #[error("Git executable is unavailable")]
     GitUnavailable,
 }
@@ -539,7 +550,10 @@ fn json(value: impl Serialize) -> Result<Value, EdgeError> {
 }
 fn recipient(value: &str, host: provenant_core::HostId) -> Result<ActorId, EdgeError> {
     let (host, label) = match value.split_once('/') {
-        Some((host, label)) => (host.parse().map_err(|_| EdgeError::Invalid)?, label),
+        Some((host, label)) => (
+            host.parse().map_err(|_| EdgeError::InvalidField("--to"))?,
+            label,
+        ),
         None => (host, value),
     };
     Ok(provenant_fabric_runtime::identity::Address::new(host, label)?.actor)
@@ -559,7 +573,7 @@ impl Fabric {
                 "mail",
                 match v {
                     Mail::Send { .. } => "send",
-                    Mail::Read(_) => "read",
+                    Mail::Read { .. } => "read",
                     Mail::MarkRead { .. } => "mark-read",
                 },
             ),
@@ -617,7 +631,7 @@ impl Fabric {
         matches!(
             self,
             Self::Identity
-                | Self::Mail(Mail::Read(_))
+                | Self::Mail(Mail::Read { .. })
                 | Self::Task(Task::List { .. })
                 | Self::Events(Events::Read { .. })
                 | Self::Claim(Claim::Verify(_) | Claim::List { .. })
@@ -747,7 +761,7 @@ fn execute(
         | Fabric::Peer { .. }
         | Fabric::PeerAgent
         | Fabric::Landing(Landing::Push { .. } | Landing::Reconcile { .. }) => {
-            return Err(EdgeError::Invalid);
+            return Err(EdgeError::InvalidField("command"));
         }
         Fabric::Mail(Mail::Send {
             to,
@@ -786,18 +800,24 @@ fn execute(
                 operation,
             )?
         }
-        Fabric::Mail(Mail::Read(page)) => {
+        Fabric::Mail(Mail::Read { page, session }) => {
             ctx.page(page.limit)?;
             observe(Mutation::Mail(MailInput::Read {
                 extra: Default::default(),
                 after: page.after,
                 limit: page.limit,
+                session,
             }))?
         }
-        Fabric::Mail(Mail::MarkRead { through, operation }) => mutate(
+        Fabric::Mail(Mail::MarkRead {
+            through,
+            session,
+            operation,
+        }) => mutate(
             Mutation::Mail(MailInput::MarkRead {
                 extra: Default::default(),
                 through,
+                session,
             }),
             operation,
         )?,
@@ -1028,9 +1048,10 @@ pub fn run(
                     ),
                     error.code(),
                 ),
-                EdgeError::Identity(_) | EdgeError::Invalid | EdgeError::Root(_) => {
-                    (Outcome::Invalid, "invalid_input")
-                }
+                EdgeError::Identity(_)
+                | EdgeError::Invalid
+                | EdgeError::InvalidField(_)
+                | EdgeError::Root(_) => (Outcome::Invalid, "invalid_input"),
                 EdgeError::Relay(error) => (Outcome::Error, error.code()),
                 EdgeError::Config(_) => (Outcome::Invalid, "config"),
                 _ => (Outcome::Error, "io"),
@@ -1076,6 +1097,7 @@ pub fn coordination_outcome(
     match error {
         FacadeError::InvalidInput | FacadeError::NotFound => Outcome::Invalid,
         FacadeError::StaleFence
+        | FacadeError::GenerationConflict { .. }
         | FacadeError::Conflict
         | FacadeError::LaneCoordinationRefused
         | FacadeError::UpgradeRefused
@@ -1099,5 +1121,23 @@ mod outcome_tests {
             assert_eq!(coordination_outcome(&error), Outcome::Refused);
             assert_eq!(facade_outcome(&error).0, Outcome::Refused);
         }
+    }
+}
+
+#[cfg(test)]
+mod input_error_tests {
+    use super::*;
+
+    #[test]
+    fn unparsable_recipient_host_names_the_to_flag() {
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        assert!(matches!(
+            recipient("not-a-host/label", host),
+            Err(EdgeError::InvalidField("--to"))
+        ));
+        assert_eq!(
+            EdgeError::InvalidField("--to").to_string(),
+            "invalid Fabric input: --to"
+        );
     }
 }

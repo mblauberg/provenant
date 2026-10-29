@@ -179,9 +179,6 @@ pub struct RouteRequest {
     /// Require a confidential-safe route
     #[arg(long)]
     pub confidential: bool,
-    /// Allow free-tier models
-    #[arg(long)]
-    pub allow_free: bool,
     /// Fallback models in ADAPTER/ID form, comma separated
     #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
     pub fallback: Vec<Model>,
@@ -225,7 +222,6 @@ impl RouteRequest {
             choice,
             effort: self.effort.clone(),
             confidential: self.confidential,
-            allow_free: self.allow_free,
             fallback,
         })
     }
@@ -410,8 +406,17 @@ pub(crate) enum EdgeError {
     Pacing(&'static str),
     #[error("{0}")]
     GoAllowance(String),
-    #[error("{0}")]
-    AccountProfile(String),
+    #[error("{message}")]
+    AccountProfile {
+        kind: AccountProfileError,
+        message: String,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccountProfileError {
+    Unknown,
+    Ambiguous,
+    Duplicate,
 }
 impl From<provenant_config::ConfigError> for EdgeError {
     fn from(error: provenant_config::ConfigError) -> Self {
@@ -460,7 +465,7 @@ pub struct OverrideRow {
     pub remaining_seconds: Option<i64>,
 }
 impl OverrideRow {
-    fn pacing(row: &provenant_routing::PacingOverride, now: i64) -> Self {
+    fn pacing(row: &provenant_routing::PacingOverride, now: WallTime) -> Self {
         Self {
             kind: "pacing",
             scope: match (&row.account, &row.provider) {
@@ -477,14 +482,14 @@ impl OverrideRow {
     fn line(&self) -> String {
         let expiry = match (self.schedule.expires, self.remaining_seconds) {
             (Some(expiry), Some(remaining)) => {
-                format!("until {} ({remaining}s remaining)", expiry_text(expiry))
+                format!("until {expiry} ({remaining}s remaining)")
             }
             _ => "no expiry".to_owned(),
         };
         let starts = self
             .schedule
             .starts
-            .map(|starts| format!(" from {}", expiry_text(starts)))
+            .map(|starts| format!(" from {starts}"))
             .unwrap_or_default();
         format!(
             "{} {} {} {}{starts} {expiry}; {}",
@@ -502,6 +507,21 @@ pub struct PacingReport {
     pub recorded: String,
     pub active_overrides: Vec<provenant_routing::PacingOverride>,
 }
+impl PacingReport {
+    fn human(&self, now: WallTime) -> String {
+        let mut lines = vec![
+            format!("recorded: {}", self.recorded),
+            format!("active overrides: {}", self.active_overrides.len()),
+        ];
+        lines.extend(
+            self.active_overrides
+                .iter()
+                .map(|row| OverrideRow::pacing(row, now).line()),
+        );
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
 fn policy_name(policy: PacingPolicy) -> &'static str {
     match policy {
         PacingPolicy::Pace => "pace",
@@ -509,10 +529,6 @@ fn policy_name(policy: PacingPolicy) -> &'static str {
         PacingPolicy::Max => "max",
         PacingPolicy::Off => "off",
     }
-}
-fn expiry_text(unix_seconds: i64) -> String {
-    jiff::Timestamp::from_second(unix_seconds)
-        .map_or_else(|_| unix_seconds.to_string(), |at| at.to_string())
 }
 fn schedule_windows(schedule: &provenant_routing::Schedule) -> String {
     if schedule.windows.is_empty() {
@@ -592,10 +608,10 @@ fn override_value(row: &provenant_routing::PacingOverride) -> toml_edit::Value {
     table.insert("policy", policy_name(row.policy).into());
     let mut schedule = toml_edit::InlineTable::new();
     if let Some(starts) = row.schedule.starts {
-        schedule.insert("starts", starts.into());
+        schedule.insert("starts", starts.to_string().into());
     }
     if let Some(expires) = row.schedule.expires {
-        schedule.insert("expires", expires.into());
+        schedule.insert("expires", expires.to_string().into());
     }
     if let Some(tz) = &row.schedule.tz {
         schedule.insert("tz", tz.as_str().into());
@@ -749,25 +765,31 @@ fn resolve_account_reference(
     }
     match matches.as_slice() {
         [(_, entry)] => Ok(format!("{}/{}", entry.adapter, entry.key)),
-        [] => Err(EdgeError::AccountProfile(format!(
-            "{field}: unknown account `{name}`; valid accounts: {}",
-            if valid.is_empty() {
-                "(none registered)"
-            } else {
-                &valid
-            }
-        ))),
-        _ => Err(EdgeError::AccountProfile(format!(
-            "{field}: account `{name}` is ambiguous: {}; use adapter/key or a unique label",
-            matches
-                .iter()
-                .map(|(id, entry)| format!(
-                    "{}/{} (label: {}, entry: {})",
-                    entry.adapter, entry.key, entry.label, id
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
+        [] => Err(EdgeError::AccountProfile {
+            kind: AccountProfileError::Unknown,
+            message: format!(
+                "{field}: unknown account `{name}`; valid accounts: {}",
+                if valid.is_empty() {
+                    "(none registered)"
+                } else {
+                    &valid
+                }
+            ),
+        }),
+        _ => Err(EdgeError::AccountProfile {
+            kind: AccountProfileError::Ambiguous,
+            message: format!(
+                "{field}: account `{name}` is ambiguous: {}; use adapter/key or a unique label",
+                matches
+                    .iter()
+                    .map(|(id, entry)| format!(
+                        "{}/{} (label: {}, entry: {})",
+                        entry.adapter, entry.key, entry.label, id
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }),
     }
 }
 
@@ -787,9 +809,10 @@ fn resolve_pacing_accounts(
             )?;
         }
         if accounts.insert(key.clone(), profile).is_some() {
-            return Err(EdgeError::AccountProfile(format!(
-                "multiple pacing profiles resolve to account key `{key}`"
-            )));
+            return Err(EdgeError::AccountProfile {
+                kind: AccountProfileError::Duplicate,
+                message: format!("multiple pacing profiles resolve to account key `{key}`"),
+            });
         }
     }
     config.pacing.accounts = accounts;
@@ -875,6 +898,22 @@ fn with_context<T>(
 }
 /// Resolve one production dispatch against fresh provider facts and validated
 /// task access. Account aliases must already have been mapped to registered keys.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DispatchError {
+    #[error("no route outside model families {} and family separation is required", .0.join(", "))]
+    FamilySeparation(Vec<String>),
+    #[error(transparent)]
+    Edge(Box<EdgeError>),
+    #[error(transparent)]
+    Catalogue(#[from] RoutingError),
+}
+
+impl From<EdgeError> for DispatchError {
+    fn from(error: EdgeError) -> Self {
+        Self::Edge(Box::new(error))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_dispatch(
     request: &provenant_routing::RouteRequest,
@@ -885,8 +924,8 @@ pub(crate) fn resolve_dispatch(
     access: &[AccessContext<'_>],
     host: &str,
     excluded_families: Option<(&[String], bool)>,
-) -> Result<provenant_records::ResolvedRoute, String> {
-    let catalogue = Catalogue::bundled().map_err(|error| error.to_string())?;
+) -> Result<provenant_records::ResolvedRoute, DispatchError> {
+    let catalogue = Catalogue::bundled()?;
     let (excluded_families, required) = match excluded_families {
         Some((families, required)) => (Some(families), required),
         None => (None, false),
@@ -910,12 +949,10 @@ pub(crate) fn resolve_dispatch(
         host,
         &excluded,
     );
-    let exhausted =
-        matches!(&selected, Err(error) if error.starts_with("no eligible pool member:"));
+    let exhausted = matches!(&selected, Err(EdgeError::Routing(error)) if error.code() == "no_eligible_pool_member");
     if required && exhausted {
-        Err(format!(
-            "no route outside model families {} and family separation is required",
-            excluded_families.unwrap_or_default().join(", ")
+        Err(DispatchError::FamilySeparation(
+            excluded_families.unwrap_or_default().to_vec(),
         ))
     } else if !excluded.is_empty() && exhausted {
         resolve_dispatch_excluding(
@@ -928,8 +965,9 @@ pub(crate) fn resolve_dispatch(
             host,
             &[],
         )
+        .map_err(DispatchError::from)
     } else {
-        selected
+        selected.map_err(DispatchError::from)
     }
 }
 
@@ -947,7 +985,7 @@ fn resolve_dispatch_excluding(
     access: &[AccessContext<'_>],
     host: &str,
     initial_exclusions: &[ModelId],
-) -> Result<provenant_records::ResolvedRoute, String> {
+) -> Result<provenant_records::ResolvedRoute, EdgeError> {
     let mut requested_models = Vec::new();
     if let RouteChoice::Model(model) = &request.choice {
         requested_models.push(model.clone());
@@ -1090,7 +1128,6 @@ fn resolve_dispatch_excluding(
             Ok(resolved)
         },
     )
-    .map_err(|error| error.to_string())
 }
 
 fn record_pool_redraw(
@@ -1182,7 +1219,7 @@ pub(crate) fn check_dispatch_candidate(
         .domains;
     provenant_routing::check_go_allowance(&model, &domains.routing, &catalogue)?;
     let pools = admission_pools(&route.adapter, &catalogue, &model);
-    let now = jiff::Timestamp::now().as_second();
+    let now = SystemClock::new().unix_seconds();
     let mut records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
     domains.quota.apply_calibration(&mut records, now);
     provenant_quota::Admission {
@@ -1296,7 +1333,10 @@ fn edit_config(
     let _ = provenant_config::edit_config::<crate::domains::Domains>(
         roots,
         &crate::domains::SECTIONS,
-        |document| edit(document).map_err(|reason| provenant_config::ConfigError::Edit { reason }),
+        &provenant_config::EditOptions::new("cli"),
+        |document, _| {
+            edit(document).map_err(|reason| provenant_config::ConfigError::Edit { reason })
+        },
     )?;
     Ok(())
 }
@@ -1403,20 +1443,18 @@ fn set_pacing(roots: &Roots, request: &RoutePacing) -> Result<String, EdgeError>
     Ok(format!("provider {} pacing {policy}", request.provider))
 }
 
-/// An RFC 3339 timestamp, or a positive duration (s, m, h or d) from `now`.
-fn instant(value: &str, now: i64) -> Option<i64> {
-    if let Ok(timestamp) = value.parse::<jiff::Timestamp>() {
-        return Some(timestamp.as_second());
+/// An RFC 3339 timestamp, or a positive duration (s, m, h, d or w) from `now`.
+fn instant(value: &str, now: WallTime) -> Option<WallTime> {
+    if let Ok(at) = WallTime::parse_rfc3339(value) {
+        return Some(at);
     }
-    let (digits, multiplier) = match value.as_bytes().last()? {
-        b's' => (&value[..value.len() - 1], 1),
-        b'm' => (&value[..value.len() - 1], 60),
-        b'h' => (&value[..value.len() - 1], 3600),
-        b'd' => (&value[..value.len() - 1], 86_400),
-        _ => return None,
-    };
-    let seconds = digits.parse::<i64>().ok()?.checked_mul(multiplier)?;
-    (seconds > 0).then(|| now.checked_add(seconds)).flatten()
+    let seconds =
+        provenant_providers::duration::suffix_seconds(value.strip_prefix('+').unwrap_or(value))?;
+    if seconds == 0 {
+        return None;
+    }
+    now.checked_add(provenant_core::DurationMicros::from_seconds(seconds).ok()?)
+        .ok()
 }
 
 /// Take the recorded pacing override rows as inline tables, whichever TOML
@@ -1445,7 +1483,7 @@ fn take_override_rows(
 /// expired one, then appending `append`. Returns the removed rows.
 fn rewrite_overrides(
     roots: &Roots,
-    now: i64,
+    now: WallTime,
     remove: impl Fn(&provenant_routing::PacingOverride) -> bool,
     append: Option<&provenant_routing::PacingOverride>,
 ) -> Result<Vec<provenant_routing::PacingOverride>, EdgeError> {
@@ -1496,7 +1534,7 @@ fn same_scope(
     recorded.as_deref() == account && row.provider.as_deref() == provider
 }
 
-fn set_override(roots: &Roots, request: &OverrideSet, now: i64) -> Result<Data, EdgeError> {
+fn set_override(roots: &Roots, request: &OverrideSet, now: WallTime) -> Result<Data, EdgeError> {
     if let Some(provider) = &request.provider {
         known_provider(provider)?;
     }
@@ -1576,7 +1614,11 @@ fn set_override(roots: &Roots, request: &OverrideSet, now: i64) -> Result<Data, 
     })))
 }
 
-fn clear_override(roots: &Roots, request: &OverrideClear, now: i64) -> Result<Data, EdgeError> {
+fn clear_override(
+    roots: &Roots,
+    request: &OverrideClear,
+    now: WallTime,
+) -> Result<Data, EdgeError> {
     let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
         .domains
         .accounts;
@@ -1611,7 +1653,7 @@ fn clear_override(roots: &Roots, request: &OverrideClear, now: i64) -> Result<Da
 }
 
 /// Every recorded pacing override, then every scheduled model policy rule.
-fn list_overrides(roots: &Roots, now: i64) -> Result<Vec<OverrideRow>, EdgeError> {
+fn list_overrides(roots: &Roots, now: WallTime) -> Result<Vec<OverrideRow>, EdgeError> {
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
         .domains
         .routing;
@@ -1646,7 +1688,7 @@ fn list_overrides(roots: &Roots, now: i64) -> Result<Vec<OverrideRow>, EdgeError
     Ok(overrides)
 }
 
-fn execute(command: &Route, roots: &Roots, now: i64) -> Result<Data, EdgeError> {
+fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeError> {
     match command {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
         Route::Resolve(query) => with_context(
@@ -1666,7 +1708,7 @@ fn execute(command: &Route, roots: &Roots, now: i64) -> Result<Data, EdgeError> 
                 let model_policy = context.config.model_policy.effective(
                     &model,
                     query.account.as_deref().or(route.account_key.as_deref()),
-                    context.now.as_timestamp().as_second(),
+                    context.now,
                 );
                 provenant_routing::validate_intent(&model_policy.policy, request.intent)?;
                 let compaction_break_even_turns = model_policy
@@ -1787,13 +1829,10 @@ pub fn run(
         },
     };
     let now = SystemClock::new().wall_now();
-    let now_seconds = now
-        .as_ref()
-        .map(|time| time.as_timestamp().as_second())
-        .unwrap_or_default();
+    let at = now.as_ref().ok().copied();
     let result = match now
         .map_err(EdgeError::from)
-        .and_then(|_| execute(&command, roots, now_seconds))
+        .and_then(|now| execute(&command, roots, now))
     {
         Ok(data) => CommandResult::new(name, Outcome::Ok, Some(data)),
         Err(error) => {
@@ -1807,9 +1846,12 @@ pub fn run(
                 EdgeError::Routing(_) | EdgeError::Unresolved { .. } | EdgeError::Pacing(_) => {
                     (Outcome::Invalid, "INVALID")
                 }
-                EdgeError::Config(_)
-                | EdgeError::PacingConfig(_)
-                | EdgeError::AccountProfile(_) => (Outcome::Invalid, "CONFIG"),
+                EdgeError::Config(_) | EdgeError::PacingConfig(_) => (Outcome::Invalid, "CONFIG"),
+                EdgeError::AccountProfile { kind, .. } => match kind {
+                    AccountProfileError::Unknown
+                    | AccountProfileError::Ambiguous
+                    | AccountProfileError::Duplicate => (Outcome::Invalid, "CONFIG"),
+                },
                 _ => (Outcome::Error, "IO"),
             };
             let mut result = CommandResult::new(name, status, None);
@@ -1853,7 +1895,7 @@ pub fn run(
                         entry.policy,
                         entry.source,
                         entry.profile,
-                        entry.expires_unix_seconds,
+                        entry.expires.map(|at| at.to_string()),
                     )
                 }));
                 lines.extend(list.configured_accounts.iter().map(|(account, profile)| {
@@ -1957,19 +1999,7 @@ pub fn run(
                 }
                 text
             }
-            Some(Data::Pacing(report)) => {
-                let mut lines = vec![
-                    format!("recorded: {}", report.recorded),
-                    format!("active overrides: {}", report.active_overrides.len()),
-                ];
-                lines.extend(
-                    report
-                        .active_overrides
-                        .iter()
-                        .map(|row| OverrideRow::pacing(row, now_seconds).line()),
-                );
-                format!("{}\n", lines.join("\n"))
-            }
+            Some(Data::Pacing(report)) => at.map(|now| report.human(now)).unwrap_or_default(),
             Some(Data::Overrides(report)) => {
                 let mut lines = Vec::new();
                 if let Some(row) = &report.recorded {
@@ -2090,13 +2120,39 @@ mod route_tests {
     use std::error::Error;
 
     #[test]
+    fn pacing_report_prints_every_active_override() -> Result<(), Box<dyn Error>> {
+        use provenant_core::{Clock, MonoTime, TestClock, WallTime};
+        let clock = TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0));
+        let report = super::PacingReport {
+            recorded: "codex".into(),
+            active_overrides: serde_json::from_value(serde_json::json!([
+                {"provider":"codex", "policy":"pace"},
+                {"provider":"claude", "policy":"off"}
+            ]))?,
+        };
+        let text = report.human(clock.wall_now()?);
+        assert_eq!(text.lines().count(), 4);
+        assert!(text.contains("active overrides: 2"));
+        assert!(text.contains("pacing provider codex pace active"));
+        assert!(text.contains("pacing provider claude off active"));
+        Ok(())
+    }
+
+    #[test]
     fn override_instants_and_windows_parse_relative_to_the_supplied_instant() {
         use super::{instant, parse_window};
 
-        assert_eq!(instant("1s", 99), Some(100));
-        assert_eq!(instant("2h", 0), Some(7200));
-        assert_eq!(instant("0h", 0), None);
-        assert_eq!(instant("1970-01-01T00:01:00Z", 0), Some(60)); // timebomb: allow parse-only fixture with an injected instant
+        let at = |seconds| provenant_core::WallTime::from_unix_seconds(seconds).ok();
+        let epoch = provenant_core::WallTime::from_micros(0).expect("epoch");
+        assert_eq!(instant("1s", at(99).expect("instant")), at(100));
+        assert_eq!(instant("+5m", at(99).expect("instant")), at(399));
+        assert_eq!(instant("+0m", epoch), None);
+        assert_eq!(instant("++5m", epoch), None);
+        assert_eq!(instant("2h", epoch), at(7200));
+        assert_eq!(instant("1w", epoch), at(604_800));
+        assert_eq!(instant("1h30m", epoch), at(5_400));
+        assert_eq!(instant("0h", epoch), None);
+        assert_eq!(instant("1970-01-01T00:01:00Z", epoch), at(60)); // timebomb: allow parse-only fixture with an injected instant
         let weekdays = parse_window("mon-wed,fri,6@23-2").expect("window");
         assert_eq!(weekdays.weekdays, [0, 1, 2, 4, 6]);
         assert_eq!((weekdays.start_hour, weekdays.end_hour), (23, 2));
@@ -2129,7 +2185,7 @@ mod route_tests {
         let path = roots.state.as_path().join("config.toml");
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing]\npacing_overrides=[{account='codex/removed',policy='pace',schedule={expires=1}},{provider='codex',policy='off'},{provider='claude',policy='off'}]\n",
+            "schema_version=1\n[domains.routing]\npacing_overrides=[{account='codex/removed',policy='pace',schedule={expires='1970-01-01T00:00:01Z'}},{provider='codex',policy='off'},{provider='claude',policy='off'}]\n", // timebomb: allow fixed epoch fixture, not the live clock
         )?;
 
         let data = super::set_override(
@@ -2144,7 +2200,7 @@ mod route_tests {
                 window: vec!["mon-fri@23-7".into()],
                 tz: Some("Australia/Sydney".into()),
             },
-            2,
+            provenant_core::WallTime::from_unix_seconds(2)?,
         )?;
 
         let report = serde_json::to_value(&data)?;
@@ -2158,7 +2214,7 @@ mod route_tests {
         assert!(!saved.contains("provider='codex'"), "{saved}");
         assert!(saved.contains("provider='claude'"), "{saved}");
         assert!(
-            saved.contains("schedule = { expires = 3602, tz = \"Australia/Sydney\", windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 23, end_hour = 7 }] }"),
+            saved.contains("schedule = { expires = \"1970-01-01T01:00:02.000000Z\", tz = \"Australia/Sydney\", windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 23, end_hour = 7 }] }"), // timebomb: allow fixed epoch fixture, not the live clock
             "{saved}"
         );
         Ok(())
@@ -2179,16 +2235,16 @@ mod route_tests {
             serde_json::json!({"pacing":{"free":{"codex":{"deadline":{"reset_of":"shared"}}}}}),
         ] {
             let mut config: RoutingConfig = serde_json::from_value(config).unwrap();
-            let error = super::resolve_pacing_accounts(&mut config, &settings)
-                .unwrap_err()
-                .to_string();
-            for expected in [
-                "ambiguous",
-                "claude/shared",
-                "codex/other",
-                "agy/shared",
-                "adapter/key",
-            ] {
+            let error = super::resolve_pacing_accounts(&mut config, &settings).unwrap_err();
+            assert!(matches!(
+                error,
+                super::EdgeError::AccountProfile {
+                    kind: super::AccountProfileError::Ambiguous,
+                    ..
+                }
+            ));
+            let error = error.to_string();
+            for expected in ["claude/shared", "codex/other", "agy/shared", "adapter/key"] {
                 assert!(error.contains(expected), "{error}");
             }
         }
@@ -2220,12 +2276,13 @@ mod route_tests {
             super::resolve_account_reference("opencode/zen", "test", &settings).unwrap(),
             "opencode/zen"
         );
-        assert!(
-            super::resolve_account_reference("shared", "test", &settings)
-                .unwrap_err()
-                .to_string()
-                .contains("ambiguous")
-        );
+        assert!(matches!(
+            super::resolve_account_reference("shared", "test", &settings),
+            Err(super::EdgeError::AccountProfile {
+                kind: super::AccountProfileError::Ambiguous,
+                ..
+            })
+        ));
         for (input, expected) in [
             ("office", "claude/shared"),
             ("claude/shared", "claude/shared"),
@@ -2314,11 +2371,11 @@ mod route_tests {
         let path = roots.state.as_path().join("config.toml");
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=0}]\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1},{model='opencode/opencode-go/deepseek-v4.1-flash',weight=0}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=61\n",
         )?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let catalogue = super::Catalogue::bundled()?;
-        let now = jiff::Timestamp::now().as_second();
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
         let availability = [provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: "opencode".into(),
@@ -2328,8 +2385,8 @@ mod route_tests {
             catalogue_revision: catalogue.revision().into(),
             account_key: Some("go".into()),
             observed_models: vec![
-                "opencode-go/minimax-m3.1-flash".into(),
                 "opencode-go/glm-5.3-flash".into(),
+                "opencode-go/deepseek-v4.1-flash".into(),
             ],
             observed_unix_seconds: now,
             expires_unix_seconds: now + 300,
@@ -2347,7 +2404,6 @@ mod route_tests {
                 route: route.map(str::to_owned),
                 effort: None,
                 confidential: false,
-                allow_free: false,
                 fallback: vec![],
             }
             .to_domain()
@@ -2370,28 +2426,31 @@ mod route_tests {
             name: None,
             request: super::RouteRequest {
                 read_heavy: false,
-                model: Some(super::Model(
-                    "opencode/opencode-go/minimax-m3.1-flash".into(),
-                )),
+                model: Some(super::Model("opencode/opencode-go/glm-5.3-flash".into())),
                 route: None,
                 effort: None,
                 confidential: false,
-                allow_free: false,
                 fallback: vec![],
             },
         });
-        match super::execute(&preview, &roots, 0) {
-            Err(error) => assert!(error.to_string().contains("$20")),
+        match super::execute(&preview, &roots, provenant_core::WallTime::from_micros(0)?) {
+            Err(error) => assert!(error.to_string().contains("$60")),
             Ok(_) => panic!("preview must refuse the model"),
         }
-        let error = resolve(&request(
-            Some("opencode/opencode-go/minimax-m3.1-flash"),
-            None,
-        )?)
-        .unwrap_err();
-        assert!(error.contains("minimax-m3.1-flash") && error.contains("$20"));
+        let error =
+            resolve(&request(Some("opencode/opencode-go/glm-5.3-flash"), None)?).unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("glm-5.3-flash") && error.contains("$60"));
         let error = resolve(&request(Some("opencode/opencode-go/unlisted"), None)?).unwrap_err();
-        assert!(error.contains("opencode-go/unlisted") && error.contains("unknown"));
+        let error = error.to_string();
+        assert!(
+            error.contains("opencode-go/unlisted")
+                && error.contains("not an admitted OpenCode route")
+                && error.contains("opencode/opencode-go/glm-5.3-flash")
+        );
+        let error = resolve(&request(Some("opencode/opencode-go/glm-5.2"), None)?).unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("glm-5.2") && error.contains("opencode/opencode-go/glm-5.3-flash"));
         let fallback = |model: Option<&str>, route: Option<&str>| -> Result<(), Box<dyn Error>> {
             let request = super::RouteRequest {
                 read_heavy: false,
@@ -2399,42 +2458,45 @@ mod route_tests {
                 route: route.map(str::to_owned),
                 effort: None,
                 confidential: false,
-                allow_free: false,
-                fallback: vec![super::Model("opencode/opencode-go/glm-5.3-flash".into())],
+                fallback: vec![super::Model(
+                    "opencode/opencode-go/deepseek-v4.1-flash".into(),
+                )],
             };
             let resolved = resolve(&request.to_domain()?)?;
             assert!(super::check_dispatch_candidate(&roots, &resolved).is_err());
             assert_eq!(
                 resolved.alternatives.as_slice()[0].model,
-                "opencode-go/glm-5.3-flash"
+                "opencode-go/deepseek-v4.1-flash"
             );
             Ok(())
         };
-        fallback(Some("opencode/opencode-go/minimax-m3.1-flash"), None)?;
+        fallback(Some("opencode/opencode-go/glm-5.3-flash"), None)?;
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1}]\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=61\n",
         )?;
         fallback(None, Some("test"))?;
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1},{model='opencode/opencode-go/deepseek-v4.1-flash',weight=1}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=100\n",
         )?;
-        let error = resolve(&request(None, Some("test"))?).unwrap_err();
+        let error = resolve(&request(None, Some("test"))?)
+            .unwrap_err()
+            .to_string();
         assert!(
-            error.contains("minimax-m3.1-flash") && error.contains("glm-5.3-flash"),
+            error.contains("glm-5.3-flash") && error.contains("deepseek-v4.1-flash"),
             "{error}"
         );
         std::fs::write(
             &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/minimax-m3.1-flash',weight=1},{model='opencode/opencode-go/glm-5.3-flash',weight=0}]\n",
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='opencode/opencode-go/glm-5.3-flash',weight=1},{model='opencode/opencode-go/deepseek-v4.1-flash',weight=0}]\n[domains.routing.opencode_go]\nmin_monthly_allowance_usd=61\n",
         )?;
         let selected = resolve(&request(None, Some("test"))?)?;
-        assert_eq!(selected.model, "opencode-go/glm-5.3-flash");
+        assert_eq!(selected.model, "opencode-go/deepseek-v4.1-flash");
         assert!(
             selected.pool_selection.as_ref().unwrap().redraws[0]
                 .reason
-                .contains("$20")
+                .contains("$60")
         );
         let mut candidate = selected.clone();
         candidate.model = "opencode-go/unlisted".into();
@@ -2443,11 +2505,11 @@ mod route_tests {
                 .unwrap_err()
                 .contains("unknown")
         );
-        candidate.model = "opencode-go/minimax-m3.1-flash".into();
+        candidate.model = "opencode-go/glm-5.3-flash".into();
         assert!(
             super::check_dispatch_candidate(&roots, &candidate)
                 .unwrap_err()
-                .contains("$20")
+                .contains("$60")
         );
         Ok(())
     }
@@ -2472,7 +2534,7 @@ mod route_tests {
             provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
         inputs.state_dir = Some(temp.path().join("state"));
         let roots = inputs.resolve(&Resolver)?;
-        let now = jiff::Timestamp::now().as_second();
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
         let catalogue = super::Catalogue::bundled()?;
         let mut availability = Vec::new();
         for (key, status) in [
@@ -2525,7 +2587,6 @@ mod route_tests {
             route: None,
             effort: None,
             confidential: false,
-            allow_free: false,
             fallback: vec![super::Model("codex/unlisted-fallback".into())],
         }
         .to_domain()?;
@@ -2599,7 +2660,7 @@ mod route_tests {
             roots.state.as_path(),
             std::fs::Permissions::from_mode(0o700),
         )?;
-        let now = jiff::Timestamp::now().as_second();
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
         let catalogue = super::Catalogue::bundled()?;
         let availability: Vec<_> = ["first", "second"]
             .into_iter()
@@ -2628,7 +2689,6 @@ mod route_tests {
             route: None,
             effort: None,
             confidential: false,
-            allow_free: false,
             fallback: vec![],
         }
         .to_domain()?;
@@ -2843,7 +2903,7 @@ mod route_tests {
         )?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let catalogue = super::Catalogue::bundled()?;
-        let now = jiff::Timestamp::now().as_second();
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
         let availability: Vec<_> = [("codex", "gpt-6-luna"), ("claude", "claude-haiku-5-5")]
             .into_iter()
             .map(|(adapter, model)| provenant_providers::AvailabilityRecord {
@@ -2878,7 +2938,6 @@ mod route_tests {
             route: Some("test".into()),
             effort: None,
             confidential: false,
-            allow_free: false,
             fallback: vec![],
         }
         .to_domain()?;
@@ -2922,10 +2981,7 @@ mod route_tests {
         )
         .err()
         .ok_or("a required separation must not substitute")?;
-        assert!(
-            refused.contains("family separation is required"),
-            "{refused}"
-        );
+        assert!(matches!(refused, super::DispatchError::FamilySeparation(_)));
         let fallback = resolve(&[family, other])?;
         assert!(matches!(
             fallback.readiness,

@@ -20,7 +20,7 @@ use std::process::{Command, Output};
 use std::time::Duration;
 
 fn git(git: &Path, git_dir: &Path, tree: &Path, home: &Path, args: &[&str]) -> Output {
-    Command::new(git)
+    provenant_os::fixture::git_command_at(git)
         .current_dir(tree)
         .args(args)
         .env("GIT_DIR", git_dir)
@@ -432,7 +432,7 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
     let private = linked.repo().private_git_dir();
     let run_git = |args: &[&str], overlay: bool| {
         let mut command = Command::new("/usr/bin/sandbox-exec");
-        command.env_remove("GIT_COMMON_DIR");
+        provenant_os::fixture::scrub_git_env(&mut command);
         command.env("GIT_DIR", if overlay { &private_common } else { private });
         if overlay {
             command.env("GIT_COMMON_DIR", &private_common);

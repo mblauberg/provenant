@@ -39,7 +39,10 @@ fn viewer_isolation() {
         answer_id: None,
         closure_reason: None,
     };
+    let before = provenant_os::changes::read(f.root.as_path()).unwrap();
     store.create_human_request(&original, &request).unwrap();
+    let after = provenant_os::changes::read(f.root.as_path()).unwrap();
+    assert!(after.inbox > before.inbox);
     for sql in [
         "INSERT INTO viewer_requests(project,viewer,request,seen_revision) VALUES('p','v','r',0)",
         "INSERT INTO viewer_requests(project,viewer,request,dismissed) VALUES('p','v','r',2)",

@@ -19,6 +19,33 @@ mod wait;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// A refusal with a stable machine code; the message stays free text.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct Refused {
+    pub(crate) code: &'static str,
+    message: String,
+}
+
+impl Refused {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// The refusal's code, or `fallback` for any other failure.
+pub(crate) fn code_of(
+    error: &(dyn std::error::Error + 'static),
+    fallback: &'static str,
+) -> &'static str {
+    error
+        .downcast_ref::<Refused>()
+        .map_or(fallback, |refused| refused.code)
+}
+
 /// An external command exceeded its time limit. Reads may retry this; a
 /// mutation must first re-read the state it meant to change.
 #[derive(Debug, thiserror::Error)]

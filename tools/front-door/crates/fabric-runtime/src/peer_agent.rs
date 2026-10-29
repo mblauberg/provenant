@@ -85,6 +85,23 @@ pub enum AgentError {
     Io(#[from] io::Error),
 }
 
+impl AgentError {
+    /// Stable identifier independent of the displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotPrivate(_) => "not_private",
+            Self::Running(_) => "running",
+            Self::NoReply(_) => "no_reply",
+            Self::Frame => "frame",
+            Self::Path(_) => "path",
+            Self::Launchctl(..) => "launchctl",
+            Self::Systemctl(..) => "systemctl",
+            Self::Exec(_) => "exec",
+            Self::Io(_) => "io",
+        }
+    }
+}
+
 fn directory(state: &Path) -> PathBuf {
     state.join("peer-agent")
 }
@@ -658,33 +675,6 @@ impl Projects {
     }
 }
 
-/// At most the first 4 KiB of `path`, as text.
-fn read_small(path: &Path) -> Option<String> {
-    let mut text = String::new();
-    fs::File::open(path)
-        .ok()?
-        .take(4096)
-        .read_to_string(&mut text)
-        .ok()?;
-    Some(text)
-}
-
-/// The canonical Git common directory of the worktree at `top`, from its
-/// `.git` directory, or its `gitdir:` file and that directory's `commondir`.
-fn common_dir(top: &Path) -> Option<PathBuf> {
-    let marker = top.join(".git");
-    let private = if marker.is_dir() {
-        marker
-    } else {
-        top.join(read_small(&marker)?.strip_prefix("gitdir: ")?.trim_end())
-    };
-    let common = match read_small(&private.join("commondir")) {
-        Some(text) => private.join(text.trim_end()),
-        None => private,
-    };
-    fs::canonicalize(common).ok()
-}
-
 /// The top level of a Git worktree holding `directory` that belongs to a
 /// project the agent works in. Worktrees are found by ancestor `.git` files or
 /// directories, and every enclosing one is checked, so a clone nested inside a
@@ -699,7 +689,12 @@ fn project_worktree(directory: &Path, projects: &Projects) -> Option<PathBuf> {
                 Err(error) => error.kind() != io::ErrorKind::NotFound,
             },
         )
-        .find(|top| projects.own(top, common_dir(top).as_deref()))
+        .find(|top| {
+            let common = provenant_os::git::repository_marker(top)
+                .and_then(|marker| marker.common_dir)
+                .and_then(|path| fs::canonicalize(path).ok());
+            projects.own(top, common.as_deref())
+        })
         .map(Path::to_path_buf)
 }
 
@@ -1346,7 +1341,12 @@ mod tests {
         .unwrap();
         provider(&worktree.join("bin/claude"));
         let projects = Projects::registered(&roots, name);
-        assert_eq!(common_dir(&worktree), Some(project.join(".git")));
+        assert_eq!(
+            provenant_os::git::repository_marker(&worktree)
+                .and_then(|marker| marker.common_dir)
+                .and_then(|path| fs::canonicalize(path).ok()),
+            Some(project.join(".git"))
+        );
         assert_eq!(
             project_worktree(&worktree.join("bin"), &projects),
             Some(worktree.clone())

@@ -1,6 +1,7 @@
 import AppKit
+import ProvenantKit
 
-/// `quota-menubar --render <report.json> <out.png> [--dark] [--expand <account id>] [--lanes <lanes.json>]
+/// `quota-menubar --render <report.json> <out.png> [--dark] [--expand <account id>]
 /// [--now <ISO time>] [--scale <factor>]` draws the menu from a saved report into a PNG, offscreen, without running
 /// the CLI, at 2x as on a Retina display unless told otherwise.
 /// AppKit draws a real `NSMenu` only while it tracks the mouse, so the PNG is a preview at macOS 26 menu metrics.
@@ -10,32 +11,30 @@ import AppKit
 @MainActor
 enum Render {
     static func run(_ arguments: [String]) -> Int32 {
-        var positional: [String] = [], dark = false, expand: String?, lanesPath: String?, now: Date?, scale = 2
+        var positional: [String] = [], dark = false, expand: String?, now: Date?, scale = 2
         var rest = arguments[...]
         while let argument = rest.popFirst() {
             switch argument {
             case "--dark": dark = true
             case "--expand": expand = rest.popFirst()
-            case "--lanes": lanesPath = rest.popFirst()
             case "--now": now = rest.popFirst().flatMap { try? Date($0, strategy: .iso8601) }
             case "--scale": scale = rest.popFirst().flatMap(Int.init).map { max(1, min($0, 4)) } ?? scale
             default: positional.append(argument)
             }
         }
         guard positional.count == 2 else {
-            FileHandle.standardError.write(Data("usage: quota-menubar --render <report.json> <out.png> [--dark] [--expand id] [--lanes file] [--now ISO] [--scale N]\n".utf8))
+            FileHandle.standardError.write(Data("usage: quota-menubar --render <report.json> <out.png> [--dark] [--expand id] [--now ISO] [--scale N]\n".utf8))
             return 2
         }
-        let report: QuotaReport, lanes: [Lane]
+        let report: QuotaReport
         do {
             report = try CLI.decode(Data(contentsOf: URL(fileURLWithPath: positional[0]))).get()
-            lanes = try lanesPath.map { try Lane.decodePage(Data(contentsOf: URL(fileURLWithPath: $0))).lanes } ?? []
         } catch {
             FileHandle.standardError.write(Data("cannot read input: \(error)\n".utf8))
             return 1
         }
         let clock = now ?? report.generatedAt
-        let entries = QuotaMenu.entries(for: QuotaModel(fixture: report, updatedAt: clock, lanes: lanes), now: clock)
+        let entries = QuotaMenu.entries(for: QuotaModel(fixture: report, updatedAt: clock), now: clock)
             .filter { if case .item(let spec) = $0 { !spec.hidden } else { true } }
 
         _ = NSApplication.shared

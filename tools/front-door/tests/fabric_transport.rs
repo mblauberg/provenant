@@ -2097,7 +2097,10 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
         );
         let database = rig.state.join("fabric/fabric.sqlite3");
         let cursor = || -> Result<i64> {
-            Ok(rusqlite::Connection::open(&database)?.query_row(
+            let connection = rusqlite::Connection::open(&database)?;
+            // A writer must retain the WAL index for the lane's read-only VFS.
+            provenant_sqlite::retain_read_only_wal(&connection)?;
+            Ok(connection.query_row(
                 "SELECT COALESCE(SUM(sequence), 0) FROM run_event_cursors",
                 [],
                 |row| row.get(0),
@@ -2205,8 +2208,20 @@ fn lane_mcp_refuses_coordination_but_allows_reads_and_child_submission() -> Resu
                     "{result}"
                 );
             } else {
+                // These operations now use the guardian relay. This fixture
+                // has no guardian, so they fail closed at the relay boundary.
+                let relayed = matches!(
+                    calls[id - 1].0,
+                    "fabric_mail" | "fabric_task" | "fabric_events"
+                ) || (calls[id - 1].0 == "fabric_lease"
+                    && calls[id - 1].1["op"] == "claim_acquire");
                 assert_eq!(
-                    result["structuredContent"]["code"], "lane_coordination_refused",
+                    result["structuredContent"]["code"],
+                    if relayed {
+                        "owner_unavailable"
+                    } else {
+                        "lane_coordination_refused"
+                    },
                     "{result}"
                 );
             }
@@ -3482,6 +3497,22 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
     assert_eq!(waited["data"]["condition_met"], true);
 
     let peer_text = peer.to_string();
+    for target_args in [
+        vec!["output", &target],
+        vec!["output", &attempt, "--host", "workshop"],
+    ] {
+        let mut words = target_args;
+        words.extend(["--part", "stderr", "--path", "--json"]);
+        let (status, output) = json_command(&rig, &words)?;
+        assert_ne!(status, 0, "{words:?} {output}");
+        assert_eq!(output["error"]["code"], "UNSUPPORTED", "{output}");
+        assert!(
+            output["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("--path")),
+            "{output}"
+        );
+    }
     let (status, stderr) = json_command(&rig, &["output", &target, "--part", "stderr", "--json"])?;
     if backend.is_ok() {
         assert_eq!(status, 0, "{stderr} {placed}");

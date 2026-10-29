@@ -1,0 +1,30 @@
+#!/bin/sh
+# Builds "Provenant Console.app": the console as the main executable, with the menu agent beside it.
+# Usage: apps/quota-menubar/bundle [output directory, default .build/bundle]
+set -eu
+cd "$(dirname "$0")"
+out="${1:-.build/bundle}/Provenant Console.app"
+swift build -c release
+bin="$(swift build -c release --show-bin-path)"
+rm -rf "$out"
+mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources"
+cp "$bin/provenant-console" "$bin/quota-menubar" "$out/Contents/MacOS/"
+[ -d "$bin/quota-menubar_QuotaMenuBar.bundle" ] && cp -R "$bin/quota-menubar_QuotaMenuBar.bundle" "$out/Contents/Resources/"
+cat > "$out/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>dev.provenant.console</string>
+  <key>CFBundleName</key><string>Provenant Console</string>
+  <key>CFBundleDisplayName</key><string>Provenant Console</string>
+  <key>CFBundleExecutable</key><string>provenant-console</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+echo "$out"

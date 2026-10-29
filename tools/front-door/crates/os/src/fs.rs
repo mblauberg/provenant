@@ -435,6 +435,40 @@ pub struct Directory {
     anchor_depth: usize,
 }
 impl Directory {
+    /// Open the signal itself as its lock, refusing links and replaced entries.
+    pub(crate) fn signal_file(&self, name: &OsStr, write: bool) -> Result<File> {
+        let name = component(name)?;
+        let path = self.path.join(name);
+        let uid = os::effective_uid();
+        verify_lock_directory(name, self.metadata()?, uid)?;
+        let before = match self.metadata_at(name, false) {
+            Ok(meta) => Some(meta),
+            Err(e) if e.is_not_found() => None,
+            Err(e) => return Err(e),
+        };
+        let file = if write {
+            os::open_lock(&self.file, name)
+        } else {
+            os::open_read(&self.file, name)
+        }
+        .map_err(error("open change signal", &path))?;
+        let opened = file
+            .metadata()
+            .map(Metadata::from_std)
+            .map_err(error("fstat change signal", &path))?;
+        let after = self.metadata_at(name, false)?;
+        verify_owner_lock_metadata(name, before, opened, after, self.device, uid)?;
+        Ok(file)
+    }
+
+    pub(crate) fn verify_signal_file(&self, name: &OsStr, file: &File) -> Result<()> {
+        let opened = file
+            .metadata()
+            .map(Metadata::from_std)
+            .map_err(error("fstat change signal", &self.path))?;
+        let after = self.metadata_at(name, false)?;
+        verify_owner_lock_metadata(name, None, opened, after, self.device, os::effective_uid())
+    }
     /// Bounded no-follow read that refuses changed metadata or name identity.
     /// This detects observed changes; it is not a filesystem snapshot.
     pub fn read_stable(&self, name: &OsStr, limit: u64) -> Result<Vec<u8>> {

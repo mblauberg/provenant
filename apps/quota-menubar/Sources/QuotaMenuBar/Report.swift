@@ -263,16 +263,7 @@ struct QuotaReport {
         try project(decoder().decode(QuotaWireReport.self, from: data))
     }
 
-    static func decodeEnvelope(_ data: Data, command: String) throws -> QuotaReport {
-        let envelope = try decoder().decode(QuotaEnvelope<QuotaWireReport>.self, from: data)
-        guard envelope.schemaVersion == schemaVersion, envelope.command == command, envelope.status == "ok" else {
-            throw invalid("unexpected quota command envelope")
-        }
-        guard let report = envelope.data else { throw invalid(envelope.error ?? "quota command returned no report") }
-        return try project(report)
-    }
-
-    private static func project(_ wire: QuotaWireReport) throws -> QuotaReport {
+    static func project(_ wire: QuotaWireReport) throws -> QuotaReport {
         guard wire.schemaVersion == schemaVersion else { throw invalid("unsupported report version") }
         guard !wire.reportPath.isEmpty, wire.reportPath.hasPrefix("/") else { throw invalid("report path is not absolute") }
         let generatedAt = date(wire.generatedUnixSeconds)
@@ -342,7 +333,7 @@ struct QuotaReport {
     }
 }
 
-private struct QuotaWireReport: Decodable {
+struct QuotaWireReport: Decodable, Sendable {
     let schemaVersion: UInt64
     let generatedUnixSeconds: Int64
     let accounts: [QuotaWireAccount]
@@ -353,22 +344,16 @@ private struct QuotaWireReport: Decodable {
     let sources: [QuotaWireSource]?
     let display: QuotaWireDisplay?
 }
-private struct QuotaWireDisplay: Decodable { let headline, icon: String? }
-private struct QuotaWireRowDisplay: Decodable {
+struct QuotaWireDisplay: Decodable, Sendable { let headline, icon: String? }
+struct QuotaWireRowDisplay: Decodable, Sendable {
     let id: String
     let name: String?
     let hidden: Bool?
     let order: UInt64?
     let headline: String?
 }
-private struct QuotaEnvelope<Payload: Decodable>: Decodable {
-    let schemaVersion: UInt64
-    let command, status: String
-    let data: Payload?
-    let error: String?
-}
-private struct QuotaWireCoverage: Decodable { let total, known: UInt64 }
-private struct QuotaWireAccount: Decodable {
+struct QuotaWireCoverage: Decodable, Sendable { let total, known: UInt64 }
+struct QuotaWireAccount: Decodable, Sendable {
     let account: QuotaWireScope
     let snapshot: QuotaWireSnapshot?
     let status: String
@@ -378,23 +363,23 @@ private struct QuotaWireAccount: Decodable {
     let error: String?
     let display: QuotaWireRowDisplay?
 }
-private struct QuotaWireScope: Decodable { let adapter, accountKey, label: String }
-private struct QuotaWireSnapshot: Decodable {
+struct QuotaWireScope: Decodable, Sendable { let adapter, accountKey, label: String }
+struct QuotaWireSnapshot: Decodable, Sendable {
     let windows: [QuotaWireWindow]
     let details: QuotaWireDetails?
 }
-private struct QuotaWireDetails: Decodable {
+struct QuotaWireDetails: Decodable, Sendable {
     let plan, fingerprint, creditBalance, note: String?
     let priority, resetCredits: UInt64?
     let resetExpiriesUnixSeconds: [Int64]?
 }
-private struct QuotaWireWindow: Decodable {
+struct QuotaWireWindow: Decodable, Sendable {
     let pool: String
     let usedBasisPoints: UInt64
     let resetsUnixSeconds: Int64?
     let windowSeconds: UInt64?
 }
-private struct QuotaWireSource: Decodable {
+struct QuotaWireSource: Decodable, Sendable {
     let adapter: String
     let status: String
     let error: String?

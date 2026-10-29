@@ -1,4 +1,5 @@
 import Foundation
+import ProvenantKit
 
 /// The bounded local projection, without artifact bodies.
 struct ConsoleOverview: Decodable, Equatable, Sendable {
@@ -42,12 +43,9 @@ extension CLI {
         do {
             let run = try exec(launcher.url, ["console", "overview", "--json"], path: launcher.path, limit: 20,
                                qos: QOS_CLASS_BACKGROUND)
-            guard run.status == 0, !run.timedOut, !run.signalled else {
-                return (launcher, .failure(Failure(message: "Could not read console overview")))
-            }
-            return (launcher, .success(try ConsoleOverview.decode(run.out)))
+            return (launcher, .success(try CLIClient.decode(run, command: "console overview", as: ConsoleOverview.self)))
         } catch {
-            return (launcher, .failure(Failure(message: "Could not read console overview: \(error.localizedDescription)")))
+            return (launcher, .failure(Failure(message: (error as? ClientError)?.message ?? "Could not read console overview: \(error.localizedDescription)")))
         }
     }
 }

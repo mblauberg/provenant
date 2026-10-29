@@ -1,6 +1,7 @@
 //! Bounded CI polling for a pinned PR head. No progress goes to JSON stdout.
 use super::{Result, execute_for, status::Required, successful};
 use provenant_core::GitOid;
+use provenant_core::retry::{Backoff, RetryCause, is_transient};
 use provenant_os::exec::Termination;
 use serde::Deserialize;
 use std::{
@@ -152,7 +153,8 @@ impl Reader<'_> {
     // This CLI edge owns the real clock and retry pause.
     #[allow(clippy::disallowed_methods)]
     pub fn read(&self, argv: &[&str]) -> Result<provenant_os::exec::ExecOutcome> {
-        let mut pause = RETRY_FIRST;
+        let backoff = Backoff::new(RETRY_FIRST, 2, RETRY_LAST);
+        let mut retries = 0_u64;
         loop {
             let left = self.deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -165,10 +167,10 @@ impl Reader<'_> {
                 match execute_for(self.project, argv, left.min(Duration::from_secs(60)), false) {
                     Ok(output) if output.termination == Termination::Exit(0) => return Ok(output),
                     Ok(output) => {
-                        if !transient_failure(
-                            &String::from_utf8_lossy(&output.stderr.bytes),
-                            &String::from_utf8_lossy(&output.stdout.bytes),
-                        ) {
+                        if !is_transient(RetryCause::CommandOutput {
+                            stderr: &String::from_utf8_lossy(&output.stderr.bytes),
+                            stdout: &String::from_utf8_lossy(&output.stdout.bytes),
+                        }) {
                             return Ok(output);
                         }
                         None
@@ -180,37 +182,11 @@ impl Reader<'_> {
                 return Err(failure("CI_UNAVAILABLE", error.to_string()));
             }
             let left = self.deadline.saturating_duration_since(Instant::now());
-            std::thread::sleep(pause.min(left));
-            pause = (pause * 2).min(RETRY_LAST);
+            std::thread::sleep(backoff.delay(retries).min(left));
+            retries = retries.saturating_add(1);
         }
     }
 }
-/// Server errors, rate limits and network faults are worth another read; an
-/// authorisation or not-found answer is not.
-fn transient_failure(stderr: &str, stdout: &str) -> bool {
-    let text = format!("{stderr}\n{stdout}").to_lowercase();
-    [
-        "http 5",
-        "http 429",
-        "rate limit",
-        "abuse detection",
-        "timed out",
-        "timeout",
-        "connection reset",
-        "connection refused",
-        "unexpected eof",
-        "no such host",
-        "could not resolve host",
-        "temporary failure",
-        "tls handshake",
-        "network is unreachable",
-        "bad gateway",
-        "service unavailable",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
-}
-
 /// Both check runs and legacy status contexts are addressed by immutable SHA.
 /// GitHub lists statuses newest first; older states of a context cannot veto a
 /// successful retry. Pagination is needed even when required checks arrive late.
@@ -669,27 +645,5 @@ mod tests {
         let mut future = check("build", "pass");
         future.registered = Some(at("2026-01-01T00:00:10Z"));
         assert_eq!(state(&[future], &[], at(NOW)), State::Settling);
-    }
-    #[test]
-    fn only_server_rate_and_network_failures_are_retried() {
-        for text in [
-            "gh: Bad Gateway (HTTP 502)",
-            "HTTP 503: Service Unavailable",
-            "API rate limit exceeded",
-            "HTTP 429",
-            "dial tcp: i/o timeout",
-            "read: connection reset by peer",
-            "could not resolve host: api.github.com",
-        ] {
-            assert!(transient_failure(text, ""), "{text}");
-        }
-        for text in [
-            "gh: Not Found (HTTP 404)",
-            "HTTP 401: Bad credentials",
-            "HTTP 403: Resource not accessible",
-            "no pull requests found",
-        ] {
-            assert!(!transient_failure(text, ""), "{text}");
-        }
     }
 }

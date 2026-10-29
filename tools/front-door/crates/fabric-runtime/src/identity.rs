@@ -17,6 +17,17 @@ pub enum IdentityError {
     Label,
 }
 
+impl IdentityError {
+    /// Stable identifier independent of the displayed explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::OutsideHome => "outside_home",
+            Self::Encoding => "encoding",
+            Self::Label => "label",
+        }
+    }
+}
+
 pub fn validate_label(label: &str) -> Result<(), IdentityError> {
     if label.is_empty()
         || label.len() > 128
@@ -114,6 +125,19 @@ impl Address {
             actor: ActorId::from_bytes(bytes),
         })
     }
+}
+
+/// The Fabric mailbox of one exact chair session. An agent label is shared by
+/// every session that runs under it, so control mail cannot be addressed to it.
+pub fn chair_session_mailbox(project: ProjectId, session: &str) -> ActorId {
+    let mut digest = Sha256::new();
+    digest.update(b"provenant.fabric.chair-session-mailbox.v1\0");
+    digest.update(project.to_string().as_bytes());
+    digest.update([0]);
+    digest.update(session.as_bytes());
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest.finalize()[..16]);
+    ActorId::from_bytes(bytes)
 }
 
 #[derive(Debug, Clone, Serialize)]

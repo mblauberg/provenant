@@ -38,12 +38,35 @@ pub enum RoutingError {
         effort: String,
         support: String,
     },
+    #[error("{model} is not an admitted OpenCode route; choose one of: {admitted}")]
+    UnlistedOpenCodeModel { model: String, admitted: String },
     #[error("invalid catalogue")]
     Catalogue,
     #[error("invalid availability record")]
     Availability,
     #[error("invalid review demand")]
     ReviewDemand,
+}
+
+impl RoutingError {
+    /// Stable identifier for the refusal, independent of its display text.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ReadOnlyPolicy => "read_only_policy",
+            Self::InvalidModel => "invalid_model",
+            Self::InvalidValue => "invalid_value",
+            Self::Alternatives => "alternatives",
+            Self::UnknownAdapter => "unknown_adapter",
+            Self::UnknownRoute => "unknown_route",
+            Self::ConfidentialModel => "confidential_model",
+            Self::NoEligiblePoolMember { .. } => "no_eligible_pool_member",
+            Self::UnsupportedEffort { .. } => "unsupported_effort",
+            Self::UnlistedOpenCodeModel { .. } => "unlisted_opencode_model",
+            Self::Catalogue => "catalogue",
+            Self::Availability => "availability",
+            Self::ReviewDemand => "review_demand",
+        }
+    }
 }
 
 #[cfg(test)]

@@ -304,7 +304,7 @@ pub(crate) fn append_chair_log(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, dead_code)]
+#[allow(dead_code)]
 mod tests {
     #[allow(unused_imports)]
     use super::*;

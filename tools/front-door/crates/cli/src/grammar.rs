@@ -112,6 +112,8 @@ pub enum Command {
     Cancel(Cancel),
     /// Resume an attempt with a new prompt
     Resume(Resume),
+    /// Queue a steering message for a lane when its provider supports control
+    Steer(crate::inbox::Steer),
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
@@ -284,6 +286,8 @@ pub enum Chair {
     /// Append and read a chair session's authored updates.
     #[command(subcommand)]
     Log(ChairLog),
+    /// Queue a message for an exact registered chair session.
+    Message(crate::inbox::ChairMessage),
     /// Checkpoint and continue under an allowed registered Claude account.
     Switch {
         /// Registered Claude account to switch to
@@ -467,8 +471,34 @@ fn host_alias(value: &str) -> Result<String, &'static str> {
 pub enum Config {
     /// List configuration warnings with their source file and key.
     Check(Page),
-    /// Print the effective configuration and knobs with their source layer.
+    /// Print the effective configuration and knobs with their source layer
+    /// and the configuration revision.
     Show,
+    /// List each editable field with its type, bounds, default, effective
+    /// value, source layer and whether a restart is needed.
+    Schema,
+    /// Validate a JSON patch of `{"field": value}` (null clears a field) and
+    /// commit all of it or none, if the configuration is still at the revision.
+    Apply {
+        /// JSON patch file
+        #[arg(long, value_name = "PATCH.json")]
+        file: PathBuf,
+        /// Revision from `config show`; a stale revision is refused
+        #[arg(long, value_name = "REV")]
+        expect_revision: String,
+        /// Validate and report the change without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List the bounded history of applied configuration changes, newest first.
+    History {
+        /// Only entries since this RFC3339 time or this many seconds ago
+        #[arg(long, value_parser = since)]
+        since: Option<jiff::Timestamp>,
+        /// Maximum entries (1 to 500)
+        #[arg(long, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=500))]
+        limit: u64,
+    },
     /// Set `profile` (balanced, economy or rigorous) or a registry knob such
     /// as `lanes.max_concurrency`.
     Set {
@@ -548,7 +578,7 @@ pub struct DispatchInput {
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
     /// Expand and run a named pipeline preset
-    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"])]
+    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"])]
     pub preset: Option<String>,
     /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
     #[arg(long = "set", requires = "preset")]
@@ -803,7 +833,7 @@ pub struct Lanes {
     /// Keep lanes submitted by this session (its agent label)
     #[arg(long, value_parser = session_label, conflicts_with = "all")]
     pub session: Option<String>,
-    /// Show every lane
+    /// Show every lane, newest first
     #[arg(long)]
     pub all: bool,
     /// Maximum lanes per page (1 to 100)
@@ -861,7 +891,7 @@ pub enum Part {
 }
 #[derive(Debug, Args)]
 pub struct Output {
-    /// Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; receipt also accepts a unique RUN or RUN/TASK
+    /// Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; a RUN or RUN/TASK reads its newest settled attempt, and receipt needs exactly one
     pub attempt: Attempt,
     /// Read a configured peer's own attempt, by label or host ID
     #[arg(long)]
@@ -869,6 +899,12 @@ pub struct Output {
     /// Which part to read
     #[arg(long, value_enum, default_value = "result")]
     pub part: Part,
+    /// Write the selected range to FILE, replacing it, instead of printing it
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["path", "trace"])]
+    pub to: Option<PathBuf>,
+    /// Print the attempt's artifact path for this part instead of its content
+    #[arg(long, conflicts_with_all = ["to", "trace", "offset", "tail", "max_bytes"])]
+    pub path: bool,
     /// Byte offset to start from
     #[arg(long, default_value = "0", conflicts_with = "tail")]
     pub offset: u64,
@@ -952,6 +988,25 @@ pub enum Telemetry {
         #[command(subcommand)]
         command: Prices,
     },
+    /// Record native chair and sub-agent token usage per account
+    Ingest(Ingest),
+    /// Report quota mileage and effective token rates from quota history and ingested usage
+    Mileage(Mileage),
+    /// Compare experiment arms using offline pipeline outcomes
+    #[command(subcommand)]
+    Experiments(Experiments),
+}
+#[derive(Debug, Subcommand)]
+pub enum Experiments {
+    /// Show one experiment's stratified arm comparison
+    Show(ExperimentShow),
+}
+#[derive(Debug, Args)]
+pub struct ExperimentShow {
+    /// Experiment name from domains.fabric.pipelines.experiment
+    pub id: String,
+    #[command(flatten)]
+    pub pipeline: PipelineOptions,
 }
 #[derive(Debug, Subcommand)]
 pub enum Prices {
@@ -977,6 +1032,39 @@ pub struct PricesRefresh {
     /// Proposal file (default `telemetry-prices.proposed.json`)
     #[arg(long, default_value = "telemetry-prices.proposed.json")]
     pub out: PathBuf,
+}
+#[derive(Debug, Args)]
+pub struct Ingest {
+    /// Ingest only this provider's sessions (only `claude` writes native transcripts)
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Ingest transcripts written, and messages stamped, from this date or timestamp, or this many seconds ago
+    #[arg(long, value_parser = since)]
+    pub since: Option<jiff::Timestamp>,
+}
+#[derive(Debug, Args)]
+pub struct Mileage {
+    /// Account label or key
+    #[arg(long)]
+    pub account: Option<String>,
+    /// Quota window, such as five_hour or weekly (default every window)
+    #[arg(long)]
+    pub window: Option<String>,
+    /// Count only usage of this exact model; quota deltas still cover every model, so mileage is understated
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Use readings and usage from this date or timestamp, or this many seconds ago
+    #[arg(long, value_parser = since)]
+    pub since: Option<jiff::Timestamp>,
+    /// Runs needed on each side before a capacity trend is judged
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(2..=10_000))]
+    pub min_runs: u32,
+    /// Fall in capacity, in percent, that is flagged rather than inconclusive
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=99))]
+    pub fall_percent: u32,
+    /// Days in the recent side of a capacity step change
+    #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=90))]
+    pub recent_days: u32,
 }
 #[derive(Debug, Args)]
 pub struct Trace {
@@ -1005,6 +1093,14 @@ pub enum StatsBy {
 }
 #[derive(Debug, Args)]
 pub struct Stats {
+    /// Include offline post-merge outcomes and stratified ranking
+    #[arg(long, conflicts_with_all = ["usage", "claude_subagents", "by"])]
+    pub outcomes: bool,
+    /// Include advisory expiring suggestions from offline pipeline evidence
+    #[arg(long, conflicts_with_all = ["usage", "claude_subagents", "by"])]
+    pub suggest: bool,
+    #[command(flatten)]
+    pub pipeline: PipelineOptions,
     /// Report native Claude subagents from one session's subagents directory instead of supervised attempts
     #[arg(long, conflicts_with_all = ["usage", "since", "until", "run_id", "by"])]
     pub claude_subagents: Option<PathBuf>,
@@ -1020,12 +1116,31 @@ pub struct Stats {
     /// Restrict usage and cost to one run.
     #[arg(long)]
     pub run_id: Option<Target>,
-    /// Group supervised attempts by work context or merged pull request
+    /// Group supervised attempts by work context or merged pull request; attempts with no value form an `unattributed` group
     #[arg(long, value_enum, conflicts_with = "usage")]
     pub by: Option<StatsBy>,
     /// Include per-attempt detail
     #[arg(long, conflicts_with = "usage")]
     pub detail: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PipelineOptions {
+    /// Local main-line ref to analyse; no fetch is performed
+    #[arg(long, default_value = "main")]
+    pub main_ref: String,
+    /// Recorded gh main-branch run list JSON; absent means CI not_measured
+    #[arg(long)]
+    pub ci_file: Option<PathBuf>,
+    /// Days after a merge to attribute escaped defects
+    #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u32).range(1..=3650))]
+    pub outcome_days: u32,
+    /// Independent graphs and mature merges required per arm
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    pub min_samples: u32,
+    /// Days until a suggestion expires
+    #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u32).range(1..=3650))]
+    pub expiry_days: u32,
 }
 #[derive(Debug, Subcommand)]
 pub enum Worktree {
@@ -1215,7 +1330,11 @@ pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
         if seconds <= 0 {
             return Err("duration must be positive".into());
         }
-        return jiff::Timestamp::now()
+        use provenant_core::Clock;
+        return provenant_os::clock::SystemClock::new()
+            .wall_now()
+            .map_err(|error| error.to_string())?
+            .as_timestamp()
             .checked_sub(jiff::SignedDuration::from_secs(seconds))
             .map_err(|error| error.to_string());
     }
@@ -1229,9 +1348,11 @@ mod target_tests {
 
     #[test]
     fn since_accepts_whole_seconds_only() {
-        let before = jiff::Timestamp::now();
+        use provenant_core::Clock;
+        let clock = provenant_os::clock::SystemClock::new();
+        let before = clock.wall_now().unwrap().as_timestamp();
         let start = since("86400").unwrap();
-        let after = jiff::Timestamp::now();
+        let after = clock.wall_now().unwrap().as_timestamp();
         let duration = jiff::SignedDuration::from_secs(86_400);
         assert!(start >= before.checked_sub(duration).unwrap());
         assert!(start <= after.checked_sub(duration).unwrap());

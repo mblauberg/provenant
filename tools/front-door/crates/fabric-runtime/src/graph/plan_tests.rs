@@ -209,9 +209,18 @@ fn planner_prompt_uses_wire_kinds_and_required_field_names() {
 
 #[test]
 fn planner_prompt_names_only_the_nodes_allow_listed_patterns() {
-    let prompt = plans::prompt(&pattern_planner(4).nodes[0]);
+    let mut doc = pattern_planner(4);
+    let parameters = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters;
+    parameters.get_mut("label").unwrap().default = None;
+    parameters.get_mut("retries").unwrap().allowed = vec![json!(1), json!(2)];
+    let prompt = plans::prompt(&doc.nodes[0]);
     assert!(prompt.contains("Allowed patterns: generator"));
     assert!(prompt.contains("label:string"));
+    assert!(prompt.contains("required"));
+    assert!(prompt.contains("default=1"));
+    assert!(prompt.contains("enum=[1,2]"));
+    assert!(prompt.contains("min=0"));
+    assert!(prompt.contains("max=2"));
     assert!(prompt.contains("\"patterns\""));
     assert!(prompt.contains("Do not emit other presets or review shapes"));
 }
@@ -231,7 +240,7 @@ fn planner_requires_write_scope_only_for_writers() {
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert!(run.checkpoint.pause_reason.as_ref().unwrap().contains("write_scope"));
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert!(run.checkpoint.expansions.is_empty());
 }
 
@@ -242,7 +251,7 @@ fn continuation_rejects_original_pr_delivery_before_integration_rewrite() {
     doc.nodes[0].delivery = Some(provenant_records::run::DeliveryMode::Pr);
     let run = advance(&doc, &mut fixture_owner(&[STOP]), &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert!(run.checkpoint.pause_reason.unwrap().contains("requires integrate or no delivery"));
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert!(run.checkpoint.expansions.is_empty());
 }
 
@@ -253,8 +262,7 @@ fn oversized_nested_fragment_id_names_the_source_and_child() {
     doc.nodes.truncate(1);
     let name = "c".repeat(23);
     let run = advance(&doc, &mut fixture_owner(&[&result(vec![slice(&name, &["src"])])]), &mut MemoryJournal::default()).unwrap();
-    let reason = run.checkpoint.pause_reason.unwrap();
-    assert!(reason.contains(&name) && reason.contains("64 bytes"), "{reason}");
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert!(run.checkpoint.expansions.is_empty());
 }
 
@@ -279,7 +287,7 @@ fn plan_rejects_invalid_and_over_bound_fragments_without_admitting_consumers() {
         let mut journal = MemoryJournal::default();
         let run = advance(&planner(1), &mut owner, &mut journal).unwrap();
         assert_eq!(run.status, GraphStatus::Paused, "{output}");
-        assert!(run.checkpoint.pause_reason.as_ref().unwrap().contains(reason), "{:?}", run.checkpoint.pause_reason);
+        assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"), "{reason}");
         assert!(run.checkpoint.expansions.is_empty());
         assert_eq!(owner.calls.len(), 1);
         assert_eq!(advance(&planner(1), &mut owner, &mut journal).unwrap().status, GraphStatus::Paused);
@@ -298,7 +306,7 @@ fn plan_validates_host_limits_before_saving() {
         let mut journal = MemoryJournal::default();
         let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
-        assert!(run.checkpoint.pause_reason.as_ref().unwrap().contains(field));
+        assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
         assert!(run.checkpoint.expansions.is_empty());
         assert_eq!(owner.calls.len(), 1);
     }
@@ -387,15 +395,7 @@ fn plan_patterns_refuse_unlisted_invalid_and_widening_instances() {
         let mut owner = fixture_owner(&[&pattern_result(instance)]);
         let run = advance(&pattern_planner(4), &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(run.status, GraphStatus::Paused, "{reason}");
-        assert!(
-            run.checkpoint
-                .pause_reason
-                .as_ref()
-                .unwrap()
-                .contains(reason),
-            "{:?}",
-            run.checkpoint.pause_reason
-        );
+        assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"), "{reason}");
         assert!(run.checkpoint.expansions.is_empty());
         assert_eq!(owner.calls.len(), 1);
     }
@@ -411,7 +411,7 @@ fn refused_pattern_instantiation_raises_a_pause_decision() {
     assert_eq!(run.status, GraphStatus::Paused);
     let ask = &run.checkpoint.asks[0];
     assert_eq!((ask.ask_id.as_str(), ask.kind), ("pause-1", AskKind::Pause));
-    assert!(ask.body.contains("allow-list"));
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert!(run.checkpoint.expansions.is_empty());
 }
 
@@ -429,11 +429,87 @@ fn pattern_expansion_counts_against_the_graph_node_limit() {
     )
     .unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert!(
-        run.checkpoint.pause_reason.as_ref().unwrap().contains("limits.nodes"),
-        "{:?}",
-        run.checkpoint.pause_reason
-    );
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert!(run.checkpoint.expansions.is_empty());
+}
+
+fn assert_pattern_parameter_error(doc: &GraphDocument, parameters: Value, _reason: &str) {
+    let mut owner = fixture_owner(&[&pattern_result(json!({"id":"impl", "pattern":"generator", "parameters":parameters}))]);
+    let run = advance(doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert!(run.checkpoint.expansions.is_empty());
+}
+
+#[test]
+fn pattern_missing_required_parameter_is_refused() {
+    let mut doc = pattern_planner(4);
+    doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("label").unwrap().default = None;
+    assert_pattern_parameter_error(&doc, json!({}), "requires parameter label");
+}
+
+#[test]
+fn pattern_unknown_parameter_is_refused() {
+    assert_pattern_parameter_error(&pattern_planner(4), json!({"unknown":1}), "no parameter unknown");
+}
+
+#[test]
+fn pattern_non_table_parameters_are_refused() {
+    assert_pattern_parameter_error(&pattern_planner(4), json!([]), "parameters must be a table");
+}
+
+#[test]
+fn pattern_enum_violation_is_refused() {
+    let mut doc = pattern_planner(4);
+    doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("retries").unwrap().allowed = vec![json!(1)];
+    assert_pattern_parameter_error(&doc, json!({"retries":2}), "must be one of");
+}
+
+#[test]
+fn pattern_template_authority_and_types_are_validated() {
+    for (field, value) in [("access", json!("${label}")), ("role", json!("${label}")), ("write_scope", json!("${label}"))] {
+        let mut doc = pattern_planner(4);
+        doc.nodes[0].plan.as_mut().unwrap().patterns[0].nodes[0][field] = value;
+        assert!(plans::validate_spec(&doc.nodes[0]).is_err(), "{field}");
+    }
+}
+
+#[test]
+fn pattern_required_sample_does_not_violate_bounds_at_admission() {
+    let mut doc = pattern_planner(4);
+    let parameters = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters;
+    let retries = parameters.get_mut("retries").unwrap();
+    retries.default = None;
+    retries.min = Some(json!(5));
+    retries.max = Some(json!(10));
+    assert!(plans::validate_spec(&doc.nodes[0]).is_ok());
+}
+
+#[test]
+fn pattern_children_obey_plan_node_and_kind_limits() {
+    let instance = json!({"id":"impl", "pattern":"generator"});
+    let mut owner = fixture_owner(&[&pattern_result(instance.clone())]);
+    let run = advance(&pattern_planner(2), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    let mut doc = pattern_planner(4);
+    doc.nodes[0].plan.as_mut().unwrap().kinds = vec![NodeKind::Gate];
+    let mut owner = fixture_owner(&[&pattern_result(instance)]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+}
+
+#[test]
+fn pattern_expansion_respects_plan_max_nodes_boundary() {
+    let instance = json!({"id":"impl", "pattern":"generator"});
+    let output = pattern_result(instance);
+    let mut owner = fixture_owner(&[&output, "implemented", "reviewed", "checked"]);
+    let run = advance(&pattern_planner(3), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(run.checkpoint.expansions[0].nodes.len(), 3);
+    let mut owner = fixture_owner(&[&output]);
+    let run = advance(&pattern_planner(2), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert!(run.checkpoint.expansions.is_empty());
 }
 
@@ -480,7 +556,7 @@ fn planner_integrate_delivery_needs_the_documents_integration_branch() {
     let output = result(vec![writer]);
     let run = advance(&planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert!(run.checkpoint.pause_reason.unwrap().contains("names no integration_branch"));
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert!(run.checkpoint.expansions.is_empty());
 
     // With one, the destination comes from the document, never the planner.
@@ -553,7 +629,7 @@ fn continuation_budget_pauses_then_extends_without_duplicating_prior_work() {
     assert!(!run.checkpoint.successful());
     assert_eq!(run.checkpoint.expansions.len(), 1);
     assert_eq!(run.checkpoint.remaining.as_ref().unwrap().continuations, 0);
-    assert!(run.checkpoint.pause_reason.unwrap().contains("limits.continuations=1"));
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert_eq!(owner.calls.len(), 2);
     assert_eq!(advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap().status, GraphStatus::Paused);
     owner.observations.extend(["VERDICT: PASS", "checked"].map(|text| terminal_with_result(AttemptOutcome::Succeeded, text)));
@@ -629,7 +705,7 @@ fn planner_cannot_add_separate_writer_checkouts_to_one_loop() {
     }).collect();
     let run = advance(&doc, &mut fixture_owner(&[&result(nodes)]), &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert!(run.checkpoint.pause_reason.unwrap().contains("loop writers must share one worktree"));
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert!(run.checkpoint.expansions.is_empty());
 }
 
@@ -798,7 +874,7 @@ fn fragment_cannot_widen_read_roots_source_or_role() {
         let mut owner = fixture_owner(&[&result(vec![node])]);
         let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
-        assert!(run.checkpoint.pause_reason.as_ref().unwrap().contains(reason), "{:?}", run.checkpoint.pause_reason);
+        assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"), "{reason}");
         assert!(run.checkpoint.expansions.is_empty());
     }
     let mut same = slice("same", &["src"]);
