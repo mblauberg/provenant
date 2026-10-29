@@ -51,6 +51,37 @@ pub(crate) enum RepoObjectFormat {
 pub(crate) struct RepoProbeData {
     pub object_format: RepoObjectFormat,
     pub attribute_source: String,
+    /// Config overrides that neutralise configuration lanes can influence.
+    pub config_overrides: Vec<(String, String)>,
+    /// Files Git read through `include.path` and `includeIf`, plus every
+    /// declared include target, present or not. The configuration digest
+    /// covers them, so a later edit makes the handle stale.
+    pub config_files: Vec<PathBuf>,
+    /// Digest of `config_files` taken when they were read.
+    pub config_files_digest: [u8; 32],
+    /// A declared include target in a lane-writable location was not read
+    /// because its condition (such as `onbranch:`) did not match this HEAD. A
+    /// later HEAD change could activate it, so the digest also covers `HEAD`.
+    pub config_head_sensitive: bool,
+}
+
+#[cfg(test)]
+impl RepoProbeData {
+    /// Probe data for a repository whose configuration includes no files.
+    pub(crate) fn without_includes(
+        object_format: RepoObjectFormat,
+        attribute_source: String,
+        config_overrides: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            object_format,
+            attribute_source,
+            config_overrides,
+            config_files: Vec::new(),
+            config_files_digest: Sha256::digest(Sha256::digest([])).into(),
+            config_head_sensitive: false,
+        }
+    }
 }
 
 /// A repository-relative, byte-preserving path. The value cannot name an
@@ -91,9 +122,9 @@ impl RepoPath {
     }
 }
 
-/// A strictly validated full local branch ref. The deliberately narrow ASCII
-/// form covers branch names used by the command surface and never asks Git to
-/// interpret caller-supplied revision syntax.
+/// A strictly validated full local branch ref. The name must satisfy Git's own
+/// branch-name rules, and Git is never asked to interpret caller-supplied
+/// revision syntax.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GitRefName(String);
 
@@ -166,27 +197,25 @@ impl GitRevision {
     }
 }
 
+/// Git's own rules for a branch name (`git check-ref-format --branch`), so
+/// anything Git accepts is accepted here. Names reach paths only through
+/// escaped path grants and reach Git only as single argv entries. Git accepts a
+/// lone `@` (`refs/heads/@` is a valid ref; only the bare ref name `@` is
+/// reserved), and rejects `HEAD` and any `@{` sequence.
 fn valid_branch(branch: &str) -> bool {
-    if branch.is_empty()
-        || branch == "@"
+    !(branch.is_empty()
+        || branch == "HEAD"
         || branch.starts_with('-')
-        || branch.starts_with('/')
         || branch.ends_with('/')
         || branch.ends_with('.')
+        || branch.contains("..")
+        || branch.contains("@{")
         || branch
-            .bytes()
-            .any(|byte| !(byte.is_ascii_alphanumeric() || b"._/-".contains(&byte)))
-    {
-        return false;
-    }
-    !branch.split('/').any(|part| {
-        part.is_empty()
-            || part == "."
-            || part == ".."
-            || part.starts_with('.')
-            || part.ends_with(".lock")
-    }) && !branch.contains("..")
-        && !branch.contains("@{")
+            .chars()
+            .any(|character| character.is_ascii_control() || " ~^:?*[\\".contains(character))
+        || branch
+            .split('/')
+            .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock")))
 }
 
 /// Held, verified repository and Git common/private directories.
@@ -205,8 +234,16 @@ pub struct VerifiedRepo {
     commondir_bytes: Option<Vec<u8>>,
     gitdir_backlink_bytes: Option<Vec<u8>>,
     probe_data: Option<RepoProbeData>,
-    config_digest: Option<[u8; 32]>,
+    config_digest: Option<ConfigDigest>,
     native_alternates: bool,
+}
+
+/// Digest of the repository's own config files, kept apart from the digest of
+/// the files they include so a probe can tell which of the two moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ConfigDigest {
+    base: [u8; 32],
+    pub(crate) included: [u8; 32],
 }
 
 impl VerifiedRepo {
@@ -352,9 +389,16 @@ impl VerifiedRepo {
     {
         let mut repo = Self::open_structure(path, native_alternates).map_err(E::from)?;
         let config_before = repo.configuration_digest().map_err(E::from)?;
-        repo.probe_data = Some(probe(&repo)?);
+        let data = probe(&repo)?;
+        repo.probe_data = Some(data);
+        // The probe records the digest of the included files it read; the
+        // repository's own config files must not have changed meanwhile.
         let config_after = repo.configuration_digest().map_err(E::from)?;
-        if config_before != config_after {
+        let included = repo
+            .probe_data
+            .as_ref()
+            .map(|data| data.config_files_digest);
+        if config_before.base != config_after.base || included != Some(config_after.included) {
             return Err(E::from(RepoError::IdentityChanged));
         }
         repo.config_digest = Some(config_after);
@@ -401,7 +445,7 @@ impl VerifiedRepo {
         self.probe_data.as_ref()
     }
 
-    fn configuration_digest(&self) -> Result<[u8; 32], RepoError> {
+    fn configuration_digest(&self) -> Result<ConfigDigest, RepoError> {
         let mut digest = Sha256::new();
         for (marker, directory) in [(b'P', &self.private), (b'C', &self.common)] {
             for name in [OsStr::new("config"), OsStr::new("config.worktree")] {
@@ -417,11 +461,47 @@ impl VerifiedRepo {
                 }
             }
         }
+        let (files, head_sensitive) = self.probe_data.as_ref().map_or((&[][..], false), |data| {
+            (data.config_files.as_slice(), data.config_head_sensitive)
+        });
+        Ok(ConfigDigest {
+            base: digest.finalize().into(),
+            included: self.included_digest(files, head_sensitive)?,
+        })
+    }
+
+    /// Digest of included config files, for a probe that has just read them.
+    pub(crate) fn included_digest(
+        &self,
+        files: &[PathBuf],
+        head_sensitive: bool,
+    ) -> Result<[u8; 32], RepoError> {
+        let mut digest = Sha256::new();
+        digest.update(included_files_digest(files)?);
+        if head_sensitive {
+            match read_optional_bounded(&self.private, OsStr::new("HEAD"), GITFILE_LIMIT)? {
+                Some(bytes) => {
+                    digest.update([1]);
+                    digest.update(bytes);
+                }
+                None => digest.update([0]),
+            }
+        }
         Ok(digest.finalize().into())
     }
 
+    /// Replace the probe data after probing this repository's own effective
+    /// configuration, and re-anchor the digest on it.
+    pub(crate) fn set_probe_data(&mut self, data: RepoProbeData) -> Result<(), RepoError> {
+        self.probe_data = Some(data);
+        self.config_digest = Some(self.configuration_digest()?);
+        self.revalidate()
+    }
+
     pub fn revalidate(&self) -> Result<(), RepoError> {
-        let current = Self::open_structure(&self.root_path, self.native_alternates)?;
+        let mut current = Self::open_structure(&self.root_path, self.native_alternates)?;
+        // The included files to digest are the ones this handle was probed on.
+        current.probe_data = self.probe_data.clone();
         let Some(config_digest) = self.config_digest else {
             return Err(RepoError::Unprobed);
         };
@@ -470,6 +550,10 @@ impl VerifiedWorktree {
         &self.repo
     }
 
+    pub(crate) fn repo_mut(&mut self) -> &mut VerifiedRepo {
+        &mut self.repo
+    }
+
     pub fn path(&self) -> &Path {
         self.repo.root_path()
     }
@@ -504,6 +588,43 @@ pub fn verify_worktree(
     worktree.config_digest = Some(worktree.configuration_digest()?);
     worktree.revalidate()?;
     Ok(VerifiedWorktree { repo: worktree })
+}
+
+/// Hash each file with the path it resolves to, so retargeting a symlink or
+/// creating a file that was absent changes the digest. Git follows links in
+/// includes, so a link is read through.
+fn included_files_digest(files: &[PathBuf]) -> Result<[u8; 32], RepoError> {
+    let mut digest = Sha256::new();
+    for file in files {
+        digest.update(file.as_os_str().as_bytes());
+        digest.update([0]);
+        let Ok(resolved) = canonicalize(file) else {
+            digest.update([0]);
+            continue;
+        };
+        let (Some(parent), Some(name)) = (resolved.parent(), resolved.file_name()) else {
+            return Err(RepoError::InvalidGitDirectory);
+        };
+        let directory = match Directory::open_anchor(parent) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => {
+                digest.update([0]);
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        digest.update([1]);
+        digest.update(resolved.as_os_str().as_bytes());
+        match read_optional_bounded(&directory, name, CONFIG_LIMIT)? {
+            Some(bytes) => {
+                digest.update([1]);
+                digest.update((bytes.len() as u64).to_be_bytes());
+                digest.update(bytes);
+            }
+            None => digest.update([0]),
+        }
+    }
+    Ok(digest.finalize().into())
 }
 
 fn verify_git_directory(metadata: Metadata, owner: u32) -> Result<(), RepoError> {
@@ -650,20 +771,108 @@ fn open_canonical_anchor(
 #[cfg(test)]
 mod tests {
     use super::{
-        GitRevision, GitRevisionError, RepoError, RepoObjectFormat, RepoProbeData, VerifiedRepo,
-        verify_worktree,
+        GitRefName, GitRevision, GitRevisionError, RepoError, RepoObjectFormat, RepoProbeData,
+        VerifiedRepo, verify_worktree,
     };
     use std::fs;
+
+    /// Each row is `git check-ref-format --branch <name>` (git-check-ref-format(1),
+    /// "--branch"), observed with Git 2.53: true when it exits 0. `@{` forms
+    /// are excluded because `--branch` treats them as shorthand to expand.
+    const BRANCH_TABLE: &[(&str, bool)] = &[
+        ("feat/a+b", true),
+        ("fix#12", true),
+        ("user@x", true),
+        ("@", true),
+        ("@a", true),
+        ("a@", true),
+        ("a/@", true),
+        ("@/a", true),
+        ("@@", true),
+        ("head", true),
+        ("caf\u{e9}", true),
+        ("a\"b", true),
+        ("a{b", true),
+        ("a}b", true),
+        ("a.lock.b", true),
+        ("lock", true),
+        ("x/y.z", true),
+        ("v1.0", true),
+        ("a/-b", true),
+        ("", false),
+        ("HEAD", false),
+        ("-x", false),
+        ("--x", false),
+        ("/x", false),
+        ("x/", false),
+        ("x//y", false),
+        (".", false),
+        ("..", false),
+        (".x", false),
+        ("x/.y", false),
+        ("x.", false),
+        ("a/b.", false),
+        ("a..b", false),
+        ("a@{b", false),
+        ("a b", false),
+        ("a~b", false),
+        ("a^b", false),
+        ("a:b", false),
+        ("a?b", false),
+        ("a*b", false),
+        ("a[b", false),
+        ("a\\b", false),
+        ("a\u{7f}b", false),
+        ("a\nb", false),
+        ("a\tb", false),
+        ("x.lock", false),
+        ("x.lock/y", false),
+        ("a/b.lock", false),
+        (".lock", false),
+        ("a/..", false),
+    ];
+
+    #[test]
+    fn branch_names_follow_git_ref_format() {
+        for (name, accepted) in BRANCH_TABLE {
+            assert_eq!(GitRefName::branch(name).is_ok(), *accepted, "{name:?}");
+        }
+    }
+
+    /// The table above can drift from Git; ask the installed Git directly.
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn branch_names_match_the_installed_git() {
+        let Some(git) = provenant_os::git::git_executable() else {
+            return;
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new(&git)
+                .current_dir(temp.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        assert!(run(&["init", "--quiet"]).status.success());
+        for (name, accepted) in BRANCH_TABLE {
+            let output = run(&["check-ref-format", "--branch", name]);
+            assert_eq!(output.status.success(), *accepted, "{name:?}");
+        }
+    }
 
     #[test]
     fn verify_worktree_refuses_the_primary_checkout() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join(".git")).unwrap();
         let repo = VerifiedRepo::open(temp.path(), |_| {
-            Ok::<_, RepoError>(RepoProbeData {
-                object_format: RepoObjectFormat::Sha1,
-                attribute_source: String::new(),
-            })
+            Ok::<_, RepoError>(RepoProbeData::without_includes(
+                RepoObjectFormat::Sha1,
+                String::new(),
+                Vec::new(),
+            ))
         })
         .unwrap();
 
@@ -697,10 +906,11 @@ mod tests {
         fs::create_dir(&git).unwrap();
         fs::write(git.join("config"), b"[core]\nrepositoryformatversion = 0\n").unwrap();
         let repo = VerifiedRepo::open(temp.path(), |_| {
-            Ok::<_, RepoError>(RepoProbeData {
-                object_format: RepoObjectFormat::Sha1,
-                attribute_source: String::new(),
-            })
+            Ok::<_, RepoError>(RepoProbeData::without_includes(
+                RepoObjectFormat::Sha1,
+                String::new(),
+                Vec::new(),
+            ))
         })
         .unwrap();
         fs::write(

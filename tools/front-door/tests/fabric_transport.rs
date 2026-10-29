@@ -3986,6 +3986,20 @@ fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
     assert_eq!(worktree["branch"], "peer/writer");
     let path = Path::new(worktree["path"].as_str().ok_or("worktree path")?);
     assert_eq!(git(&rig, path, &["rev-parse", "HEAD"])?, base);
+    let (status, collision) = dispatch("peer-writer-collision", "peer/Writer", "origin/main")?;
+    assert_ne!(status, 0, "{collision}");
+    assert!(
+        collision.to_string().contains("create peer worktree"),
+        "{collision}"
+    );
+    assert_eq!(
+        git(
+            &rig,
+            path,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/peer"]
+        )?,
+        "refs/heads/peer/writer"
+    );
     let run = placed["data"]["run_id"]
         .as_str()
         .ok_or("run id")?

@@ -2320,10 +2320,14 @@ fn remove_by_name_deletes_a_branch_fully_contained_in_integration() -> Result {
 
 fn remove_resolves_directory_names_and_remote_integration_refs() -> Result {
     let rig = repository()?;
-    git(
-        &rig,
-        &["remote", "add", "origin", "/missing/offline-upstream.git"],
-    )?;
+    let remote = rig
+        .project
+        .parent()
+        .ok_or("fixture parent")?
+        .join("fixture-origin.git");
+    let remote_text = remote.to_str().ok_or("non-text fixture path")?;
+    git(&rig, &["init", "--bare", remote_text])?;
+    git(&rig, &["remote", "add", "origin", remote_text])?;
     // The worktree directory is the branch with `/` replaced by `-`.
     ok(
         &rig,
@@ -2343,6 +2347,7 @@ fn remove_resolves_directory_names_and_remote_integration_refs() -> Result {
     git(&rig, &["-C", shipped_text, "commit", "-qm", "shipped"])?;
     // Local main stays behind; the work is only on the remote-tracking ref.
     let tip = git(&rig, &["rev-parse", "fix/shipped"])?;
+    git(&rig, &["push", "origin", &format!("{tip}:refs/heads/main")])?;
     git(&rig, &["update-ref", "refs/remotes/origin/main", &tip])?;
 
     let removed = ok(
@@ -2384,6 +2389,15 @@ fn remove_resolves_directory_names_and_remote_integration_refs() -> Result {
         ],
     )?;
     git(&rig, &["update-ref", "refs/remotes/origin/main", &next])?;
+    git(
+        &rig,
+        &[
+            "push",
+            "--force",
+            "origin",
+            &format!("{next}:refs/heads/main"),
+        ],
+    )?;
     let stale = git(&rig, &["rev-parse", "HEAD"])?;
     git(
         &rig,

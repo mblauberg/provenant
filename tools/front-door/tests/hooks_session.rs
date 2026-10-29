@@ -516,6 +516,19 @@ fn worktree_remove_distinguishes_missing_paths_from_other_errors() -> Result {
 }
 
 #[test]
+fn worktree_hook_refuses_a_colliding_branch() -> Result {
+    let rig = TestRig::new()?;
+    commit_file(&rig)?;
+    git(&rig, &["branch", "claude/Bright-fox"])?;
+    let output = run_hook(&rig, "worktree-create", &worktree_input(&rig, "bright-fox"))?;
+    assert_eq!(code(&output), 2);
+    let stderr = String::from_utf8(output.stderr.bytes)?;
+    assert!(stderr.contains("collides"), "{stderr}");
+    assert!(!rig.project.join(".worktrees/claude-bright-fox").exists());
+    Ok(())
+}
+
+#[test]
 fn worktree_hooks_create_and_remove_through_the_worktree_owner() -> Result {
     let rig = TestRig::new()?;
     commit_file(&rig)?;
