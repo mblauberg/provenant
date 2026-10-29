@@ -719,9 +719,7 @@ fn resolve_dispatch_excluding(
             )?;
             loop {
                 let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
-                let pools = free_pools(&resolved.adapter, || {
-                    context.catalogue.is_free_model(&model)
-                });
+                let pools = admission_pools(&resolved.adapter, context.catalogue, &model);
                 let now_unix_seconds = context.now.as_timestamp().as_second();
                 let policies = provenant_providers::quota_policies(context.registry);
                 let admission = provenant_quota::Admission {
@@ -860,6 +858,12 @@ fn record_pool_redraw(
     current.redraws = redraws;
     Ok(())
 }
+/// The pools a model draws on: the free allowance and its catalogued group.
+fn admission_pools(adapter: &str, catalogue: &Catalogue, model: &ModelId) -> Vec<String> {
+    let mut pools = free_pools(adapter, || catalogue.is_free_model(model));
+    pools.extend(catalogue.quota_pool(model).map(str::to_owned));
+    pools
+}
 /// Only OpenCode draws on the keyless free allowance, whatever a pool lists.
 fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
     provenant_records::AdapterSpec::get(adapter)
@@ -881,7 +885,7 @@ pub(crate) fn check_dispatch_candidate(
         .map_err(|e| e.to_string())?
         .domains;
     provenant_routing::check_go_allowance(&model, &domains.routing, &catalogue)?;
-    let pools = free_pools(&route.adapter, || catalogue.is_free_model(&model));
+    let pools = admission_pools(&route.adapter, &catalogue, &model);
     let now = jiff::Timestamp::now().as_second();
     let mut records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
     domains.quota.apply_calibration(&mut records, now);
