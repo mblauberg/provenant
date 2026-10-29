@@ -1,3 +1,4 @@
 ## Fixes
+### Pipelines and graphs
 
-- Graph budgets now count usage correctly from attempt telemetry, including partial and unpriced usage (#2046).
+- Graph budgets count usage correctly from attempt telemetry, including partial and unpriced usage (#2046).

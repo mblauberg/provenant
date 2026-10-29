@@ -182,7 +182,7 @@ or amending requires separate authority.
 
 ## Changelog and Release Notes
 
-A changelog is the exhaustive, versioned record for developers (Keep a Changelog); release notes are the curated, upgrader-facing account of what a release means. Do not merge them. For release notes, fragments and changelog entries, follow [release notes](release-notes.md).
+A changelog is the exhaustive, versioned record for developers (Keep a Changelog); release notes are the curated, upgrader-facing account of what a release means. Do not merge them. A changelog has one section per release (newest first, version and ISO date), an Unreleased section on top, and entries grouped as Added, Changed, Deprecated, Removed, Fixed, Security. For release notes and fragments, follow [release notes](release-notes.md).
 
 ## Error Message
 

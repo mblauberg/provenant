@@ -28,16 +28,32 @@ Add one file per user-visible change under `next.d/`, named `<issue>-<topic>.md`
 
 ```markdown
 ## Fixes
+### Lanes and settlement
 
 - `status` no longer reports a finished run as running (#123).
 ```
 
 - **First line.** Exactly one of `## Breaking changes`, `## Behaviour changes`,
-  `## Additions` or `## Fixes`. No other heading is allowed in a fragment.
+  `## Additions` or `## Fixes`. No other `##` heading is allowed.
+- **Second line (area).** `### <Area>`, from the list below. The collator groups
+  each section's entries by area in this order and leaves out empty areas.
+  Untagged fragments come last, under no sub-heading, so tag every fragment.
+  An unknown area fails `scripts/collate-release-notes --check`.
+  1. CLI and install
+  2. Lanes and settlement
+  3. Git and safety
+  4. Accounts, quota and routing
+  5. Pipelines and graphs
+  6. Chair, inbox and console
+  7. Fabric and MCP
+  8. Telemetry and providers
 - **Body.** One to three bullets, each a finished sentence for the published
   notes: subject first, in the user's terms, ending with `(#issue)`. A breaking
   change also says who is affected and what to do instead, in up to five
-  sentences. Write `**The change.** Action.` for breaking entries.
+  sentences: `**The change.** Action.`
+- **Upgrade actions.** Anything a user must do on upgrade (drain lanes, upgrade
+  every host together, edit config, rerun a command) is a breaking change, or
+  goes in the intro's upgrade note. Never leave one under Behaviour changes.
 - **Do not include.** Stability or version boilerplate, an intro, mechanism or
   failure-sequence detail, slice or wave numbers, internal-only changes, or
   entries copied from commit messages. A change no user can notice needs no

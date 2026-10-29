@@ -1,3 +1,4 @@
 ## Fixes
+### Lanes and settlement
 
-- `cancel` recognises a writer that settled and released its reservation during recovery, including its startup spacing (#1970).
+- `cancel` now recognises a writer that settled and released its reservation during recovery (#1970).

@@ -22,4 +22,35 @@ done
 rm -f "$dir/invalid.md"
 printf 'See [policy](../../release-notes/README.md).\n' > "$dir/_intro.md"
 "$script" | grep -F '(../release-notes/README.md)' > /dev/null
+! "$script" | sed -n '1,/^## /p' | grep -F '../../' > /dev/null
+
+# Area grouping: configured order, untagged last, empty areas left out.
+rm -f "$dir"/*.md
+printf 'Intro.\n' > "$dir/_intro.md"
+printf '## Fixes\n### Fabric and MCP\n\n- Fabric fix.\n' > "$dir/a.md"
+printf '## Fixes\n### CLI and install\n\n- CLI fix.\n' > "$dir/b.md"
+printf '## Fixes\n\n- Untagged fix.\n' > "$dir/c.md"
+printf '## Additions\n### Git and safety\n\n- Git addition.\n' > "$dir/d.md"
+"$script" > "$tmp/out"
+expected='## Fixes
+
+### CLI and install
+
+- CLI fix.
+
+### Fabric and MCP
+
+- Fabric fix.
+
+- Untagged fix.'
+grep -qxF '### Git and safety' "$tmp/out"
+! grep -qxF '### Lanes and settlement' "$tmp/out"
+actual=$(sed -n '/^## Fixes/,$p' "$tmp/out")
+[ "$actual" = "$expected" ] || { echo "unexpected grouping:" >&2; printf '%s\n' "$actual" >&2; exit 1; }
+printf '## Fixes\n### Nowhere\n\n- Bad.\n' > "$dir/e.md"
+if "$script" --check > "$tmp/out" 2> "$tmp/err"; then
+  echo "collate-release-notes accepted an unknown area" >&2
+  exit 1
+fi
+grep -F 'unknown area' "$tmp/err" > /dev/null
 echo 'release notes heading validation passed'

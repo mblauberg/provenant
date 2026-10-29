@@ -1,3 +1,4 @@
 ## Fixes
+### Chair, inbox and console
 
-- Console board and tree reads share one deadline across peers. Local results are kept when peers time out (#2128).
+- `console board` and `console tree` share one deadline across peers and keep local results when a peer times out (#2128).

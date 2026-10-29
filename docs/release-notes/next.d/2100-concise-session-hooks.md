@@ -1,3 +1,4 @@
 ## Behaviour changes
+### Chair, inbox and console
 
-- Session hooks summarise settled lanes and closed pull requests, and session saves advise when checkpoints need trimming or contain stale references.
+- Session hooks summarise settled lanes and closed pull requests. Session saves advise when a checkpoint needs trimming or holds stale references.

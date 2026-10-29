@@ -1,3 +1,4 @@
 ## Fixes
+### Lanes and settlement
 
-- Nested runs now carry host-verifiable child run and attempt IDs. A lane that rewrites an ID is refused before launch and cannot affect a sibling's lookup or launch. Existing child records stay unindexed, with no migration (#2054).
+- Nested runs now carry child run and attempt IDs that the host verifies, so a lane can no longer rewrite an ID to affect a sibling. Existing child records are not migrated (#2054).

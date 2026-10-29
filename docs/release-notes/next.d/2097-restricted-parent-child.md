@@ -1,3 +1,4 @@
 ## Fixes
+### Lanes and settlement
 
-- A parent with restricted network access can launch children, which keep its restriction. A continuation of a child store is bounded by the requesting parent's network, or by the provider-only profile when the parent's sealed context is unavailable. On macOS that profile currently also permits outbound TCP 443 beyond provider endpoints ([#2118](https://github.com/mblauberg/provenant/issues/2118)) (#2097).
+- A parent with restricted network access can launch children, which keep its restriction. A child continuation is limited to the requesting parent's network, or to the provider-only profile when the parent's context is unavailable; on macOS that profile also permits outbound TCP 443 beyond provider endpoints, tracked in #2118 (#2097).
