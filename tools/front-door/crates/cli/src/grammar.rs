@@ -542,7 +542,7 @@ pub struct Dispatch {
     #[command(flatten)]
     pub access: Access,
     /// Provider timeout in seconds
-    #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), value_parser = clap::value_parser!(u64).range(1..=14400))]
+    #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS))]
     pub provider_timeout: u64,
     /// Manifest lanes or preset graph attempts to run at once (1 to 16)
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=16))]
@@ -769,7 +769,7 @@ pub struct Lanes {
         default_missing_value = "14400",
         value_name = "SECONDS",
         conflicts_with_all = ["all", "states", "cursor"],
-        value_parser = clap::value_parser!(u64).range(1..=14400)
+        value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS)
     )]
     pub watch: Option<u64>,
     /// Keep lanes in any of these states.
@@ -1205,7 +1205,7 @@ fn duration_seconds(value: &str) -> Result<u64, &'static str> {
         .parse::<u64>()
         .ok()
         .and_then(|n| n.checked_mul(multiplier))
-        .filter(|n| (1..=14400).contains(n))
+        .filter(|n| (1..=provenant_core::MAX_LANE_RUNTIME_SECONDS).contains(n))
         .ok_or("wait must be 1s to 4h; run `provenant help run` for examples")
 }
 #[derive(Debug, Args)]

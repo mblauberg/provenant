@@ -760,7 +760,7 @@ fn constraints(path: &str) -> Vec<String> {
 }
 fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
     match name {
-        "wait" | "provider_timeout" => Some((1, 14400)),
+        "wait" | "provider_timeout" => Some((1, provenant_core::MAX_LANE_RUNTIME_SECONDS)),
         "limit" => Some((1, 100)),
         "concurrency" => Some((1, 16)),
         "max_bytes" => Some((1, 65536)),

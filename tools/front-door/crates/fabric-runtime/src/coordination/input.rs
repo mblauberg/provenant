@@ -437,7 +437,9 @@ impl ValidateInput for SubmitInput {
                         bounded_text(&deliver.branch, &format!("{path}.deliver.branch"), 1024)?;
                     }
                     route(&task.route, &format!("{path}.route"))?;
-                    if !(1..=14_400).contains(&task.timeout_seconds) {
+                    if !(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS)
+                        .contains(&task.timeout_seconds)
+                    {
                         return Err(field(&format!("{path}.timeout_seconds")));
                     }
                 }

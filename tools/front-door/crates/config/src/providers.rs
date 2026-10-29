@@ -37,9 +37,6 @@ impl Default for ProviderSettings {
     }
 }
 
-/// The longest runtime deadline a dispatch can request.
-const MAX_RUNTIME_DEADLINE_SECONDS: u64 = 14_400;
-
 pub(crate) fn defaults() -> BTreeMap<String, ProviderSettings> {
     provenant_records::ADAPTER_SPECS
         .iter()
@@ -58,10 +55,9 @@ pub(crate) fn validate(providers: &BTreeMap<String, ProviderSettings>) -> Result
         if settings.update_timeout_seconds == 0 {
             return Err("update_timeout_seconds_range");
         }
-        if settings
-            .runtime_deadline_seconds
-            .is_some_and(|seconds| !(1..=MAX_RUNTIME_DEADLINE_SECONDS).contains(&seconds))
-        {
+        if settings.runtime_deadline_seconds.is_some_and(|seconds| {
+            !(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS).contains(&seconds)
+        }) {
             return Err("runtime_deadline_seconds_range");
         }
         if let ProviderUpdate::Command { command } = &settings.update
