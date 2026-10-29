@@ -419,9 +419,15 @@ impl LaneRuntime<'_> {
 
 fn claude_shell(env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> {
     let mut exports = identity_exports(env)?;
-    if let Some((_, value)) = env.iter().find(|(key, _)| key == "CARGO_BUILD_JOBS") {
-        let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
-        exports.push_str(&format!("export CARGO_BUILD_JOBS={}\n", shell_quote(value)));
+    for name in [
+        "CARGO_BUILD_JOBS",
+        "CARGO_INCREMENTAL",
+        "CARGO_PROFILE_DEV_DEBUG",
+    ] {
+        if let Some((_, value)) = env.iter().find(|(key, _)| key == name) {
+            let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
+            exports.push_str(&format!("export {name}={}\n", shell_quote(value)));
+        }
     }
     Ok(format!("#!/bin/sh\n{exports}exec /bin/bash -c \"$1\"\n").into_bytes())
 }
@@ -741,6 +747,8 @@ mod tests {
             &path,
             claude_shell(&[
                 ("CARGO_BUILD_JOBS".into(), "4".into()),
+                ("CARGO_INCREMENTAL".into(), "0".into()),
+                ("CARGO_PROFILE_DEV_DEBUG".into(), "line-tables-only".into()),
                 ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
             ])
             .unwrap(),
@@ -749,11 +757,14 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let result = std::process::Command::new(path)
             .env_clear()
-            .arg("printf '%s\\n' \"$CARGO_BUILD_JOBS\" \"$GIT_AUTHOR_NAME\" 'quoted argument'")
+            .arg("printf '%s\\n' \"$CARGO_BUILD_JOBS\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$GIT_AUTHOR_NAME\" 'quoted argument'")
             .output()
             .unwrap();
         assert!(result.status.success());
-        assert_eq!(result.stdout, b"4\nO'Brien\nquoted argument\n");
+        assert_eq!(
+            result.stdout,
+            b"4\n0\nline-tables-only\nO'Brien\nquoted argument\n"
+        );
     }
 
     #[test]

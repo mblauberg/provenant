@@ -292,6 +292,38 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant accounts sync`
+
+| Argument | Contract |
+|---|---|
+| `--dry-run` | `{"defaults": ["false"], "name": "dry_run", "values": ["true", "false"]}` |
+| `--adopt` | `{"name": "adopt"}` |
+| `--force-settings` | `{"defaults": ["false"], "name": "force_settings", "values": ["true", "false"]}` |
+| `--prune-orphans` | `{"defaults": ["false"], "name": "prune_orphans", "values": ["true", "false"]}` |
+| `--json` | `{"name": "json", "values": ["true", "false"]}` |
+| `--state-dir` | `{"name": "state_dir"}` |
+| `--project` | `{"name": "project"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "dry_run",
+        "adopt",
+        "force_settings",
+        "prune_orphans"
+      ],
+      "multiple": true,
+      "name": "Sync",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant accounts set`
 
 | Argument | Contract |

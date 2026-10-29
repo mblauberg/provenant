@@ -128,7 +128,8 @@ def config_reference(data):
                  "Omit a key for its host-dependent default; -1 also selects automatic behaviour.\n\n| Key | Default | Effect |\n|---|---|---|\n")
         for name, setting in host["settings"].items():
             auto = setting.get("auto_value")
-            allowed = f"{setting['min']} to {setting['max']}" + (f" or {auto} for auto" if auto is not None else "")
+            allowed = setting.get("allowed") or (
+                f"{setting['min']} to {setting['max']}" + (f" or {auto} for auto" if auto is not None else ""))
             text += f"| `{name}` | {setting['default']} | {setting['effect']} ({allowed}). |\n"
         text += "\n"
     provider_updates = data.get("provider_updates")

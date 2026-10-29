@@ -96,12 +96,15 @@ impl Error {
             | Self::InvalidScope
             | Self::Worktree(
                 WorktreeError::InvalidRequest
+                | WorktreeError::AmbiguousName { .. }
                 | WorktreeError::NotFound
                 | WorktreeError::CheckedOut
                 | WorktreeError::BranchCollision { .. },
             ) => Outcome::Invalid,
             Self::Worktree(
                 WorktreeError::Dirty
+                | WorktreeError::DetachedPrimary
+                | WorktreeError::DetachedUnmerged { .. }
                 | WorktreeError::IgnoredPaths(_)
                 | WorktreeError::GitOperationInProgress
                 | WorktreeError::LiveWriter
@@ -342,6 +345,7 @@ struct GcData {
     provider_state: provenant_run::ProviderStateGc,
     chair_logs: crate::chair_log_retention::Report,
     target_seeds: provenant_run::target_seed_gc::Report,
+    build_dirs: provenant_run::build_dir_gc::Report,
     worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
     alerts: Vec<String>,
     unobserved_projects: Vec<PathBuf>,
@@ -397,6 +401,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
                 provider_state: *provider_state,
                 chair_logs: Default::default(),
                 target_seeds: Default::default(),
+                build_dirs: Default::default(),
                 worktree_cleanup,
                 alerts,
                 notice: None,
@@ -445,6 +450,22 @@ fn gc_data_summary(data: &GcData) -> String {
             "removed"
         }
     ));
+    human.push_str(&format!(
+        "{} lane build director(ies), {} bytes {}; {} bytes of lane build output remain, {} busy, {} recent\n",
+        data.build_dirs.removed.len(),
+        data.build_dirs.bytes,
+        if data.report.dry_run {
+            "reclaimable"
+        } else {
+            "reclaimed"
+        },
+        data.build_dirs.cache_bytes,
+        data.build_dirs.busy.len(),
+        data.build_dirs.recent.len(),
+    ));
+    for error in &data.build_dirs.errors {
+        human.push_str(&format!("lane build output: {error}\n"));
+    }
     for temporary in &data.provider_state.attempt_tmp {
         human.push_str(&format!(
             "{} attempt tmp {} ({} bytes)\n",
@@ -552,6 +573,9 @@ enum GcOutput<'a> {
         kept: usize,
         bytes_freed: u64,
         provider_state_removed: usize,
+        build_dirs_removed: usize,
+        build_dir_bytes_reclaimed: u64,
+        build_dir_bytes: u64,
         errors: &'a [provenant_run::ProviderStateIssue],
         unobserved_projects: &'a [PathBuf],
         alerts: &'a [String],
@@ -568,6 +592,9 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
         kept: data.report.kept.len(),
         bytes_freed: data.report.bytes_freed,
         provider_state_removed: data.provider_state.removed.len(),
+        build_dirs_removed: data.build_dirs.removed.len(),
+        build_dir_bytes_reclaimed: data.build_dirs.bytes,
+        build_dir_bytes: data.build_dirs.cache_bytes,
         errors: &data.provider_state.errors,
         unobserved_projects: &data.unobserved_projects,
         alerts: &data.alerts,
@@ -1224,6 +1251,19 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         seed_policy.max_bytes,
         command.dry_run,
     );
+    // Lane build output goes last among collections: it is the largest, and
+    // the sweep holds host admission while it removes.
+    let build_settings = config.domains.fabric.lanes.build_settings();
+    let build_collection = provenant_run::build_dir_gc::collect(
+        roots.state.as_path(),
+        &home,
+        provenant_run::build_dir_gc::Limits {
+            max_bytes: build_settings.build_dir_cap(),
+            free_floor,
+            grace_seconds: build_settings.build_dir_grace_seconds(),
+        },
+        command.dry_run,
+    );
     // Observe after every collection class, including a partially failed sweep.
     let mut alerts =
         crate::gc_support::disk_alert(&roots, &project_ids, alert_floor, command.dry_run)
@@ -1232,6 +1272,13 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         Ok(report) => report,
         Err(error) => {
             alerts.push(format!("target seed collection skipped: {error}"));
+            Default::default()
+        }
+    };
+    let build_dirs = match build_collection {
+        Ok(report) => report,
+        Err(error) => {
+            alerts.push(format!("lane build output collection skipped: {error}"));
             Default::default()
         }
     };
@@ -1250,6 +1297,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     };
     let notice = (command.pressure
         && report.removed.is_empty()
+        && build_dirs.removed.is_empty()
         && provider_state.removed.is_empty()
         && provider_state.attempt_tmp.is_empty()
         && provider_state.attempt_logs.is_empty()
@@ -1282,6 +1330,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         provider_state,
         chair_logs,
         target_seeds,
+        build_dirs,
         unobserved_projects,
         skipped_transient,
         worktree_cleanup,
@@ -1491,6 +1540,35 @@ mod gc_preview_tests {
             ..Default::default()
         });
         assert!(gc_data_summary(&data).contains("provenant worktree adopt PATH --owner NAME"));
+    }
+    #[test]
+    fn gc_summary_reports_build_output_reclaimed_and_remaining() {
+        let mut data = GcData::default();
+        data.build_dirs.removed.push("/cache/a/target/debug".into());
+        data.build_dirs.bytes = 4096;
+        data.build_dirs.cache_bytes = 8192;
+        data.build_dirs.busy.push("/cache/b/target/debug".into());
+        data.build_dirs.recent.push("/cache/c/target/debug".into());
+        for (dry_run, expected) in [
+            (
+                true,
+                "1 lane build director(ies), 4096 bytes reclaimable; 8192 bytes of lane build output remain, 1 busy, 1 recent\n",
+            ),
+            (
+                false,
+                "1 lane build director(ies), 4096 bytes reclaimed; 8192 bytes of lane build output remain, 1 busy, 1 recent\n",
+            ),
+        ] {
+            data.report.dry_run = dry_run;
+            assert!(gc_data_summary(&data).contains(expected));
+        }
+        let json = serde_json::to_value(gc_result_data(&data, false)).unwrap_or_default();
+        assert_eq!(json["build_dirs_removed"], 1);
+        assert_eq!(json["build_dir_bytes_reclaimed"], 4096);
+        assert_eq!(json["build_dir_bytes"], 8192);
+        let json = serde_json::to_value(gc_result_data(&data, true)).unwrap_or_default();
+        assert_eq!(json["build_dirs"]["cache_bytes"], 8192);
+        assert_eq!(json["build_dirs"]["recent"][0], "/cache/c/target/debug");
     }
     #[test]
     fn gc_summary_reports_event_expiry_in_preview_and_applied_mode() {

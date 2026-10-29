@@ -133,7 +133,8 @@ else
 fi
 [ -x "$release/bin/provenant" ] || die 4 'Release binary is missing'
 
-# Existing receipts always use their recorded selection, paths and hooks.
+# Existing receipts always use their recorded selection, paths and hooks, and
+# every registered account directory is installed too.
 set -- --state-dir "$state" install --source "$release"
 if [ -n "$bin_dir" ]; then set -- "$@" --bin-dir "$bin_dir"; fi
 providers=

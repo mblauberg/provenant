@@ -429,7 +429,7 @@ fn chair_log_cli_retention_replay_and_lane_refusal() -> Result {
 
 #[test]
 fn session_show_honours_project_and_state_dir_without_allocating() -> Result {
-    let rig = TestRig::new()?;
+    let mut rig = TestRig::new()?;
     let other = rig.root.join("other");
     std::fs::create_dir(&other)?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
@@ -439,6 +439,10 @@ fn session_show_honours_project_and_state_dir_without_allocating() -> Result {
     );
     let file = rig.root.join("checkpoint.md");
     std::fs::write(&file, "selected project\n")?;
+    let cwd = rig.project.clone();
+    // Saving with --project from outside a checkout avoids a conflicting
+    // selection; reads below still exercise selection from another project.
+    rig.project = rig.root.clone();
     call(
         &rig,
         &[
@@ -453,6 +457,7 @@ fn session_show_honours_project_and_state_dir_without_allocating() -> Result {
         ],
         0,
     )?;
+    rig.project = cwd;
     let before = state_snapshot(&rig.state)?;
     for mode in [vec![], vec!["--revisions"], vec!["--rev", "1"]] {
         let mut args = vec![
@@ -591,6 +596,176 @@ fn conflicting_markers_fall_back_to_the_configured_client() -> Result {
     let mcp_identity = &replies.get(&id).ok_or("identity")?["result"]["structuredContent"];
     assert_eq!(mcp_identity["inbox"], identity["inbox"]);
     assert_eq!(mcp_identity["client"], "terminal");
+    Ok(())
+}
+
+#[test]
+fn session_save_outside_checkout_requires_project() -> Result {
+    let mut rig = TestRig::new()?;
+    let project = rig.project.clone();
+    let source = rig.root.join("checkpoint.md");
+    std::fs::write(&source, "checkpoint\n")?;
+    let source = source.to_str().ok_or("source")?;
+    let args = ["workflow", "session", "save", "outside", "--file", source];
+    call(&rig, &args, 0)?;
+    let before = state_snapshot(&rig.state.join("workflow"))?;
+    rig.project = rig.root.clone();
+    let refused = call(&rig, &args, 1)?;
+    assert_eq!(refused["error"]["code"], "ROOT");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("--project")
+    );
+    assert_eq!(state_snapshot(&rig.state.join("workflow"))?, before);
+    let unknown = call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "new-outside",
+            "--file",
+            source,
+        ],
+        1,
+    )?;
+    assert_eq!(unknown["error"]["code"], "ROOT");
+    assert_eq!(state_snapshot(&rig.state.join("workflow"))?, before);
+    let mut explicit = args.to_vec();
+    explicit.extend(["--project", project.to_str().ok_or("project")?]);
+    assert_eq!(call(&rig, &explicit, 0)?["data"]["revision"], 1);
+    Ok(())
+}
+
+#[test]
+fn session_save_accepts_same_project_across_linked_worktrees() -> Result {
+    let mut rig = TestRig::new()?;
+    let project = rig.project.clone();
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    assert_eq!(
+        code(&rig.execute(
+            &git,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+            None
+        )?),
+        0
+    );
+    let linked = rig.root.join("linked");
+    assert_eq!(
+        code(&rig.execute(
+            &git,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().ok_or("linked")?,
+            ],
+            None
+        )?),
+        0
+    );
+    let nested = linked.join("nested");
+    std::fs::create_dir(&nested)?;
+    let source = rig.root.join("checkpoint.md");
+    std::fs::write(&source, "checkpoint\n")?;
+    rig.project = nested;
+    let args = [
+        "workflow",
+        "session",
+        "save",
+        "linked",
+        "--file",
+        source.to_str().ok_or("source")?,
+    ];
+    let saved = call(&rig, &args, 0)?;
+    let mut explicit = args.to_vec();
+    explicit.extend(["--project", project.to_str().ok_or("project")?]);
+    let repeated = call(&rig, &explicit, 0)?;
+    assert_eq!(repeated["data"]["project"], saved["data"]["project"]);
+    assert_eq!(repeated["data"]["revision"], 1);
+    Ok(())
+}
+
+#[test]
+fn session_save_refuses_conflicting_explicit_project() -> Result {
+    let rig = TestRig::new()?;
+    let other = rig.root.join("other");
+    std::fs::create_dir(&other)?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    assert_eq!(
+        code(&rig.execute(&git, &["init", "-q", other.to_str().ok_or("other")?], None)?),
+        0
+    );
+    let source = rig.root.join("checkpoint.md");
+    std::fs::write(&source, "checkpoint\n")?;
+    let refused = call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "conflict",
+            "--file",
+            source.to_str().ok_or("source")?,
+            "--project",
+            other.to_str().ok_or("other")?,
+        ],
+        1,
+    )?;
+    assert_eq!(refused["error"]["code"], "ROOT");
+    let message = refused["error"]["message"].as_str().ok_or("message")?;
+    assert!(message.contains("--project"));
+    assert!(message.contains(rig.project.to_str().ok_or("project")?));
+    assert!(message.contains(other.to_str().ok_or("other")?));
+    assert!(!rig.state.join("workflow").exists());
+    Ok(())
+}
+
+#[test]
+fn session_save_refuses_another_registered_project() -> Result {
+    let mut rig = TestRig::new()?;
+    let project = rig.project.clone();
+    let source = rig.root.join("checkpoint.md");
+    std::fs::write(&source, "checkpoint\n")?;
+    let args = [
+        "workflow",
+        "session",
+        "save",
+        "registered",
+        "--file",
+        source.to_str().ok_or("source")?,
+    ];
+    call(&rig, &args, 0)?;
+    let other = rig.root.join("other");
+    std::fs::create_dir(&other)?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    assert_eq!(
+        code(&rig.execute(&git, &["init", "-q", other.to_str().ok_or("other")?], None)?),
+        0
+    );
+    let before = state_snapshot(&rig.state.join("workflow"))?;
+    rig.project = other;
+    let refused = call(&rig, &args, 1)?;
+    assert_eq!(refused["error"]["code"], "SESSION_PROJECT");
+    let message = refused["error"]["message"].as_str().ok_or("message")?;
+    assert!(message.contains(project.to_str().ok_or("project")?));
+    assert!(message.contains("--project"));
+    assert_eq!(state_snapshot(&rig.state.join("workflow"))?, before);
+    // An explicit selection can deliberately use the same ID in this project.
+    let mut explicit = args.to_vec();
+    explicit.extend(["--project", rig.project.to_str().ok_or("other")?]);
+    assert_eq!(call(&rig, &explicit, 0)?["data"]["revision"], 1);
     Ok(())
 }
 

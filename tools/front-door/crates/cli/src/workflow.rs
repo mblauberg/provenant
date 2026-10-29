@@ -63,7 +63,7 @@ pub enum Receipt {
 }
 #[derive(Debug, Subcommand)]
 pub enum Session {
-    /// Save a session checkpoint (up to 256 KiB)
+    /// Save a session checkpoint (up to 256 KiB); requires a checkout or --project
     Save {
         /// Session ID
         session_id: String,
@@ -425,6 +425,36 @@ fn execute(
             data: Value::Null,
         });
     }
+    if let Workflow::Session(Session::Save { session_id, .. }) = &cmd
+        && globals.project.is_none()
+    {
+        let id = HostSessionId::parse(session_id).map_err(|e| invalid(e.to_string()))?;
+        let bindings = provenant_config::registered_projects(&context.roots)
+            .map_err(crate::fabric::EdgeError::from)?;
+        for binding in bindings {
+            if binding.project_id() == context.identity.project {
+                continue;
+            }
+            if let Some(found) = SessionStore::new(
+                context.roots.state.clone(),
+                binding.project_id(),
+                id.clone(),
+            )
+            .discovery()?
+                && found.record.host == context.identity.host
+            {
+                return Err(Error::Refused {
+                    code: "SESSION_PROJECT",
+                    message: format!(
+                        "session {session_id} is registered under project {} at {}; change to its checkout and run `provenant --project PATH workflow session save {session_id} --file FILE`, or explicitly select the intended project",
+                        binding.project_id(),
+                        binding.common_dir().display(),
+                    ),
+                    data: Value::Null,
+                });
+            }
+        }
+    }
     let actor = match &cmd {
         Workflow::Session(Session::Save { client, .. }) => {
             session_actor(&context, *client).map_err(|e| invalid(e.to_string()))?
@@ -506,6 +536,7 @@ fn execute(
                 closed.contains(&number)
             }));
             Ok(serde_json::json!({
+                "project": project,
                 "saved_bytes": text.len(),
                 "limit_bytes": provenant_workflow::session::CHECKPOINT_LIMIT,
                 "revision": saved.revision,

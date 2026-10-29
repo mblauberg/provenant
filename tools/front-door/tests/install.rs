@@ -1478,3 +1478,538 @@ fn invalid_install_home_names_the_repair() -> Result {
     }
     Ok(())
 }
+
+fn run_json(rig: &TestRig, args: &[&str]) -> Result<(i64, serde_json::Value)> {
+    let mut arguments = args.to_vec();
+    arguments.push("--json");
+    let output = rig.command(&arguments)?;
+    let value = serde_json::from_slice(&output.stdout.bytes).map_err(|error| {
+        format!(
+            "{args:?}: {error}: {} {}",
+            String::from_utf8_lossy(&output.stdout.bytes),
+            String::from_utf8_lossy(&output.stderr.bytes)
+        )
+    })?;
+    Ok((code(&output), value))
+}
+
+/// The managed hooks of a Claude settings file, ignoring everything user-owned.
+fn managed_hooks(settings: &Path) -> Result<serde_json::Value> {
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(settings)?)?;
+    Ok(document["hooks"].clone())
+}
+
+/// A fixture `claude` whose sign-in status names its config directory.
+fn fake_claude(rig: &mut TestRig) -> Result {
+    let bin = rig.root.join("claude-bin");
+    fs::create_dir_all(&bin)?;
+    let claude = bin.join("claude");
+    fs::write(
+        &claude,
+        "#!/bin/sh\nprintf '{\"loggedIn\":true,\"email\":\"%s@example.test\"}\\n' \"${CLAUDE_CONFIG_DIR##*/}\"\n",
+    )?;
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    Ok(())
+}
+
+#[test]
+fn install_and_upgrade_leave_every_registered_account_identical() -> Result {
+    let executable = std::env::current_exe()?;
+    let rig = TestRig::in_directory(executable.parent().ok_or("test executable parent")?)?;
+    let first = staged(&rig)?;
+    let second = staged_named(&rig, "new-release", b"new release")?;
+    let claude = [
+        rig.root.join("claude"),
+        rig.home.join(".claude-work"),
+        rig.home.join(".claude-pro"),
+    ];
+    let codex = [rig.root.join("codex"), rig.home.join(".codex-alt")];
+    for directory in claude.iter().chain(&codex).skip(1) {
+        fs::create_dir_all(directory)?;
+    }
+    support::register_account(&rig, "claude", "work", "work-key", &claude[1])?;
+    support::register_account(&rig, "claude", "pro", "pro-key", &claude[2])?;
+    support::register_account(&rig, "codex", "alt", "alt-key", &codex[1])?;
+    // User-owned content and credentials sit beside the managed entries.
+    fs::write(
+        claude[2].join("settings.json"),
+        "{\n  \"model\": \"opus\",\n  \"env\": {\"KEPT\": \"1\"}\n}\n",
+    )?;
+    fs::write(claude[1].join(".credentials.json"), b"fixture credential")?;
+
+    let installed = rig.command(&[
+        "install",
+        "--source",
+        first.to_str().ok_or("first")?,
+        "--harness",
+        "claude",
+        "--harness",
+        "codex",
+        "--hooks",
+        "on",
+        "--json",
+    ])?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    let identical = |release: &Path| -> Result {
+        let reference = managed_hooks(&claude[0].join("settings.json"))?;
+        assert!(reference["PreToolUse"].is_array(), "{reference}");
+        for directory in &claude {
+            let link = fs::read_link(directory.join("skills/example"))?;
+            assert!(link.starts_with(release), "{directory:?}: {link:?}");
+            assert_eq!(managed_hooks(&directory.join("settings.json"))?, reference);
+            let mcp: serde_json::Value =
+                serde_json::from_slice(&fs::read(directory.join(".claude.json"))?)?;
+            assert_eq!(mcp["mcpServers"]["fabric"]["type"], "stdio");
+        }
+        for directory in &codex {
+            assert!(fs::read_link(directory.join("skills/example"))?.starts_with(release));
+            assert!(fs::read_to_string(directory.join("config.toml"))?.contains("fabric"));
+        }
+        Ok(())
+    };
+    let release_of = |stage: &Path| -> Result<PathBuf> {
+        let digest = Release::read(stage, env!("PROVENANT_TARGET_TRIPLE"))?
+            .manifest()
+            .source_digest;
+        Ok(provenant_config::release_root(&rig.state, digest))
+    };
+    identical(&release_of(&first)?)?;
+    let (status, checked) = run_json(&rig, &["check", "install"])?;
+    assert_eq!(status, 0, "{checked}");
+
+    // Without flags, an upgrade reuses the receipt and still reaches every account.
+    let upgraded = rig.command(&[
+        "install",
+        "--source",
+        second.to_str().ok_or("second")?,
+        "--json",
+    ])?;
+    assert_eq!(code(&upgraded), 0, "{upgraded:?}");
+    identical(&release_of(&second)?)?;
+    let (status, checked) = run_json(&rig, &["check", "install"])?;
+    assert_eq!(status, 0, "{checked}");
+
+    let kept: serde_json::Value =
+        serde_json::from_slice(&fs::read(claude[2].join("settings.json"))?)?;
+    assert_eq!(kept["model"], "opus");
+    assert_eq!(kept["env"]["KEPT"], "1");
+    assert_eq!(
+        fs::read(claude[1].join(".credentials.json"))?,
+        b"fixture credential"
+    );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn check_install_reports_drift_per_account_and_accounts_sync_repairs_it() -> Result {
+    let executable = std::env::current_exe()?;
+    let rig = TestRig::in_directory(executable.parent().ok_or("test executable parent")?)?;
+    let stage = staged(&rig)?;
+    let work = rig.home.join(".claude-work");
+    let pro = rig.home.join(".claude-pro");
+    for directory in [&work, &pro] {
+        fs::create_dir_all(directory)?;
+    }
+    support::register_account(&rig, "claude", "work", "work-key", &work)?;
+    support::register_account(&rig, "claude", "pro", "pro-key", &pro)?;
+    let installed = rig.command(&[
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--harness",
+        "claude",
+        "--hooks",
+        "on",
+        "--json",
+    ])?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    let (status, listed) = run_json(&rig, &["accounts", "list"])?;
+    assert_eq!(status, 0, "{listed}");
+    assert!(
+        listed["data"]["sync"]
+            .as_array()
+            .ok_or("sync")?
+            .iter()
+            .all(|account| account["state"] == "synced"),
+        "{listed}"
+    );
+
+    // One account loses a skill link; the other loses its managed hooks.
+    fs::remove_file(work.join("skills/example"))?;
+    let settings = pro.join("settings.json");
+    let hooks = managed_hooks(&settings)?;
+    fs::write(&settings, "{\"model\": \"opus\"}\n")?;
+    let (status, checked) = run_json(&rig, &["check", "install"])?;
+    assert_ne!(status, 0, "{checked}");
+    let messages: Vec<_> = checked["data"]["findings"]
+        .as_array()
+        .ok_or("findings")?
+        .iter()
+        .filter_map(|finding| finding["message"].as_str())
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("account work (claude)")),
+        "{messages:?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("account pro (claude)")),
+        "{messages:?}"
+    );
+    let (_, listed) = run_json(&rig, &["accounts", "list"])?;
+    let states: Vec<_> = listed["data"]["sync"]
+        .as_array()
+        .ok_or("sync")?
+        .iter()
+        .map(|account| {
+            (
+                account["label"].as_str().unwrap_or(""),
+                account["state"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert!(states.contains(&("work", "drift")), "{states:?}");
+    assert!(states.contains(&("pro", "drift")), "{states:?}");
+
+    let (status, doctor) = run_json(&rig, &["hosts", "doctor"])?;
+    assert_eq!(status, 0, "{doctor}");
+    let managed: Vec<_> = doctor["data"]["managed"]
+        .as_array()
+        .ok_or("managed")?
+        .iter()
+        .map(|row| {
+            (
+                row["label"].as_str().unwrap_or(""),
+                row["state"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert!(managed.contains(&("work", "drift")), "{managed:?}");
+    assert!(managed.contains(&("pro", "drift")), "{managed:?}");
+
+    let (status, preview) = run_json(&rig, &["accounts", "sync", "--dry-run"])?;
+    assert_eq!(status, 0, "{preview}");
+    assert!(fs::symlink_metadata(work.join("skills/example")).is_err());
+
+    let (status, synced) = run_json(&rig, &["accounts", "sync"])?;
+    assert_eq!(status, 0, "{synced}");
+    assert!(fs::symlink_metadata(work.join("skills/example")).is_ok());
+    // Removing every managed hook is the account's own choice and sticks.
+    assert!(hooks["PreToolUse"].is_array());
+    assert!(managed_hooks(&settings)?.is_null());
+    let repaired: serde_json::Value = serde_json::from_slice(&fs::read(&settings)?)?;
+    assert_eq!(repaired["model"], "opus");
+    let (status, checked) = run_json(&rig, &["check", "install"])?;
+    assert_eq!(status, 0, "{checked}");
+    let (_, listed) = run_json(&rig, &["accounts", "list"])?;
+    assert!(
+        listed["data"]["sync"]
+            .as_array()
+            .ok_or("sync")?
+            .iter()
+            .all(|account| account["state"] == "synced"),
+        "{listed}"
+    );
+    let (_, doctor) = run_json(&rig, &["hosts", "doctor"])?;
+    assert!(
+        doctor["data"]["managed"]
+            .as_array()
+            .ok_or("managed")?
+            .iter()
+            .all(|row| row["state"] == "synced"),
+        "{doctor}"
+    );
+    Ok(())
+}
+
+#[test]
+fn accounts_sync_without_an_install_names_the_missing_receipt() -> Result {
+    let rig = TestRig::new()?;
+    let (status, value) = run_json(&rig, &["accounts", "sync"])?;
+    assert_ne!(status, 0);
+    assert_eq!(value["status"], "invalid", "{value}");
+    assert_eq!(value["error"]["code"], "SYNC_RECEIPT", "{value}");
+    Ok(())
+}
+
+#[test]
+fn registering_an_account_installs_managed_content_when_an_install_exists() -> Result {
+    let executable = std::env::current_exe()?;
+    let mut rig = TestRig::in_directory(executable.parent().ok_or("test executable parent")?)?;
+    fake_claude(&mut rig)?;
+    let stage = staged(&rig)?;
+    let early = rig.home.join(".claude-early");
+    let late = rig.home.join(".claude-late");
+    for directory in [&early, &late] {
+        fs::create_dir_all(directory)?;
+    }
+    let register = |label: &str, directory: &Path| -> Result<serde_json::Value> {
+        let (status, value) = run_json(
+            &rig,
+            &[
+                "accounts",
+                "register",
+                label,
+                "--adapter",
+                "claude",
+                "--directory",
+                directory.to_str().ok_or("directory")?,
+            ],
+        )?;
+        assert_eq!(status, 0, "{value}");
+        Ok(value)
+    };
+    // Nothing is installed yet, so registration only records the account.
+    let value = register("early", &early)?;
+    assert_eq!(
+        value["data"]["sync"]["skipped"], "no install receipt",
+        "{value}"
+    );
+    assert!(!early.join("skills").exists());
+
+    let installed = rig.command(&[
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--harness",
+        "claude",
+        "--hooks",
+        "on",
+        "--json",
+    ])?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    assert!(fs::symlink_metadata(early.join("skills/example")).is_ok());
+
+    let value = register("late", &late)?;
+    assert!(
+        value["data"]["sync"]["changes"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
+        "{value}"
+    );
+    assert!(fs::symlink_metadata(late.join("skills/example")).is_ok());
+    assert_eq!(
+        managed_hooks(&late.join("settings.json"))?,
+        managed_hooks(&rig.root.join("claude/settings.json"))?
+    );
+    let (status, checked) = run_json(&rig, &["check", "install"])?;
+    assert_eq!(status, 0, "{checked}");
+    Ok(())
+}
+
+fn write_accounts_section(rig: &TestRig, edit: impl FnOnce(&mut toml_edit::Table)) -> Result {
+    let config = rig.state.join("config.toml");
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config)?.parse()?;
+    let accounts = doc["domains"]["accounts"]
+        .as_table_mut()
+        .ok_or("accounts")?;
+    edit(accounts);
+    fs::write(config, doc.to_string())?;
+    Ok(())
+}
+
+fn finding_details(value: &serde_json::Value, rule: &str) -> Vec<String> {
+    value["data"]["outcome"]["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|finding| finding["rule"] == rule)
+        .filter_map(|finding| finding["detail"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
+    let executable = std::env::current_exe()?;
+    let rig = TestRig::in_directory(executable.parent().ok_or("test executable parent")?)?;
+    let stage = staged(&rig)?;
+    let work = rig.home.join(".claude-work");
+    let pro = rig.home.join(".claude-pro");
+    for directory in [&work, &pro] {
+        fs::create_dir_all(directory)?;
+    }
+    support::register_account(&rig, "claude", "work", "work-key", &work)?;
+    support::register_account(&rig, "claude", "pro", "pro-key", &pro)?;
+    let source = rig.root.join("source-settings.json");
+    let write_source = |style: &str| -> Result {
+        fs::write(
+            &source,
+            format!(
+                "{{\"outputStyle\": \"{style}\", \"permissions\": {{\"allow\": [\"Bash(ls)\"]}}, \"model\": \"opus\"}}\n"
+            ),
+        )?;
+        Ok(())
+    };
+    write_source("terse")?;
+    write_accounts_section(&rig, |accounts| {
+        let mut shared = toml_edit::Table::new();
+        shared["source"] = toml_edit::value(source.to_str().unwrap_or_default());
+        accounts["shared_settings"] = toml_edit::Item::Table(shared);
+    })?;
+    fs::write(
+        pro.join(".claude.json"),
+        "{\"oauthAccount\": {\"emailAddress\": \"x@example.test\"}}\n",
+    )?;
+    let identity_before = fs::read(pro.join(".claude.json"))?;
+    let installed = rig.command(&[
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--harness",
+        "claude",
+        "--json",
+    ])?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    let style = |directory: &Path| -> Result<serde_json::Value> {
+        Ok(serde_json::from_slice::<serde_json::Value>(&fs::read(
+            directory.join("settings.json"),
+        )?)?)
+    };
+    for directory in [&work, &pro] {
+        let settings = style(directory)?;
+        assert_eq!(settings["outputStyle"], "terse");
+        assert_eq!(settings["permissions"]["allow"][0], "Bash(ls)");
+        assert!(
+            settings.get("model").is_none(),
+            "unlisted keys are not synced"
+        );
+    }
+    // Only the MCP entry is added to `.claude.json`.
+    let identity: serde_json::Value = serde_json::from_slice(&fs::read(pro.join(".claude.json"))?)?;
+    assert_eq!(identity["oauthAccount"]["emailAddress"], "x@example.test");
+    assert_ne!(fs::read(pro.join(".claude.json"))?, identity_before);
+    let (status, checked) = run_json(&rig, &["check", "install"])?;
+    assert_eq!(status, 0, "{checked}");
+
+    // A local edit survives a source change and is reported by account and key.
+    let edited = fs::read_to_string(pro.join("settings.json"))?.replace("terse", "mine");
+    fs::write(pro.join("settings.json"), edited)?;
+    write_source("formal")?;
+    let (status, checked) = run_json(&rig, &["check", "install"])?;
+    assert_ne!(status, 0, "{checked}");
+    assert!(
+        checked.to_string().contains("account pro key outputStyle"),
+        "{checked}"
+    );
+    let (status, synced) = run_json(&rig, &["accounts", "sync"])?;
+    assert_eq!(status, 0, "{synced}");
+    assert_eq!(
+        finding_details(&synced, "settings_conflict"),
+        ["account pro key outputStyle"]
+    );
+    assert_eq!(style(&pro)?["outputStyle"], "mine");
+    assert_eq!(style(&work)?["outputStyle"], "formal");
+    let human = rig.command(&["accounts", "sync"])?;
+    let human = String::from_utf8_lossy(&human.stdout.bytes);
+    assert!(
+        human.contains("--adopt") && human.contains("--force-settings"),
+        "{human}"
+    );
+
+    // Adopting pulls the account's value into the source and the other accounts.
+    let (status, adopted) = run_json(&rig, &["accounts", "sync", "--adopt", "pro"])?;
+    assert_eq!(status, 0, "{adopted}");
+    assert!(fs::read_to_string(&source)?.contains("\"outputStyle\": \"mine\""));
+    assert_eq!(style(&work)?["outputStyle"], "mine");
+    assert!(finding_details(&adopted, "settings_conflict").is_empty());
+
+    // Forcing overwrites the edit with the source's value.
+    let edited = fs::read_to_string(pro.join("settings.json"))?.replace("mine", "again");
+    fs::write(pro.join("settings.json"), edited)?;
+    write_source("final")?;
+    let (status, forced) = run_json(&rig, &["accounts", "sync", "--force-settings"])?;
+    assert_eq!(status, 0, "{forced}");
+    assert_eq!(style(&pro)?["outputStyle"], "final");
+    assert_eq!(style(&work)?["outputStyle"], "final");
+    let (status, checked) = run_json(&rig, &["check", "install"])?;
+    assert_eq!(status, 0, "{checked}");
+
+    // Identity keys are refused, and a configuration defect never blocks removal.
+    write_accounts_section(&rig, |accounts| {
+        let mut keys = toml_edit::Array::new();
+        keys.push("outputStyle");
+        keys.push("apiKeyHelper");
+        accounts["shared_settings"]["keys"] = toml_edit::value(keys);
+    })?;
+    let (status, refused) = run_json(&rig, &["accounts", "sync"])?;
+    assert_ne!(status, 0, "{refused}");
+    assert!(refused.to_string().contains("is never synced"), "{refused}");
+    let removed = rig.command(&["uninstall", "--harness", "claude"])?;
+    assert_eq!(code(&removed), 0, "{removed:?}");
+    // `CLAUDE_CONFIG_DIR` selects the one matching recorded target.
+    assert!(fs::symlink_metadata(rig.root.join("claude/skills/example")).is_err());
+    assert!(
+        String::from_utf8_lossy(&removed.stdout.bytes).contains("configuration ignored")
+            || String::from_utf8_lossy(&removed.stderr.bytes).contains("configuration ignored")
+    );
+    Ok(())
+}
+
+#[test]
+fn an_unregistered_account_is_orphaned_not_synced_and_prune_removes_it() -> Result {
+    let executable = std::env::current_exe()?;
+    let rig = TestRig::in_directory(executable.parent().ok_or("test executable parent")?)?;
+    let stage = staged(&rig)?;
+    let work = rig.home.join(".claude-work");
+    let pro = rig.home.join(".claude-pro");
+    for directory in [&work, &pro] {
+        fs::create_dir_all(directory)?;
+    }
+    support::register_account(&rig, "claude", "work", "work-key", &work)?;
+    support::register_account(&rig, "claude", "pro", "pro-key", &pro)?;
+    let installed = rig.command(&[
+        "install",
+        "--source",
+        stage.to_str().ok_or("stage")?,
+        "--harness",
+        "claude",
+        "--hooks",
+        "on",
+        "--json",
+    ])?;
+    assert_eq!(code(&installed), 0, "{installed:?}");
+    write_accounts_section(&rig, |accounts| {
+        if let Some(entries) = accounts["entries"].as_table_mut() {
+            entries.remove("claude-pro");
+        }
+    })?;
+    fs::remove_file(pro.join("skills/example"))?;
+    let (status, synced) = run_json(&rig, &["accounts", "sync"])?;
+    assert_eq!(status, 0, "{synced}");
+    assert_eq!(
+        finding_details_for_path(&synced, "orphaned_account"),
+        1,
+        "{synced}"
+    );
+    assert!(
+        fs::symlink_metadata(pro.join("skills/example")).is_err(),
+        "an orphan is reported, not synced"
+    );
+    let human = rig.command(&["accounts", "sync"])?;
+    assert!(String::from_utf8_lossy(&human.stdout.bytes).contains("--prune-orphans"));
+
+    let pruned = rig.command(&["accounts", "sync", "--prune-orphans"])?;
+    assert_eq!(code(&pruned), 0, "{pruned:?}");
+    let pruned = String::from_utf8_lossy(&pruned.stdout.bytes).into_owned();
+    assert!(pruned.contains("removed managed content from"), "{pruned}");
+    assert!(
+        !fs::read_to_string(pro.join("settings.json"))?.contains("'hook' 'claude'"),
+        "{pruned} {}",
+        fs::read_to_string(pro.join("settings.json"))?
+    );
+    assert!(fs::symlink_metadata(work.join("skills/example")).is_ok());
+    Ok(())
+}
+
+fn finding_details_for_path(value: &serde_json::Value, rule: &str) -> usize {
+    value["data"]["outcome"]["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|finding| finding["rule"] == rule)
+        .count()
+}
