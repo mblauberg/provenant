@@ -12,7 +12,7 @@ use std::{
     ffi::OsStr,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Instant, SystemTime},
 };
 use thiserror::Error;
 
@@ -163,6 +163,8 @@ pub struct Request<'a> {
     pub provider: Option<&'a str>,
     /// Skip files not written since and messages stamped before.
     pub since: Option<jiff::Timestamp>,
+    /// Stop reading at this instant. Rows read before it are still written.
+    pub deadline: Option<Instant>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -183,6 +185,8 @@ pub struct Report {
     pub unreadable_files: u64,
     /// The store hit its cap, so some new messages were not recorded.
     pub store_full: bool,
+    /// The request's deadline passed, so some transcripts were not read.
+    pub deadline_reached: bool,
     pub accounts: BTreeMap<String, AccountCount>,
 }
 
@@ -364,9 +368,16 @@ fn locate(
     Ok(())
 }
 
+/// Real time is sampled only here, for a request's wall budget.
+#[allow(clippy::disallowed_methods)]
+fn expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|at| Instant::now() >= at)
+}
+
 fn read_transcript(
     transcript: &Transcript,
     since: Option<jiff::Timestamp>,
+    deadline: Option<Instant>,
     messages: &mut BTreeMap<(String, String), Pending>,
     report: &mut Report,
 ) -> Result<(), ()> {
@@ -389,6 +400,10 @@ fn read_transcript(
     );
     let mut line = Vec::new();
     loop {
+        if expired(deadline) {
+            report.deadline_reached = true;
+            return Ok(());
+        }
         line.clear();
         let read = (&mut reader)
             .take(MAX_LINE_BYTES as u64 + 1)
@@ -479,12 +494,16 @@ fn read_transcript(
 
 fn row(session: String, message: String, pending: Pending) -> Row {
     let raw = pending.raw;
-    let creation = raw.cache_creation_input_tokens.unwrap_or(0);
-    let one_hour = raw
+    // A split that names the one-hour part without a total still counts it.
+    let one_hour_named = raw
         .cache_creation
         .and_then(|split| split.ephemeral_1h_input_tokens)
+        .unwrap_or(0);
+    let creation = raw
+        .cache_creation_input_tokens
         .unwrap_or(0)
-        .min(creation);
+        .max(one_hour_named);
+    let one_hour = one_hour_named.min(creation);
     Row {
         schema_version: ROW_SCHEMA_VERSION,
         account: pending.account,
@@ -518,12 +537,19 @@ fn read_store(directory: &Directory) -> Result<Vec<u8>, IngestError> {
     }
 }
 
-fn decode(bytes: &[u8]) -> impl Iterator<Item = Row> + '_ {
-    bytes
-        .split(|b| *b == b'\n')
-        .filter(|line| !line.is_empty())
-        .filter_map(|line| serde_json::from_slice::<Row>(line).ok())
-        .filter(|row| row.schema_version == ROW_SCHEMA_VERSION)
+/// Parses the store. A current-version row is read. Any other line, such as a
+/// row another schema version wrote or a torn line, is returned as its bytes so
+/// a rewrite keeps it unchanged rather than erasing it.
+fn split(bytes: &[u8]) -> (Vec<Row>, Vec<&[u8]>) {
+    let mut rows = Vec::new();
+    let mut kept = Vec::new();
+    for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
+        match serde_json::from_slice::<Row>(line) {
+            Ok(row) if row.schema_version == ROW_SCHEMA_VERSION => rows.push(row),
+            _ => kept.push(line),
+        }
+    }
+    (rows, kept)
 }
 
 /// Read new messages from the config directories into the store. Directories
@@ -541,6 +567,10 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     let mut seen_paths = BTreeSet::new();
     let mut transcripts = Vec::new();
     for dir in request.dirs {
+        if expired(request.deadline) {
+            report.deadline_reached = true;
+            break;
+        }
         let canonical = std::fs::canonicalize(&dir.path).unwrap_or_else(|_| dir.path.clone());
         if !seen_paths.insert(canonical) {
             continue;
@@ -555,8 +585,20 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
     }
     let mut messages = BTreeMap::new();
     for transcript in &transcripts {
+        if expired(request.deadline) {
+            report.deadline_reached = true;
+            break;
+        }
         report.files += 1;
-        if read_transcript(transcript, request.since, &mut messages, &mut report).is_err() {
+        if read_transcript(
+            transcript,
+            request.since,
+            request.deadline,
+            &mut messages,
+            &mut report,
+        )
+        .is_err()
+        {
             report.unreadable_files += 1;
         }
     }
@@ -570,7 +612,9 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             other => other.into(),
         })?;
     let existing = read_store(&directory)?;
-    let mut known: BTreeMap<(String, String), Row> = decode(&existing)
+    let (current, kept) = split(&existing);
+    let mut known: BTreeMap<(String, String), Row> = current
+        .into_iter()
         .map(|row| ((row.session.clone(), row.message.clone()), row))
         .collect();
     let mut fresh: Vec<Row> = Vec::new();
@@ -591,6 +635,10 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
             previous.cache_write_1h = previous.cache_write_1h.max(current.cache_write_1h);
             previous.cache_write = total_write.saturating_sub(previous.cache_write_1h);
             previous.output = previous.output.max(current.output);
+            // A row first seen as a lane is a chair once the hook records it.
+            if previous.source == Source::Lane && current.source == Source::Chair {
+                previous.source = Source::Chair;
+            }
             changed |= *previous != before;
         } else {
             fresh.push(row(session, message, pending));
@@ -600,6 +648,10 @@ pub fn ingest(roots: &Roots, request: &Request<'_>) -> Result<Report, IngestErro
         (&a.timestamp, &a.session, &a.message).cmp(&(&b.timestamp, &b.session, &b.message))
     });
     let mut out = Vec::new();
+    for line in &kept {
+        out.extend_from_slice(line);
+        out.push(b'\n');
+    }
     for row in known.values() {
         serde_json::to_writer(&mut out, row).map_err(std::io::Error::other)?;
         out.push(b'\n');
@@ -646,7 +698,9 @@ pub fn read_rows(roots: &Roots, filter: &RowFilter) -> Result<Vec<Row>, IngestEr
         Err(error) => return Err(error.into()),
     };
     let bytes = read_store(&directory)?;
-    let mut rows: Vec<(i64, Row)> = decode(&bytes)
+    let mut rows: Vec<(i64, Row)> = split(&bytes)
+        .0
+        .into_iter()
         .filter(|row| filter.account.as_ref().is_none_or(|a| *a == row.account))
         .filter(|row| filter.model.as_ref().is_none_or(|m| *m == row.model))
         .filter_map(|row| Some((row.unix_seconds()?, row)))

@@ -59,6 +59,7 @@ impl Fixture {
                 chair_sessions: &chairs,
                 provider: None,
                 since: since.map(str::parse).transpose()?,
+                deadline: None,
             },
         )?)
     }
@@ -225,6 +226,7 @@ fn since_and_provider_narrow_the_import() -> Result {
             chair_sessions: &BTreeSet::new(),
             provider: Some("codex"),
             since: None,
+            deadline: None,
         },
     )?;
     assert_eq!(none.added, 0);
@@ -304,5 +306,131 @@ fn registered_directories_get_their_label_and_the_rest_are_unattributed() -> Res
             ("unattributed", ".claude-extra")
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn lines_this_build_cannot_read_survive_a_rewrite() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", "2026-10-01T00:00:00Z", 10, 0, 0, 1),
+    )?;
+    f.run(&DIRS, &[], None)?;
+    let store = f.base.join("state/ingest.jsonl");
+    // A row another schema version wrote, then a torn line from a crash.
+    let current = std::fs::read_to_string(&store)?;
+    let foreign = current.replacen("{\"schema_version\":1,", "{\"schema_version\":2,", 1);
+    let torn = "{\"schema_version\":1,\"account\":\"half";
+    std::fs::write(&store, format!("{foreign}{torn}\n"))?;
+    f.write(
+        "claude",
+        "projects/p/s2.jsonl",
+        &message("m2", "2026-10-01T00:01:00Z", 10, 0, 0, 2),
+    )?;
+    let report = f.run(&DIRS, &[], None)?;
+    assert_eq!(report.added, 2);
+    let text = std::fs::read_to_string(&store)?;
+    assert!(
+        text.lines()
+            .any(|line| line == foreign.trim_end_matches('\n'))
+    );
+    assert!(text.lines().any(|line| line == torn));
+    assert_eq!(read_rows(&f.roots, &RowFilter::default())?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn a_one_hour_cache_split_without_a_total_is_still_counted() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        "{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{\"id\":\"m1\",\"model\":\"m\",\"usage\":{\"input_tokens\":1,\"cache_creation\":{\"ephemeral_1h_input_tokens\":40}}}}\n",
+    )?;
+    f.run(&DIRS, &[], None)?;
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
+    assert_eq!(rows[0].buckets(), [1, 0, 0, 40, 0]);
+    Ok(())
+}
+
+#[test]
+fn a_lane_row_is_upgraded_to_chair_when_the_hook_records_it() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", "2026-10-01T00:00:00Z", 10, 0, 0, 1),
+    )?;
+    assert_eq!(f.run(&DIRS, &[], None)?.added, 1);
+    assert_eq!(
+        read_rows(&f.roots, &RowFilter::default())?[0].source,
+        Source::Lane
+    );
+    // The same session is now recorded by the chair hook: the row is upgraded
+    // in place, which counts as a change, and nothing is added.
+    let report = f.run(&DIRS, &["s1"], None)?;
+    assert_eq!((report.added, report.already_present), (0, 1));
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
+    assert_eq!((rows.len(), rows[0].source), (1, Source::Chair));
+    Ok(())
+}
+
+#[test]
+fn one_message_in_two_session_files_counts_twice() -> Result {
+    let f = Fixture::new()?;
+    let at = "2026-10-01T00:00:00Z";
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", at, 10, 0, 0, 1),
+    )?;
+    f.write(
+        "claude",
+        "projects/p/s2.jsonl",
+        &message("m1", at, 10, 0, 0, 1),
+    )?;
+    // Rows are keyed by session and message, so a copy of a message in another
+    // session file is a second row. Whether resumed sessions copy messages is
+    // not confirmed, so the key is left as it is.
+    let report = f.run(&DIRS, &[], None)?;
+    assert_eq!(report.added, 2);
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn an_expired_deadline_reads_nothing_and_keeps_the_store() -> Result {
+    let f = Fixture::new()?;
+    populate(&f)?;
+    f.run(&DIRS, &[], None)?;
+    let store = f.base.join("state/ingest.jsonl");
+    let before = std::fs::read(&store)?;
+    f.write(
+        "claude",
+        "projects/p/s9.jsonl",
+        &message("m9", "2026-10-04T00:00:00Z", 1, 0, 0, 1),
+    )?;
+    let dirs: Vec<ConfigDir> = DIRS
+        .iter()
+        .map(|(account, dir)| ConfigDir {
+            account: (*account).into(),
+            path: f.dir(dir),
+        })
+        .collect();
+    let report = ingest(
+        &f.roots,
+        &Request {
+            dirs: &dirs,
+            chair_sessions: &BTreeSet::new(),
+            provider: None,
+            since: None,
+            deadline: Some(Instant::now()),
+        },
+    )?;
+    assert!(report.deadline_reached);
+    assert_eq!((report.files, report.added), (0, 0));
+    assert_eq!(std::fs::read(&store)?, before);
     Ok(())
 }

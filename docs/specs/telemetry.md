@@ -141,7 +141,11 @@ the message timestamp, session ID, message ID and a `source` of `chair`,
 `subagent` or `lane`. Prompt, reply, tool and path text is never stored, and a
 row is keyed by session and message ID, so a re-run adds nothing. A message
 that streams repeatedly is kept once at its largest counts, mixing the
-short-TTL and one-hour cache-write parts into separate buckets.
+short-TTL and one-hour cache-write parts into separate buckets; a one-hour
+count with no cache-write total still counts. A row first stored as a `lane`
+becomes a `chair` when a later run finds its session recorded by the hook. A
+line the build cannot read, such as a row another schema version wrote or a
+torn line, is kept byte for byte when the store is rewritten.
 `--since` skips files last written before it and messages stamped before it;
 `--provider` other than `claude` ingests nothing.
 
@@ -153,7 +157,10 @@ claimed twice is visited once. Every other `~/.claude*` directory with a
 SessionStart hook is a `chair`, a file under a session's `subagents` directory
 is a `subagent`, and every other session is a `lane`. The chair's SessionStart
 hook also runs the last day of ingest, best effort, so the interactive session
-is captured without a manual command.
+is captured without a manual command. That run stops at a three-second wall
+deadline, inside the hook's five-second timeout, and writes the rows it has
+read. A `telemetry ingest` run has no deadline, and its report sets
+`deadline_reached` only when one stopped it.
 Reads are bounded (1 GiB a transcript, 128 MiB a store, 8 MiB a line, 100,000
 sessions, 2,000 subagent files a session) and never follow links. A message
 without a timestamp is counted as skipped, not guessed. When the store reaches
@@ -162,6 +169,10 @@ its cap, ingest stops adding rows and the report says the store is full.
   which no supervised attempt record sees.
 - Test: `crates/telemetry/src/ingest/tests.rs::rerun_adds_nothing_and_accounts_stay_distinct`;
   `::registered_directories_get_their_label_and_the_rest_are_unattributed`;
+  `::lines_this_build_cannot_read_survive_a_rewrite`;
+  `::a_lane_row_is_upgraded_to_chair_when_the_hook_records_it`;
+  `::an_expired_deadline_reads_nothing_and_keeps_the_store`;
+  `::one_message_in_two_session_files_counts_twice`;
   `tests/telemetry_ingest.rs::ingest_is_idempotent_and_attributes_by_directory`;
   `::chair_session_start_ingests_the_session_as_chair`
 - Owner: `crates/telemetry/src/ingest.rs`, `src/usage.rs`, `src/hooks.rs`
@@ -173,8 +184,10 @@ joins the quota history to ingested usage priced by the reviewed table. Mileage
 is the API-equivalent cost of one percentage point of a window between two
 distinct readings in one reset period; capacity is the cost of a full window
 (mileage times 100). A reset, an advance of the reset time, a fall in the used
-percentage or a plan change ends a run, so no segment is negative. A drop with
-no reset time is segmented the same way and flagged `reset: inferred`.
+percentage or a plan change ends a run, so no segment is negative. A reset
+time that advances by less than a minute is the same window reporting with
+jitter, not a reset. A drop with no reset time is segmented the same way and
+flagged `reset: inferred`.
 Each figure is the median over the last seven days, with the segment count `n`
 and the priced share.
 
@@ -188,8 +201,12 @@ average API rate per bucket for the potential rate at full use, and divide the
 plan price by tokens actually used for the realised rate. The period is the
 report window: the monthly plan price is prorated to it, and one window's
 capacity is expanded to the number of full windows in the period. Both carry
-the window's utilisation, `n` and token coverage; while coverage is incomplete
-the report says token use is a lower bound and realised rates are upper bounds.
+the window's latest used percentage (`latest_used_basis_points`, the value at
+its latest reading, not averaged over the period), `n` and priced token
+coverage. Every effective report says token use is a lower bound and realised
+rates are upper bounds, because ingest coverage of the account is not checked.
+`--model` narrows only the tokens: quota deltas cover every model, so mileage
+under a model filter is understated.
 Fitted non-negative weights for `delta used = sum w_b x tokens_b` are reported
 per account, window and model only with `n` and the fit's R-squared, and only
 when the fit explains at least half the variance. All money is integer
@@ -199,6 +216,9 @@ microdollars, rounded once.
 - Test: `crates/telemetry/src/mileage.rs::tests::three_readings_give_exact_mileage_and_capacity`;
   `::a_thirty_percent_fall_at_a_constant_plan_is_flagged`;
   `::a_ten_percent_fall_or_too_few_runs_is_inconclusive`;
+  `::reset_time_jitter_under_a_minute_stays_in_one_window`;
+  `::full_price_coverage_still_reports_the_bound_note`;
+  `crates/cli/src/mileage.rs::tests::an_interval_takes_each_row_once_in_its_half_open_bounds`;
   `tests/telemetry_mileage.rs::three_readings_give_exact_mileage_capacity_and_effective_rates`
 - Owner: `crates/telemetry/src/mileage.rs`, `crates/cli/src/mileage.rs`
 

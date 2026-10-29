@@ -110,10 +110,15 @@ fn three_readings_give_exact_mileage_capacity_and_effective_rates() -> Result {
     assert_eq!(window["priced_share_basis_points"], 10_000);
     assert_eq!(window["step_change"]["status"], "inconclusive");
     let effective = &window["effective"];
-    assert_eq!(effective["utilisation_basis_points"], 6_000);
+    assert_eq!(effective["latest_used_basis_points"], 6_000);
     assert_eq!(effective["coverage_basis_points"], 10_000);
     assert_eq!(effective["period_days"], 7);
-    assert!(effective["note"].is_null());
+    // Coverage is priced usage only, so the report still states the bound.
+    assert!(
+        effective["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("lower bound"))
+    );
     let output = effective["buckets"]
         .as_array()
         .and_then(|buckets| buckets.iter().find(|bucket| bucket["bucket"] == "output"))

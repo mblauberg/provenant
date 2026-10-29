@@ -107,20 +107,22 @@ impl Tally {
     }
 }
 
+/// An account's ingested rows with their Unix seconds, oldest first.
+type Timed<'a> = [(i64, &'a ingest::Row)];
+
+/// Usage stamped in `(after, until]`. Rows are sorted, so the bounds are found
+/// by binary search and each row is visited once per interval.
 fn interval(
-    rows: &[ingest::Row],
+    rows: &Timed<'_>,
     after: i64,
     until: i64,
     prices: Option<&provenant_telemetry::PriceTable>,
 ) -> Tally {
+    let start = rows.partition_point(|(at, _)| *at <= after);
+    let end = rows.partition_point(|(at, _)| *at <= until).max(start);
     let mut tally = Tally::new();
-    for row in rows {
-        let Some(at) = row.unix_seconds() else {
-            continue;
-        };
-        if at > after && at <= until {
-            tally.add(row, prices);
-        }
+    for (_, row) in &rows[start..end] {
+        tally.add(row, prices);
     }
     tally
 }
@@ -205,14 +207,22 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
             .or_default()
             .push(record);
     }
+    // Each account's rows are timed once, not once per reading and window.
+    let mut timed_by_account: BTreeMap<&str, Vec<(i64, &ingest::Row)>> = BTreeMap::new();
+    for row in &rows {
+        if let Some(at) = row.unix_seconds() {
+            timed_by_account
+                .entry(row.account.as_str())
+                .or_default()
+                .push((at, row));
+        }
+    }
     let mut reports = Vec::new();
     let mut human = String::new();
     for ((key, provider, label), records) in &grouped {
-        let account_rows: Vec<ingest::Row> = rows
-            .iter()
-            .filter(|row| row.account == *label)
-            .cloned()
-            .collect();
+        let account_rows: &Timed<'_> = timed_by_account
+            .get(label.as_str())
+            .map_or(&[][..], Vec::as_slice);
         let latest = records
             .iter()
             .map(|record| record.observed_unix_seconds)
@@ -255,7 +265,7 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
                     .readings
                     .last()
                     .map_or(at, |reading| reading.observed_unix_seconds);
-                let tally = interval(&account_rows, previous, at, table.as_ref());
+                let tally = interval(account_rows, previous, at, table.as_ref());
                 let reading = Reading {
                     observed_unix_seconds: at,
                     used_basis_points: window.used_basis_points,
@@ -285,7 +295,7 @@ fn inner(command: &Mileage, edge: &Edge<'_>) -> Result<(Value, String), Failure>
                 provider,
                 label,
                 latest,
-                &account_rows,
+                account_rows,
                 table.as_ref(),
                 &report.mileage.capacity,
                 report.window_seconds,
@@ -399,9 +409,9 @@ fn human_series(report: &mileage::SeriesReport) -> String {
 
 fn human_effective(effective: &Effective) -> String {
     let mut human = format!(
-        "  effective: utilisation {}.{:02}%, n={}, coverage {}.{:02}%\n",
-        effective.utilisation_basis_points.unwrap_or(0) / 100,
-        effective.utilisation_basis_points.unwrap_or(0) % 100,
+        "  effective: latest used {}.{:02}%, n={}, coverage {}.{:02}%\n",
+        effective.latest_used_basis_points.unwrap_or(0) / 100,
+        effective.latest_used_basis_points.unwrap_or(0) % 100,
         effective.n,
         effective.coverage_basis_points.unwrap_or(0) / 100,
         effective.coverage_basis_points.unwrap_or(0) % 100,
@@ -418,9 +428,7 @@ fn human_effective(effective: &Effective) -> String {
             human_money(&bucket.realised),
         ));
     }
-    if let Some(note) = effective.note {
-        human.push_str(&format!("    note: {note}\n"));
-    }
+    human.push_str(&format!("    note: {}\n", effective.note));
     human
 }
 
@@ -430,11 +438,11 @@ fn effective(
     provider: &str,
     label: &str,
     latest: i64,
-    rows: &[ingest::Row],
+    rows: &Timed<'_>,
     prices: Option<&provenant_telemetry::PriceTable>,
     capacity: &Option<mileage::Money>,
     window_seconds: Option<u64>,
-    utilisation: Option<u64>,
+    latest_used: Option<u64>,
     n: u64,
     recent_days: u32,
     accounts: &BTreeMap<String, provenant_providers::accounts::Registration>,
@@ -468,7 +476,7 @@ fn effective(
         n,
         period_days: recent_days,
     };
-    mileage::effective(&input, period_capacity, utilisation)
+    mileage::effective(&input, period_capacity, latest_used)
 }
 
 fn round_ratio(numerator: u128, denominator: u128) -> Option<u64> {
@@ -481,4 +489,47 @@ fn round_ratio(numerator: u128, denominator: u128) -> Option<u64> {
             .checked_div(denominator)?,
     )
     .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(at: i64) -> ingest::Row {
+        ingest::Row {
+            schema_version: ingest::ROW_SCHEMA_VERSION,
+            account: "work".into(),
+            provider: "claude".into(),
+            model: "m".into(),
+            effort: None,
+            uncached_input: 0,
+            cache_read: 0,
+            cache_write: 0,
+            cache_write_1h: 0,
+            output: 1,
+            timestamp: jiff::Timestamp::from_second(at)
+                .expect("a valid timestamp")
+                .to_string(),
+            session: "s1".into(),
+            message: format!("m{at}"),
+            source: ingest::Source::Lane,
+        }
+    }
+
+    #[test]
+    fn an_interval_takes_each_row_once_in_its_half_open_bounds() {
+        let rows = [0, 100, 200, 300].map(row);
+        let timed: Vec<(i64, &ingest::Row)> = rows
+            .iter()
+            .map(|row| (row.unix_seconds().expect("timed"), row))
+            .collect();
+        // (after, until]: the row at `after` is out and the row at `until` is in.
+        let output = |after, until| interval(&timed, after, until, None).usage[4];
+        assert_eq!(output(0, 200), 2);
+        assert_eq!(output(-1, 0), 1);
+        assert_eq!(output(200, 200), 0);
+        assert_eq!(output(-100, 1_000), 4);
+        assert!(!interval(&timed, 300, 400, None).present);
+        assert!(!interval(&[], 0, 100, None).present);
+    }
 }

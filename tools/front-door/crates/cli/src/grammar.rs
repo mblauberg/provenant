@@ -963,7 +963,7 @@ pub struct Mileage {
     /// Quota window, such as five_hour or weekly (default every window)
     #[arg(long)]
     pub window: Option<String>,
-    /// Count only usage of this exact model
+    /// Count only usage of this exact model; quota deltas still cover every model, so mileage is understated
     #[arg(long)]
     pub model: Option<String>,
     /// Use readings and usage from this date or timestamp, or this many seconds ago

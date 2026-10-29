@@ -2,15 +2,21 @@
 //!
 //! Mileage is the API-equivalent cost of one percentage point of a quota
 //! window between two distinct readings inside one reset period; capacity is
-//! the cost of a full window. A reset, an advance of the reset time, a fall in
-//! the used percentage or a plan change ends a run, so no segment is negative.
-//! All money is integer microdollars and is rounded once.
+//! the cost of a full window. A reset, an advance of the reset time of a minute
+//! or more, a fall in the used percentage or a plan change ends a run, so no
+//! segment is negative. All money is integer microdollars and is rounded once.
 use serde::Serialize;
 
 /// The five disjoint usage buckets, in [`Reading::usage`] order.
 pub const BUCKETS: [&str; 5] = crate::ingest::BUCKETS;
 /// Least squares is reported only when it explains at least this much.
 pub const MIN_FIT_R2: f64 = 0.5;
+/// A reset time that advances by less than this is the same window reporting
+/// its reset with jitter, not a new one.
+const RESET_TOLERANCE_SECONDS: i64 = 60;
+/// The note on every effective-rate report. Token use is not shown to cover
+/// all of the account's usage, so it is a bound.
+const BOUND_NOTE: &str = "token use is a lower bound and realised rates are upper bounds, because ingest coverage of the account is not checked";
 
 #[derive(Clone, Debug)]
 pub struct Reading {
@@ -174,7 +180,7 @@ fn boundary(prev: &Reading, curr: &Reading) -> Option<&'static str> {
         return Some("plan_change");
     }
     if let (Some(before), Some(after)) = (prev.resets_unix_seconds, curr.resets_unix_seconds)
-        && after > before
+        && after.saturating_sub(before) >= RESET_TOLERANCE_SECONDS
     {
         return Some("reported");
     }
@@ -550,15 +556,17 @@ pub struct BucketRate {
 pub struct Effective {
     pub price: Option<Money>,
     pub capacity: Option<Money>,
-    /// Used share of the window at its latest reading, in basis points.
-    pub utilisation_basis_points: Option<u64>,
+    /// The window's used share at its latest reading, in basis points. It is
+    /// not averaged over the period.
+    pub latest_used_basis_points: Option<u64>,
     pub n: u64,
     /// Priced tokens as a share of all used tokens, in basis points.
     pub coverage_basis_points: Option<u64>,
     /// Length of the billing period the price and tokens cover.
     pub period_days: u32,
-    /// Set while ingest, and therefore token coverage, is incomplete.
-    pub note: Option<&'static str>,
+    /// Always set: token use is a lower bound, so realised rates are upper
+    /// bounds, until ingest coverage of the account is checked.
+    pub note: &'static str,
     pub buckets: Vec<BucketRate>,
 }
 
@@ -568,16 +576,13 @@ pub struct Effective {
 pub fn effective(
     input: &EffectiveInput,
     capacity: Option<Money>,
-    utilisation_basis_points: Option<u64>,
+    latest_used_basis_points: Option<u64>,
 ) -> Effective {
     let total: u64 = input.usage.iter().sum();
     let priced: u64 = input.priced_usage.iter().sum();
     let coverage = (total > 0)
         .then(|| u64::try_from(u128::from(priced) * 10_000 / u128::from(total)).unwrap_or(10_000));
     let price = input.price_microdollars.map(Money::new);
-    let complete = coverage.is_some_and(|coverage| coverage >= 10_000)
-        && price.is_some()
-        && capacity.is_some();
     let buckets = (0..5)
         .map(|index| {
             let tokens = input.usage[index];
@@ -609,13 +614,11 @@ pub fn effective(
     Effective {
         price,
         capacity,
-        utilisation_basis_points,
+        latest_used_basis_points,
         n: input.n,
         coverage_basis_points: coverage,
         period_days: input.period_days,
-        note: (!complete).then_some(
-            "token use is a lower bound until ingest covers the account; realised rates are upper bounds",
-        ),
+        note: BOUND_NOTE,
         buckets,
     }
 }
@@ -721,6 +724,34 @@ mod tests {
             report.runs[1].capacity.as_ref().unwrap().microdollars,
             90_000_000
         );
+    }
+
+    #[test]
+    fn reset_time_jitter_under_a_minute_stays_in_one_window() {
+        // The reset time drifts 40 s a reading: no single step is a reset.
+        let mut readings: Vec<Reading> = [0, 40, 80, 120]
+            .into_iter()
+            .enumerate()
+            .map(|(index, drift)| {
+                let mut reading = reading(
+                    100 * index as i64,
+                    1_000 * (index as u64 + 1),
+                    Some(10_000_000),
+                );
+                reading.resets_unix_seconds = Some(10_000_000 + drift);
+                reading
+            })
+            .collect();
+        let report = analyse(&series(readings.clone()), options());
+        assert_eq!(report.runs.len(), 1);
+        assert_eq!(report.mileage.n, 3);
+        // A reset a full window later still starts a new run.
+        let mut reset = reading(400, 1_500, Some(5_000_000));
+        reset.resets_unix_seconds = Some(10_018_000);
+        readings.push(reset);
+        let report = analyse(&series(readings), options());
+        assert_eq!(report.runs.len(), 2);
+        assert_eq!(report.runs[1].reset, Some("reported"));
     }
 
     fn capacity_series(
@@ -858,10 +889,10 @@ mod tests {
         };
         let effective = effective(&input, Some(Money::new(200_000_000)), Some(4_000));
         assert_eq!(effective.price.unwrap().microdollars, 100_000_000);
-        assert_eq!(effective.utilisation_basis_points, Some(4_000));
+        assert_eq!(effective.latest_used_basis_points, Some(4_000));
         assert_eq!(effective.coverage_basis_points, Some(7_500));
         assert_eq!(effective.n, 4);
-        assert!(effective.note.is_some());
+        assert!(effective.note.contains("lower bound"));
         // Potential halves the API rate because the plan costs half capacity.
         assert_eq!(
             effective.buckets[0]
@@ -881,5 +912,22 @@ mod tests {
             100_000_000
         );
         assert!(effective.buckets[1].realised.is_none());
+    }
+
+    #[test]
+    fn full_price_coverage_still_reports_the_bound_note() {
+        // Priced coverage alone does not show that ingest covers the account.
+        let input = EffectiveInput {
+            price_microdollars: Some(100_000_000),
+            usage: [1_000_000, 0, 0, 0, 0],
+            priced_usage: [1_000_000, 0, 0, 0, 0],
+            api_rates: [Some(1_000_000), None, None, None, None],
+            n: 2,
+            period_days: 7,
+        };
+        let effective = effective(&input, Some(Money::new(200_000_000)), None);
+        assert_eq!(effective.coverage_basis_points, Some(10_000));
+        assert!(effective.note.contains("lower bound"));
+        assert!(effective.note.contains("upper bounds"));
     }
 }

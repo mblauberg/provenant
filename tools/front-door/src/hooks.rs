@@ -65,7 +65,8 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
         Handler::ChairStart => {
             let status = crate::chair::hook(true, globals);
             // The chair's spend is most of the total, so its SessionStart also
-            // tops up the native ingest store. The call is bounded and silent.
+            // tops up the native ingest store. The call stops at its wall budget
+            // and is silent.
             crate::usage::ingest_after_chair_hook(globals);
             status
         }
