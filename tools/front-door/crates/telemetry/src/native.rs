@@ -1,5 +1,5 @@
 //! Opt-in metadata import from a Claude Code session's subagents directory.
-use crate::{Categories, PriceTable, TokenTotal};
+use crate::{Categories, PriceTable, TokenTotal, claude::Raw as Usage};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -18,33 +18,6 @@ struct Message {
     id: Option<String>,
     model: Option<String>,
     usage: Option<Usage>,
-}
-#[derive(Clone, Deserialize)]
-struct Usage {
-    input_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-}
-impl Usage {
-    fn counts(&self) -> [Option<u64>; 4] {
-        [
-            self.input_tokens,
-            self.cache_read_input_tokens,
-            self.cache_creation_input_tokens,
-            self.output_tokens,
-        ]
-    }
-    fn merge(&mut self, other: Self) {
-        self.input_tokens = self.input_tokens.max(other.input_tokens);
-        self.cache_read_input_tokens = self
-            .cache_read_input_tokens
-            .max(other.cache_read_input_tokens);
-        self.cache_creation_input_tokens = self
-            .cache_creation_input_tokens
-            .max(other.cache_creation_input_tokens);
-        self.output_tokens = self.output_tokens.max(other.output_tokens);
-    }
 }
 #[derive(Serialize)]
 pub struct NativeModel {
@@ -424,6 +397,13 @@ cache_write = 1000000
 output_excluding_reasoning = 2000000
 "#,
         )?;
+        std::fs::write(
+            session.join("agent-split.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"id\":\"split\",\"model\":\"example\",\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_1h_input_tokens\":7},\"output_tokens\":0}}}\n",
+        )?;
+        let split_report = import_subagents(&session, dir.path(), &validate_prices(&config)?)?;
+        assert_eq!(split_report.models[0].usage.cache_write.known, 7);
+        std::fs::remove_file(session.join("agent-split.jsonl"))?;
         let report = import_subagents(&session, dir.path(), &validate_prices(&config)?)?;
         assert_eq!(report.agents, 2);
         assert_eq!(report.models[0].agents, 2);

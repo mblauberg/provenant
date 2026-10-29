@@ -4,6 +4,7 @@
 //! The store is `ingest.jsonl` in the state root, one row per assistant
 //! message, keyed by session and message ID so a re-run adds nothing. A row
 //! holds counts and identifiers only: never a prompt, a reply or a path.
+use crate::claude::Raw;
 use provenant_core::Roots;
 use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
 use serde::{Deserialize, Serialize};
@@ -205,38 +206,6 @@ struct Message {
     effort: Option<String>,
     usage: Option<Raw>,
 }
-#[derive(Clone, Default, Deserialize)]
-struct Raw {
-    input_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-    cache_creation: Option<Split>,
-    output_tokens: Option<u64>,
-}
-#[derive(Clone, Default, Deserialize)]
-struct Split {
-    ephemeral_1h_input_tokens: Option<u64>,
-}
-impl Raw {
-    /// A message repeats as it streams; the largest count of each field is its
-    /// final one.
-    fn merge(&mut self, other: Self) {
-        let max = |a: Option<u64>, b: Option<u64>| a.max(b);
-        self.input_tokens = max(self.input_tokens, other.input_tokens);
-        self.cache_read_input_tokens =
-            max(self.cache_read_input_tokens, other.cache_read_input_tokens);
-        self.cache_creation_input_tokens = max(
-            self.cache_creation_input_tokens,
-            other.cache_creation_input_tokens,
-        );
-        self.output_tokens = max(self.output_tokens, other.output_tokens);
-        let one_hour = |raw: &Self| raw.cache_creation.as_ref()?.ephemeral_1h_input_tokens;
-        self.cache_creation = max(one_hour(self), one_hour(&other)).map(|n| Split {
-            ephemeral_1h_input_tokens: Some(n),
-        });
-    }
-}
-
 struct Pending {
     account: String,
     model: String,
