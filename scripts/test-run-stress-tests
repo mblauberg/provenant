@@ -1,0 +1,84 @@
+#!/bin/sh
+# Exercise advisory stress reporting without a Cargo build or a stress run.
+set -eu
+
+script=$(cd "$(dirname "$0")" && pwd -P)/run-stress-tests
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-run-stress-tests.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/repo/scripts" "$tmp/repo/tools/front-door" "$tmp/bin"
+cp "$script" "$tmp/repo/scripts/run-stress-tests"
+cat > "$tmp/repo/scripts/find-changed-tests" <<'SH'
+#!/bin/sh
+printf '%s\n' 'test(=fixture)'
+SH
+cat > "$tmp/bin/cargo" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" > "$STRESS_FIXTURE_ARGUMENTS"
+case "$STRESS_FIXTURE_CASE" in
+  failure|budget_failure)
+    echo '        FAIL [0.010s] fixture early_failure'
+    echo '---- early_failure stdout ----'
+    echo 'assertion failed: early failure diagnostics survive the budget'
+    ;;
+  build_error)
+    echo 'error: fixture compiler failure'
+    exit 101
+    ;;
+esac
+i=0
+while [ "$i" -lt 250 ]; do
+  echo "        PASS [0.001s] fixture later_pass_$i"
+  i=$((i + 1))
+done
+case "$STRESS_FIXTURE_CASE" in
+  failure|budget_failure) exit 1 ;;
+esac
+SH
+cat > "$tmp/bin/timeout" <<'SH'
+#!/bin/sh
+[ "$1" = '-s' ] && [ "$2" = 'INT' ] && [ "$3" = '15m' ] || exit 99
+shift 3
+status=0
+"$@" || status=$?
+case "$STRESS_FIXTURE_CASE" in
+  budget_*) exit 124 ;;
+esac
+exit "$status"
+SH
+chmod +x "$tmp/repo/scripts/find-changed-tests" "$tmp/bin/cargo" "$tmp/bin/timeout"
+
+check_contains() {
+  if ! grep -Fq -- "$2" "$1"; then
+    echo "run-stress-tests: expected '$2' in $1" >&2
+    exit 1
+  fi
+}
+for mode in failure budget_failure success budget_clean build_error; do
+  log=$tmp/$mode.log
+  summary=$tmp/$mode.summary
+  PATH="$tmp/bin:$PATH" STRESS_FIXTURE_CASE="$mode" \
+    STRESS_FIXTURE_ARGUMENTS="$tmp/arguments" GITHUB_STEP_SUMMARY="$summary" \
+    STRESS_COUNT=20 STRESS_DURATION=15m \
+    sh "$tmp/repo/scripts/run-stress-tests" base head > "$log" 2>&1
+  check_contains "$tmp/arguments" '--failure-output'
+  check_contains "$tmp/arguments" 'immediate'
+  case "$mode" in
+    failure|budget_failure)
+      check_contains "$log" 'fixture early_failure'
+      check_contains "$log" 'assertion failed: early failure diagnostics survive the budget'
+      check_contains "$summary" 'fixture early_failure'
+      check_contains "$summary" '**Stress run failed**'
+      ;;
+    success)
+      check_contains "$summary" 'passed 20 stress iterations'
+      ;;
+    budget_clean)
+      check_contains "$summary" 'Stopped at the 15m budget'
+      ;;
+    build_error)
+      check_contains "$log" 'fixture compiler failure'
+      check_contains "$summary" '**Stress run failed** (exit 101)'
+      ;;
+  esac
+done
+echo 'run-stress-tests tests passed'

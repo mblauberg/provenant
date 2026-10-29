@@ -34,6 +34,7 @@ jobs:
         run: |
           scripts/test-assertion-diff
           scripts/test-find-changed-tests
+          scripts/test-run-stress-tests
       - name: Check PR test assertions
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
