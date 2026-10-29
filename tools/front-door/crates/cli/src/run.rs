@@ -2081,6 +2081,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 ));
             };
             let session = Session { store, context };
+            let _ = session.store.reap(&call);
             let full = command.all || command.id.is_some();
             let mut query = lane_query(
                 &session,
@@ -4587,6 +4588,7 @@ fn candidates<'a>(
             clock: &clock,
             cancel: &cancel,
         };
+        let _ = session.store.reap(&call);
         let ids = match picks.since {
             Some(since) if picks.targets.is_empty() => {
                 select_since(session, picks.owner, since, &call)?

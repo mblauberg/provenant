@@ -475,13 +475,28 @@ mod reboot_tests {
             "an uncancelled start waits"
         );
         let attempt = store.attempt_dir(run.run_id, id, false)?;
-        crate::artifacts::seal(&attempt, "cancel.json", b"{}", RECORD_LIMIT)?;
+        let scope = RunStore::scope(&store.record(id, &call)?);
+        let request = serde_json::to_vec(&serde_json::json!({"scope": scope}))?;
+        crate::artifacts::seal(&attempt, "cancel.json", &request, RECORD_LIMIT)?;
         assert_eq!(
             store.reap_with(&call, spawn)?,
             1,
             "a cancelled start is reaped"
         );
         assert_eq!(spawned.get(), 1);
+        store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                ..
+            }
+        ));
         Ok(())
     }
 
@@ -514,6 +529,19 @@ mod reboot_tests {
             Ok(())
         })?;
         assert_eq!((reaped, spawned.get()), (1, 1));
+        store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Lost,
+                ..
+            }
+        ));
         Ok(())
     }
 
