@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "target_skill": "tdd",
+  "target_skill": "test-design",
   "cases": [
     {
       "id": "q262",
@@ -10,7 +10,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tdd",
+        "primary_skill": "test-design",
         "companion_skills": [
           "implement"
         ]
@@ -24,7 +24,7 @@
         "direct"
       ],
       "expected": {
-        "primary_skill": "tdd",
+        "primary_skill": "test-design",
         "companion_skills": [
           "implement"
         ]
@@ -33,12 +33,12 @@
     {
       "id": "q264",
       "relation": "positive",
-      "prompt": "Use red-green-refactor for this observable contract change, one vertical slice at a time.",
+      "prompt": "Prune this bloated test suite: merge duplicates, remove type-impossible cases and identify the defect each retained test catches.",
       "tags": [
         "direct"
       ],
       "expected": {
-        "primary_skill": "tdd",
+        "primary_skill": "test-design",
         "companion_skills": [
           "implement"
         ]
@@ -92,7 +92,7 @@
       "expected": {
         "primary_skill": "implement",
         "companion_skills": [
-          "tdd"
+          "test-design"
         ]
       }
     },
@@ -106,35 +106,7 @@
       "expected": {
         "primary_skill": "implement",
         "companion_skills": [
-          "tdd"
-        ]
-      }
-    },
-    {
-      "id": "q270",
-      "relation": "boundary",
-      "prompt": "Production code may contain uncommitted user work; add the regression seam without deleting or overwriting it.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "tdd",
-        "companion_skills": [
-          "implement"
-        ]
-      }
-    },
-    {
-      "id": "q919",
-      "relation": "boundary",
-      "prompt": "Project rules run tests only at the merged-tree landing gate; write this behaviour's test first and report its red and green runs as deferred.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "tdd",
-        "companion_skills": [
-          "implement"
+          "test-design"
         ]
       }
     },
