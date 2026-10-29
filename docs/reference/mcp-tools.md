@@ -2415,7 +2415,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Read projects, sessions, board, tree and overview; board and tree can include peers.",
+  "description": "Read projects, sessions, board, tree, overview, attempt detail and bounded prompt or result search; board and tree can include peers.",
   "inputSchema": {
     "oneOf": [
       {
@@ -2463,6 +2463,23 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
       {
         "additionalProperties": false,
         "properties": {
+          "id": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "op": {
+            "const": "detail"
+          }
+        },
+        "required": [
+          "id",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
           "op": {
             "const": "overview"
           }
@@ -2481,6 +2498,58 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
         },
         "required": [
           "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "op": {
+            "const": "search"
+          },
+          "part": {
+            "enum": [
+              "prompt",
+              "result"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "op",
+          "part",
+          "query"
         ],
         "type": "object"
       },

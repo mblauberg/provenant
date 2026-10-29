@@ -214,6 +214,31 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                     args.extend(["--hosts".into(), hosts]);
                 }
             }
+            ConsoleInput::Detail { id } => {
+                args.extend(["detail".into(), id]);
+            }
+            ConsoleInput::Search {
+                query,
+                part,
+                session,
+                limit,
+                cursor,
+            } => {
+                args.extend([
+                    "search".into(),
+                    query,
+                    "--part".into(),
+                    part,
+                    "--limit".into(),
+                    limit.to_string(),
+                ]);
+                if let Some(session) = session {
+                    args.extend(["--session".into(), session]);
+                }
+                if let Some(cursor) = cursor {
+                    args.extend(["--cursor".into(), cursor]);
+                }
+            }
             ConsoleInput::Tree {
                 max_depth,
                 max_nodes,

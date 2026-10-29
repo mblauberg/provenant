@@ -261,6 +261,29 @@ pub struct LanePage {
     pub next: Option<u64>,
 }
 impl RunStore {
+    /// Read only the stored prompt or result for a console search. Other
+    /// artifact classes can contain credentials or provider state and are
+    /// deliberately outside this API.
+    pub fn console_text_artifact(
+        &self,
+        id: AttemptId,
+        part: ArtifactPart,
+        limit: u64,
+        call: &Request<'_>,
+    ) -> Result<Option<Vec<u8>>> {
+        let record = self.record(id, call)?;
+        let artifact = match part {
+            ArtifactPart::Prompt => Some(&record.prompt),
+            ArtifactPart::Result => record.result.as_ref(),
+            ArtifactPart::Stderr | ArtifactPart::Transcript => {
+                return Err(RunError::Validation("console text artifact part"));
+            }
+        };
+        artifact
+            .map(|artifact| self.artifact_bytes(record.run_id, artifact, limit))
+            .transpose()
+    }
+
     pub fn operation(
         &self,
         id: &OperationId,

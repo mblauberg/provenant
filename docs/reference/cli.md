@@ -2870,6 +2870,60 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant console detail`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"name": "id", "positional": true, "required": true}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "id"
+      ],
+      "multiple": true,
+      "name": "Detail",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant console search`
+
+| Argument | Contract |
+|---|---|
+| `query` | `{"name": "query", "positional": true, "required": true}` |
+| `--part` | `{"name": "part", "required": true, "values": ["prompt", "result"]}` |
+| `--session` | `{"name": "session"}` |
+| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
+| `--cursor` | `{"name": "cursor"}` |
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [
+        "query",
+        "part",
+        "session",
+        "limit",
+        "cursor"
+      ],
+      "multiple": true,
+      "name": "Search",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant console overview`
 
 | Argument | Contract |

@@ -12,6 +12,8 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
         Console::Overview => "console overview",
         Console::Projects => "console projects",
         Console::Sessions { .. } => "console sessions",
+        Console::Detail { .. } => "console detail",
+        Console::Search { .. } => "console search",
     };
     let result = (|| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         let resolved = crate::roots::resolve(
@@ -117,7 +119,8 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
                 Some(
                     provenant_cli::console::Error::Cursor
                     | provenant_cli::console::Error::InvalidSession
-                    | provenant_cli::console::Error::BoardCursor,
+                    | provenant_cli::console::Error::BoardCursor
+                    | provenant_cli::console::Error::SearchCursor,
                 ) => (Outcome::Invalid, "CATALOGUE_INPUT"),
                 _ => (Outcome::Error, "CATALOGUE"),
             };
