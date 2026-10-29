@@ -254,6 +254,7 @@ mod tests {
             "concurrency":1,"parent":null,"lane_depth":1}))?;
         request.chair = Some(provenant_run::ChairBinding {
             extra: Default::default(),
+            session: None,
             host: provenant_core::HostId::from_bytes([4; 16]),
             actor: context.actor_id,
         });

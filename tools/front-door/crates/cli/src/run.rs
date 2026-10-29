@@ -1198,6 +1198,7 @@ struct Manifest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestTask {
+    context: Option<provenant_records::run::WorkContext>,
     #[serde(default)]
     build_heavy: bool,
     title: Option<String>,
@@ -1422,6 +1423,7 @@ pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::Lan
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
+    pub context: Option<provenant_records::run::WorkContext>,
     pub build_heavy: bool,
     pub title: Option<String>,
     pub task_id: TaskId,
@@ -1630,7 +1632,7 @@ pub fn submit_with_host(
         .into_iter()
         .map(|task| {
             Ok(run::DispatchTask {
-                context: None,
+                context: task.context,
                 build_heavy: task.build_heavy,
                 profile: profile.clone(),
                 title: task.title,
@@ -2608,6 +2610,7 @@ fn dispatch_inner(
                 task.deliver.or_else(|| flag_delivery.clone()),
                 task.base.or_else(|| command.base.clone()),
                 task.build_heavy || command.build_heavy,
+                task.context,
             ));
         }
     } else {
@@ -2634,6 +2637,7 @@ fn dispatch_inner(
             flag_delivery,
             command.base.clone(),
             command.build_heavy,
+            None,
         ));
     }
     let concurrency = if command.input.manifest.is_some() {
@@ -2656,6 +2660,7 @@ fn dispatch_inner(
                 deliver,
                 base,
                 build_heavy,
+                context,
             ),
         ) in tasks.into_iter().enumerate()
         {
@@ -2672,6 +2677,7 @@ fn dispatch_inner(
                 );
             }
             placed.push(remote::Task {
+                context,
                 build_heavy,
                 title,
                 base,
@@ -2705,7 +2711,7 @@ fn dispatch_inner(
         .operation(&command.operation_id, &call)?
         .is_none()
     {
-        for (_, _, _, _, _, _, _, delivery, _, _) in &tasks {
+        for (_, _, _, _, _, _, _, delivery, _, _, _) in &tasks {
             if let Some(delivery) = delivery {
                 check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
@@ -2718,6 +2724,7 @@ fn dispatch_inner(
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error.to_string()))?;
         Some(run::ChairBinding {
             extra: Default::default(),
+            session: crate::fabric::current_session(),
             host: context.identity.inbox.host,
             actor: crate::workflow::session_actor(&context, None)
                 .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error))?,
@@ -2783,8 +2790,10 @@ fn dispatch_inner(
                 deliver,
                 base,
                 build_heavy,
+                context,
             )| {
                 Submitted {
+                    context,
                     build_heavy,
                     title,
                     base,
@@ -6411,7 +6420,19 @@ fn reconcile_inner(
 /// Usage and cost over this project's terminal attempts, priced from the
 /// reviewed table shipped with the product.
 pub fn stats(command: Stats, edge: &Edge<'_>) -> Reply {
-    reply("telemetry stats", stats_inner(command, edge))
+    reply("telemetry stats", stats_inner(command, edge, None))
+}
+
+/// Stats grouped by the host's merged pull request snapshot and contribution store.
+pub fn stats_by_pr(
+    command: Stats,
+    edge: &Edge<'_>,
+    merged_prs: Vec<provenant_run::PullRequest>,
+) -> Reply {
+    reply(
+        "telemetry stats",
+        stats_inner(command, edge, Some(merged_prs)),
+    )
 }
 
 fn cache_kpi_rows(
@@ -6445,7 +6466,11 @@ fn cache_kpi_rows(
     }).collect();
     json!({"scope": "project terminal attempts", "routes": routes, "lanes": lanes})
 }
-fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+fn stats_inner(
+    command: Stats,
+    edge: &Edge<'_>,
+    merged_prs: Option<Vec<provenant_run::PullRequest>>,
+) -> Result<(Value, String), Fail> {
     use run::AttemptReader;
     let path = edge.assets.join("config/telemetry-prices.toml");
     let text = std::fs::read_to_string(&path).map_err(|error| {
@@ -6521,6 +6546,7 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         detail: command.detail,
     };
     let facts = store
+        .as_ref()
         .map(|store| {
             store
                 .attempts(
@@ -6543,6 +6569,13 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
                 && window.until.is_none_or(|u| fact.finished_at < u)
         })
         .collect();
+    let graph_quality = graph_quality_rows(
+        &selected,
+        store.as_ref(),
+        &call,
+        &edge.roots.state,
+        context.project_id,
+    )?;
     let cache_kpis = cache_kpi_rows(
         &selected,
         &config.domains,
@@ -6567,9 +6600,120 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         Ok(chairs) => (chairs, None),
         Err(error) => (Vec::new(), Some(error.to_string())),
     };
-    let report = provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
+    let by = command.by;
+    let mut unknown_pr_weights = 0u64;
+    let mut merged_pr_count = 0u64;
+    let external_labels = if by == Some(crate::StatsBy::Pr) {
+        let merged_prs = merged_prs.ok_or_else(|| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::Unsupported,
+                "--by pr requires merged PR state",
+            )
+        })?;
+        merged_pr_count = merged_prs.len() as u64;
+        let contributions =
+            provenant_run::Contributions::open_read_only(edge.roots.state.as_path(), &call)?;
+        let mut labels =
+            BTreeMap::<provenant_core::AttemptId, Vec<provenant_telemetry::ExternalGroup>>::new();
+        let mut contribution_count = 0u64;
+        if let Some(contributions) = contributions {
+            for pr in merged_prs {
+                for contribution in contributions.for_pr(&pr, &call)? {
+                    contribution_count += 1;
+                    if contribution_count > provenant_telemetry::MAX_ATTEMPTS {
+                        return Err(Fail::new(
+                            Status::Invalid,
+                            ErrorKind::Invalid,
+                            "PR contributions exceed 100,000 rows; narrow the time window",
+                        ));
+                    }
+                    if contribution.weight_millionths.is_none() {
+                        unknown_pr_weights += 1;
+                    }
+                    labels.entry(contribution.attempt).or_default().push(
+                        provenant_telemetry::ExternalGroup {
+                            value: format!("{}#{}", pr.repository, pr.number),
+                            weight_millionths: contribution.weight_millionths,
+                        },
+                    );
+                }
+            }
+        }
+        Some(labels)
+    } else {
+        None
+    };
+    let by_name = match by {
+        Some(crate::StatsBy::Pr) => "pr",
+        Some(crate::StatsBy::Issue) => "issue",
+        Some(crate::StatsBy::Graph) => "graph",
+        Some(crate::StatsBy::Node) => "node",
+        Some(crate::StatsBy::Pattern) => "pattern",
+        Some(crate::StatsBy::Preset) => "preset",
+        Some(crate::StatsBy::Role) => "role",
+        None => "all",
+    };
+    let report = if by == Some(crate::StatsBy::Pr) {
+        let labels = external_labels.as_ref().ok_or_else(|| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::Unsupported,
+                "missing PR contribution labels",
+            )
+        })?;
+        provenant_telemetry::stats_by_external_key(facts, &prices, window, labels)
+    } else if let Some(by) = by {
+        let key = match by {
+            crate::StatsBy::Issue => provenant_telemetry::ContextKey::Issue,
+            crate::StatsBy::Graph => provenant_telemetry::ContextKey::GraphId,
+            crate::StatsBy::Node => provenant_telemetry::ContextKey::NodeId,
+            crate::StatsBy::Pattern => provenant_telemetry::ContextKey::Pattern,
+            crate::StatsBy::Preset => provenant_telemetry::ContextKey::Preset,
+            crate::StatsBy::Role => provenant_telemetry::ContextKey::Role,
+            crate::StatsBy::Pr => unreachable!("handled above"),
+        };
+        provenant_telemetry::stats_by_context(facts, &prices, window, key)
+    } else {
+        provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
+    }
+    .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
     let mut human = stats_summary(&report);
+    if let Some(groups) = &report.context_groups {
+        human.push_str(&format!("by {by_name}: {} groups\n", groups.len()));
+        for group in groups {
+            let label = group.value.as_deref().unwrap_or("unknown");
+            let input = grouped_token_count(
+                &group.totals.usage.uncached_input,
+                &group.totals.usage.cache_read,
+                &group.totals.usage.cache_write,
+            );
+            let output = grouped_token_count(
+                &group.totals.usage.output_excluding_reasoning,
+                &group.totals.usage.reasoning,
+                &provenant_telemetry::TokenTotal::default(),
+            );
+            human.push_str(&format!(
+                "{}  input={input} output={output}  {}\n",
+                plain_text(label, 256),
+                cost_summary(&group.totals).trim()
+            ));
+        }
+        human.push_str("next: inspect group totals with --json\n");
+    }
+    for graph in &graph_quality {
+        if graph["checkpoint"] == "read" {
+            human.push_str(&format!(
+                "graph {}: verdicts={} findings={} initial_rounds={} repair_rounds={} partial_signals={}\n",
+                graph["graph_id"].as_str().unwrap_or("unknown"),
+                graph["verdicts"],
+                graph["findings"].as_u64().unwrap_or(0),
+                graph["initial_rounds"].as_u64().unwrap_or(0),
+                graph["repair_rounds"].as_u64().unwrap_or(0),
+                graph["partial_signals"]
+            ));
+        }
+    }
     let total_share = totals_cache_read_share(&report.totals);
     human.push_str(&format!(
         "cache-read share: {}\n",
@@ -6582,6 +6726,41 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
     data["cache_read_share"] = cache_kpis;
     data["cache_read_share"]["overall"] = json!(total_share);
+    let plan_value = plan_value_rows(&report, &config.domains.accounts, edge)?;
+    if !plan_value.is_empty() {
+        human.push_str(&format!("plan value: {} accounts\n", plan_value.len()));
+        for row in &plan_value {
+            let account = row["account"].as_str().unwrap_or("unknown");
+            let price = &row["monthly_price"];
+            let amount = price["amount"].as_f64().unwrap_or(0.0);
+            let currency = price["currency"].as_str().unwrap_or("USD");
+            let value = row["api_equivalent_usd_in_selected_window"]
+                .as_str()
+                .map_or_else(|| "unknown".to_owned(), |value| format!("${value}"));
+            let bound = if row["api_equivalent_complete"] == true {
+                ""
+            } else {
+                " at least"
+            };
+            human.push_str(&format!(
+                "{}: plan {} {:.2} {}/mo; API-equivalent{bound} {value} in selected window\n",
+                plain_text(account, 128),
+                row["plan"].as_str().unwrap_or("unknown"),
+                amount,
+                currency
+            ));
+        }
+        human.push_str("next: compare a full billing period with quota history\n");
+    }
+    data["plan_value"] = json!(plan_value);
+    data["graph_quality"] = json!(graph_quality);
+    if by == Some(crate::StatsBy::Pr) {
+        data["pr_attribution"] = json!({
+            "merged_prs_read": merged_pr_count,
+            "unknown_allocation_weights": unknown_pr_weights,
+            "allocation": "contribution_weight_millionths",
+        });
+    }
     if let Some(error) = chair_error {
         human.push_str(&format!(
             "chair sessions not read: {}\n",
@@ -6590,6 +6769,125 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         data["chair_error"] = Value::String(error);
     }
     Ok((data, human))
+}
+
+fn grouped_token_count(
+    first: &provenant_telemetry::TokenTotal,
+    second: &provenant_telemetry::TokenTotal,
+    third: &provenant_telemetry::TokenTotal,
+) -> String {
+    let known = u128::from(first.known) + u128::from(second.known) + u128::from(third.known);
+    let missing =
+        u128::from(first.missing) + u128::from(second.missing) + u128::from(third.missing);
+    if missing == 0 {
+        known.to_string()
+    } else {
+        format!(">={known} ({missing} unknown)")
+    }
+}
+
+fn graph_quality_rows(
+    facts: &[&provenant_records::AttemptFact],
+    store: Option<&run::RunStore>,
+    call: &run::Request<'_>,
+    state_root: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+) -> Result<Vec<Value>, Fail> {
+    use provenant_fabric_runtime::graph::FileJournal;
+    let graph_ids: std::collections::BTreeSet<_> = facts
+        .iter()
+        .filter_map(|fact| fact.context.as_ref()?.graph_id.clone())
+        .collect();
+    let mut rows = Vec::new();
+    for graph_id in graph_ids {
+        let checkpoint = match FileJournal::read_checkpoint(state_root, project, &graph_id) {
+            Ok(Some(checkpoint)) => checkpoint,
+            Ok(None) => {
+                rows.push(json!({"graph_id": graph_id, "checkpoint": "missing"}));
+                continue;
+            }
+            Err(_) => {
+                rows.push(json!({"graph_id": graph_id, "checkpoint": "unavailable"}));
+                continue;
+            }
+        };
+        let mut verdicts = BTreeMap::<String, u64>::new();
+        let (findings, initial_rounds, repair_rounds) = graph_quality_counts(&checkpoint.nodes);
+        for node in &checkpoint.nodes {
+            if let Some(gate) = &node.gate {
+                *verdicts
+                    .entry(
+                        if gate.passed {
+                            "gate_pass"
+                        } else {
+                            "gate_fail"
+                        }
+                        .into(),
+                    )
+                    .or_default() += 1;
+            }
+            if let Some(verdict) = node
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.verdict.as_ref())
+            {
+                *verdicts.entry(verdict.to_ascii_lowercase()).or_default() += 1;
+            }
+        }
+        let mut partial = BTreeMap::<String, u64>::new();
+        if let Some(store) = store {
+            for fact in facts.iter().filter(|fact| {
+                fact.context
+                    .as_ref()
+                    .and_then(|context| context.graph_id.as_deref())
+                    == Some(graph_id.as_str())
+            }) {
+                let record = store.record(fact.attempt_id, call)?;
+                for signal in record.partial_signals {
+                    *partial.entry(signal.as_str().to_owned()).or_default() += 1;
+                }
+            }
+        }
+        rows.push(json!({
+            "graph_id": graph_id,
+            "checkpoint": "read",
+            "checkpoint_scope": "latest_snapshot",
+            "successful": checkpoint.successful(),
+            "verdicts": verdicts,
+            "findings": findings,
+            "initial_rounds": initial_rounds,
+            "repair_rounds": repair_rounds,
+            "partial_signals": partial,
+        }));
+    }
+    Ok(rows)
+}
+
+fn graph_quality_counts(
+    nodes: &[provenant_fabric_runtime::graph::NodeProgress],
+) -> (u64, usize, usize) {
+    let findings = nodes
+        .iter()
+        .filter(|node| node.children.is_empty())
+        .map(|node| {
+            node.outputs
+                .as_ref()
+                .map_or(0, |outputs| outputs.findings.len() as u64)
+        })
+        .sum();
+    let mut executed = std::collections::BTreeSet::new();
+    for node in nodes {
+        let Some(round) = &node.round else {
+            continue;
+        };
+        let attempted = node.attempts.iter().any(|attempt| attempt.launched);
+        if attempted || node.gate.is_some() {
+            executed.insert((round.loop_id.clone(), round.round));
+        }
+    }
+    let initial = executed.iter().filter(|(_, round)| *round == 1).count();
+    let repairs = executed.iter().filter(|(_, round)| *round > 1).count();
+    (findings, initial, repairs)
 }
 
 fn totals_cache_read_share(totals: &provenant_telemetry::Totals) -> Option<f64> {
@@ -6618,6 +6916,94 @@ fn cost_summary(totals: &provenant_telemetry::Totals) -> String {
         )
     };
     format!("{} attempts, {human}\n", totals.attempts)
+}
+
+/// Compare API-equivalent lane usage with configured account plans, anchored
+/// to the latest quota-history reading in the selected time window.
+fn plan_value_rows(
+    report: &provenant_telemetry::StatsReport,
+    accounts: &provenant_providers::accounts::Settings,
+    edge: &Edge<'_>,
+) -> Result<Vec<Value>, Fail> {
+    let until = report
+        .window
+        .until
+        .map(|time| time.as_timestamp().as_second().saturating_sub(1));
+    let history = crate::quota_history::read(
+        edge.roots.state.as_path(),
+        &crate::quota_history::Query {
+            // The effective plan may have been recorded just before the
+            // selected attempt window began.
+            since: None,
+            until,
+            account: None,
+        },
+    )
+    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    let mut latest = BTreeMap::new();
+    for record in history {
+        latest.insert((record.provider.clone(), record.label.clone()), record);
+    }
+    Ok(latest
+        .into_iter()
+        .filter_map(|((provider, label), reading)| {
+            let entry = accounts.entries.values().find(|entry| {
+                entry.adapter == provider
+                    && entry.label == label
+                    && entry.key == reading.account_key
+            })?;
+            let price =
+                provenant_quota::price_in_force(&entry.plans, reading.observed_unix_seconds)?;
+            let (api_equivalent, complete) = api_equivalent_for_account(report, &provider, &label);
+            Some(json!({
+                "account": label,
+                "provider": provider,
+                "plan": reading.plan.as_deref().or(Some(price.name.as_str())),
+                "observed_unix_seconds": reading.observed_unix_seconds,
+                "monthly_price": {"amount": price.price, "currency": price.currency},
+                "notional_usd_month": price.notional_usd,
+                "api_equivalent_usd_in_selected_window": api_equivalent,
+                "api_equivalent_complete": complete,
+                "quota_windows": reading.windows.iter().map(|window| json!({
+                    "pool": window.pool,
+                    "used_basis_points": window.used_basis_points,
+                    "window_seconds": window.window_seconds,
+                })).collect::<Vec<_>>(),
+                "comparison_basis": "selected_window_api_equivalent_vs_monthly_plan_price"
+            }))
+        })
+        .collect::<Vec<_>>())
+}
+
+fn api_equivalent_for_account(
+    report: &provenant_telemetry::StatsReport,
+    provider: &str,
+    account: &str,
+) -> (Option<String>, bool) {
+    let mut micros = 0u128;
+    let mut found = false;
+    let mut complete = true;
+    for route in &report.routes {
+        if route.route.provider.as_deref() != Some(provider)
+            || route.route.account_label.as_deref() != Some(account)
+        {
+            continue;
+        }
+        found = true;
+        if let Some(cost) = &route.totals.cost.complete {
+            micros += u128::from(cost.microdollars);
+        } else if let Some(cost) = &route.totals.cost.known_lower_bound {
+            micros += u128::from(cost.microdollars);
+            complete = false;
+        } else {
+            complete = false;
+        }
+        if route.totals.cost.complete.is_none() {
+            complete = false;
+        }
+    }
+    let dollars = format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000);
+    (found.then_some(dollars), complete)
 }
 
 fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
@@ -7018,6 +7404,35 @@ mod lane_depth_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn graph_quality_counts_only_executed_repair_rounds_and_leaf_findings() {
+        use provenant_fabric_runtime::graph::NodeProgress;
+        let node = |value| serde_json::from_value::<NodeProgress>(value).unwrap();
+        let findings = json!({
+            "schema_version": 1,
+            "findings": [{"id":"F1", "severity":"P2", "file":"a.rs", "line":1, "summary":"finding", "status":"open"}],
+            "warnings": []
+        });
+        let checkpoint_nodes = vec![
+            node(
+                json!({"id":"composite", "state":"succeeded", "children":["child"], "attempts":[], "outputs":findings}),
+            ),
+            node(json!({"id":"child", "state":"succeeded", "attempts":[], "outputs":findings})),
+            node(
+                json!({"id":"initial", "state":"succeeded", "attempts":[], "round":{"loop_id":"loop","round":1,"node_id":"initial","until":false}, "gate":{"passed":true}}),
+            ),
+            node(
+                json!({"id":"repair", "state":"succeeded", "attempts":[{"launched":true,"key":{"graph_id":"g","node_id":"repair","route_index":0},"route":{"alias":"utility"},"state":"terminal","launch_actor":"actor"}], "round":{"loop_id":"loop","round":2,"node_id":"repair","until":false}}),
+            ),
+            node(
+                json!({"id":"configured_only", "state":"pending", "attempts":[], "round":{"loop_id":"loop","round":3,"node_id":"configured_only","until":false}}),
+            ),
+        ];
+        assert_eq!(graph_quality_counts(&checkpoint_nodes), (1, 1, 1));
+    }
+
     #[test]
     fn model_policy_results_check_sections_and_bound_continuations()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8242,7 +8657,6 @@ mod tests {
         Ok(())
     }
 
-    use super::*;
     use provenant_run::Providers;
     use provenant_supervisor::custody::CaptureTotals;
     use provenant_supervisor::custody::PublicationState;
@@ -8399,6 +8813,7 @@ mod tests {
         };
         let chair = Some(run::ChairBinding {
             extra: Default::default(),
+            session: None,
             host: provenant_core::HostId::from_bytes([4; 16]),
             actor: ActorId::from_bytes([5; 16]),
         });
@@ -8406,6 +8821,7 @@ mod tests {
             chair: chair.clone(),
             operation_id: OperationId::parse("context-ref-replay").unwrap(),
             tasks: vec![Submitted {
+                context: None,
                 build_heavy: false,
                 title: None,
                 task_id: TaskId::from_bytes([3; 16]),
@@ -8474,6 +8890,7 @@ mod tests {
         let mut replay = submission("context-base");
         replay.chair = Some(run::ChairBinding {
             extra: Default::default(),
+            session: None,
             host: provenant_core::HostId::from_bytes([6; 16]),
             actor: ActorId::from_bytes([7; 16]),
         });

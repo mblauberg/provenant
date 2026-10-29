@@ -353,6 +353,41 @@ fn location_directory(root: &StateRoot, create: bool) -> Result<Directory, FsErr
     Ok(dir)
 }
 
+/// The most recently saved session a chair actor owns in a project. Chairs
+/// bind to their session by saving it, whatever harness they run under, so this
+/// needs no harness-specific marker. A locator is advisory: each candidate is
+/// confirmed against the session's own canonical record, which must be current
+/// and still name this chair, so a stale locator after a rebind is ignored.
+pub fn chair_session_for(
+    root: &StateRoot,
+    project: provenant_core::ProjectId,
+    actor: ActorId,
+) -> Option<HostSessionId> {
+    let entries =
+        std::fs::read_dir(root.as_path().join("workflow").join("session-locations")).ok()?;
+    let mut candidates: Vec<SessionDiscovery> = entries
+        .filter_map(|entry| {
+            let bytes = std::fs::read(entry.ok()?.path()).ok()?;
+            if bytes.len() > DISCOVERY_LIMIT as usize {
+                return None;
+            }
+            serde_json::from_slice::<SessionDiscovery>(&bytes).ok()
+        })
+        .filter(|found| found.project_id == project && found.chair_actor == actor)
+        .collect();
+    candidates.sort_by_key(|found| std::cmp::Reverse(found.last_saved_at));
+    candidates.into_iter().find_map(|locator| {
+        let canonical = SessionStore::new(root.clone(), project, locator.host_session_id.clone())
+            .discovery()
+            .ok()??;
+        (canonical.consistency == DiscoveryConsistency::Current
+            && canonical.record.project_id == project
+            && canonical.record.chair_actor == actor
+            && canonical.record.host_session_id == locator.host_session_id)
+            .then_some(locator.host_session_id)
+    })
+}
+
 /// Direct workspace/session lookup of an explicitly saved chair. No enumeration,
 /// allocation, locking, Git discovery or repair. Stale locators remain unknown.
 /// The deadline is checked between steps. Blocking filesystem operations,

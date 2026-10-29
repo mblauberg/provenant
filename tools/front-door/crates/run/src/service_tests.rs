@@ -276,6 +276,7 @@ fn chair_binding_replays_the_original_submission() -> TestResult {
     let mut first = submission("review this code");
     first.chair = Some(ChairBinding {
         extra: Default::default(),
+        session: None,
         host: provenant_core::HostId::from_bytes([4; 16]),
         actor: provenant_core::ActorId::from_bytes([5; 16]),
     });

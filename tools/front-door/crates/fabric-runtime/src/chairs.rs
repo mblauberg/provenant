@@ -121,6 +121,7 @@ mod tests {
         let run = |n| RunId::from_bytes([n; 16]);
         let chair = Some(ChairBinding {
             extra: Default::default(),
+            session: None,
             host: HostId::from_bytes([2; 16]),
             actor: ActorId::from_bytes([3; 16]),
         });
@@ -154,6 +155,7 @@ mod tests {
         let mut forged = child.clone();
         forged.chair = Some(ChairBinding {
             extra: Default::default(),
+            session: None,
             host: HostId::from_bytes([8; 16]),
             actor: ActorId::from_bytes([9; 16]),
         });

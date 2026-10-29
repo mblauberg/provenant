@@ -4631,6 +4631,22 @@ fn writer_private_temporary_directories_are_removed_after_terminal_and_withdrawa
     Ok(())
 }
 
+/// Recovery drains the reactions a terminal commit owes; tests that check the
+/// rest of recovery finish them first.
+fn finish_reactions(store: &RunStore) -> TestResult {
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    for run in store.open_runs(100, &call)? {
+        store.drain_reactions(run, &clock, &cancel, &mut |reaction, _| {
+            reaction.graph_done = true;
+            reaction.notice_done = true;
+            reaction.log_done = true;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 fn terminal(store: &RunStore, id: AttemptId, call: &Request<'_>) -> Result<Outcome> {
     match store.record(id, call)?.state {
         AttemptState::Terminal { outcome, .. } => Ok(outcome),
@@ -4896,6 +4912,7 @@ fn resume_continues_a_terminal_attempt_once_with_its_route() -> TestResult {
     let mut run = input();
     run.request.chair = Some(ChairBinding {
         extra: Default::default(),
+        session: None,
         host: provenant_core::HostId::from_bytes([30; 16]),
         actor: provenant_core::ActorId::from_bytes([31; 16]),
     });
@@ -5186,6 +5203,7 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
     let mut original = input();
     original.request.chair = Some(ChairBinding {
         extra: Default::default(),
+        session: None,
         host: provenant_core::HostId::from_bytes([32; 16]),
         actor: provenant_core::ActorId::from_bytes([33; 16]),
     });
@@ -5405,7 +5423,7 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
             std::fs::rename(attempt, attempt.with_extension("moved"))?;
             std::os::unix::fs::symlink(attempt.with_extension("moved"), attempt)?;
         }
-        store.db.execute_batch("DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; PRAGMA user_version=3;")?;
+        store.db.execute_batch("DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; PRAGMA user_version=3;")?;
         drop(store);
 
         let store = RunStore::open(&context, &call)?;
@@ -5513,6 +5531,7 @@ fn reconcile_retries_terminal_temporary_removal() -> TestResult {
         vec![(id, Reconciled::TemporaryRemoved)]
     );
     assert!(!temporary.exists());
+    finish_reactions(&store)?;
     assert!(store.open_runs(10, &call)?.is_empty());
     assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
     Ok(())
@@ -5754,6 +5773,7 @@ fn reconcile_terminal_writer_reservation_without_temporary() -> TestResult {
         if prepared {
             assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
             assert!(store.writer_fences()?.is_empty());
+            finish_reactions(&store)?;
             assert!(store.open_runs(10, &call)?.is_empty());
         } else {
             assert!(
@@ -6670,6 +6690,7 @@ fn recover_rebooted_writer_inner(
         );
     }
     assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
+    finish_reactions(&store)?;
     assert!(store.open_runs(10, &call)?.is_empty());
     Ok(())
 }
@@ -7548,6 +7569,20 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
         clock.wall_now()?,
         &call,
     )?;
+    // The terminal commit owes its reactions, so recovery is queued for them.
+    let mut spawned = 0;
+    store.queue_reconcile_with(run.run_id, &call, |_, _| {
+        spawned += 1;
+        Ok(())
+    })?;
+    assert_eq!(spawned, 1);
+    // Once they are done, a terminal run has no settlement work.
+    store.drain_reactions(run.run_id, &clock, &cancel, &mut |reaction, _| {
+        reaction.graph_done = true;
+        reaction.notice_done = true;
+        reaction.log_done = true;
+        Ok(())
+    })?;
     assert!(
         store
             .queue_reconcile_with(run.run_id, &call, |_, _| {

@@ -1516,7 +1516,7 @@ fn prelaunch_refusal_publishes_durable_never_launched_evidence() -> TestResult {
 }
 
 #[test]
-fn the_store_initialises_at_version_five_without_spacing() -> TestResult {
+fn the_store_initialises_at_version_six_without_spacing() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1529,7 +1529,7 @@ fn the_store_initialises_at_version_five_without_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     let spacing: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
         [],
@@ -1550,7 +1550,7 @@ fn temporary_tracking_upgrade_preserves_version_one_cancel_binding() -> TestResu
     RunStore::open(&context, &call)?
         .db
         .execute_batch(
-            "DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
+            "DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
         )?;
     let store = RunStore::open(&context, &call)?;
     let op = OperationId::parse("stop")?;
@@ -1571,7 +1571,7 @@ fn temporary_tracking_upgrade_drops_version_two_spacing() -> TestResult {
     let call = call(&clock, &cancel);
     // Shape the store exactly as version 2 left it, with the unused table back.
     RunStore::open(&context, &call)?.db.execute_batch(
-        "DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
+        "DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
     )?;
     let store = RunStore::open(&context, &call)?;
     let remaining: i64 = store.db.query_row(
@@ -1586,12 +1586,12 @@ fn temporary_tracking_upgrade_drops_version_two_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     Ok(())
 }
 
 #[test]
-fn the_store_refuses_a_version_newer_than_five() -> TestResult {
+fn the_store_refuses_a_version_newer_than_six() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1599,10 +1599,10 @@ fn the_store_refuses_a_version_newer_than_five() -> TestResult {
     let call = call(&clock, &cancel);
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("PRAGMA user_version=6;")?;
+        .execute_batch("PRAGMA user_version=7;")?;
     assert!(matches!(
         RunStore::open(&context, &call),
-        Err(RunError::Version(6))
+        Err(RunError::Version(7))
     ));
     Ok(())
 }
@@ -1621,7 +1621,7 @@ fn version_five_lets_one_run_continue_several_targets() -> TestResult {
     let run = input.run_id.to_string();
     // Shape the table as version 4 left it, with one row to carry over.
     store.db.execute_batch(&format!(
-        "DROP INDEX continuation_runs; DROP TABLE continuations; CREATE TABLE continuations (target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)) STRICT; INSERT INTO continuations VALUES ('{first}','{run}'); PRAGMA user_version=4;"
+        "DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX continuation_runs; DROP TABLE continuations; CREATE TABLE continuations (target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)) STRICT; INSERT INTO continuations VALUES ('{first}','{run}'); PRAGMA user_version=4;"
     ))?;
     drop(store);
     let store = RunStore::open(&context, &call)?;
@@ -1772,5 +1772,296 @@ fn work_context_bounds_are_enforced() -> TestResult {
         ..Default::default()
     });
     store.create(&request, &call)?;
+    Ok(())
+}
+
+#[test]
+fn version_six_upgrades_from_five_and_keeps_existing_attempts() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let input = input();
+    let store = RunStore::open(&context, &call)?;
+    store.create(&input, &call)?;
+    // Shape the store exactly as version 5 left it.
+    store.db.execute_batch(
+        "DROP INDEX reaction_pending; DROP TABLE reactions; PRAGMA user_version=5;",
+    )?;
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let version: i64 =
+        store
+            .db
+            .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
+                r.get(0)
+            })?;
+    assert_eq!(version, 6);
+    // History is not backfilled: nothing is owed for attempts that predate it.
+    assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
+    store.record(input.attempts[0].attempt_id, &call)?;
+    Ok(())
+}
+
+fn settle_one(
+    store: &RunStore,
+    call: &Request<'_>,
+) -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, call)?;
+    let mut observation = exit();
+    observation.never_spawned = true;
+    observation.termination = None;
+    seal_observation(store, &input, &observation)?;
+    let mut publication = publication();
+    publication.outcome = Outcome::QuotaLimited;
+    publication.started_at = None;
+    publication.provider_ms = None;
+    store.publish_terminal(id, 1, &publication, &observation, call)?;
+    Ok(input)
+}
+
+#[test]
+fn a_terminal_commit_owes_one_frozen_reaction_in_the_same_transaction() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    let id = input.attempts[0].attempt_id;
+    assert_eq!(store.pending_reactions(input.run_id, &call)?, [id]);
+    let owed = store.reaction(id, &call)?.ok_or("row")?;
+    assert!(
+        owed.notice
+            .starts_with(&format!("settled {id} quota_limited"))
+    );
+    assert!(owed.notice.len() <= crate::reactions::NOTICE_BYTES);
+    assert!(owed.graph && !owed.resolved);
+    // A replayed commit neither adds a second row nor rewrites the first.
+    let again = store.reaction(id, &call)?.ok_or("row")?;
+    assert_eq!(owed, again);
+    Ok(())
+}
+
+#[test]
+fn recovery_drains_what_a_crashed_guardian_left_and_a_failed_step_retries() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    // The guardian dies after the commit, before any reaction.
+    drop(store);
+    let recovery = RunStore::open(&context, &call)?;
+    assert_eq!(recovery.pending_reactions(input.run_id, &call)?.len(), 1);
+    let calls = std::cell::RefCell::new((0, 0));
+    let mut step = |reaction: &mut Reaction,
+                    _save: &mut crate::reactions::Saver<'_>|
+     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // The graph advances from the frozen trusted inputs.
+        assert!(reaction.graph);
+        if !reaction.graph_done {
+            calls.borrow_mut().0 += 1;
+            reaction.graph_done = true;
+        }
+        if !reaction.notice_done {
+            calls.borrow_mut().1 += 1;
+            if calls.borrow().1 == 1 {
+                return Err("inbox busy".into());
+            }
+            reaction.notice_done = true;
+        }
+        reaction.log_done = true;
+        Ok(())
+    };
+    let failed = recovery.drain_reactions(input.run_id, &clock, &cancel, &mut step);
+    assert_eq!(failed.unwrap_err().to_string(), "inbox busy");
+    // Progress is kept and the row is still owed.
+    assert_eq!(recovery.pending_reactions(input.run_id, &call)?.len(), 1);
+    recovery.drain_reactions(input.run_id, &clock, &cancel, &mut step)?;
+    assert!(recovery.pending_reactions(input.run_id, &call)?.is_empty());
+    recovery.drain_reactions(input.run_id, &clock, &cancel, &mut step)?;
+    // The graph ran once, the failed notice ran twice, and nothing ran after.
+    assert_eq!(*calls.borrow(), (1, 2));
+    Ok(())
+}
+
+#[test]
+fn two_concurrent_drains_react_once() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    let runs = std::cell::Cell::new(0);
+    let mut finish = |reaction: &mut Reaction, _: &mut crate::reactions::Saver<'_>| {
+        runs.set(runs.get() + 1);
+        reaction.graph_done = true;
+        reaction.notice_done = true;
+        reaction.log_done = true;
+        Ok(())
+    };
+    // One drain is mid-flight and holds the run's lock; a second, from another
+    // process's store, defers to it instead of repeating its work.
+    let held = store.reaction_lock(input.run_id)?.ok_or("lock")?;
+    let other = RunStore::open(&context, &call)?;
+    other.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
+    assert_eq!(runs.get(), 0);
+    drop(held);
+    other.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
+    store.drain_reactions(input.run_id, &clock, &cancel, &mut finish)?;
+    assert_eq!(runs.get(), 1);
+    assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn done_rows_are_pruned_and_pending_rows_are_kept() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    let id = input.attempts[0].attempt_id;
+    store.prune_reactions(i64::MAX, &call)?;
+    assert!(store.reaction(id, &call)?.is_some());
+    store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+        reaction.graph_done = true;
+        reaction.notice_done = true;
+        reaction.log_done = true;
+        Ok(())
+    })?;
+    store.prune_reactions(i64::MAX, &call)?;
+    assert!(store.reaction(id, &call)?.is_none());
+    Ok(())
+}
+
+/// A clock whose monotonic reading a test moves while a step runs.
+struct SkewClock {
+    inner: TestClock,
+    skew: std::sync::atomic::AtomicU64,
+}
+impl provenant_core::Clock for SkewClock {
+    fn wall_now(&self) -> std::result::Result<WallTime, provenant_core::TimeError> {
+        self.inner.wall_now()
+    }
+    fn mono_now(&self) -> MonoTime {
+        MonoTime::from_micros(
+            self.inner.mono_now().as_micros() + self.skew.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+    fn wait_until(&self, deadline: MonoTime) -> std::result::Result<(), provenant_core::TimeError> {
+        self.inner.wait_until(deadline)
+    }
+}
+
+#[test]
+fn progress_saves_with_a_fresh_budget_after_a_long_step() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (base, cancel) = (clock(), CancelToken::new());
+    let call = call(&base, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let skewed = SkewClock {
+        inner: clock(),
+        skew: Default::default(),
+    };
+    store.drain_reactions(input.run_id, &skewed, &cancel, &mut |reaction, save| {
+        // A graph advance can run for longer than one call budget.
+        skewed
+            .skew
+            .store(120_000_000, std::sync::atomic::Ordering::SeqCst);
+        reaction.graph_done = true;
+        save(reaction)?;
+        reaction.notice_done = true;
+        reaction.log_done = true;
+        Ok(())
+    })?;
+    assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
+    assert!(store.reaction(id, &call)?.ok_or("row")?.graph_done);
+    Ok(())
+}
+
+#[test]
+fn a_step_boundary_save_survives_a_failure_after_it() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let failed = store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, save| {
+        reaction.resolved = true;
+        save(reaction)?;
+        // The step dies before it records anything else.
+        Err("crash".into())
+    });
+    assert!(failed.is_err());
+    let kept = store.reaction(id, &call)?.ok_or("row")?;
+    assert!(kept.resolved && kept.pending());
+    Ok(())
+}
+
+#[test]
+fn a_closed_run_with_pending_reactions_is_open_for_reconcile() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    assert_eq!(store.open_runs(10, &call)?, vec![input.run_id]);
+    store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+        reaction.notice_done = true;
+        reaction.log_done = true;
+        reaction.graph_done = true;
+        Ok(())
+    })?;
+    assert!(store.open_runs(10, &call)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_forged_row_cannot_carry_launch_authority() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    let id = input.attempts[0].attempt_id;
+    // A lane rewrites the row to name its own executables and config root.
+    let mut forged = serde_json::to_value(store.reaction(id, &call)?.ok_or("row")?)?;
+    forged["graph"] = serde_json::json!({
+        "configuration_root": "/tmp/evil",
+        "cwd": "/tmp/evil",
+        "executables": {"codex": "/tmp/evil/codex"},
+        "git": "/tmp/evil/git",
+        "codex_home": null,
+    });
+    store.db.execute(
+        "UPDATE reactions SET payload=?1 WHERE attempt=?2",
+        rusqlite::params![crate::db::bytes(&forged)?, id.to_string()],
+    )?;
+    // The row has no place for host authority, so it is refused, not obeyed.
+    assert!(store.reaction(id, &call).is_err());
+    let mut ran = false;
+    let result = store.drain_reactions(input.run_id, &clock, &cancel, &mut |_, _| {
+        ran = true;
+        Ok(())
+    });
+    assert!(result.is_err() && !ran);
     Ok(())
 }

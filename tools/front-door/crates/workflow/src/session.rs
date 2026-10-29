@@ -1011,6 +1011,39 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_locator_after_a_rebind_does_not_name_the_old_chair() {
+        use provenant_core::{ActorId, HostId};
+        let (temp, root, project) = setup();
+        let workspace = temp.path().canonicalize().unwrap();
+        let host = HostId::from_bytes([3; 16]);
+        let (old, new) = (ActorId::from_bytes([4; 16]), ActorId::from_bytes([5; 16]));
+        let selected = |actor| {
+            store(&root, project, "chair")
+                .with_chair(host, actor)
+                .with_workspace(workspace.clone())
+        };
+        saved(&selected(old), "notes");
+        assert_eq!(
+            chair_session_for(&root, project, old).unwrap().as_str(),
+            "chair"
+        );
+        let locations = root.as_path().join("workflow").join("session-locations");
+        let snapshot: Vec<_> = std::fs::read_dir(&locations)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                (std::fs::read(&path).unwrap(), path)
+            })
+            .collect();
+        saved(&selected(new).with_rebind(true), "notes");
+        // Put the old locator back, as a crash or a lagging writer would.
+        for (bytes, path) in snapshot {
+            std::fs::write(path, bytes).unwrap();
+        }
+        assert!(chair_session_for(&root, project, old).is_none());
+    }
+
+    #[test]
     fn discovery_truncates_overlong_rebind_history_on_read() {
         use provenant_core::{ActorId, HostId};
         let (_temp, root, project) = setup();

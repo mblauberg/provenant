@@ -1673,6 +1673,23 @@ impl RunStore {
                 Ok(())
             })?;
         }
+        // A closed run whose reactions are still owed needs a drain too.
+        if runs.len() < limit as usize {
+            let owed: Vec<String> = call.retry(|| {
+                let mut query = self.db.prepare(
+                    "SELECT run FROM reactions WHERE project=?1 AND pending=1 GROUP BY run ORDER BY MIN(rowid) LIMIT ?2",
+                )?;
+                let rows = query
+                    .query_map(params![self.context.project_id.to_string(), limit], |r| r.get(0))?;
+                Ok(rows.collect::<std::result::Result<_, _>>()?)
+            })?;
+            for id in owed {
+                let run = RunId::parse(&id).map_err(|_| RunError::Validation("run index ID"))?;
+                if !runs.contains(&run) && runs.len() < limit as usize {
+                    runs.push(run);
+                }
+            }
+        }
         Ok(runs)
     }
 

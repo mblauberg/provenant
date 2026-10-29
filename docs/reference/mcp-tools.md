@@ -456,6 +456,17 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
         ],
         "type": "object"
       },
+      "ContextLabel": {
+        "anyOf": [
+          {
+            "maxLength": 256,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
       "Id": {
         "pattern": "^[0-9a-f]{32}$",
         "type": "string"
@@ -645,6 +656,47 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
                 },
                 "build_heavy": {
                   "type": "boolean"
+                },
+                "context": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "experiment_arm": {
+                          "$ref": "#/$defs/ContextLabel"
+                        },
+                        "graph_id": {
+                          "$ref": "#/$defs/ContextLabel"
+                        },
+                        "node_id": {
+                          "$ref": "#/$defs/ContextLabel"
+                        },
+                        "pattern": {
+                          "$ref": "#/$defs/ContextLabel"
+                        },
+                        "preset": {
+                          "$ref": "#/$defs/ContextLabel"
+                        },
+                        "role": {
+                          "$ref": "#/$defs/ContextLabel"
+                        },
+                        "role_digest": {
+                          "$ref": "#/$defs/ContextLabel"
+                        },
+                        "selection_source": {
+                          "$ref": "#/$defs/ContextLabel"
+                        },
+                        "work_item": {
+                          "$ref": "#/$defs/ContextLabel"
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "deliver": {
                   "anyOf": [

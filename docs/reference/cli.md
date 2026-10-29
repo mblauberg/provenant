@@ -1792,6 +1792,33 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant route override`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "RouteOverride",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant route override list`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
 ## `provenant preset`
 
 | Argument | Contract |
@@ -2402,11 +2429,12 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id"], "name": "claude_subagents"}` |
+| `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id", "by"], "name": "claude_subagents"}` |
 | `--usage` | `{"defaults": ["false"], "name": "usage", "values": ["true", "false"]}` |
 | `--since` | `{"name": "since"}` |
 | `--until` | `{"name": "until"}` |
 | `--run-id` | `{"name": "run_id"}` |
+| `--by` | `{"conflicts": ["usage"], "name": "by", "values": ["pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
 | `--detail` | `{"conflicts": ["usage"], "defaults": ["false"], "name": "detail", "values": ["true", "false"]}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
@@ -2425,6 +2453,7 @@ Accepted by every command, before or after the subcommand.
         "since",
         "until",
         "run_id",
+        "by",
         "detail"
       ],
       "multiple": true,

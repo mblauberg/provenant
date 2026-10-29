@@ -239,7 +239,7 @@ pub fn list(
             .config
             .pacing_overrides
             .iter()
-            .filter(|o| o.expires_unix_seconds > context.now_seconds())
+            .filter(|o| o.schedule.active(context.now_seconds()))
             .cloned()
             .collect(),
         account_pacing: context
@@ -416,7 +416,7 @@ fn effective_profile<'a>(
     // provider-level default beneath it.
     let profile = account_profile.or(free_profile);
     let active = context.config.pacing_overrides.iter().rev().find(|o| {
-        o.expires_unix_seconds > context.now_seconds()
+        o.schedule.active(context.now_seconds())
             && o.account.as_deref().is_none_or(|selector| {
                 account.is_some_and(|key| {
                     selector
@@ -429,7 +429,7 @@ fn effective_profile<'a>(
             && o.provider.as_deref().is_none_or(|p| p == model.adapter())
     });
     if let Some(o) = active {
-        return (o.policy, profile, "override", Some(o.expires_unix_seconds));
+        return (o.policy, profile, "override", o.schedule.expires);
     }
     if let Some(policy) = account_profile.and_then(|p| p.policy) {
         return (policy, profile, "account", None);
