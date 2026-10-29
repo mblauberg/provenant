@@ -2736,7 +2736,7 @@ fn dispatch_inner(
     config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    for (_, title, prompt, _, models, _, _, _, _, _) in &tasks {
+    for (_, title, prompt, _, models, _, _, _, _, _, _) in &tasks {
         run::Service::scan(prompt)?;
         if let Some(title) = title {
             provenant_core::validate_task_title(title)
