@@ -1,0 +1,884 @@
+[
+  {
+    "model": "claude/claude-haiku-4-5-20251001",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "claude/claude-haiku-4-5-20251001",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "claude/claude-sonnet-5",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.1
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "claude/claude-sonnet-5",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.1
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "cursor/gpt-5.3-codex-low",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "cursor/gpt-5.3-codex-low",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/beam-free",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/beam-free",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/mimo-v2.6-flash",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/mimo-v2.6-flash",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/deepseek-v4.1-flash",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "read_ratio": 0.02,
+        "write_ratio": 0.0,
+        "output_ratio": 4.0,
+        "context_window": 1000000,
+        "read_heavy_weight": 3,
+        "price_multiplier": 1.0
+      },
+      "compaction": {
+        "window": 800000,
+        "mode": "task_boundary",
+        "min_turns": 20
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/deepseek-v4.1-flash",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "read_ratio": 0.02,
+        "write_ratio": 0.0,
+        "output_ratio": 4.0,
+        "context_window": 1000000,
+        "read_heavy_weight": 3,
+        "price_multiplier": 2.0
+      },
+      "compaction": {
+        "window": 800000,
+        "mode": "task_boundary",
+        "min_turns": 20
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/glm-5.3-flash",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/glm-5.3-flash",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/glm-5.2",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/glm-5.2",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/longcat-2.0",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/longcat-2.0",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/minimax-m3.1-flash",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/minimax-m3.1-flash",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/muse-spark-1.3-contributor",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/muse-spark-1.3-contributor",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/qwen3.8-flash",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/qwen3.8-flash",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/hy3",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/hy3",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/iceman-contributor-free",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode-go/iceman-contributor-free",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "opencode/openrouter/~anthropic/claude-fable-latest",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/openrouter/~anthropic/claude-fable-latest",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/openrouter/~anthropic/claude-haiku-latest",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/openrouter/~anthropic/claude-haiku-latest",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "claude/claude-haiku-5-5",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.1
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "claude/claude-haiku-5-5",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.1
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "codex/gpt-6-luna",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.1
+      }
+    }
+  },
+  {
+    "model": "codex/gpt-6-luna",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.1
+      }
+    }
+  },
+  {
+    "model": "codex/gpt-6.1-terra",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.05
+      },
+      "lane": {
+        "stop_early_ok": false,
+        "max_continuations": 2
+      }
+    }
+  },
+  {
+    "model": "codex/gpt-6.1-terra",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.05
+      },
+      "lane": {
+        "stop_early_ok": false,
+        "max_continuations": 2
+      }
+    }
+  },
+  {
+    "model": "codex/gpt-6.1-sol",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.05
+      }
+    }
+  },
+  {
+    "model": "codex/gpt-6.1-sol",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.05
+      }
+    }
+  },
+  {
+    "model": "claude/claude-sonnet-5-5",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.05
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "claude/claude-sonnet-5-5",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.05
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "claude/claude-opus-5-5",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.05
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "claude/claude-opus-5-5",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0,
+        "read_ratio": 0.05
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "agy/gemini-3.8-flash",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "agy/gemini-3.8-flash",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "agy/claude-sonnet-4-6",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "agy/claude-sonnet-4-6",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "agy/claude-opus-4-6-thinking",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "agy/claude-opus-4-6-thinking",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "cursor/grok-4.7",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "cursor/grok-4.7",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode/deepseek-v4.1-flash-free",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode/deepseek-v4.1-flash-free",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode/glm-5.3-flash-free",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "opencode/opencode/glm-5.3-flash-free",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "claude/custom",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "claude/custom",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0
+      },
+      "compaction": {
+        "window": 275000,
+        "mode": "task_boundary",
+        "min_turns": 14
+      }
+    }
+  },
+  {
+    "model": "codex/custom",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0
+      }
+    }
+  },
+  {
+    "model": "codex/custom",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9,
+        "write_ratio": 1.25,
+        "output_ratio": 5.0
+      }
+    }
+  },
+  {
+    "model": "opencode/custom-free",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "opencode/custom-free",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      },
+      "lane": {
+        "read_only": true
+      },
+      "result": {
+        "check": true,
+        "sections": [
+          "## Findings",
+          "## Evidence"
+        ],
+        "fallback": "codex/gpt-6-luna",
+        "fallback_effort": "high"
+      }
+    }
+  },
+  {
+    "model": "opencode/custom",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "opencode/custom",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "command/custom",
+    "at": 0,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  },
+  {
+    "model": "command/custom",
+    "at": 349200,
+    "policy": {
+      "cache": {
+        "read_share_target": 0.9
+      }
+    }
+  }
+]

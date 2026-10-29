@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 pub struct Settings {
     pub max_parallel: u64,
     pub wall_budget_seconds: u64,
+    /// Timer and open-panel polling overrides, keyed by adapter.
+    #[serde(default)]
+    pub polling_intervals: BTreeMap<String, PollingIntervals>,
     #[serde(default)]
     pub display: Display,
     #[serde(default)]
@@ -15,6 +18,28 @@ pub struct Settings {
     /// Disk cap in bytes for each account's quota history (current file plus one rotated).
     #[serde(default = "default_history_max_bytes")]
     pub history_max_bytes: u64,
+}
+/// Omitted intervals retain the provider default, in seconds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PollingIntervals {
+    pub timer_seconds: Option<u64>,
+    pub panel_seconds: Option<u64>,
+}
+impl Settings {
+    /// Apply once before scheduling or reporting, retaining provider probe controls.
+    pub fn apply_polling_intervals(&self, policies: &mut [crate::QuotaPolicy]) {
+        for policy in policies {
+            if let Some(intervals) = self.polling_intervals.get(policy.adapter) {
+                if let Some(seconds) = intervals.timer_seconds {
+                    policy.timer_seconds = seconds;
+                }
+                if let Some(seconds) = intervals.panel_seconds {
+                    policy.panel_seconds = seconds;
+                }
+            }
+        }
+    }
 }
 fn default_history_max_bytes() -> u64 {
     crate::DEFAULT_HISTORY_MAX_BYTES
@@ -61,6 +86,7 @@ impl Default for Settings {
         Self {
             max_parallel: 3,
             wall_budget_seconds: 55,
+            polling_intervals: BTreeMap::new(),
             display: Display::default(),
             calibration: BTreeMap::new(),
             history_max_bytes: default_history_max_bytes(),
@@ -83,6 +109,26 @@ impl DomainConfig for Settings {
             code: "ceiling",
         })
         .collect();
+        for (adapter, intervals) in &self.polling_intervals {
+            if provenant_records::AdapterSpec::get(adapter).is_none() {
+                errors.push(SectionError {
+                    field: format!("polling_intervals.{adapter}"),
+                    code: "adapter",
+                });
+            }
+            for (field, seconds) in [
+                ("timer_seconds", intervals.timer_seconds),
+                ("panel_seconds", intervals.panel_seconds),
+            ] {
+                // The scheduler multiplies by up to four, then uses signed seconds.
+                if seconds.is_some_and(|n| n == 0 || n > i64::MAX as u64 / 4) {
+                    errors.push(SectionError {
+                        field: format!("polling_intervals.{adapter}.{field}"),
+                        code: "interval",
+                    });
+                }
+            }
+        }
         if !(crate::MIN_HISTORY_MAX_BYTES..=crate::MAX_HISTORY_MAX_BYTES)
             .contains(&self.history_max_bytes)
         {
@@ -122,6 +168,93 @@ mod tests {
         toml_edit::de::from_str(text)
     }
     const BASE: &str = "max_parallel = 3\nwall_budget_seconds = 55\n";
+    #[test]
+    fn polling_defaults_and_adapter_overrides_reach_scheduling() {
+        use crate::schedule::{Power, Trigger, interval, next_due};
+        let mut policies = crate::source::TEST_POLICIES.to_vec();
+        let original = policies.clone();
+        let defaults = parse(BASE).unwrap();
+        assert!(defaults.polling_intervals.is_empty());
+        defaults.apply_polling_intervals(&mut policies);
+        for (before, after) in original.iter().zip(&policies) {
+            assert_eq!(before.timer_seconds, after.timer_seconds);
+            assert_eq!(before.panel_seconds, after.panel_seconds);
+        }
+        let configured = parse(&format!("{BASE}[polling_intervals.claude]\ntimer_seconds = 17\npanel_seconds = 11\n[polling_intervals.agy]\ntimer_seconds = 2000\n")).unwrap();
+        assert!(configured.validate().is_empty());
+        configured.apply_polling_intervals(&mut policies);
+        assert_eq!(
+            interval(&policies, "claude", Trigger::Timer, Power::Ac),
+            Some(17)
+        );
+        assert_eq!(
+            interval(&policies, "claude", Trigger::Panel, Power::Battery),
+            Some(22)
+        );
+        assert_eq!(
+            interval(&policies, "claude", Trigger::Timer, Power::Low),
+            Some(68)
+        );
+        assert_eq!(
+            interval(&policies, "claude", Trigger::Manual, Power::Ac),
+            Some(30)
+        );
+        assert_eq!(
+            interval(&policies, "agy", Trigger::Timer, Power::Ac),
+            Some(2000)
+        );
+        assert_eq!(
+            interval(&policies, "agy", Trigger::Panel, Power::Ac),
+            Some(900)
+        );
+        assert_eq!(interval(&policies, "agy", Trigger::Timer, Power::Low), None);
+        assert_eq!(
+            interval(&policies, "opencode", Trigger::Timer, Power::Ac),
+            Some(300)
+        );
+        let mut record = crate::AccountRecord::empty(crate::AccountScope {
+            adapter: "claude".into(),
+            account_key: "work".into(),
+            label: "work".into(),
+        });
+        record.last_attempt_unix_seconds = Some(100);
+        assert_eq!(
+            next_due(&policies, &record, Trigger::Timer, Power::Ac).unwrap(),
+            Some(117)
+        );
+        for (before, after) in original.iter().zip(&policies) {
+            assert_eq!(before.probe_seconds, after.probe_seconds);
+            assert_eq!(before.low_power, after.low_power);
+            assert_eq!(before.solo, after.solo);
+        }
+    }
+
+    #[test]
+    fn polling_intervals_reject_unknown_adapters_zero_and_overflow() {
+        for text in [
+            "[polling_intervals.unknown]\ntimer_seconds=1\n",
+            "[polling_intervals.claude]\ntimer_seconds=0\n",
+            "[polling_intervals.codex]\npanel_seconds=9223372036854775807\n",
+        ] {
+            assert!(
+                !parse(&format!("{BASE}{text}"))
+                    .unwrap()
+                    .validate()
+                    .is_empty()
+            );
+        }
+        assert!(parse(&format!("{BASE}[polling_intervals.claude]\nextra=1\n")).is_err());
+        let max = i64::MAX as u64 / 4;
+        assert!(
+            parse(&format!(
+                "{BASE}[polling_intervals.codex]\ntimer_seconds={max}\n"
+            ))
+            .unwrap()
+            .validate()
+            .is_empty()
+        );
+    }
+
     #[test]
     fn display_defaults_and_valid_values() {
         let s = parse(BASE).unwrap();

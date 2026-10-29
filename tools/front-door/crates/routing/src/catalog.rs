@@ -223,6 +223,8 @@ impl From<FixedDeadline> for String {
 /// profile, reset reference and override selectors.
 pub struct RoutingConfig {
     pub model_policy: crate::ModelPolicies,
+    /// Replace the catalogue classes and pool preference for writer advice.
+    pub writer_advisory: Option<WriterAdvisory>,
     /// Silence the advisory for Opus implementation lanes.
     pub suppress_opus_writer_warning: bool,
     pub capacity_cooldown_seconds: u64,
@@ -255,6 +257,7 @@ impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             model_policy: crate::ModelPolicies::default(),
+            writer_advisory: None,
             suppress_opus_writer_warning: false,
             capacity_cooldown_seconds: 600,
             settlement_retries: 2,
@@ -397,31 +400,31 @@ impl RoutingConfig {
         catalogue: &Catalogue,
         route: &crate::ResolvedRoute,
     ) -> Option<String> {
-        if self.suppress_opus_writer_warning || !route.model.contains("opus") {
+        let advice = self
+            .writer_advisory
+            .as_ref()
+            .unwrap_or(&catalogue.writer_advisory);
+        let applied = format!("{}/{}", route.adapter, route.model);
+        if self.suppress_opus_writer_warning
+            || !advice.warn_models.iter().any(|id| id.as_str() == applied)
+        {
             return None;
         }
-        let applied = format!("{}/{}", route.adapter, route.model);
         let pool = route
             .pool_selection
             .as_ref()
             .filter(|receipt| catalogue.has_pool(&receipt.pool))
             .map(|receipt| receipt.pool.as_str())
             .or_else(|| {
-                [
-                    "principal",
-                    "senior",
-                    "junior",
-                    "design",
-                    "writing",
-                    "utility",
-                ]
-                .into_iter()
-                .find(|name| {
-                    catalogue
-                        .pools
-                        .get(*name)
-                        .is_some_and(|members| members.iter().any(|m| m.model.as_str() == applied))
-                })
+                advice
+                    .pool_priority
+                    .iter()
+                    .map(String::as_str)
+                    .find(|name| {
+                        catalogue.pools.get(*name).is_some_and(|members| {
+                            members.iter().any(|m| m.model.as_str() == applied)
+                        })
+                    })
             })?;
         let members = self.pools.get(pool).or_else(|| catalogue.pools.get(pool))?;
         let cheaper = members
@@ -429,8 +432,8 @@ impl RoutingConfig {
             .chain(catalogue.pools.get(pool).into_iter().flatten())
             .find(|member| {
                 member.weight > 0
-                    && (member.model.model().contains("sonnet")
-                        || member.model.adapter() == "codex")
+                    && member.model.as_str() != applied
+                    && advice.cheaper_models.contains(&member.model)
             })?;
         let effort = cheaper.effort.as_deref().or_else(|| {
             route
@@ -438,8 +441,13 @@ impl RoutingConfig {
                 .as_deref()
                 .filter(|effort| cheaper.efforts.iter().any(|e| e == effort))
         });
+        let writer = advice
+            .label
+            .as_ref()
+            .map(|label| format!("{label} writer"))
+            .unwrap_or_else(|| "Writer".into());
         Some(format!(
-            "advisory: Opus writer route {applied}; consider cheaper {pool} route {}{} (silence with domains.routing.suppress_opus_writer_warning = true)",
+            "advisory: {writer} route {applied}; consider cheaper {pool} route {}{} (silence with domains.routing.suppress_opus_writer_warning = true)",
             cheaper.model.as_str(),
             effort
                 .map(|effort| format!(" effort={effort}"))
@@ -457,6 +465,9 @@ impl DomainConfig for RoutingConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
         self.model_policy.validate(&mut errors);
+        if let Some(advice) = &self.writer_advisory {
+            advice.validate("writer_advisory", &mut errors);
+        }
         if self.settlement_retries > MAX_SETTLEMENT_RETRIES {
             errors.push(SectionError {
                 field: "settlement_retries".into(),
@@ -961,6 +972,48 @@ impl RoutePoolMember {
 fn default_weight() -> u8 {
     1
 }
+/// Catalogue classes used only for cost advice, separate from answering-family evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriterAdvisory {
+    /// Display label for the warning class; omitted labels use generic writer advice.
+    #[serde(default)]
+    pub label: Option<String>,
+    pub warn_models: Vec<ModelId>,
+    pub cheaper_models: Vec<ModelId>,
+    pub pool_priority: Vec<String>,
+}
+impl WriterAdvisory {
+    fn validate(&self, prefix: &str, errors: &mut Vec<SectionError>) {
+        if self.label.as_deref().is_some_and(|label| {
+            label.is_empty() || label.len() > 128 || label.chars().any(char::is_control)
+        }) {
+            errors.push(SectionError {
+                field: format!("{prefix}.label"),
+                code: "label",
+            });
+        }
+        if self.warn_models.len() > 256 || self.cheaper_models.len() > 256 {
+            errors.push(SectionError {
+                field: prefix.into(),
+                code: "limit",
+            });
+        }
+        let mut seen = BTreeSet::new();
+        if self.pool_priority.len() > 32
+            || self
+                .pool_priority
+                .iter()
+                .any(|pool| !identifier(pool) || !seen.insert(pool))
+        {
+            errors.push(SectionError {
+                field: format!("{prefix}.pool_priority"),
+                code: "selector",
+            });
+        }
+    }
+}
+
 /// Only the bundled asset constructs a catalogue. A caller cannot deserialize or
 /// change family/effort rows while retaining an existing revision.
 #[derive(Debug, Clone, Serialize)]
@@ -970,6 +1023,7 @@ pub struct Catalogue {
     pub(crate) models: Vec<ModelEntry>,
     pub(crate) pools: BTreeMap<String, Vec<RoutePoolMember>>,
     pub(crate) pacing: BTreeMap<String, PacingPolicy>,
+    pub(crate) writer_advisory: WriterAdvisory,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -995,6 +1049,10 @@ impl Catalogue {
             models: asset.models,
             pools: asset.pools,
             pacing: asset.pacing,
+            writer_advisory: toml_edit::de::from_str(include_str!(
+                "../assets/writer-advisory.toml"
+            ))
+            .map_err(|_| RoutingError::Catalogue)?,
         };
         value.validate()?;
         Ok(value)
@@ -1053,6 +1111,24 @@ impl Catalogue {
         &self.models
     }
     pub fn validate(&self) -> Result<(), RoutingError> {
+        let mut advice_errors = Vec::new();
+        self.writer_advisory
+            .validate("writer_advisory", &mut advice_errors);
+        if !advice_errors.is_empty()
+            || self
+                .writer_advisory
+                .warn_models
+                .iter()
+                .chain(&self.writer_advisory.cheaper_models)
+                .any(|id| self.model(id).is_none())
+            || self
+                .writer_advisory
+                .pool_priority
+                .iter()
+                .any(|pool| !self.has_pool(pool))
+        {
+            return Err(RoutingError::Catalogue);
+        }
         let mut seen = BTreeSet::new();
         if self.schema_version != 1 || !identifier(&self.revision) || self.models.len() > 256 {
             return Err(RoutingError::Catalogue);
@@ -1161,6 +1237,91 @@ mod tests {
     use crate::{AccessContext, Fallback, RouteChoice, RouteRequest, RoutingContext, resolve};
     use provenant_providers::{AvailabilityRecord, REGISTRY};
     use provenant_records::{RouteEligibility, RouteReadiness};
+
+    #[test]
+    fn writer_advisory_classes_and_pool_priority_are_overridable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let catalogue = Catalogue::bundled()?;
+        let config = RoutingConfig::default();
+        let context = RoutingContext {
+            policy_account_hint: None,
+            catalogue: &catalogue,
+            config: &config,
+            registry: REGISTRY,
+            availability: &[],
+            quota: &[],
+            capacity_cooldowns: &[],
+            access: &[],
+            now: provenant_core::WallTime::from_micros(0)?,
+            host: "test-host",
+        };
+        let request = |id| -> Result<RouteRequest, RoutingError> {
+            Ok(RouteRequest {
+                intent: Default::default(),
+                choice: RouteChoice::Model(ModelId::parse(id)?),
+                effort: None,
+                confidential: false,
+                allow_free: false,
+                fallback: Fallback::None,
+            })
+        };
+        let mut route = resolve(&request("claude/claude-opus-5-5")?, &context)?;
+        let default = config
+            .opus_writer_advisory(&catalogue, &route)
+            .ok_or("default advisory missing")?;
+        assert!(default.starts_with("advisory: Opus writer route"));
+        assert!(
+            default.contains("principal route codex/gpt-6.1-sol effort=high"),
+            "{default}"
+        );
+        let changed: RoutingConfig = toml_edit::de::from_str(
+            r#"
+            [writer_advisory]
+            warn_models = ["claude/claude-opus-5-5", "codex/gpt-6.1-sol"]
+            cheaper_models = ["claude/claude-sonnet-5-5", "codex/gpt-6.1-sol"]
+            pool_priority = ["design", "senior", "principal"]
+        "#,
+        )?;
+        assert!(changed.validate().is_empty());
+        let advisory = changed
+            .opus_writer_advisory(&catalogue, &route)
+            .ok_or("override missing")?;
+        assert!(
+            advisory.contains("design route claude/claude-sonnet-5-5"),
+            "{advisory}"
+        );
+        route.adapter = "codex".into();
+        route.model = "gpt-6.1-sol".into();
+        assert!(config.opus_writer_advisory(&catalogue, &route).is_none());
+        let changed_advice = changed
+            .opus_writer_advisory(&catalogue, &route)
+            .ok_or("class override missing")?;
+        assert!(changed_advice.starts_with("advisory: Writer route codex/gpt-6.1-sol"));
+        assert!(
+            changed_advice.contains("cheaper senior route claude/claude-sonnet-5-5"),
+            "must not recommend the applied model: {changed_advice}"
+        );
+        // Familiar spelling on an uncatalogued ID supplies no class evidence.
+        route.model = "unknown-opus".into();
+        assert!(config.opus_writer_advisory(&catalogue, &route).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn writer_advisory_rejects_invalid_pool_order() -> Result<(), Box<dyn std::error::Error>> {
+        for pools in [r#"["design", "design"]"#, r#"["bad pool"]"#] {
+            let config: RoutingConfig = toml_edit::de::from_str(&format!(
+                "[writer_advisory]\nwarn_models=[]\ncheaper_models=[]\npool_priority={pools}\n"
+            ))?;
+            assert!(
+                config
+                    .validate()
+                    .iter()
+                    .any(|e| e.field == "writer_advisory.pool_priority")
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn model_policy_fallbacks_are_warned_and_reconciled() -> Result<(), Box<dyn std::error::Error>>

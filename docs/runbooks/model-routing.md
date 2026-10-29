@@ -70,6 +70,25 @@ under `[domains.routing]` in the selected state's `config.toml`. Catalogue
 presence does not establish adapter availability; readiness is decided at
 dispatch, so inspect the resolved route recorded for the attempt.
 
+Writer cost advice uses exact model classes and ordered pool names from the
+bundled `routing/assets/writer-advisory.toml` catalogue data. It does not infer
+classes from model spelling. Replace those lists in the selected state's
+configuration, for example:
+
+```toml
+[domains.routing.writer_advisory]
+warn_models = ["claude/claude-opus-5-5"]
+cheaper_models = ["claude/claude-sonnet-5-5", "codex/gpt-6.1-sol"]
+pool_priority = ["design", "principal", "senior", "junior"]
+```
+
+The applied bundled pool takes precedence over `pool_priority`; exact models
+and custom pools use the first matching bundled pool in that list. Advice
+classes are independent of the provider evidence used for answering-family
+assurance. Empty model lists disable the corresponding advice. Optional `label`
+names the warning class; omitting it gives generic writer wording. The applied
+model is always excluded from its own alternatives.
+
 ## Review shapes
 
 Review shapes describe groups of read-only reviewers. Each group names a

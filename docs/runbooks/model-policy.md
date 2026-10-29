@@ -2,7 +2,13 @@
 Owner: provenant-routing
 Anchor: tools/front-door/crates/routing/src/policy.rs
 
-Model policy lives under `[domains.routing.model_policy]` in the state root's
+Bundled model policy is embedded from
+`tools/front-door/crates/routing/assets/model-policy.toml`. It uses the same
+`ModelPolicyRule` selectors, schedules and overlays as configuration, and is the
+single source for DeepSeek's peak schedule and multiplier. Telemetry's price
+table records base rates only.
+
+Model policy overrides live under `[domains.routing.model_policy]` in the selected state root's
 `config.toml`. It supplies compaction and cache planning advice, pool preferences,
 lane guidance and enforced result checks. Inspect the selected policy and its
 sources with `provenant route resolve MODEL`; `--account KEY` previews an account's
@@ -17,6 +23,13 @@ Rules support inclusive starts, exclusive expiries and hour windows in the
 schedule's optional IANA `tz` zone (UTC by default). An overnight window wraps
 midnight, including across weekday boundaries. Inactive rules have no effect. Put temporary
 overrides after enduring rules of the same scope.
+
+`model_suffix` matches the end of the provider-native model ID. Combine it with
+`adapter` to scope open-ended classes, such as OpenCode's `-free` routes.
+It has model scope for precedence. Supplied selectors are combined; malformed
+suffixes drop the rule, or refuse configuration when it enforces a restriction.
+For project-specific policy, use the project's selected state configuration;
+add `account` to limit any override to one account.
 
 ```toml
 [domains.routing.model_policy]
