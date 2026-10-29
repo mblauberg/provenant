@@ -126,6 +126,7 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         .zip(r.session.clone())
         .map(|(adapter, session)| provenant_records::TranscriptRef { adapter, session });
     Ok(AttemptFact {
+        context: r.context,
         attempt_id: r.attempt_id,
         task_id: r.task_id,
         attempt_number: r.attempt_number,
@@ -759,6 +760,9 @@ pub(crate) fn write_grants_fit(grants: &[WriteGrantRecord]) -> bool {
 }
 
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
+    if r.context.as_ref().is_some_and(|context| !context.valid()) {
+        return Err(RunError::Validation("work context"));
+    }
     if let Some(delivery) = &r.delivery
         && (delivery.schema_version != 1
             || delivery.head != r.head

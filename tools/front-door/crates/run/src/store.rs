@@ -281,6 +281,7 @@ impl RunStore {
             for (index, task) in input.request.tasks.iter().enumerate() {
                 let new = input.attempts.iter().find(|a| a.task_id == task.task_id).ok_or(RunError::Validation("missing task prompt"))?;
                 let attempt = AttemptRecord {extra: Default::default(),
+                    context: task.context.clone(),
                     title: task.title.clone(),
                     continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
                     profile: task.profile.clone(),
@@ -836,6 +837,13 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
     let mut attempts = std::collections::BTreeSet::new();
     let mut prompt_bytes = 0u64;
     for task in &input.request.tasks {
+        if task
+            .context
+            .as_ref()
+            .is_some_and(|context| !context.valid())
+        {
+            return Err(RunError::Validation("work context"));
+        }
         if let Some(deliver) = &task.deliver {
             if task.writer.is_none() {
                 return Err(RunError::Validation("delivery requires a writer"));

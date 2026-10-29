@@ -31,6 +31,7 @@ fn prices(rate: Option<u64>) -> PriceTable {
 }
 fn fact(number: u64, input: Option<u64>) -> AttemptFact {
     AttemptFact {
+        context: None,
         attempt_id: AttemptId::from_bytes(u128::from(number).to_be_bytes()),
         task_id: TaskId::from_bytes([1; 16]),
         attempt_number: number,
@@ -898,4 +899,42 @@ fn unread_chair_sessions_are_counted_not_dropped() {
     assert_eq!(chair.unread[&crate::Unread::TranscriptNotFound], 1);
     assert_eq!(chair.unread[&crate::Unread::NoConfigDir], 1);
     assert!(chair.groups.is_empty());
+}
+
+#[test]
+fn groups_by_context_including_missing() {
+    let mut first = fact(1, Some(10));
+    first.context = Some(provenant_records::run::WorkContext {
+        role: Some("reviewer".into()),
+        ..Default::default()
+    });
+    let mut second = fact(2, Some(20));
+    second.context = first.context.clone();
+    let report = stats_by_context(
+        [first, second, fact(3, Some(30))],
+        &prices(Some(1)),
+        Window::default(),
+        ContextKey::Role,
+    )
+    .unwrap();
+    let groups = report.context_groups.unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(
+        groups
+            .iter()
+            .find(|g| g.value.as_deref() == Some("reviewer"))
+            .unwrap()
+            .totals
+            .attempts,
+        2
+    );
+    assert_eq!(
+        groups
+            .iter()
+            .find(|g| g.value.is_none())
+            .unwrap()
+            .totals
+            .attempts,
+        1
+    );
 }

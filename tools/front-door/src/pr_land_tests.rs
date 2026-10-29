@@ -81,6 +81,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                 chair: None,
                 operation_id: OperationId::parse(&format!("contribution-{index}"))?,
                 tasks: vec![DispatchTask {
+                    context: None,
                     build_heavy: false,
                     title: None,
                     profile: Default::default(),
@@ -395,6 +396,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
                 chair: None,
                 operation_id: OperationId::parse(operation)?,
                 tasks: vec![DispatchTask {
+                    context: None,
                     build_heavy: false,
                     title: None,
                     profile: Default::default(),

@@ -78,6 +78,13 @@ impl<'a> Service<'a> {
             check_launch_capabilities(task, &route)?;
         }
         for mut task in input.tasks {
+            if task
+                .context
+                .as_ref()
+                .is_some_and(|context| !context.valid())
+            {
+                return Err(input_error(ErrorKind::Invalid, "invalid work context"));
+            }
             task.route = Self::route(task.route)?;
             Self::scan(&task.prompt)?;
             if let Some(title) = &task.title {
@@ -222,6 +229,7 @@ impl<'a> Service<'a> {
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
             requests.push(TaskRequest {
+                context: task.context,
                 extra: Default::default(),
                 build_heavy: task.build_heavy,
                 title: task.title,
@@ -615,6 +623,7 @@ impl From<&RunError> for ErrorKind {
 
 /// Prepared transport-independent dispatch input.
 pub struct DispatchTask {
+    pub context: Option<provenant_records::run::WorkContext>,
     pub build_heavy: bool,
     pub title: Option<String>,
     pub task_id: provenant_core::TaskId,

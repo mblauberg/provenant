@@ -83,8 +83,51 @@ impl HarnessProfile {
         self.knobs.get(name).and_then(serde_json::Value::as_u64)
     }
 }
+/// Descriptive labels only. They do not grant authority. Each value is at most 256 UTF-8 bytes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_arm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_source: Option<String>,
+}
+impl WorkContext {
+    pub fn valid(&self) -> bool {
+        [
+            &self.work_item,
+            &self.graph_id,
+            &self.node_id,
+            &self.preset,
+            &self.pattern,
+            &self.role,
+            &self.role_digest,
+            &self.experiment_arm,
+            &self.selection_source,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|s| !s.trim().is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<WorkContext>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     /// Select the build-heavy scheduling priority for this task.
@@ -603,6 +646,8 @@ pub enum WriteSource {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<WorkContext>,
     #[serde(flatten)]
     pub extra: crate::ExtraFields,
     /// Human-supplied task title, when provided at submission.
@@ -814,6 +859,7 @@ mod tests {
             fresh_continuation: None,
             schema_version: 1,
             tasks: vec![TaskRequest {
+                context: None,
                 extra: Default::default(),
                 build_heavy: false,
                 title: None,
