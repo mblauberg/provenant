@@ -3551,6 +3551,7 @@ fn validate_flat_plan(
         if routes.iter().any(|route| !route_is_bounded(route)) {
             return Err("route field size");
         }
+        // Configured aliases resolve model providers, whose registry excludes host-native.
         for (index, route) in routes.iter().enumerate() {
             if route.adapter.as_deref() == Some("host-native")
                 && !routes[index + 1..]

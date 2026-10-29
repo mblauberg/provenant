@@ -1440,9 +1440,134 @@ fn claude_dispatch_refreshes_registered_account() -> Result {
 
 fn host_native_dispatch_uses_the_declared_agent_and_refuses_resume() -> Result {
     if !graph_fixture_available()? {
+        writeln!(
+            io::stderr(),
+            "host_native_dispatch_uses_the_declared_agent_and_refuses_resume skipped: graph fixture unavailable"
+        )?;
         return Ok(());
     }
     claude_dispatch(true)
+}
+
+fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
+    let can_launch = graph_fixture_available()?;
+    let rig = claude_fixture()?;
+    let cleanup = rig.process_cleanup();
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pools]\ngraph-test = [{{ model = 'claude/claude-sonnet-5-5' }}]"
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    assert_eq!(
+        code(&rig.execute(
+            &git,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Initial",
+            ],
+            None,
+        )?),
+        0
+    );
+    let created = rig.command(&[
+        "worktree",
+        "create",
+        "graph-repair",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(code(&created), 0, "{created:?}");
+    for path in [
+        ".cargo/bin",
+        ".cargo/registry",
+        ".cargo/git",
+        "Library/pnpm",
+        "Library/Caches/pnpm",
+        ".cache/node",
+        ".rustup/toolchains",
+        ".codex",
+        ".claude/hooks",
+        ".kiro/settings",
+        ".gemini/config",
+        ".cursor/extensions",
+        ".npm",
+    ] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(
+            &json!({"schema_version":1,"graph_id":"native-fallback","nodes":[
+                {"id":"repair","prompt":"reply OK","access":"worktree_write",
+                 "worktree":".worktrees/graph-repair","delivery":"none","routes":[
+                    {"adapter":"host-native","name":"absent"},
+                    {"alias":"graph-test","account":"pro"}
+                 ]}
+            ]}),
+        )?,
+    )?;
+    let started = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(code(&started), 0, "{started:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let status = rig.command(&["fabric", "graph", "status", "native-fallback", "--json"])?;
+        assert_eq!(code(&status), 0, "{status:?}");
+        let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+        let repair = &status["data"]["checkpoint"]["nodes"][0];
+        if status["data"]["status"] == "complete" {
+            let attempts = repair["attempts"].as_array().ok_or("attempts")?;
+            assert_eq!(attempts.len(), 2, "{status}");
+            assert_eq!(attempts[0]["outcome"], "adapter_unavailable", "{status}");
+            assert_eq!(attempts[0]["launched"], false, "{status}");
+            if can_launch {
+                assert_eq!(attempts[1]["launched"], true, "{status}");
+                assert_eq!(repair["state"], "succeeded", "{status}");
+            }
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{status}");
+        std::thread::park_timeout(std::time::Duration::from_millis(50));
+    }
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    assert_eq!(code(&lanes), 0, "{lanes:?}");
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let lanes = lanes["data"]["lanes"].as_array().ok_or("lanes")?;
+    assert_eq!(lanes.len(), 2);
+    let refused = lanes
+        .iter()
+        .find(|lane| lane["requested_route"]["provider"] == "host-native")
+        .ok_or("host-native attempt")?;
+    assert_eq!(refused["state"], "rejected", "{refused}");
+    assert_eq!(
+        refused["reason"],
+        "host-native absent is not configured in domains.fabric.host_native"
+    );
+    if !can_launch {
+        writeln!(
+            io::stderr(),
+            "unconfigured_host_native_repair_launches_alias_fallback: verified prepare refusal and alias fallback; launch assertion skipped: graph fixture unavailable"
+        )?;
+    }
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
 }
 
 fn host_native_preparation_uses_the_provider_contract() -> Result {
@@ -3172,6 +3297,7 @@ fn main() -> ExitCode {
                 "claude_dispatch_refreshes_registered_account",
                 "host_native_dispatch_uses_the_declared_agent_and_refuses_resume",
                 "host_native_preparation_uses_the_provider_contract",
+                "unconfigured_host_native_repair_launches_alias_fallback",
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_settlement_records_a_failed_advance_for_status",
                 "opencode_free_pool_cools_second_model",
@@ -3219,6 +3345,9 @@ fn main() -> ExitCode {
                     }
                     "host_native_preparation_uses_the_provider_contract" => {
                         host_native_preparation_uses_the_provider_contract()
+                    }
+                    "unconfigured_host_native_repair_launches_alias_fallback" => {
+                        unconfigured_host_native_repair_launches_alias_fallback()
                     }
                     "graph_settlement_advances_writer_and_account_routed_review" => {
                         graph_settlement_advances_writer_and_account_routed_review()
