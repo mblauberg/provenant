@@ -879,7 +879,7 @@ impl ExperimentProject {
                 "seed",
             ],
         ] {
-            let output = Command::new("git")
+            let output = provenant_os::fixture::git_command()
                 .current_dir(&project)
                 .args(args)
                 .output()?;
