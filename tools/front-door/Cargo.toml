@@ -85,6 +85,7 @@ provenant-run = { workspace = true }
 provenant-providers = { workspace = true }
 provenant-cli = { workspace = true }
 provenant-core = { workspace = true }
+provenant-routing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml_edit = { workspace = true }

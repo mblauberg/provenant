@@ -47,8 +47,8 @@ all role briefs and defaults.
 | --- | --- | --- |
 | `scout-swarm` | `width = 4`, `read_roots = []` | Junior scouts, then senior synthesis |
 | `generator-evaluator` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `delivery = "none"` | Senior writer, then the lens list over the commit it wrote |
-| `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `risk`, `review_shape`, `risk_tags` | One lens role fanned out over `lenses`, then senior synthesis |
-| `scope-then-run` | `width = 3`, `worktree`, `write_scope = ["."]`, `base`, `spec`, `delivery = "none"` | Scouts, a senior scoping stage that states criteria or `NEEDS-USER`, then `generator-evaluator` |
+| `review-council` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `risk_tier`, `review_shape`, `risk_tags` | One lens role fanned out over `lenses`, then senior synthesis |
+| `scope-then-run` | `width = 3`, `worktree`, `write_scope = ["."]`, `base`, `spec`, `delivery = "none"` | Scouts, a senior scoping stage, a verdict gate (a blocked scope launches no writer), then `generator-evaluator` |
 | `big-batch` | `lanes`, `batch_worktree`, `base`, `spec`, `integration_branch = "batch/graph"`, `width = 4`, `read_roots = []` | Scout, one writer lane per `lanes` entry, council, principal refactor, two-round repair and review |
 
 Write list parameters in a TOML file and pass `--params-file lanes.toml`. The
@@ -159,7 +159,7 @@ subject node states both. Prompts live in
 
 The routing review shapes are canonical for who reviews. A lens whose `tier`
 is empty takes its pool from the shape that `routing.review.select_shape`
-picks for `risk` (or the `review_shape` override): `quick` runs one junior
+picks for `risk_tier` (or the `review_shape` override): `quick` runs one junior
 reviewer, `standard` two, and `deep` up to six with its named lenses. Conditional
 lenses add to that count. Set a lens `tier` to override the shape for that lens.
 `--explain` prints the selected shape. Synthesis reconciles the evidence and

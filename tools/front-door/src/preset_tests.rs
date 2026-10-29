@@ -250,6 +250,8 @@ impl provenant_fabric_runtime::graph::GraphJournal for PresetJournal {
 
 #[derive(Default)]
 struct PresetOwner {
+    /// Nodes whose result carries `VERDICT: FAIL`.
+    failing: Vec<String>,
     launched: Vec<String>,
     integration_pins: usize,
 }
@@ -279,7 +281,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         self.launched.push(key.node_id.clone());
         let mut result =
             provenant_records::result_capture::ResultCapture::new(node.required_verdict);
-        result.push(b"Evidence checked.\nVERDICT: PASS\n");
+        result.push(if self.failing.contains(&key.node_id) {
+            b"Blocked on the user.\nVERDICT: FAIL\n".as_slice()
+        } else {
+            b"Evidence checked.\nVERDICT: PASS\n".as_slice()
+        });
         Ok(AttemptObservation::Terminal {
             attempt_ref: Some(format!("fixture/{}", key.node_id)),
             outcome: AttemptOutcome::Succeeded,
@@ -818,12 +824,9 @@ fn read_roots_are_confined_to_the_project_or_the_host_allow_list()
     Ok(())
 }
 
-fn council(
-    overrides: &[&str],
-    shape: Option<super::preset::ShapeHint>,
-) -> Result<serde_json::Value, String> {
+fn council(overrides: &[&str], shapes: bool) -> Result<serde_json::Value, String> {
     let mut layers = Layers::empty();
-    layers.shape = shape;
+    layers.review = shapes.then(provenant_routing::ReviewConfig::default);
     let overrides: Vec<String> = overrides.iter().map(|s| (*s).to_owned()).collect();
     expand(&layers, "review-council", "the change", &overrides).map(|e| e.document)
 }
@@ -839,7 +842,7 @@ fn lens_ids(document: &serde_json::Value) -> Vec<String> {
 
 #[test]
 fn review_council_fans_out_one_lens_role_over_the_lens_list() {
-    let document = council(&["parameters.worktree='/repo/lane'"], None).unwrap();
+    let document = council(&["parameters.worktree='/repo/lane'"], false).unwrap();
     assert_eq!(
         lens_ids(&document),
         [
@@ -869,7 +872,7 @@ fn triggered_lenses_follow_the_risk_tags() {
             "parameters.worktree='/repo/lane'",
             "parameters.risk_tags=['security','terminal']",
         ],
-        None,
+        false,
     )
     .unwrap();
     let ids = lens_ids(&document);
@@ -880,13 +883,14 @@ fn triggered_lenses_follow_the_risk_tags() {
 
 #[test]
 fn lens_tiers_come_from_the_review_shape_unless_overridden() {
-    let shape = super::preset::ShapeHint {
-        name: "standard".into(),
-        source: "risk".into(),
-        slots: vec!["junior".into(), "junior".into()],
-        named: Vec::new(),
-    };
-    let document = council(&["parameters.worktree='/repo/lane'"], Some(shape.clone())).unwrap();
+    let document = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.review_shape='standard'",
+        ],
+        true,
+    )
+    .unwrap();
     let nodes = document["nodes"][1]["composite"]["nodes"]
         .as_array()
         .unwrap();
@@ -895,15 +899,160 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
     let document = council(
         &[
             "parameters.worktree='/repo/lane'",
+            "parameters.review_shape='standard'",
             "parameters.lenses=[{name='tests',tier='principal',prompt_file='code-review/lenses/tests',distinct_from='',when=''}]",
         ],
-        Some(shape),
+        true,
     )
     .unwrap();
     let nodes = document["nodes"][1]["composite"]["nodes"]
         .as_array()
         .unwrap();
     assert_eq!(nodes[0]["route"]["alias"], "principal");
+}
+
+fn lens_count(document: &serde_json::Value, council: &str) -> usize {
+    let council = document["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == council)
+        .unwrap();
+    council["composite"]["nodes"][1]["composite"]["nodes"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+#[test]
+fn each_review_stage_selects_its_shape_from_its_own_parameters() {
+    let mut layers = Layers::empty();
+    layers.review = Some(provenant_routing::ReviewConfig::default());
+    let batch = [
+        "parameters.batch_worktree='/repo/batch'".to_owned(),
+        "parameters.lanes=[{name='one',worktree='/repo/one',scope=['.'],spec=''}]".to_owned(),
+    ];
+    let plain = expand(&layers, "big-batch", "brief", &batch).unwrap();
+    let standard = lens_count(&plain.document, "council");
+    // A stage-level risk tier reaches that stage's shape selection.
+    let mut high = batch.to_vec();
+    high.push("council.risk_tier='high'".into());
+    let high = expand(&layers, "big-batch", "brief", &high).unwrap();
+    assert_ne!(lens_count(&high.document, "council"), standard);
+    assert!(high.review_shape.unwrap().contains("deep (by_risk)"));
+    // A parent's ambient risk tier reaches a child that declares it.
+    let mut layers = Layers::empty();
+    layers.review = Some(provenant_routing::ReviewConfig::default());
+    layers
+        .insert(
+            "repo",
+            "wrap",
+            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nrisk_tier = 'low'\n",
+        )
+        .unwrap();
+    let low = expand(&layers, "wrap", "brief", &[]).unwrap();
+    assert_eq!(low.review_shape.as_deref(), Some("quick (by_risk)"));
+}
+
+#[test]
+fn nested_set_paths_keep_the_rest_of_a_childs_table_default() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "wrap",
+            "stages = [{ id = 'child', preset = 'generator-evaluator', parameters = { worktree = '/repo/lane' } }]\n",
+        )
+        .unwrap();
+    let result = expand(
+        &layers,
+        "wrap",
+        "brief",
+        &["child.subject.commit='refs/heads/x'".into()],
+    )
+    .unwrap();
+    let source = &result.document["nodes"][0]["composite"]["nodes"][0]["source"];
+    assert_eq!(source["type"], "commit");
+    assert_eq!(source["commit"], "refs/heads/x");
+    let _: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(result.document).unwrap();
+}
+
+#[test]
+fn malformed_parameter_schemas_are_refused() {
+    for (schema, expect) in [
+        (
+            "{ type = 'integer', default = 3, max = '2' }",
+            "max must be a number",
+        ),
+        (
+            "{ type = 'integer', default = 3, min = true }",
+            "min must be a number",
+        ),
+        (
+            "{ type = 'integer', default = 3, min = 5, max = 2 }",
+            "min must not exceed max",
+        ),
+        (
+            "{ type = 'string', default = 'a', enum = 'a' }",
+            "enum must be a nonempty list",
+        ),
+        (
+            "{ type = 'string', default = 'a', enum = [] }",
+            "enum must be a nonempty list",
+        ),
+        ("{ type = 'strng', default = 'a' }", "type must be one of"),
+        ("{ type = 3, default = 'a' }", "type must be one of"),
+        (
+            "{ type = 'boolean', default = true, max = 1 }",
+            "apply to numbers",
+        ),
+    ] {
+        let mut layers = Layers::empty();
+        layers
+            .insert(
+                "repo",
+                "bad",
+                &format!("extends = 'single'\n[parameters]\nextra = {schema}\n"),
+            )
+            .unwrap();
+        let error = expand(&layers, "bad", "brief", &[]).unwrap_err();
+        assert!(
+            error.contains("parameters.extra") && error.contains(expect),
+            "{schema}: {error}"
+        );
+    }
+}
+
+#[test]
+fn child_stage_errors_name_the_stage_path_and_origin() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "wrap",
+            "stages = [{ id = 'child', preset = 'fan-out' }]\n",
+        )
+        .unwrap();
+    let error = expand(&layers, "wrap", "brief", &["child.width=0".into()]).unwrap_err();
+    assert!(
+        error.contains("child.width") && error.contains("(--set)"),
+        "{error}"
+    );
+    layers
+        .insert(
+            "repo",
+            "wrap2",
+            "stages = [{ id = 'child', preset = 'fan-out', parameters = { width = 99 } }]\n",
+        )
+        .unwrap();
+    let error = expand(&layers, "wrap2", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("child.width") && error.contains("(entry)"),
+        "{error}"
+    );
+    let result = expand(&layers, "wrap", "brief", &["child.width=3".into()]).unwrap();
+    assert_eq!(result.origins["expanded.child.parameters.width"], "--set");
 }
 
 #[test]
@@ -913,7 +1062,7 @@ fn unknown_prompt_files_and_foreign_distinct_from_values_are_refused() {
             "parameters.worktree='/repo/lane'",
             "parameters.lenses=[{name='x',tier='senior',prompt_file='code-review/lenses/nope',distinct_from='',when=''}]",
         ],
-        None,
+        false,
     )
     .unwrap_err();
     assert!(error.contains("prompt_file"), "{error}");
@@ -922,7 +1071,7 @@ fn unknown_prompt_files_and_foreign_distinct_from_values_are_refused() {
             "parameters.worktree='/repo/lane'",
             "parameters.lenses=[{name='x',tier='senior',prompt_file='code-review/lenses/tests',distinct_from='reviewer',when=''}]",
         ],
-        None,
+        false,
     )
     .unwrap_err();
     assert!(error.contains("distinct_from"), "{error}");
@@ -1165,5 +1314,34 @@ fn unknown_pattern_fields_and_levels_are_refused() {
         expand(&layers, "single", "brief", &[])
             .unwrap_err()
             .contains("unknown field")
+    );
+}
+
+#[test]
+fn a_blocked_scope_launches_no_writer() {
+    use provenant_fabric_runtime::graph::advance_with_budget;
+    let document = bundled_fixture("scope-then-run");
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner {
+        failing: vec!["scope".into()],
+        ..Default::default()
+    };
+    let mut journal = PresetJournal::default();
+    let _ = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &config.limits,
+        &config.budget,
+    );
+    assert!(
+        owner.launched.iter().any(|id| id == "scope"),
+        "{:?}",
+        owner.launched
+    );
+    assert!(
+        owner.launched.iter().all(|id| !id.starts_with("run")),
+        "{:?}",
+        owner.launched
     );
 }

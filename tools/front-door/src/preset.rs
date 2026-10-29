@@ -60,10 +60,10 @@ fn prompt_file(name: &str) -> Result<&'static str, String> {
 
 const DEPTH: usize = 8;
 
-/// The review shape selected for this run. Review shapes are canonical for who
-/// reviews; presets compose them, so lens counts and tiers default from here.
+/// The review shape selected for one review stage. Review shapes are canonical
+/// for who reviews; presets compose them, so lens counts and tiers default from here.
 #[derive(Clone, Debug, Default)]
-pub struct ShapeHint {
+struct ShapeHint {
     pub name: String,
     pub source: String,
     /// Reviewer pools in shape order, one entry per reviewer.
@@ -74,7 +74,10 @@ pub struct ShapeHint {
 
 #[derive(Default)]
 pub struct Layers {
-    pub shape: Option<ShapeHint>,
+    /// Routing review shapes. Each review stage selects its own shape from its
+    /// final `review_shape` and `risk_tier` parameters.
+    pub review: Option<provenant_routing::ReviewConfig>,
+    used_shapes: std::cell::RefCell<BTreeSet<String>>,
     entries: BTreeMap<String, Vec<(String, Value)>>,
     errors: BTreeMap<String, Vec<String>>,
     repo_files: BTreeSet<String>,
@@ -385,13 +388,16 @@ const TYPE_NAMES: [&str; 6] = ["string", "integer", "number", "boolean", "list",
 const AMBIENT: [&str; 2] = ["risk_tier", "subject"];
 
 /// A table made only of typed-parameter keys. Other tables are plain values.
+/// A `type` that is not a type name marks a plain value (`{ type = "commit" }`)
+/// unless the table has a `default`, which only a schema carries.
 fn is_fragment(value: &Value) -> bool {
     value.as_object().is_some_and(|map| {
         !map.is_empty()
             && map.keys().all(|key| SPEC_KEYS.contains(&key.as_str()))
-            && map
-                .get("type")
-                .is_none_or(|kind| kind.as_str().is_some_and(|kind| TYPE_NAMES.contains(&kind)))
+            && (map.contains_key("default")
+                || map
+                    .get("type")
+                    .is_none_or(|kind| kind.as_str().is_none_or(|kind| TYPE_NAMES.contains(&kind))))
     })
 }
 
@@ -510,16 +516,26 @@ fn override_stage(
         return Err(format!("{path}: a stage {} cannot be overridden", field[0]));
     }
     if entry.get("preset").is_some() {
-        let target = entry
+        let entry = entry
             .as_object_mut()
-            .ok_or("stage entries must be tables")?
-            .entry("parameters")
-            .or_insert_with(|| json!({}));
-        set_nested(target, field, replacement.clone())?;
+            .ok_or("stage entries must be tables")?;
+        if field.len() == 1 {
+            let target = entry.entry("parameters").or_insert_with(|| json!({}));
+            set_nested(target, field, replacement.clone())?;
+        } else {
+            // A nested path applies to the child's resolved defaults, not the
+            // entry, so the rest of a table value survives.
+            entry
+                .entry("set")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or("stage set must be a table")?
+                .insert(field.join("."), replacement.clone());
+        }
     } else {
         set_nested(entry, field, replacement.clone())?;
     }
-    origins.insert(path.into(), origin.into());
+    origins.insert(format!("{}.{}", parts[0], field.join(".")), origin.into());
     Ok(true)
 }
 
@@ -630,6 +646,41 @@ fn flatten_parameters(
         let default = value
             .get("default")
             .ok_or_else(|| fail("typed parameter needs a default".into()))?;
+        if let Some(kind) = value.get("type")
+            && !kind.as_str().is_some_and(|kind| TYPE_NAMES.contains(&kind))
+        {
+            return Err(fail(format!(
+                "type must be one of {}",
+                TYPE_NAMES.join(", ")
+            )));
+        }
+        for bound in ["min", "max"] {
+            if let Some(limit) = value.get(bound)
+                && !limit.is_number()
+            {
+                return Err(fail(format!("{bound} must be a number")));
+            }
+        }
+        if let Some(allowed) = value.get("enum")
+            && !allowed.as_array().is_some_and(|list| !list.is_empty())
+        {
+            return Err(fail("enum must be a nonempty list".into()));
+        }
+        if let (Some(min), Some(max)) = (
+            value.get("min").and_then(Value::as_f64),
+            value.get("max").and_then(Value::as_f64),
+        ) && min > max
+        {
+            return Err(fail("min must not exceed max".into()));
+        }
+        if (value.get("min").is_some() || value.get("max").is_some())
+            && !matches!(
+                default,
+                Value::Number(_) | Value::Array(_) | Value::String(_)
+            )
+        {
+            return Err(fail("min and max apply to numbers, lists and text".into()));
+        }
         let fits = match value.get("type").and_then(Value::as_str) {
             Some("string") => default.is_string(),
             Some("integer") => default.is_i64() || default.is_u64(),
@@ -729,6 +780,7 @@ pub fn expand_with(
     params: &[(String, Value)],
     overrides: &[String],
 ) -> Result<Expansion, String> {
+    layers.used_shapes.borrow_mut().clear();
     let mut repo_files = Vec::new();
     let (mut config, mut origins) = layers.resolve_inner(name, &mut Vec::new(), &mut repo_files)?;
     for (key, value) in params {
@@ -801,10 +853,15 @@ pub fn expand_with(
         return Err("expanded graph exceeds the 8 MiB graph document limit".into());
     }
     Ok(Expansion {
-        review_shape: layers
-            .shape
-            .as_ref()
-            .map(|shape| format!("{} ({})", shape.name, shape.source)),
+        review_shape: Some(
+            layers
+                .used_shapes
+                .take()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+        .filter(|shapes| !shapes.is_empty()),
         document,
         origins,
         repo_files,
@@ -1237,6 +1294,37 @@ impl StageBuilder<'_> {
         Ok(incoming)
     }
 
+    /// The shape this stage's final parameters select, if shapes are configured.
+    fn shape_hint(&self) -> Result<Option<ShapeHint>, String> {
+        let Some(review) = &self.layers.review else {
+            return Ok(None);
+        };
+        let text = |key: &str| {
+            self.parameters
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        };
+        let selected = review.select_shape(text("review_shape"), text("risk_tier"), None, &[])?;
+        let mut hint = ShapeHint {
+            name: selected.name.to_owned(),
+            source: selected.source.to_owned(),
+            ..Default::default()
+        };
+        for group in &selected.shape.reviewers {
+            hint.slots
+                .extend(std::iter::repeat_n(group.pool.clone(), group.count));
+            for lens in &group.lenses {
+                hint.named.push((lens.clone(), group.pool.clone()));
+            }
+        }
+        self.layers
+            .used_shapes
+            .borrow_mut()
+            .insert(format!("{} ({})", hint.name, hint.source));
+        Ok(Some(hint))
+    }
+
     /// Apply `when` triggers and the selected review shape to a lens list.
     /// An item without a tier takes it from the shape, and only such items count
     /// against the shape's reviewer total; a tier set in the preset is an override.
@@ -1247,7 +1335,8 @@ impl StageBuilder<'_> {
             .and_then(Value::as_array)
             .map(|tags| tags.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
-        let shape = self.layers.shape.as_ref();
+        let hint = self.shape_hint()?;
+        let shape = hint.as_ref();
         let limit = shape.map_or(usize::MAX, |shape| shape.slots.len().max(1));
         let mut governed = 0usize;
         let mut selected = Vec::new();
@@ -1383,9 +1472,18 @@ impl StageBuilder<'_> {
                 (node, true)
             } else if let Some(child) = object.remove("preset") {
                 let child = child.as_str().ok_or("preset must be a name")?;
-                let (mut config, child_origins) =
+                let (mut config, resolved_origins) =
                     self.layers
                         .resolve_inner(child, &mut Vec::new(), self.repo_files)?;
+                // Origins local to this child: its layers, then this stage's
+                // entry values (or the `--set` that wrote them), then ambient ones.
+                let mut local = resolved_origins;
+                let stage_origin = |origins: &BTreeMap<String, String>, path: &str| {
+                    origins
+                        .get(&format!("{id}.{path}"))
+                        .cloned()
+                        .unwrap_or_else(|| "entry".into())
+                };
                 let mut passed: Vec<String> = Vec::new();
                 if let Some(parameters) = object.remove("parameters") {
                     let parameters =
@@ -1404,9 +1502,25 @@ impl StageBuilder<'_> {
                             &mut config,
                             &format!("parameters.{key}"),
                             value.clone(),
-                            &mut BTreeMap::new(),
-                            "entry",
-                        )?;
+                            &mut local,
+                            &stage_origin(self.origins, key),
+                        )
+                        .map_err(|error| format!("stage {id}: {error}"))?;
+                    }
+                }
+                if let Some(sets) = object.remove("set") {
+                    for (path, value) in sets.as_object().ok_or("stage set must be a table")? {
+                        let value =
+                            interpolate(value, &self.parameters, self.prompt, index as usize)?;
+                        passed.push(path.split('.').next().unwrap_or(path).to_owned());
+                        override_value(
+                            &mut config,
+                            &format!("parameters.{path}"),
+                            value,
+                            &mut local,
+                            &stage_origin(self.origins, path),
+                        )
+                        .map_err(|error| format!("stage {id}: {error}"))?;
                     }
                 }
                 for key in AMBIENT {
@@ -1418,7 +1532,7 @@ impl StageBuilder<'_> {
                             &mut config,
                             &format!("parameters.{key}"),
                             value.clone(),
-                            &mut BTreeMap::new(),
+                            &mut local,
                             "ambient",
                         )?;
                     }
@@ -1430,13 +1544,10 @@ impl StageBuilder<'_> {
                         .ok_or("preset must be a table")?
                         .entry("roles")
                         .or_insert_with(|| json!({}));
-                    merge(target, &roles, "roles", "entry", &mut BTreeMap::new())?;
-                }
-                for (key, origin) in child_origins {
-                    self.origins.insert(format!("expanded.{id}.{key}"), origin);
+                    merge(target, &roles, "roles", "entry", &mut local)?;
                 }
                 let mut children = Vec::new();
-                let ends = build(
+                let built = build(
                     self.layers,
                     child,
                     &config,
@@ -1445,9 +1556,20 @@ impl StageBuilder<'_> {
                     &[],
                     self.stack,
                     &mut children,
-                    self.origins,
+                    &mut local,
                     self.repo_files,
-                )?;
+                );
+                for (key, origin) in local {
+                    let key = if key.starts_with("expanded.") {
+                        key
+                    } else {
+                        format!("expanded.{id}.{key}")
+                    };
+                    self.origins.insert(key, origin);
+                }
+                // Name the failing value by the stage that received it.
+                let ends =
+                    built.map_err(|error| error.replacen("parameters.", &format!("{id}."), 1))?;
                 let exports = object
                     .remove("exports")
                     .or_else(|| config.get("exports").cloned())
@@ -1973,27 +2095,6 @@ fn params_file(path: &Path) -> Result<Vec<(String, Value)>, String> {
         .collect())
 }
 
-/// A top-level string parameter as supplied by `--params-file` or `--set`.
-fn requested_parameter(
-    key: &str,
-    params: &[(String, Value)],
-    overrides: &[String],
-) -> Option<String> {
-    let mut found = params
-        .iter()
-        .find(|(name, _)| name == key)
-        .and_then(|(_, value)| value.as_str().map(str::to_owned));
-    for item in overrides {
-        if let Some((path, raw)) = item.split_once('=')
-            && path == format!("parameters.{key}")
-            && let Ok(parsed) = toml_edit::de::from_str::<Value>(&format!("value = {raw}"))
-        {
-            found = parsed["value"].as_str().map(str::to_owned);
-        }
-    }
-    found.filter(|value| !value.is_empty())
-}
-
 pub fn run(
     request: provenant_cli::Dispatch,
     globals: &provenant_cli::Globals,
@@ -2028,27 +2129,7 @@ pub fn run(
             provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
                 .map_err(|e| e.to_string())?;
         let mut layers = configured(globals)?;
-        let requested = |key: &str| requested_parameter(key, &params, &request.preset_set);
-        let (named, risk) = (requested("review_shape"), requested("risk_tier"));
-        let selected = config.domains.routing.review.select_shape(
-            named.as_deref(),
-            risk.as_deref(),
-            None,
-            &[],
-        )?;
-        let mut hint = ShapeHint {
-            name: selected.name.to_owned(),
-            source: selected.source.to_owned(),
-            ..Default::default()
-        };
-        for group in &selected.shape.reviewers {
-            hint.slots
-                .extend(std::iter::repeat_n(group.pool.clone(), group.count));
-            for lens in &group.lenses {
-                hint.named.push((lens.clone(), group.pool.clone()));
-            }
-        }
-        layers.shape = Some(hint);
+        layers.review = Some(config.domains.routing.review.clone());
         let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
         let policy =
             discover_read_roots(&directory, &config.domains.fabric.graph.allowed_read_roots);
