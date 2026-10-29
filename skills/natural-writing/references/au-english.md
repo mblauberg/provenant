@@ -109,7 +109,7 @@ not text you quote.
 - Do not stack three-or-more-word hyphen chains or `versus`-joined modifiers
   (`urban-versus-rural`, `pre-and-post-intervention`); recast as a
   prepositional or relative clause. This is usually a noun tower wearing
-  hyphens; see the anti-AI taxonomy's noun-stacking section.
+  hyphens.
 
 ## Terminology
 
