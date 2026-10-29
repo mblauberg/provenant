@@ -25,6 +25,10 @@ use std::{io, io::Read, path::Path};
 const REQUEST_LIMIT: u64 = 256 * 1024;
 const FACT_LIFETIME_SECONDS: u64 = 300;
 const WAIT_SECONDS: u64 = 30;
+/// Guidance only: a checkpoint is meant to hold current state in about this many bytes.
+const CHECKPOINT_SOFT_BYTES: u64 = 2048;
+/// A checkpoint larger than this draws a warning. Smaller ones are quiet.
+const CHECKPOINT_WARN_BYTES: u64 = 8 * 1024;
 
 #[derive(Debug, Subcommand)]
 pub enum Workflow {
@@ -517,12 +521,6 @@ fn execute(
                 .with_revisions(keep)
                 .save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
             let mut warnings = saved.warnings;
-            let soft_bytes =
-                provenant_config::read_with_domains(&edge.roots, &crate::domains::SECTIONS)
-                    .ok()
-                    .and_then(|config| config.retention.projects.get(&project.to_string()).cloned())
-                    .unwrap_or_default()
-                    .checkpoint_soft_bytes;
             let references = checkpoint_references(std::str::from_utf8(&text).unwrap_or_default());
             let closed = std::thread::scope(|scope| {
                 let tasks: Vec<_> = references
@@ -535,7 +533,7 @@ fn execute(
                     .filter_map(|(number, closed)| closed.then_some(number))
                     .collect::<Vec<_>>()
             });
-            warnings.extend(checkpoint_warnings(&text, soft_bytes, |number| {
+            warnings.extend(checkpoint_warnings(&text, |number| {
                 closed.contains(&number)
             }));
             Ok(serde_json::json!({
@@ -558,14 +556,10 @@ fn execute(
 }
 
 /// Advisory only: failed or unavailable GitHub lookups leave the save intact.
-fn checkpoint_warnings(
-    text: &[u8],
-    soft_bytes: u64,
-    mut closed: impl FnMut(u64) -> bool,
-) -> Vec<String> {
+fn checkpoint_warnings(text: &[u8], mut closed: impl FnMut(u64) -> bool) -> Vec<String> {
     let mut warnings = Vec::new();
-    if text.len() as u64 > soft_bytes {
-        warnings.push(format!("checkpoint is {} bytes (soft budget {soft_bytes}); rewrite current state rather than appending history", text.len()));
+    if text.len() as u64 > CHECKPOINT_WARN_BYTES {
+        warnings.push(format!("checkpoint is {} bytes (the soft budget is {CHECKPOINT_SOFT_BYTES}); rewrite current state rather than appending history", text.len()));
     }
     let refs = checkpoint_references(std::str::from_utf8(text).unwrap_or_default());
     let stale: Vec<_> = refs.into_iter().filter(|number| closed(*number)).collect();
@@ -988,16 +982,16 @@ pub fn run(
 mod tests {
     #[test]
     fn checkpoint_advisories_are_soft_and_ignore_unavailable_references() {
-        let large = vec![b'x'; 2049];
-        assert!(super::checkpoint_warnings(&large, 2048, |_| false)[0].contains("soft budget"));
+        let large = vec![b'x'; 8 * 1024 + 1];
+        assert!(super::checkpoint_warnings(&large, |_| false)[0].contains("soft budget is 2048"));
         assert!(
-            super::checkpoint_warnings(b"Current PR #12 and issue #13", 2048, |n| n == 13)[0]
+            super::checkpoint_warnings(b"Current PR #12 and issue #13", |n| n == 13)[0]
                 .contains("#13")
         );
-        assert!(
-            super::checkpoint_warnings(b"Current PR #12 and issue #13", 2048, |_| false).is_empty()
-        );
-        assert!(super::checkpoint_warnings(&large, 4096, |_| false).is_empty());
+        assert!(super::checkpoint_warnings(b"Current PR #12 and issue #13", |_| false).is_empty());
+        // Between the 2 KiB guidance and the 8 KiB warning size, nothing is said.
+        assert!(super::checkpoint_warnings(&vec![b'x'; 4096], |_| false).is_empty());
+        assert!(super::checkpoint_warnings(&vec![b'x'; 8 * 1024], |_| false).is_empty());
         assert_eq!(
             super::checkpoint_references("é PR #12, issue #13, pull/14, issues/15; PR #12"),
             vec![12, 13, 14, 15]

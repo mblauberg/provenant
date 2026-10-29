@@ -2668,6 +2668,11 @@ mod tests {
             )),
             "{text}"
         );
+        // The checkout the hook ran in is named, so the save works from anywhere.
+        assert!(
+            text.contains("--file <checkpoint.md> --project '/work'"),
+            "{text}"
+        );
         // The default store shows the plain command.
         let text = context(&hook_with(&root, project, &CommandPrefix::default(), 0));
         assert!(text.contains(&format!(

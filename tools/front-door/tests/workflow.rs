@@ -1069,6 +1069,86 @@ fn long_checkpoints_save_up_to_the_documented_bound() -> Result {
 }
 
 #[test]
+fn checkpoint_warns_only_above_eight_kib() -> Result {
+    let rig = TestRig::new()?;
+    let file = rig.root.join("warn.md");
+    let save = |bytes: usize| -> Result<Value> {
+        std::fs::write(&file, "x".repeat(bytes - 1) + "\n")?;
+        call(
+            &rig,
+            &[
+                "workflow",
+                "session",
+                "save",
+                "s-warn",
+                "--file",
+                &file.to_string_lossy(),
+            ],
+            0,
+        )
+    };
+    assert_eq!(save(8 * 1024)?["data"]["warnings"], json!([]));
+    let warned = save(8 * 1024 + 1)?;
+    let warnings = warned["data"]["warnings"].as_array().ok_or("warnings")?;
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0]
+            .as_str()
+            .ok_or("warning")?
+            .contains("the soft budget is 2048")
+    );
+    Ok(())
+}
+
+#[test]
+fn session_save_reads_stdin_and_never_rewrites_its_source() -> Result {
+    let rig = TestRig::new()?;
+    let source = rig.root.join("checkpoint.md");
+    std::fs::write(&source, "chair notes\n")?;
+    let source_arg = source.to_string_lossy().into_owned();
+    call(
+        &rig,
+        &[
+            "workflow",
+            "session",
+            "save",
+            "s-source",
+            "--file",
+            &source_arg,
+        ],
+        0,
+    )?;
+    assert_eq!(std::fs::read_to_string(&source)?, "chair notes\n");
+    let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("production binary path")?;
+    let state = rig.state.to_string_lossy().into_owned();
+    let output = rig.execute(
+        std::path::Path::new(binary),
+        &[
+            "--state-dir",
+            &state,
+            "workflow",
+            "session",
+            "save",
+            "s-stdin",
+            "--file",
+            "-",
+            "--json",
+        ],
+        Some(b"from stdin\n"),
+    )?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let shown = call(&rig, &["workflow", "session", "show", "s-stdin"], 0)?;
+    assert_eq!(shown["data"]["markdown"], "from stdin\n");
+    assert_eq!(std::fs::read_to_string(&source)?, "chair notes\n");
+    Ok(())
+}
+
+#[test]
 fn session_save_warns_once_only_when_disk_is_low() -> Result {
     let rig = TestRig::new()?;
     let file = rig.root.join("checkpoint.md");
