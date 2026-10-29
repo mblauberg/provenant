@@ -260,7 +260,7 @@ fn a_held_cargo_lock_wait_is_bounded_too() -> Result {
     fs::create_dir_all(&profile)?;
     // Another cargo holds the target directory's build lock.
     let lock = fs::File::create(profile.join(".cargo-lock"))?;
-    provenant_os::sys::fs::try_flock(&lock, provenant_os::fs::LockMode::Exclusive)?;
+    lock.try_lock()?;
     let mut waiter = rig
         .command(1, 1, &["build"])
         .env("CARGO_TARGET_DIR", rig.state.join("target"))
