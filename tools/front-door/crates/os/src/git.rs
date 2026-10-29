@@ -2,7 +2,8 @@
 use crate::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use std::{
     ffi::{OsStr, OsString},
-    fs, io,
+    fs,
+    io::{self, Read},
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     time::Duration,
@@ -13,6 +14,59 @@ use std::{
 pub enum RepositoryPath {
     Toplevel,
     CommonDir,
+}
+
+/// A checkout marker, including paths only when its metadata is well formed.
+/// The marker itself remains visible even when those paths cannot be read.
+pub struct RepositoryMarker {
+    pub git_dir: Option<PathBuf>,
+    pub common_dir: Option<PathBuf>,
+}
+
+/// Inspect a checkout marker without consulting the inherited Git environment.
+/// This is for guards that must recognise even an invalid or incomplete marker.
+pub fn repository_marker(top: &Path) -> Option<RepositoryMarker> {
+    let marker = top.join(".git");
+    fs::symlink_metadata(&marker).ok()?;
+    if fs::metadata(&marker).is_ok_and(|metadata| metadata.is_dir()) {
+        return Some(RepositoryMarker {
+            git_dir: Some(marker.clone()),
+            common_dir: Some(marker),
+        });
+    }
+    let git_dir = read_marker_line(&marker)
+        .ok()
+        .and_then(|line| {
+            line.strip_prefix("gitdir: ")
+                .map(|path| path.trim().to_owned())
+        })
+        .filter(|line| !line.is_empty())
+        .map(|line| top.join(line));
+    let common_dir =
+        git_dir.as_ref().and_then(
+            |private| match read_marker_line(&private.join("commondir")) {
+                Ok(line) if !line.trim().is_empty() => Some(private.join(line.trim())),
+                Ok(_) => None,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Some(private.clone()),
+                Err(_) => None,
+            },
+        );
+    Some(RepositoryMarker {
+        git_dir,
+        common_dir,
+    })
+}
+
+fn read_marker_line(path: &Path) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take(4097).read_to_end(&mut bytes)?;
+    let line = bytes
+        .strip_suffix(b"\n")
+        .ok_or_else(|| io::Error::other("incomplete Git marker"))?;
+    if bytes.len() > 4096 || line.is_empty() || line.contains(&0) || line.contains(&b'\n') {
+        return Err(io::Error::other("invalid Git marker"));
+    }
+    String::from_utf8(line.to_vec()).map_err(io::Error::other)
 }
 
 /// Resolve and validate a repository path without inheriting Git redirects.
@@ -271,6 +325,27 @@ mod tests {
                 fs::canonicalize(&common).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn marker_discovery_keeps_invalid_markers_visible() {
+        let temp = tempfile::tempdir().unwrap();
+        let top = temp.path().join("checkout");
+        let private = temp.path().join("private");
+        fs::create_dir(&top).unwrap();
+        fs::create_dir(&private).unwrap();
+        fs::write(top.join(".git"), format!("gitdir: {}\n", private.display())).unwrap();
+        fs::write(private.join("commondir"), "../common\n").unwrap();
+        let marker = repository_marker(&top).unwrap();
+        assert_eq!(marker.git_dir, Some(private.clone()));
+        assert_eq!(marker.common_dir, Some(private.join("../common")));
+        fs::write(top.join(".git"), b"gitdir: bad\nextra\n").unwrap();
+        let marker = repository_marker(&top).unwrap();
+        assert!(marker.git_dir.is_none());
+        assert!(marker.common_dir.is_none());
+        fs::write(top.join(".git"), vec![b'x'; 4097]).unwrap();
+        assert!(repository_marker(&top).unwrap().git_dir.is_none());
+        assert!(repository_marker(&temp.path().join("missing")).is_none());
     }
 
     #[test]
