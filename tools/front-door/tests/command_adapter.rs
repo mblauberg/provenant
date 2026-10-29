@@ -281,15 +281,23 @@ fn command_custom_shebang_runtime_keeps_credentials_and_writes_denied() -> Resul
     let cleanup = rig.process_cleanup();
     let runtime = rig.root.join("custom-runtime/bin/interpreter");
     fs::create_dir_all(runtime.parent().ok_or("runtime parent")?)?;
-    rig.copy_executable(std::path::Path::new("/bin/sh"), &runtime)?;
-    // A copied platform binary is killed by the kernel until it is re-signed.
-    if std::path::Path::new("/usr/bin/codesign").exists() {
-        let signed = std::process::Command::new("/usr/bin/codesign")
-            .args(["-s", "-", "--force"])
-            .arg(&runtime)
-            .output()?;
-        assert!(signed.status.success(), "{signed:?}");
-    }
+    // A natively linked shim is signed by the linker; a copied platform
+    // binary can be killed by the kernel even after ad hoc re-signing.
+    let source = runtime.with_file_name("interpreter.c");
+    fs::write(
+        &source,
+        "#include <unistd.h>\nint main(int argc, char **argv) {\n    (void)argc;\n    argv[0] = \"sh\";\n    execv(\"/bin/sh\", argv);\n    return 127;\n}\n",
+    )?;
+    let Ok(built) = std::process::Command::new("cc")
+        .arg("-o")
+        .arg(&runtime)
+        .arg(&source)
+        .output()
+    else {
+        return Ok(());
+    };
+    assert!(built.status.success(), "{built:?}");
+    fs::remove_file(&source)?;
     fs::write(runtime.with_file_name("neighbour"), "private runtime data")?;
     let script = rig.project.join("check-script");
     fs::write(
