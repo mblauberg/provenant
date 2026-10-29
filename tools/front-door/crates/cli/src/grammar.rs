@@ -504,7 +504,7 @@ pub struct DispatchInput {
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
     /// Expand and run a named pipeline preset
-    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "operation_id"])]
+    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "network", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "allow_free", "provider_timeout", "operation_id"])]
     pub preset: Option<String>,
     /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
     #[arg(long = "set", requires = "preset")]
