@@ -7,6 +7,8 @@ pub use refs::*;
 mod ids;
 pub use bytes::{hex, unhex};
 pub use ids::*;
+mod line;
+pub use line::bounded_line;
 mod time;
 pub use time::*;
 mod work;

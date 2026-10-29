@@ -1070,11 +1070,7 @@ impl RunStore {
 
 /// A lane's own words in a one-line reason: bounded and on one line.
 fn bounded_note(note: &str) -> String {
-    let line: String = note.split_whitespace().collect::<Vec<_>>().join(" ");
-    match line.char_indices().nth(240) {
-        Some((end, _)) => format!("{}...", &line[..end]),
-        None => line,
-    }
+    provenant_confinement::redact::bounded_line(note, 240)
 }
 
 #[cfg(test)]

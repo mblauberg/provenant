@@ -24,6 +24,7 @@ const MAX_UTILITY_TIMEOUT: Duration = Duration::from_secs(provenant_core::MAX_LA
 const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 const MAX_GIT_LOG: u64 = 1000;
 const MAX_LANE_CONFIG_FILES: usize = 32;
+/// The longest fetch stderr excerpt, in characters.
 const MAX_FETCH_STDERR: usize = 1024;
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
@@ -906,54 +907,7 @@ pub(crate) fn fetch_missing_remote_branch(
 }
 
 fn fetch_stderr_excerpt(bytes: &[u8]) -> String {
-    let safe = crate::redact::known_shapes(bytes)
-        .unwrap_or_else(|_| b"fetch stderr could not be sanitised".to_vec());
-    let mut stderr: String = String::from_utf8_lossy(&safe)
-        .chars()
-        .map(|character| {
-            if character.is_control() || is_format_character(character) {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
-    if stderr.len() > MAX_FETCH_STDERR {
-        let mut end = MAX_FETCH_STDERR - '…'.len_utf8();
-        while !stderr.is_char_boundary(end) {
-            end -= 1;
-        }
-        stderr.truncate(end);
-        stderr.push('…');
-    }
-    stderr
-}
-
-fn is_format_character(character: char) -> bool {
-    matches!(
-        character as u32,
-        0x00AD
-            | 0x0600..=0x0605
-            | 0x061C
-            | 0x06DD
-            | 0x070F
-            | 0x0890..=0x0891
-            | 0x08E2
-            | 0x180E
-            | 0x200B..=0x200F
-            | 0x202A..=0x202E
-            | 0x2060..=0x2064
-            | 0x2066..=0x206F
-            | 0xFEFF
-            | 0xFFF9..=0xFFFB
-            | 0x110BD
-            | 0x110CD
-            | 0x13430..=0x1343F
-            | 0x1BCA0..=0x1BCA3
-            | 0x1D173..=0x1D17A
-            | 0xE0001
-            | 0xE0020..=0xE007F
-    )
+    crate::redact::bounded_line(&String::from_utf8_lossy(bytes), MAX_FETCH_STDERR)
 }
 
 /// Run a read for the release scan, where shallow boundaries must not hide
@@ -2534,7 +2488,7 @@ pub(crate) mod tests {
             return Err(format!("unexpected error: {error}").into());
         };
         assert_ne!(status, 0);
-        assert!(stderr.len() <= MAX_FETCH_STDERR);
+        assert!(stderr.chars().count() <= MAX_FETCH_STDERR);
 
         fixture.run(&[
             "remote",
@@ -2570,7 +2524,7 @@ pub(crate) mod tests {
         let excerpt = fetch_stderr_excerpt(long_secret.as_bytes());
         assert!(!excerpt.contains("secret"));
         assert!(excerpt.contains("[REDACTED]"));
-        assert!(excerpt.len() <= MAX_FETCH_STDERR);
+        assert!(excerpt.chars().count() <= MAX_FETCH_STDERR);
         Ok(())
     }
 

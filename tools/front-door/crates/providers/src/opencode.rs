@@ -289,7 +289,7 @@ fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
         let end = cause.find("\" ").or_else(|| cause.rfind('"'))?;
         // The log escapes newlines, so the first stack frame ends the cause.
         let first = cause[..end].split("\\n").next()?.trim();
-        let first: String = first
+        let printable: String = first
             .chars()
             .map(|c| {
                 if c.is_ascii_graphic() || c == ' ' {
@@ -298,8 +298,8 @@ fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
                     '?'
                 }
             })
-            .take(LIMIT)
             .collect();
+        let first = provenant_confinement::redact::bounded_line(&printable, LIMIT);
         (!first.is_empty()).then(|| format!("opencode server failed with HTTP {digits}: {first}"))
     })
 }
@@ -847,10 +847,16 @@ mod tests {
             "level=INFO cause=\"{}\" http.status=503\n",
             "x".repeat(1000)
         );
+        let diagnostic = failure_diagnostic(long.as_bytes()).unwrap();
         assert_eq!(
-            failure_diagnostic(long.as_bytes()).unwrap().len(),
+            diagnostic.chars().count(),
             240 + "opencode server failed with HTTP 503: ".len()
         );
+        assert!(diagnostic.ends_with('…'));
+        let secret =
+            "level=INFO cause=\"fetch https://user:secret@example.invalid/x\" http.status=500\n";
+        let redacted = failure_diagnostic(secret.as_bytes()).unwrap();
+        assert!(!redacted.contains("secret"), "{redacted}");
         for unrelated in [
             "level=INFO cause=\"boom\" http.status=404\n",
             "level=INFO message=\"ok\" http.status=500\n",
