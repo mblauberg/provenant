@@ -4,9 +4,12 @@ One worker owns one `Store` connection at `<StateRoot>/fabric/fabric.sqlite3`.
 Supply a validated, local-filesystem state root, a core clock and a cancellation
 token in `Request`. Contention waits once, inside SQLite, for the busy timeout
 that `provenant-sqlite` sets at open; the store's advisory locks wait for the
-same bound, and a store still busy after it reports `Error::Busy`. The store
-starts no threads. It creates
-private directories and files through supervisor, refuses observed symlinks and
+same bound, and a store still busy after it reports `Error::Busy`. An open
+holds `locks/fabric.sqlite3.init.lock` through file creation, the switch to WAL
+and migrations, because SQLite never calls its busy handler on that switch.
+Host-only databases lock in `fabric` itself, outside the lane-writable `locks`.
+The store starts no threads. It creates private directories and files through
+supervisor, refuses observed symlinks and
 non-private components, and uses SQLite WAL, FULL sync and foreign keys.
 The database and any `-wal`, `-shm` or `-journal` companions must be private
 regular files with one link, owned by the effective UID. Zero-link observations

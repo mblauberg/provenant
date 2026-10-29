@@ -1,8 +1,8 @@
 use crate::*;
 use provenant_core::{CancelToken, Clock, StateRoot};
-use provenant_os::fs::Directory;
 #[cfg(test)]
 use provenant_os::fs::Metadata;
+use provenant_os::fs::{Directory, FsError, LockMode};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 #[cfg(test)]
 use std::path::PathBuf;
@@ -214,20 +214,20 @@ impl Store {
     }
 
     pub fn open(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
-        Self::open_database(root, request, "fabric.sqlite3", Some("locks"))
+        Self::open_database(root, request, "fabric.sqlite3", true)
     }
 
     /// Host-only records live outside the exact coordination DB grants lanes
     /// receive. Reuse all directory, companion and migration checks.
     pub(crate) fn open_host(root: &StateRoot, request: &Request<'_>) -> Result<Self> {
-        Self::open_database(root, request, "host.sqlite3", None)
+        Self::open_database(root, request, "host.sqlite3", false)
     }
 
     fn open_database(
         root: &StateRoot,
         request: &Request<'_>,
         database: &str,
-        locks_name: Option<&str>,
+        landing_locks: bool,
     ) -> Result<Self> {
         request.check()?;
         let mut directory = Directory::root(true)?;
@@ -268,6 +268,48 @@ impl Store {
         )?;
         let path = root.as_path().join("fabric");
         private(&fabric, &path)?;
+        // Lanes may write only the shared database files and `locks`, so the
+        // shared database's initialisation lock lives there. Host-only
+        // databases ignore that lane-writable directory and lock in `fabric`.
+        let locks = if landing_locks {
+            match fabric.mkdir(OsStr::new("locks"), 0o700) {
+                Ok(()) => fabric.sync()?,
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.into()),
+            }
+            let locks = checked_directory(
+                &fabric,
+                OsStr::new("locks"),
+                Some(fabric.metadata()?.device),
+            )?;
+            private(&locks, &path.join("locks"))?;
+            Some(locks)
+        } else {
+            None
+        };
+        let lock_directory = locks.as_ref().unwrap_or(&fabric);
+        // SQLite serialises transactions, but first-file and WAL setup precede
+        // them, and it never calls the busy handler on the switch to WAL.
+        let lock_name = OsString::from(format!("{database}.init.lock"));
+        // Concurrent non-exclusive O_CREAT opens can fail with ENOENT on macOS.
+        match lock_directory.create_new(&lock_name) {
+            Ok(_) => {}
+            Err(error) if error.is_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let _initialisation = lock_directory
+            .lock(
+                &lock_name,
+                LockMode::Exclusive,
+                request.lock_budget(),
+                request.cancel,
+                request.clock,
+            )
+            .map_err(|error| match error {
+                FsError::LockTimeout { .. } => Error::Busy,
+                FsError::Cancelled { .. } => Error::Cancelled,
+                error => error.into(),
+            })?;
         let db_path = path.join(database);
         match fabric.create_new(OsStr::new(database)) {
             Ok(file) => {
@@ -285,22 +327,6 @@ impl Store {
         if database == "fabric.sqlite3" {
             provenant_sqlite::retain_read_only_wal(&db)?;
         }
-        let locks = if let Some(locks_name) = locks_name {
-            match fabric.mkdir(OsStr::new(locks_name), 0o700) {
-                Ok(()) => fabric.sync()?,
-                Err(error) if error.is_exists() => {}
-                Err(error) => return Err(error.into()),
-            }
-            let locks = checked_directory(
-                &fabric,
-                OsStr::new(locks_name),
-                Some(fabric.metadata()?.device),
-            )?;
-            private(&locks, &path.join(locks_name))?;
-            Some(locks)
-        } else {
-            None
-        };
         let store = Self {
             db,
             locks,

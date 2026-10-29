@@ -629,6 +629,28 @@ fn cold_open_race_serialises_schema_setup() {
         second.join().unwrap();
     });
 }
+#[test]
+fn concurrent_cold_opens_wait_for_one_initialiser() {
+    // SQLite never calls the busy handler on the switch to WAL, so without
+    // the initialisation lock a second cold open reports busy at once.
+    for _ in 0..10 {
+        let f = Fixture::new();
+        let barrier = Barrier::new(8);
+        std::thread::scope(|scope| {
+            let opens: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        Store::open(&f.root, &f.request()).map(drop)
+                    })
+                })
+                .collect();
+            for open in opens {
+                assert!(matches!(open.join().unwrap(), Ok(())));
+            }
+        });
+    }
+}
 #[cfg(unix)]
 #[test]
 fn state_symlinks_and_non_private_components_are_refused() {

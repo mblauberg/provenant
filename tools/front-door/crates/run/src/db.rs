@@ -18,6 +18,8 @@ pub struct ExecutionContext {
     pub actor_id: ActorId,
     pub read_prompts: bool,
 }
+/// How long a launch waits for its guardian to acknowledge custody.
+const GUARDIAN_HANDSHAKE_MICROS: u64 = 30_000_000;
 pub struct Request<'a> {
     pub clock: &'a dyn Clock,
     pub cancel: &'a CancelToken,
@@ -27,6 +29,14 @@ impl Request<'_> {
     /// now: the same allowance as SQLite's busy timeout.
     pub fn lock_budget(&self) -> WaitBudget {
         provenant_sqlite::lock_budget(self.clock.mono_now())
+    }
+    /// The wait for a guardian's launch handshake that starts now. It is not
+    /// store contention, so the store busy timeout never shortens it.
+    pub fn handshake_budget(&self) -> WaitBudget {
+        WaitBudget::up_to(
+            self.clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(GUARDIAN_HANDSHAKE_MICROS),
+        )
     }
     pub(crate) fn check(&self) -> Result<()> {
         if self.cancel.is_cancelled() {

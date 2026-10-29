@@ -1466,7 +1466,7 @@ impl RunStore {
             OwnedLaunch {
                 command,
                 lease: &mut lease,
-                handshake: call.lock_budget(),
+                handshake: call.handshake_budget(),
                 cancel: call.cancel,
                 clock: call.clock,
             },
