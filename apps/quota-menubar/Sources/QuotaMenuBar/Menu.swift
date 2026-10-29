@@ -79,13 +79,13 @@ enum QuotaMenu {
     static func entries(for model: QuotaModel, now: Date) -> [MenuEntry] {
         entries(report: model.report, error: model.error, updatedAt: model.updatedAt,
                 refreshing: model.isRefreshing || model.report?.isRefreshing(now: now) == true,
-                lanes: [], stateRoot: model.stateRoot, now: now, overview: model.overview,
+                stateRoot: model.stateRoot, now: now, overview: model.overview,
                 overviewError: model.overviewError, overviewUpdatedAt: model.overviewUpdatedAt,
                 observationError: model.overviewObservationError)
     }
 
     static func entries(report: QuotaReport?, error: String?, updatedAt: Date?, refreshing: Bool,
-                        lanes: [AttentionLane], stateRoot: URL, now: Date, overview: ConsoleOverview? = nil,
+                        stateRoot: URL, now: Date, overview: ConsoleOverview? = nil,
                         overviewError: String? = nil, overviewUpdatedAt: Date? = nil,
                         observationError: String? = nil) -> [MenuEntry] {
         let freshness = refreshing ? "Refreshing…" : updatedAt.map { "Updated \(Fmt.ago($0, now: now))" }

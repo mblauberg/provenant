@@ -10,7 +10,7 @@ final class MenuTests: XCTestCase {
     }
 
     private func entries(_ report: QuotaReport, refreshing: Bool = false) -> [MenuEntry] {
-        QuotaMenu.entries(report: report, error: nil, updatedAt: report.generatedAt, refreshing: refreshing, lanes: [],
+        QuotaMenu.entries(report: report, error: nil, updatedAt: report.generatedAt, refreshing: refreshing,
                           stateRoot: URL(fileURLWithPath: "/tmp/provenant"), now: report.generatedAt)
     }
 
@@ -128,7 +128,7 @@ final class MenuTests: XCTestCase {
         """
         let overview = try ConsoleOverview.decode(Data(json.utf8))
         let report = try fixture()
-        let menu = QuotaMenu.entries(report: report, error: nil, updatedAt: nil, refreshing: false, lanes: [],
+        let menu = QuotaMenu.entries(report: report, error: nil, updatedAt: nil, refreshing: false,
                                      stateRoot: URL(fileURLWithPath: "/tmp"), now: report.generatedAt, overview: overview)
         XCTAssertTrue(menu.contains(.header("At least 4 needs you")))
         let rows = items(menu)

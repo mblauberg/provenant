@@ -75,10 +75,10 @@ Run the fixture's deterministic checks with `python3 -m unittest discover -s app
 
 ## Render the menu
 
-`--render` draws the menu's content from a saved raw report into a PNG without running the CLI. AppKit draws a real menu only while it is open, so the PNG is a preview at macOS 26 menu metrics. It uses the same entries, attributed titles, icons and information views as the menu, and imitates only the native items' frame and the menu's glass background. `--expand <account id>` shows that account's submenu beside its highlighted row, and `--lanes` adds a saved `provenant lanes --json` page. The clock defaults to `generated_unix_seconds`; `--now` selects another instant. Rendering uses 2x scale unless `--scale` sets another factor.
+`--render` draws the menu's content from a saved raw report into a PNG without running the CLI. AppKit draws a real menu only while it is open, so the PNG is a preview at macOS 26 menu metrics. It uses the same entries, attributed titles, icons and information views as the menu, and imitates only the native items' frame and the menu's glass background. `--expand <account id>` shows that account's submenu beside its highlighted row. The clock defaults to `generated_unix_seconds`; `--now` selects another instant. Rendering uses 2x scale unless `--scale` sets another factor.
 
 ```bash
-.build/debug/quota-menubar --render Fixtures/current.json current.png --lanes Fixtures/lanes.json
+.build/debug/quota-menubar --render Fixtures/current.json current.png
 .build/debug/quota-menubar --render Fixtures/current.json expanded.png --dark --expand codex/default
 .build/debug/quota-menubar --render Fixtures/tall.json tall.png
 ```

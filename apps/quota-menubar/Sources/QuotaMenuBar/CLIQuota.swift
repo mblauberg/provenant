@@ -20,17 +20,12 @@ extension CLI {
         do { run = try exec(launcher.url, arguments, path: launcher.path, limit: 60) } catch {
             return fail(nil, "launch", "Could not start \(name): \(error.localizedDescription)")
         }
-        let detail = run.err.split(separator: "\n").last.map(String.init) ?? "no error output"
-        if run.timedOut { return fail(launcher, "timeout", "provenant quota timed out after 60 seconds.") }
-        if run.signalled { return fail(launcher, "signal \(run.status)", "provenant quota was killed by signal \(run.status).") }
-        if run.status == 127 {
-            let hint = launcher.custom ? "" : " Check that the login shell's PATH reaches it, or set PROVENANT_BIN."
-            return fail(nil, "status 127", "\(name) exited with status 127: \(detail).\(hint)")
-        }
-        if run.status != 0 { return fail(launcher, "status \(run.status)", "\(name) exited with status \(run.status): \(detail)") }
-        switch decodeEnvelope(run.out, command: "quota \(operation)") {
-        case .success(let report): return (launcher, .report(report))
-        case .failure(let failure): return fail(launcher, "unreadable response", failure.message)
+        do {
+            let wire = try CLIClient.decode(run, command: "quota \(operation)", as: QuotaWireReport.self)
+            return (launcher, .report(try QuotaReport.project(wire)))
+        } catch {
+            let message = (error as? ClientError)?.message ?? error.localizedDescription
+            return fail(run.status == 127 ? nil : launcher, "response", message)
         }
     }
 
