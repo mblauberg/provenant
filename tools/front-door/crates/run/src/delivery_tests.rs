@@ -6,6 +6,100 @@ use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
 
+#[test]
+fn reconcile_settles_exhausted_writer_import_after_durable_exit()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_supervisor::custody::WriterBinding;
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let record = store.mark_starting(
+        &store.record(id, &call)?,
+        &tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let scope = RunStore::scope(&record);
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let mut launch = crate::prepare_writer(
+        &fixture.writer,
+        &store.writer_registry,
+        execution.project_id,
+    )?;
+    let binding = WriterBinding::from_verified(
+        launch.worktree.repo().root_dir(),
+        launch.worktree.repo().private_dir(),
+        launch.branch.as_str(),
+        launch.base,
+    )?;
+    let directory = launch.custody.take().ok_or("writer custody")?.0;
+    drop(provenant_supervisor::fixture::acquire_writer_with_binding(
+        directory,
+        scope,
+        binding,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?);
+    let reservation = store
+        .writer_registry
+        .join("worktrees")
+        .join(execution.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(
+            &fixture.writer.worktree,
+        ))
+        .join(scope.attempt.to_string())
+        .join("reservation.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+    let metadata = attempt.metadata()?;
+    value["launch_state"] = "settling".into();
+    value["guardian"] = serde_json::json!({"boot":value["boot"], "pid":123, "native_start":1, "group_id":123, "session_id":123});
+    value["unresolved_cleanup"] = false.into();
+    value["census_incomplete"] = false.into();
+    value["attempt_device"] = metadata.device.into();
+    value["attempt_inode"] = metadata.inode.into();
+    std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+    artifacts::seal(
+        &attempt,
+        "launch.json",
+        &serde_json::to_vec(
+            &serde_json::json!({"schema_version":1,"scope":scope,"requester":execution.actor_id}),
+        )?,
+        RECORD_LIMIT,
+    )?;
+    let mut exit = tests::exit();
+    exit.scope = scope;
+    dispatch_tests::seal_exit(&store, &exit)?;
+    artifacts::seal(
+        &attempt,
+        "settlement-progress.json",
+        &serde_json::to_vec(
+            &serde_json::json!({"schema_version":1,"scope":scope,"phase":"import","attempts":3,"head":null,"base":null,"owner":null,"owner_since_ms":0,"retry_after_ms":0}),
+        )?,
+        RECORD_LIMIT,
+    )?;
+    let found = store.reconcile_with_observer(
+        input.run_id,
+        &dispatch_tests::Fake::default(),
+        &call,
+        &provenant_supervisor::census::SystemProcessObserver,
+    )?;
+    assert_eq!(found, vec![(id, Reconciled::Finished)]);
+    assert!(
+        matches!(store.record(id, &call)?.state, AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. } if reason.contains("exhausted three attempts"))
+    );
+    assert!(!reservation.exists());
+    Ok(())
+}
+
 pub(super) struct PrepareFixture {
     _temp: tempfile::TempDir,
     root: std::path::PathBuf,

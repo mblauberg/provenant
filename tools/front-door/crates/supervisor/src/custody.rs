@@ -1713,7 +1713,8 @@ impl Recovery {
             _custody: custody,
         }))
     }
-    pub(crate) fn observe_with(&self, observer: &dyn ProcessObserver) -> RecoveryState {
+    /// Classify custody with the same process observer used by the caller.
+    pub fn observe_with(&self, observer: &dyn ProcessObserver) -> RecoveryState {
         if self.guardian_quiescent {
             return RecoveryState::Absent;
         }

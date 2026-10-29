@@ -12,6 +12,7 @@ use serde::Serialize;
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static HOLDERLESS_BEFORE_EXCLUSION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static REBOOT_TEMPORARY_CLEANUP: std::cell::RefCell<Option<std::result::Result<Option<Reconciled>, String>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -138,6 +139,89 @@ const ORPHAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
 mod reboot_tests {
     use super::*;
+
+    #[test]
+    fn reader_refusal_published_before_recovery_exclusion_is_not_lost()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let record = store.record(id, &call)?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let path = context
+            .state_root
+            .as_path()
+            .join(format!("runs/{}/attempts/{id}", run.run_id));
+        drop(custody::acquire_reader(
+            attempt.try_clone()?,
+            scope,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?);
+        let reservation = path.join(id.to_string()).join("reservation.json");
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&reservation)?)?;
+        value["launch_state"] = "spawned".into();
+        value["boot"] = "darwin:00000000-0000-0000-0000-000000000000".into();
+        value["guardian"] = serde_json::json!({
+            "boot": "darwin:00000000-0000-0000-0000-000000000000",
+            "pid": 123, "native_start": 1, "group_id": 123, "session_id": 123
+        });
+        let meta = attempt.metadata()?;
+        value["attempt_device"] = meta.device.into();
+        value["attempt_inode"] = meta.inode.into();
+        std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+        crate::artifacts::seal(&attempt, "launch.json", b"{}", RECORD_LIMIT)?;
+        // Simulate the guardian's refusal while it owns writer exclusion, in
+        // the precise gap after the first holder check and before acquisition.
+        let hook_path = path.clone();
+        let hook_reservation = reservation.clone();
+        HOLDERLESS_BEFORE_EXCLUSION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let dir = provenant_os::fs::Directory::open_anchor(&hook_path).unwrap();
+                let _lease = dir
+                    .try_lock(
+                        std::ffi::OsStr::new("writer.lock"),
+                        provenant_os::fs::LockMode::Exclusive,
+                    )
+                    .unwrap();
+                crate::artifacts::seal(&dir, "process-exit.json", b"refusal", RECORD_LIMIT)
+                    .unwrap();
+                let mut current: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&hook_reservation).unwrap()).unwrap();
+                current["launch_state"] = "settling".into();
+                current["unresolved_cleanup"] = false.into();
+                current["census_incomplete"] = false.into();
+                std::fs::write(&hook_reservation, serde_json::to_vec(&current).unwrap()).unwrap();
+            }))
+        });
+        assert_eq!(
+            store.settle_holderless(&record, &call, &SystemProcessObserver)?,
+            None
+        );
+        assert_eq!(store.record(id, &call)?, record);
+        assert!(reservation.exists());
+        let recovery =
+            custody::acquire_recovery(attempt, scope, call.lock_budget(), &cancel, &clock)?;
+        assert_eq!(recovery.observe(), RecoveryState::Absent);
+        Ok(())
+    }
 
     #[test]
     fn reboot_settlement_error_propagates() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -1080,6 +1164,12 @@ impl RunStore {
             }
             None => attempt,
         };
+        #[cfg(test)]
+        HOLDERLESS_BEFORE_EXCLUSION.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
         let Ok(recovery) = custody::acquire_recovery(
             directory,
             scope,
@@ -1089,7 +1179,14 @@ impl RunStore {
         ) else {
             return Ok(None);
         };
-        if recovery.scope() != scope || recovery.observe() != RecoveryState::Absent {
+        // A reader can publish its exit and release exclusion after the first
+        // check, so both proofs must still hold under exclusion.
+        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        if recovery.scope() != scope
+            || read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
+            || !custody::holder_gone(&attempt, scope, observer)
+            || recovery.observe_with(observer) != RecoveryState::Absent
+        {
             return Ok(None);
         }
         self.commit_lost(

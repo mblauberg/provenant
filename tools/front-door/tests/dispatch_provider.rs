@@ -2374,6 +2374,7 @@ struct PersistedAttemptOptions {
     extra_task: bool,
     nonterminal: bool,
     lost_before_route: bool,
+    stalled_import: bool,
 }
 
 fn persisted_attempt_with(
@@ -2403,6 +2404,38 @@ fn persisted_attempt_with(
     use provenant_supervisor::custody::SettlementEvidence;
 
     let rig = TestRig::new()?;
+    if options.stalled_import {
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let seeded = rig.execute(
+            &git,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "seed",
+            ],
+            None,
+        )?;
+        assert_eq!(code(&seeded), 0);
+        let created = rig.command(&[
+            "worktree",
+            "create",
+            "receipt-writer",
+            "--base",
+            "HEAD",
+            "--json",
+        ])?;
+        assert_eq!(
+            code(&created),
+            0,
+            "{}",
+            String::from_utf8_lossy(&created.stdout.bytes)
+        );
+    }
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
@@ -2509,6 +2542,9 @@ fn persisted_attempt_with(
     let started_at = clock.wall_now()?;
     let mut running = store.record(attempt_id, &call)?;
     running.revision = 2;
+    if options.stalled_import {
+        running.generation = 1;
+    }
     running.resolved_route = Some(applied.clone());
     running.applied_route = Some(applied.clone());
     running.started_at = Some(started_at);
@@ -2523,7 +2559,7 @@ fn persisted_attempt_with(
         rusqlite::params![2_i64, running_bytes, attempt_id.to_string()],
     )?;
 
-    if options.nonterminal {
+    if options.nonterminal && !options.stalled_import {
         return Ok((rig, running));
     }
 
@@ -2559,7 +2595,7 @@ fn persisted_attempt_with(
         scope: Scope {
             run: run_id,
             attempt: attempt_id,
-            generation: 0,
+            generation: running.generation,
         },
         termination: Some(Termination::Exit(exit_code)),
         never_spawned: false,
@@ -2607,6 +2643,74 @@ fn persisted_attempt_with(
     stderr_file.write_all(stderr)?;
     stderr_file.sync_all()?;
     let attempt = Directory::open_anchor(&attempt_dir)?;
+    if options.stalled_import {
+        use std::os::unix::fs::MetadataExt;
+        let writer = prepared.request.tasks[0].writer.as_ref().ok_or("writer")?;
+        let slot = rig
+            .state
+            .join("worktrees")
+            .join(project_id.to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(
+                &writer.worktree,
+            ));
+        fs::create_dir_all(&slot)?;
+        let scope = exit.scope;
+        let launch = provenant_run::prepare_writer(writer, &rig.state, project_id)?;
+        let head = rig.execute(
+            &provenant_os::git::git_executable().ok_or("Git unavailable")?,
+            &["rev-parse", "HEAD"],
+            None,
+        )?;
+        let base = provenant_core::GitOid::parse(std::str::from_utf8(&head.stdout.bytes)?.trim())?;
+        let binding = provenant_supervisor::custody::WriterBinding::from_verified(
+            launch.worktree.repo().root_dir(),
+            launch.worktree.repo().private_dir(),
+            launch.branch.as_str(),
+            base,
+        )?;
+        drop(
+            provenant_supervisor::fixture::acquire_writer_with_binding(
+                Directory::open_anchor(&slot)?,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )
+            .map_err(|error| format!("acquire fixture writer: {error}"))?,
+        );
+        let reservation = slot
+            .join(scope.attempt.to_string())
+            .join("reservation.json");
+        let mut value: Value = serde_json::from_slice(&fs::read(&reservation)?)?;
+        let metadata = fs::metadata(&attempt_dir)?;
+        value["launch_state"] = "settling".into();
+        value["guardian"] = json!({"boot":value["boot"], "pid":123, "native_start":1, "group_id":123, "session_id":123});
+        value["unresolved_cleanup"] = false.into();
+        value["census_incomplete"] = false.into();
+        value["attempt_device"] = metadata.dev().into();
+        value["attempt_inode"] = metadata.ino().into();
+        fs::write(reservation, serde_json::to_vec(&value)?)?;
+        for (name, value) in [
+            (
+                "launch.json",
+                json!({"schema_version":1,"scope":scope,"requester":actor_id}),
+            ),
+            (
+                "settlement-progress.json",
+                json!({"schema_version":1,"scope":scope,"phase":"import","attempts":3,"head":null,"base":null,"owner":null,"owner_since_ms":0,"retry_after_ms":0}),
+            ),
+        ] {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(attempt_dir.join(name))?;
+            file.write_all(&serde_json::to_vec(&value)?)?;
+            file.sync_all()?;
+        }
+        return Ok((rig, running));
+    }
     let terminal = if options.writer {
         // Publish real terminal artifacts through the production commit path.
         // No launch grants are recorded, matching older writer attempts.
@@ -2647,6 +2751,53 @@ fn persisted_attempt_with(
             .map_err(|error| format!("finish persisted provider fixture: {error:?}"))?
     };
     Ok((rig, terminal))
+}
+
+fn cancel_wait_settles_stalled_import_with_durable_exit() -> Result {
+    let (rig, running) = persisted_attempt_with(
+        "codex",
+        "codex/gpt-6.1-sol",
+        ("work", "fixture"),
+        b"",
+        b"",
+        0,
+        PersistedAttemptOptions {
+            writer: true,
+            nonterminal: true,
+            stalled_import: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("stalled import fixture: {error}"))?;
+    let _cleanup = rig.process_cleanup();
+    let started = std::time::Instant::now();
+    let output = rig.command(&[
+        "cancel",
+        &running.attempt_id.to_string(),
+        "--wait",
+        "10s",
+        "--json",
+    ])?;
+    let elapsed = started.elapsed();
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(value["data"]["condition_met"], true, "{value}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "cancel took {elapsed:?}: {value}"
+    );
+    let lanes = rig.command(&[
+        "lanes",
+        "--id",
+        &running.attempt_id.to_string(),
+        "--all",
+        "--json",
+    ])?;
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let lane = &lanes["data"]["lanes"][0];
+    assert_eq!(lane["state"], "cancelled", "{lanes}");
+    assert_eq!(lane["reason"], "provider output is partial", "{lanes}");
+    Ok(())
 }
 
 fn receipt_output_resolves_run_task_and_attempt() -> Result {
@@ -3430,6 +3581,7 @@ fn main() -> ExitCode {
         provenant_supervisor::fixture::run_libtest(
             &args,
             &[
+                "cancel_wait_settles_stalled_import_with_durable_exit",
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",
                 "receipt_output_resolves_run_task_and_attempt",
                 "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
@@ -3461,6 +3613,7 @@ fn main() -> ExitCode {
             ],
             |name| {
                 let result = match name {
+                    "cancel_wait_settles_stalled_import_with_durable_exit" => cancel_wait_settles_stalled_import_with_durable_exit(),
                     "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
                         receipt_output_reports_unknown_route_for_settled_lost_attempt()
                     }
