@@ -212,7 +212,8 @@ is retained. `cargo-target-setup.json` records whether
 preparation seeded, skipped or fell back, including mismatch reasons. The lane
 starts with an empty target if no matching generation can be cloned. The
 configuration above limits retained generations to three and 20 GiB of apparent
-file size; `provenant gc` removes the oldest generations over either limit.
+file size (a different measure from the allocated bytes that cap lane build
+output); `provenant gc` removes the oldest generations over either limit.
 It also reclaims abandoned build staging trees once no seed build is active,
 and removes incomplete generations. Only one host seed build runs at a time.
 Generations created before the completion marker was introduced are treated
@@ -223,7 +224,7 @@ profile directories (those whose `.cargo-lock`, `.cargo-build-lock` and
 `.cargo-artifact-lock` can all be locked) from lane caches, least recently used
 first, until the total of all profile directories, idle and busy, is within
 `build_dir_max_bytes` and free space meets the floor. A directory written within
-`build_dir_grace_seconds` (15 minutes by default) is kept, and so is every busy
+`build_dir_grace_seconds` (15 minutes by default) is kept (only recent writes are protected: a binary that runs longer without writing under `target/` is unprotected unless a Cargo lock is held), and so is every busy
 one, so the total can stay over the cap. It reports the bytes reclaimed and the
 lane build output that remains.
 A lane settling and an admission below the floor trigger the same collection.

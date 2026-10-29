@@ -25,7 +25,9 @@ pub struct LaneBuildSettings {
     /// Seconds after its newest write during which a profile directory is
     /// never removed, even with its Cargo locks free: test and run binaries
     /// execute after Cargo drops its locks, and Cargo may be opening its lock
-    /// files. 15 minutes unless set.
+    /// files. Only recent writes are protected: a binary that runs longer than the
+    /// grace without writing is unprotected unless a Cargo lock is held. 15
+    /// minutes unless set.
     pub build_dir_grace_seconds: Option<u64>,
     /// Seconds between walks of the lane caches by settlement-triggered
     /// collection. Within it, a settlement skips the walk unless free space is

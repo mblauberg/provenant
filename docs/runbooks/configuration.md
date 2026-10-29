@@ -121,7 +121,7 @@ lock file without writing anything; the `flock` probe covers that case. A direct
 `build_dir_grace_seconds` (15 minutes by default) is therefore never removed,
 and neither is one written after the sweep measured it. These directories still
 count toward the cap and are reported as `recent`. Set the grace to 0 to turn
-the protection off.
+the protection off. The grace protects only recently written directories: a test or run binary that runs longer than the grace without writing under `target/` is unprotected unless a Cargo lock is still held.
 
 Collection runs on three events:
 
@@ -141,7 +141,8 @@ below `gc.free_floor`, when the last walk is older than
 `build_dir_survey_interval_seconds` (5 minutes by default), or when that walk
 found the total within 10% of the cap. The last result is kept in the state
 root, and a settlement that finds another walk running skips. `provenant gc`
-always walks.
+always walks. While free space stays below the floor, each settlement walks,
+because reclaiming is the point.
 
 `provenant gc` reports the directories removed or reclaimable, the bytes
 reclaimed, how many bytes of lane build output remain and how many directories

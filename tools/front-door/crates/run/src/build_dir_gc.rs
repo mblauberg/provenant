@@ -151,7 +151,8 @@ pub fn collect(
 /// Cheap signals come first. The walk runs only when free space is below the
 /// floor, when the last walk is older than `build_dir_survey_interval_seconds`,
 /// or when it found the total within a tenth of the cap. The last walk's time
-/// and total live in the state root. A try-lock keeps concurrent events from
+/// and total live in the state root. While the floor stays breached every
+/// settlement walks, because reclaiming is the point. A try-lock keeps concurrent events from
 /// walking twice: the loser skips and returns `None`.
 pub fn reclaim(host: &Path, home: &Path) -> Option<Report> {
     let settings = provenant_config::LaneBuildSettings::read(host).ok()?;
@@ -176,12 +177,35 @@ fn reclaim_with(
     free: &mut dyn FnMut() -> io::Result<u64>,
     now_ns: i128,
 ) -> Option<Report> {
+    reclaim_gated(
+        host,
+        home,
+        limits,
+        interval_seconds,
+        free,
+        now_ns,
+        &mut || {},
+    )
+}
+
+/// `between` runs after the cheap check and before the walk lock is taken: the
+/// window in which a concurrent settlement can finish a walk.
+fn reclaim_gated(
+    host: &Path,
+    home: &Path,
+    limits: Limits,
+    interval_seconds: u64,
+    free: &mut dyn FnMut() -> io::Result<u64>,
+    now_ns: i128,
+    between: &mut dyn FnMut(),
+) -> Option<Report> {
     let anchor = Directory::open_anchor(host).ok()?;
     // An unreadable disk is not evidence of room: walk.
     let breached = free().map_or(true, |bytes| bytes < limits.free_floor);
     if !breached && !survey_due(&anchor, limits, interval_seconds, now_ns) {
         return None;
     }
+    between();
     let _walking = anchor
         .try_lock(OsStr::new(SURVEY_LOCK), LockMode::Exclusive)
         .ok()?;
@@ -486,7 +510,9 @@ fn measure(directory: &PayloadTree, depth: usize) -> io::Result<(u64, i128)> {
 /// holds a lock at probe time. It does not cover a test or run binary that keeps
 /// executing after Cargo drops its locks, nor a Cargo between opening a lock
 /// file and locking it. Those leave recent writes, which the grace spares, and
-/// a directory written since the survey is spared too.
+/// a directory written since the survey is spared too. A binary that runs longer
+/// than the grace without writing under the profile directory is unprotected
+/// unless a Cargo lock is still held.
 fn remove(
     root: &Directory,
     candidate: &Candidate,
@@ -1257,5 +1283,93 @@ mod tests {
             now(),
         );
         assert!(skipped.is_none());
+    }
+
+    #[test]
+    fn an_unreadable_or_malformed_survey_record_forces_a_walk() {
+        let state = state_root();
+        let fixture = Fixture::new();
+        fixture.profile('a', "debug", 4096, 2000);
+        let roomy = limits(u64::MAX / 2, 1);
+        let mut plenty_free = plenty;
+        let at = now();
+        let record = state.path().join(SURVEY_STATE);
+        for bad in [
+            "".as_bytes(),
+            b"not a record\n",
+            b"123\n",
+            b"abc 5\n",
+            b"123 -5\n",
+            b"\xff\xfe",
+        ] {
+            fs::write(&record, bad).unwrap();
+            let report = reclaim_with(
+                state.path(),
+                fixture.home.path(),
+                roomy,
+                300,
+                &mut plenty_free,
+                at,
+            );
+            assert!(report.is_some(), "{bad:?} must force a walk");
+            // The walk replaces the bad record, so the next settlement skips.
+            let next = reclaim_with(
+                state.path(),
+                fixture.home.path(),
+                roomy,
+                300,
+                &mut plenty_free,
+                at + 1,
+            );
+            assert!(next.is_none());
+        }
+        // A record that is a directory cannot be read: walk and carry on.
+        fs::remove_file(&record).unwrap();
+        fs::create_dir(&record).unwrap();
+        let report = reclaim_with(
+            state.path(),
+            fixture.home.path(),
+            roomy,
+            300,
+            &mut plenty_free,
+            at,
+        );
+        assert!(report.is_some());
+    }
+
+    #[test]
+    fn a_settlement_that_wins_the_lock_after_a_fresh_record_skips_the_walk() {
+        let state = state_root();
+        let fixture = Fixture::new();
+        fixture.profile('a', "debug", 4096, 2000);
+        let roomy = limits(u64::MAX / 2, 1);
+        let at = now();
+        let record = state.path().join(SURVEY_STATE);
+        let mut plenty_free = plenty;
+        // No record: the cheap check says walk. Meanwhile another settlement
+        // finishes its walk and records it, so the re-read under the lock skips.
+        let mut other_settlement = || fs::write(&record, format!("{at} 4096\n")).unwrap();
+        let report = reclaim_gated(
+            state.path(),
+            fixture.home.path(),
+            roomy,
+            300,
+            &mut plenty_free,
+            at,
+            &mut other_settlement,
+        );
+        assert!(report.is_none(), "the record is fresh once the lock is won");
+        // With a breached floor the record is not consulted: walk regardless.
+        let mut none_free = || Ok(0_u64);
+        let report = reclaim_gated(
+            state.path(),
+            fixture.home.path(),
+            roomy,
+            300,
+            &mut none_free,
+            at,
+            &mut || {},
+        );
+        assert!(report.is_some());
     }
 }

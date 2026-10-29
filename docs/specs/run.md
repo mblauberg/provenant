@@ -61,7 +61,7 @@ A directory is idle only when a non-blocking exclusive `flock` succeeds on all o
 lock that cannot be probed, keeps the directory. Free locks are not enough: test
 and run binaries execute after Cargo drops its locks, so a directory written
 within `build_dir_grace_seconds` (15 minutes by default), or since the sweep
-measured it, is kept. The walk takes no lock and a sweep with nothing to remove
+measured it, is kept. The grace covers only recent writes: a binary that runs longer than the grace without writing under `target/` is unprotected unless a Cargo lock is still held. The walk takes no lock and a sweep with nothing to remove
 stops there; removal holds the host admission lock, so no lane is admitted
 mid-removal, and probes each candidate again. Collection runs when a lane
 settles, when admission finds the disk below the floor, and in `provenant gc`.
