@@ -15,6 +15,10 @@ cargo_build_jobs = -1 # automatic: half the available cores, at least 1
 enabled = false
 max_generations = 3
 max_bytes = 21474836480
+[lanes.settlement]
+notice = true # post one terse notice to the dispatching chair's inbox when a lane settles
+notice_read_only = false # also notify for read-only lanes
+chair_log = true # append an entry to the dispatching chair's session log
 [lanes.priority]
 writer = 10
 read-only = 5

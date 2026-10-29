@@ -204,6 +204,36 @@ by their tool names.
 Run submission can wait for a result in the same bounded call; a timeout
 returns a receipt and continuation instructions. Run listings are bounded and
 newest first, and compact status, wait and cancel responses can request detail.
+Waiting is optional: every settlement passes one post-settlement seam that
+runs its reactions in order, each isolated from the others and idempotent by
+attempt ID. Graphs advance, then the dispatching chair's inbox receives one
+note of at most 300 bytes (attempt, outcome, `(partial)`, model, staged
+recovery, head, pull request), then the chair's session log gains a
+`lane_settled` entry. Notices report outcomes and never instruct.
+
+The run store owns the obligation. The terminal commit inserts a `reactions`
+row (schema v6) in the same transaction, freezing the notice, the message
+envelope, the pull request and issue IDs, and that a graph advance is due. The
+row never carries host authority: it lives in lane-writable state, so graph
+launch inputs come from the live guardian, or, in recovery, are derived afresh
+from the trusted process and the host-owned graph journal. If they cannot be
+derived the graph reaction stays pending. The first drain resolves the chair
+and its session and persists them before any effect uses them, then saves
+progress at every step boundary with a fresh call budget. Reactions are
+at-least-once and exactly-once in effect: the normal path and crash recovery
+drain pending rows under the run's `reactions.lock`, a busy lock means another
+drain covers the run, and a failed reaction, or a busy host store, leaves only
+that reaction pending without stopping the others. `run reconcile` and recovery
+scheduling both see a closed run that still has pending rows. Attempts that
+settled before v6 have no row, so nothing is backfilled. Finished rows are
+pruned with `[retention] logs_days`.
+
+The chair log goes to the session in `PROVENANT_SESSION_ID`, else the session
+the chair saved, which must still be current and name the chair in its own
+canonical record. A lane dispatched by a lane has no chair and stays quiet, and
+read-only lanes notify only when `[domains.fabric.lanes.settlement]
+notice_read_only` is set; `notice` and `chair_log` switch the other two
+reactions.
 Run operation IDs are generated when omitted and returned for retries;
 explicit IDs preserve planned retry identity.
 Chair log appends generate an operation ID when omitted and return it in the

@@ -13,8 +13,9 @@ scope: global, adapter, model, account, and model plus account. An adapter makes
 a rule more specific within its scope. Later rules win at the same scope.
 Only supplied fields replace earlier values; an empty `sections` array clears
 section requirements. Set `bundled = false` to start without bundled policy.
-Rules support inclusive starts, exclusive expiries and UTC hour windows. An
-overnight window wraps midnight. Inactive rules have no effect. Put temporary
+Rules support inclusive starts, exclusive expiries and hour windows in the
+schedule's optional IANA `tz` zone (UTC by default). An overnight window wraps
+midnight, including across weekday boundaries. Inactive rules have no effect. Put temporary
 overrides after enduring rules of the same scope.
 
 ```toml
@@ -37,8 +38,9 @@ max_turns = 100
 
 [[domains.routing.model_policy.rules]]
 model = "opencode/opencode-go/deepseek-v4.1-flash"
-expires_unix_seconds = 1793491200
-windows = [{ start_hour = 1, end_hour = 4 }, { start_hour = 6, end_hour = 10 }]
+[domains.routing.model_policy.rules.schedule]
+expires = 1793491200
+windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 1, end_hour = 4 }, { weekdays = [0, 1, 2, 3, 4], start_hour = 6, end_hour = 10 }]
 [domains.routing.model_policy.rules.policy.cache]
 price_multiplier = 2.0
 read_heavy_weight = 2
@@ -46,12 +48,21 @@ read_heavy_weight = 2
 [[domains.routing.model_policy.rules]]
 model = "agy/gemini-3.8-flash"
 account = "agy/work"
-expires_unix_seconds = 1793491200
+[domains.routing.model_policy.rules.schedule]
+expires = 1793491200
 [domains.routing.model_policy.rules.policy.result]
 sections = ["## Findings", "## Evidence"]
 fallback = "codex/gpt-6-luna"
 fallback_effort = "high"
 ```
+
+Schedules may set `tz` to an IANA time zone; omitted `tz` uses UTC. Weekdays use Monday-based indexes, Monday `0` through Sunday `6`;
+an empty `weekdays` list matches every day. Window end hours are exclusive and
+overnight windows wrap midnight. `provenant route override list` shows policy
+and pacing schedules, whether each is active and the time remaining to expiry.
+Legacy `starts_unix_seconds`, `expires_unix_seconds` and top-level `windows`
+are converted to `schedule` during load. Rewrite the file to keep the new form;
+expired legacy records are dropped. Unknown time zones warn and use UTC.
 
 The bundled policy follows issues #2177 and #2185 and the repository's price
 table. These are adjustable operating defaults:
@@ -93,6 +104,10 @@ provider safety compaction may still occur.
 prices and zero read prices produce an unknown estimate. At the bundled Claude
 window this is about 8.27 future turns; rework raises it. This is advice for
 model judgement, not an automatic compaction trigger.
+
+Fallback model IDs and efforts are checked against the bundled catalogue when
+the host configuration loads, so an invalid fallback is reported before a run
+reaches the result-check retry.
 
 Cache `ttl_seconds` and `min_prefix`, and lane `max_context` and `max_turns`, are
 planning guidance supplied to the model. They do not change a provider's cache

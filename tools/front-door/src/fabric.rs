@@ -531,6 +531,7 @@ impl F3Facade for BoundFacade<'_> {
             actor: None,
             chair: Some(provenant_run::ChairBinding {
                 extra: Default::default(),
+                session: provenant_cli::fabric::current_session(),
                 host: self.factory.context.identity.inbox.host,
                 actor: self.factory.context.identity.inbox.actor,
             }),
@@ -3480,6 +3481,13 @@ fn graph_result_warning(error: &provenant_run::RunError) -> &'static str {
     }
 }
 
+/// The one post-settlement seam. Every settlement, including a partial or
+/// stopped-early one, passes through here once, and crash recovery drains the
+/// same reactions through `settlement::drain_run`. A staged successor launches
+/// around the reactions, and a delayed retry reacts before its wait. A failed
+/// launch or reaction never stops the other, and the first error in time order
+/// is reported. The reactions run in order: graphs advance, the chair is
+/// notified, then the chair log is appended.
 pub(crate) fn advance_settled_graphs(
     holder: &provenant_cli::run::HostHolder<'_>,
     workers: &'static dyn WorkerObserver,
@@ -3487,13 +3495,71 @@ pub(crate) fn advance_settled_graphs(
     let Some(settled) = holder.settled()? else {
         return Ok(());
     };
-    // A delayed retry advances graphs before its wait, not after it.
-    let mut advanced = None;
-    provenant_cli::run::launch_policy_successor(&settled, || {
-        advanced = Some(advance_graphs_after_settlement(&settled, workers));
+    crate::settlement::seam(
+        |before| provenant_cli::run::launch_policy_successor(&settled, before),
+        || {
+            settlement_reactions(
+                &crate::settlement::Subject {
+                    home: settled.roots.home.clone(),
+                    checkout: settled.roots.checkout.clone(),
+                    state_root: settled.roots.state_root.clone(),
+                    project: settled.project_id,
+                    actor: settled.actor_id,
+                    run: settled.run_id,
+                },
+                settled.launch.clone(),
+                workers,
+            )
+        },
+    )
+}
+
+/// Launch inputs for a graph advance when no live guardian supplies them,
+/// derived the way a fresh host launch derives them: from this trusted process
+/// and the recovery edge, never from the run store, which a lane can rewrite.
+/// The graph's own directory comes from the host-owned graph journal.
+pub(crate) fn recovery_launch(
+    state_root: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<provenant_run::HostLaunchContext, Box<dyn std::error::Error>> {
+    Ok(provenant_run::HostLaunchContext::from_environment(
+        state_root,
+        cwd,
+        provenant_os::git::git_executable().ok_or("Git unavailable")?,
+    ))
+}
+
+/// Drain the reactions a settlement owes: the graph advance, then the notice
+/// and the chair log. `live` is the launch context of the guardian that
+/// settled, which only the host holds; recovery has none and derives its own.
+/// If those cannot be derived the graph reaction stays pending.
+pub(crate) fn settlement_reactions(
+    subject: &crate::settlement::Subject,
+    live: Option<provenant_run::HostLaunchContext>,
+    workers: &'static dyn WorkerObserver,
+) -> Result<(), Box<dyn std::error::Error>> {
+    crate::settlement::drain_run(subject, &mut |reaction| {
+        let launch = match &live {
+            Some(live) => live.clone(),
+            None => recovery_launch(&subject.state_root, &subject.checkout)?,
+        };
+        let settled = provenant_run::HolderContext {
+            schema_version: 1,
+            roots: provenant_run::RootSeed {
+                home: subject.home.clone(),
+                checkout: subject.checkout.clone(),
+                state_root: subject.state_root.clone(),
+            },
+            project_id: reaction.project,
+            actor_id: subject.actor,
+            run_id: reaction.run,
+            attempt_id: reaction.attempt,
+            host_delivery: None,
+            launch: Some(launch),
+            sealed: None,
+        };
+        advance_graphs_after_settlement(&settled, workers)
     })
-    .map_err(std::io::Error::other)?;
-    advanced.unwrap_or_else(|| advance_graphs_after_settlement(&settled, workers))
 }
 
 fn advance_graphs_after_settlement(

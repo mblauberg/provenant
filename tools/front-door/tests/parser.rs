@@ -857,7 +857,13 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let reconcile = rig.command(&["reconcile", "--json"])?;
     assert_eq!(code(&reconcile), 0);
     let value: serde_json::Value = serde_json::from_slice(&reconcile.stdout.bytes)?;
-    assert_eq!(value["data"]["runs"], serde_json::json!([]));
+    // Refused runs still owe their settlement reactions until a worker drains
+    // them, so reconcile may list them; it never launches or changes work.
+    for run in value["data"]["runs"].as_array().ok_or("runs")? {
+        assert_eq!(run["attempts"], serde_json::json!([]), "{value}");
+        assert_eq!(run["launched"], 0, "{value}");
+        assert_eq!(run["launch_error"], serde_json::Value::Null, "{value}");
+    }
     // Prices ship as a reviewed product asset beside the binary.
     std::fs::create_dir_all(rig.project.join("config"))?;
     std::fs::copy(

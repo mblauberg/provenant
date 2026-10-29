@@ -1792,6 +1792,33 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant route override`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
+```json
+{
+  "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "RouteOverride",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant route override list`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"name": "help"}` |
+| `--version` | `{"name": "version"}` |
+
 ## `provenant preset`
 
 | Argument | Contract |

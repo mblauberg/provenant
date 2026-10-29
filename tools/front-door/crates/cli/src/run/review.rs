@@ -120,6 +120,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
             .map_err(|e| Fail::new(Status::Error, ErrorKind::Identity, e.to_string()))?;
         Some(run::ChairBinding {
             extra: Default::default(),
+            session: crate::fabric::current_session(),
             host: context.identity.inbox.host,
             actor: crate::workflow::session_actor(&context, None)
                 .map_err(|e| Fail::new(Status::Error, ErrorKind::Identity, e))?,

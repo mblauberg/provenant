@@ -854,6 +854,13 @@ fn prepare_candidates(
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
+        for warning in config
+            .domains
+            .routing
+            .model_policy_fallback_warnings(&catalogue)
+        {
+            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+        }
         if writer.is_some()
             && let Some(advisory) = config
                 .domains

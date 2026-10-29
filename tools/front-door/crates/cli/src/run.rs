@@ -2858,6 +2858,7 @@ fn dispatch_inner(
                     })?;
                 Some(run::ChairBinding {
                     extra: Default::default(),
+                    session: crate::fabric::current_session(),
                     host: context.identity.inbox.host,
                     actor: crate::workflow::session_actor(&context, None)
                         .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error))?,
@@ -8076,6 +8077,7 @@ mod tests {
         };
         let chair = Some(run::ChairBinding {
             extra: Default::default(),
+            session: None,
             host: provenant_core::HostId::from_bytes([4; 16]),
             actor: ActorId::from_bytes([5; 16]),
         });
@@ -8151,6 +8153,7 @@ mod tests {
         let mut replay = submission("context-base");
         replay.chair = Some(run::ChairBinding {
             extra: Default::default(),
+            session: None,
             host: provenant_core::HostId::from_bytes([6; 16]),
             actor: ActorId::from_bytes([7; 16]),
         });
