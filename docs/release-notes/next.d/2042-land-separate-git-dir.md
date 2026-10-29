@@ -1,3 +1,4 @@
 ## Fixes
+### Git and safety
 
-- `land` uses `core.worktree` to identify a primary checkout when Git's inventory lists a separate Git directory. An unusable inventory now reports the inventory problem.
+- `land` recognises a primary checkout that uses a separate Git directory, and reports the problem when Git's worktree list is unusable (#2042).

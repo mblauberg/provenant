@@ -117,6 +117,9 @@ impl Deadline {
     }
 }
 
+/// The longest a lane, provider deadline or CLI wait may run, in seconds.
+pub const MAX_LANE_RUNTIME_SECONDS: u64 = 14_400;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitTransport {
     Cli,
@@ -125,7 +128,7 @@ pub enum WaitTransport {
 impl WaitTransport {
     pub const fn maximum_seconds(self) -> u64 {
         match self {
-            Self::Cli => 14_400,
+            Self::Cli => MAX_LANE_RUNTIME_SECONDS,
             Self::Mcp => 55,
         }
     }
@@ -328,13 +331,13 @@ mod tests {
     fn budgets_and_deadlines_check_caps_overflow_and_expiry() {
         let now = MonoTime::from_micros(10);
         assert_eq!(
-            WaitBudget::cli(now, 14_400)
+            WaitBudget::cli(now, MAX_LANE_RUNTIME_SECONDS)
                 .unwrap()
                 .remaining(now)
                 .as_micros(),
-            14_400_000_000
+            MAX_LANE_RUNTIME_SECONDS * 1_000_000
         );
-        assert!(WaitBudget::cli(now, 14_401).is_err());
+        assert!(WaitBudget::cli(now, MAX_LANE_RUNTIME_SECONDS + 1).is_err());
         assert!(WaitBudget::mcp(now, 55).is_ok());
         assert!(WaitBudget::mcp(now, 56).is_err());
         assert!(

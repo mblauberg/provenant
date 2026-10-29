@@ -25,18 +25,25 @@ pub fn schedule(roots: &Roots, cwd: &Path) -> Result<(), String> {
     }) {
         return Ok(());
     }
-    let argv = [
-        std::env::current_exe()
-            .map_err(|e| e.to_string())?
-            .into_os_string(),
+    if !provenant_providers::update::reserve_worker(roots.state.as_path(), now) {
+        return Ok(());
+    }
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let argv = worker_argv(&executable, roots.state.as_path());
+    provenant_os::exec::spawn_detached(&argv, cwd).map_err(|e| e.to_string())
+}
+
+/// The worker starts in the event's working directory, which is its project.
+/// Selecting that directory with `--project` would also demand a Git checkout,
+/// and quota events can run anywhere.
+fn worker_argv(executable: &Path, state: &Path) -> [std::ffi::OsString; 5] {
+    [
+        executable.as_os_str().to_owned(),
         "--state-dir".into(),
-        roots.state.as_path().as_os_str().to_owned(),
-        "--project".into(),
-        cwd.as_os_str().to_owned(),
+        state.as_os_str().to_owned(),
         "internal".into(),
         "provider-updates".into(),
-    ];
-    provenant_os::exec::spawn_detached(&argv, cwd).map_err(|e| e.to_string())
+    ]
 }
 
 fn schedulable(
@@ -60,10 +67,27 @@ fn schedulable(
     )
 }
 
+/// The detached worker. It records its one failure cause beside the update
+/// records, because its own output goes nowhere.
 pub fn housekeep(roots: &Roots, home: &Path, cwd: &Path) -> Result<(), String> {
     if crate::fabric::in_lane() {
         return Ok(());
     }
+    let result = update_providers(roots, home, cwd);
+    let now = SystemClock::new()
+        .wall_now()
+        .map(|time| time.as_timestamp().as_second());
+    if let Ok(now) = now {
+        provenant_providers::update::finish_worker(
+            roots.state.as_path(),
+            now,
+            result.as_ref().err().map(String::as_str),
+        );
+    }
+    result
+}
+
+fn update_providers(roots: &Roots, home: &Path, cwd: &Path) -> Result<(), String> {
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
         .map_err(|e| e.to_string())?;
     let clock = SystemClock::new();
@@ -167,6 +191,13 @@ fn note_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_does_not_require_a_git_checkout() {
+        let argv = worker_argv(Path::new("/bin/provenant"), Path::new("/state"));
+        assert!(!argv.iter().any(|arg| arg == "--project"));
+        assert_eq!(argv[3], "internal");
+    }
 
     #[test]
     fn scheduling_skips_missing_and_busy_providers() -> Result<(), Box<dyn std::error::Error>> {

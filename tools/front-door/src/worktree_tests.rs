@@ -119,7 +119,7 @@ pub fn main() -> std::process::ExitCode {
         Some("exec" | "-p") => exit("lane provider", lane_provider()),
         Some("--writer-provider") => exit("writer provider", provider(&args)),
         // The fake `gh` of the `land` fixtures.
-        Some("pr" | "repo") => {
+        Some("pr" | "repo" | "api") => {
             let args: Vec<String> = std::env::args().skip(1).collect();
             match crate::pr_land_tests::fake_gh(&args) {
                 Ok(code) => ExitCode::from(code),
@@ -4631,6 +4631,7 @@ fn resume_refuses_low_disk_writer() -> Result {
             observed_route: Some(fixture_route()),
             usage: Default::default(),
             session: Some("fixture-session".into()),
+            partial_signals: Vec::new(),
         },
         &exit,
         &call,

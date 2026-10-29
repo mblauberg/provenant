@@ -12,8 +12,16 @@ pub enum ProviderEvent {
         cache_read: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_write: Option<u64>,
+        /// The long-TTL part of `cache_write`, where the provider splits writes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_write_1h: Option<u64>,
     },
     Refusal,
+    /// A completed turn that the provider says ended for another reason than
+    /// finishing: a token limit, a turn limit or a pause.
+    EarlyStop {
+        reason: String,
+    },
     QuotaLimited {
         message: String,
         pool: Option<String>,

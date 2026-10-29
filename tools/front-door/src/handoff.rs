@@ -130,6 +130,15 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     Ok((ok, text))
 }
 
+/// Plain-text Git output for callers outside the handoff owner.
+pub(crate) fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
+    match git(dir, args, GIT_TIMEOUT) {
+        Ok((true, text)) => Ok(text),
+        Ok((false, text)) => Err(text.trim().to_owned()),
+        Err(refusal) => Err(refusal.message),
+    }
+}
+
 fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refusal> {
     let project = src.cwd.as_path();
     let infos = crate::worktrees::with_context(

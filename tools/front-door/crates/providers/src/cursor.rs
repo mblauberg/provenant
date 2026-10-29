@@ -156,6 +156,12 @@ struct Usage {
     input: u64,
     #[serde(rename = "outputTokens")]
     output: u64,
+    // Cursor reports cache tokens apart from `inputTokens`, as its own
+    // dashboard rows do.
+    #[serde(default, rename = "cacheReadTokens")]
+    cache_read: Option<u64>,
+    #[serde(default, rename = "cacheWriteTokens")]
+    cache_write: Option<u64>,
 }
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
@@ -194,8 +200,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
                 events.push(E::Usage {
                     input: usage.input,
                     output: usage.output,
-                    cache_read: None,
-                    cache_write: None,
+                    cache_read: usage.cache_read,
+                    cache_write: usage.cache_write,
+                    cache_write_1h: None,
                 });
             }
             if is_error || subtype != "success" {

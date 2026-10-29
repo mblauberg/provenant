@@ -1,3 +1,4 @@
 ## Additions
+### Lanes and settlement
 
-- Pass a chair-verified full commit SHA with `--head` and optionally a full SHA with `--base`. The host records the merge base with `origin/HEAD` when the base is omitted, injects the range into the brief and exports `PROVENANT_LANE_HEAD` and `PROVENANT_LANE_BASE`. Peer writer lanes now receive the base when a head is supplied.
+- `--head` takes a full commit SHA and `--base` optionally another, defaulting to the merge base with `origin/HEAD`. The range goes into the brief and is exported as `PROVENANT_LANE_HEAD` and `PROVENANT_LANE_BASE` (#2015).

@@ -1,3 +1,4 @@
 ## Fixes
+### Git and safety
 
-- Adopt fresh linked worktrees when an incomplete native process census reports unknown writer state. Exclusive writer custody and reservation checks still apply, and observed live writers still refuse adoption.
+- `worktree adopt` now accepts a fresh linked worktree when the host cannot tell whether a writer is running, while observed live writers still refuse adoption (#2137).

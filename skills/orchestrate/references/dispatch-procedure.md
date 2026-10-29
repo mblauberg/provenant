@@ -190,13 +190,18 @@ push|reconcile`. A terminal without MCP cancels with `provenant cancel ATTEMPT`.
 - A dispatched lane has no inbox. Peers message sessions, not lanes; a lane gets
   new instructions only through `resume` or a new dispatch.
 - For reviews that need history, pass `--base REF` to `provenant run`, or
-  `base` on each manifest or Fabric submission task. The host writes bounded log
-  and diff files into the attempt's temporary scratch directory and names their
-  paths in the prompt. Reviewers read `git-context.json` first for the resolved
-  base, captured HEAD and truncation flags, then `git-log.txt` and
-  `git-diff.patch`. Report incomplete coverage when either file is truncated or
-  `timed_out` is set. These files describe committed changes; inspect the
-  checkout separately for uncommitted edits. They are removed at settlement, so
+  `base` on each manifest or Fabric submission task. The host writes bounded log,
+  diff, diff-stat and per-file patch-slice files into the attempt's temporary
+  scratch directory and names their paths in the prompt. Reviewers read
+  `git-context.json` first for the resolved base, captured HEAD and truncation
+  flags, then `git-log.txt` and `git-diff.stat`, then only the slices they need
+  from `git-diff-slices/` (`index.txt` maps each slice to its path). They open
+  the whole `git-diff.patch` only for a question that spans files. Slices are
+  navigation aids; reviewers still read the surrounding code in the checkout.
+  When slices are incomplete the prompt lists the changed files that have none. Report
+  incomplete coverage when a file is truncated, `timed_out` is set or
+  `slices_complete` is false. These files describe committed changes; inspect
+  the checkout separately for uncommitted edits. They are removed at settlement, so
   put review evidence in the final answer. Peer writers (`--host` with
   `--branch`) get no context files.
 - For a review of a chair-verified commit, pass `--head SHA` and optionally

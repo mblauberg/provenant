@@ -3,7 +3,7 @@
 //! same-binary guardian holder shares.
 use crate::{
     Cancel, Condition, Dispatch, Lanes, Mode, Output, Part, Reconcile, Resume, Stats, Switch,
-    Target, Trace,
+    Target, Trace, limits,
 };
 use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId,
@@ -20,6 +20,7 @@ use run::ErrorKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     io::Read,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -37,6 +38,13 @@ pub(crate) use provider::find_executable as provider_executable;
 pub use provider::{prepare_fixture, writer_fixture_plan};
 pub use review::review;
 
+/// Catalogue family of a provider-qualified model, for family-distinct routing.
+pub fn model_family(model: &str) -> Option<String> {
+    let catalogue = provenant_routing::Catalogue::bundled().ok()?;
+    let id = ModelId::parse(model).ok()?;
+    catalogue.model(&id).and_then(|m| m.family.clone())
+}
+
 const PROMPT_LIMIT: u64 = 1024 * 1024;
 
 /// Paths the binary resolved for this invocation.
@@ -50,6 +58,10 @@ pub struct Edge<'a> {
 pub struct Reply {
     pub result: CommandResult<Value>,
     pub human: String,
+    /// The owner's compact view; without one the renderer truncates `human`.
+    pub summary: Option<crate::Summary>,
+    /// A read that may end quietly if its reader goes away.
+    pub read_only: bool,
 }
 /// A refused or failed owner call: envelope status, stable code and message.
 #[derive(Debug)]
@@ -135,6 +147,8 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
         Ok((data, human)) => Reply {
             result: CommandResult::new(command, Status::Ok, data),
             human,
+            summary: None,
+            read_only: false,
         },
         Err(fail) => {
             let mut result = CommandResult::new(command, fail.status, Value::Null);
@@ -147,6 +161,8 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
             Reply {
                 result,
                 human: String::new(),
+                summary: None,
+                read_only: false,
             }
         }
     }
@@ -195,6 +211,59 @@ impl Registry<'_> {
     }
 }
 impl run::Providers for Registry<'_> {
+    fn runtime_cap(&self, provider: &str) -> Option<u64> {
+        provenant_config::read_with_domains(self.roots?, &crate::domains::SECTIONS)
+            .ok()?
+            .providers
+            .get(provider)?
+            .runtime_deadline_seconds
+    }
+    fn assess_result(
+        &self,
+        task: &run::TaskRequest,
+        record: &run::AttemptRecord,
+        decoded: &run::Decoded,
+        context: Option<&run::HolderContext>,
+        policy_attempt: u64,
+    ) -> Result<run::ResultAssessment, String> {
+        let Some(route) = record.applied_route.as_ref() else {
+            return Ok(Default::default());
+        };
+        let Some(model) = route.model.as_deref() else {
+            return Ok(Default::default());
+        };
+        let model = ModelId::parse(model).map_err(|error| error.to_string())?;
+        let context_roots = context
+            .map(|context| {
+                let mut inputs = provenant_core::RootInputs::new(
+                    context.roots.home.clone(),
+                    context.roots.checkout.clone(),
+                );
+                inputs.state_dir = Some(context.disk_roots().0.to_owned());
+                inputs
+                    .resolve(&provenant_os::fs::SystemPathResolver)
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()?;
+        let policies = match context_roots.as_ref().or(self.roots) {
+            Some(roots) => {
+                provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+                    .map_err(|error| error.to_string())?
+                    .domains
+                    .routing
+                    .model_policy
+            }
+            None => provenant_routing::ModelPolicies::default(),
+        };
+        let policy = policies
+            .effective(
+                &model,
+                route.account_key.as_deref(),
+                jiff::Timestamp::now().as_second(),
+            )
+            .policy;
+        assess_model_result(&policy, task, record, decoded, policy_attempt)
+    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         let roots = self.roots.ok_or("routing context is unavailable")?;
         let priority = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
@@ -313,6 +382,84 @@ impl run::Providers for Registry<'_> {
         self.decode_inner(route, stdout, exit, provider_state, false)
     }
 }
+fn assess_model_result(
+    policy: &provenant_routing::ModelPolicy,
+    task: &run::TaskRequest,
+    record: &run::AttemptRecord,
+    decoded: &run::Decoded,
+    policy_attempt: u64,
+) -> Result<run::ResultAssessment, String> {
+    let failed_check = !policy.result_valid(&decoded.result);
+    if policy.result.check == Some(true)
+        && matches!(
+            decoded.outcome,
+            run::Outcome::Succeeded | run::Outcome::Failed | run::Outcome::Uncommitted
+        )
+        && (failed_check || decoded.outcome == run::Outcome::Failed)
+    {
+        let retry = if task.writer.is_none()
+            && task.access.write_roots.is_empty()
+            && record.continuation.as_deref() != Some("policy_fallback")
+        {
+            // Caller alternatives take precedence over the bundled fallback.
+            let fallback = task.fallback.first().cloned().or_else(|| {
+                policy
+                    .result
+                    .fallback
+                    .as_ref()
+                    .map(|model| run::RouteRecord {
+                        provider: Some(model.adapter().into()),
+                        model: Some(model.as_str().into()),
+                        effort: policy.result.fallback_effort.clone(),
+                        ..Default::default()
+                    })
+            });
+            fallback.and_then(|fallback| fallback.model.map(|model| run::PolicyRetry {
+                schema_version: 1,
+                route: run::RequestedRoute::Model { extra: Default::default(), provider: fallback.provider.unwrap_or_default(), model, effort: fallback.effort },
+                resume: false, max_attempts: 2,
+                instruction: "The previous read-only route failed its result check. Complete the original task and include concrete evidence in your final answer.".into(),
+            }))
+        } else {
+            None
+        };
+        return Ok(run::ResultAssessment {
+            refusal: (failed_check && decoded.outcome == run::Outcome::Succeeded).then(|| {
+                "model policy result check failed: empty answer or missing expected sections".into()
+            }),
+            retry,
+        });
+    }
+    if policy.lane.stop_early_ok == Some(false)
+        && matches!(
+            decoded.outcome,
+            run::Outcome::Succeeded | run::Outcome::Uncommitted
+        )
+        && decoded.complete
+        && decoded
+            .result
+            .trim_end()
+            .lines()
+            .last()
+            .is_some_and(|line| line.trim() == "Status: incomplete")
+    {
+        let route = record
+            .applied_route
+            .as_ref()
+            .ok_or("continuation route missing")?;
+        let model = route.model.clone().ok_or("continuation model missing")?;
+        return Ok(run::ResultAssessment {
+            refusal: Some("model reported unfinished work".into()),
+            retry: (policy_attempt <= u64::from(policy.lane.max_continuations.unwrap_or(0))).then(|| run::PolicyRetry {
+                schema_version: 1,
+                route: run::RequestedRoute::Model { extra: Default::default(), provider: route.provider.clone().unwrap_or_default(), model, effort: route.effort.clone() },
+                resume: true, max_attempts: u64::from(policy.lane.max_continuations.unwrap_or(0)) + 1,
+                instruction: "Continue the unfinished task in this session. Carry out the remaining work and verification. End with Status: complete only when done; otherwise Status: incomplete.".into(),
+            }),
+        });
+    }
+    Ok(Default::default())
+}
 impl Registry<'_> {
     fn decode_inner(
         &self,
@@ -335,6 +482,7 @@ impl Registry<'_> {
             },
             session: None,
             reason: Some(reason.into()),
+            partial_signals: Vec::new(),
         };
         let Some(adapter) = REGISTRY
             .iter()
@@ -433,22 +581,32 @@ impl Registry<'_> {
             usage: run::UsageRecord::default(),
             session: outcome.session().map(str::to_owned),
             reason: None,
+            partial_signals: Vec::new(),
         };
         let mut has_usage = false;
+        let mut early_stop = None;
         for event in &events {
             match event {
                 ProviderEvent::Text(text) => decoded.result.push_str(text),
+                ProviderEvent::EarlyStop { reason } => {
+                    decoded
+                        .partial_signals
+                        .push(run::PartialSignal::ProviderStop);
+                    early_stop = Some(reason.clone());
+                }
                 ProviderEvent::Usage {
                     input,
                     output,
                     cache_read,
                     cache_write,
+                    cache_write_1h,
                 } => {
                     has_usage = true;
                     decoded.usage.uncached_input = Some(*input);
                     decoded.usage.output_excluding_reasoning = Some(*output);
                     decoded.usage.cache_read = *cache_read;
                     decoded.usage.cache_write = *cache_write;
+                    decoded.usage.cache_write_1h = *cache_write_1h;
                     decoded.usage.source = Some("provider".into());
                 }
                 _ => {}
@@ -488,6 +646,17 @@ impl Registry<'_> {
         };
         if decoded.reason.is_none() {
             decoded.reason = rollout_error;
+        }
+        if decoded.outcome == run::Outcome::Succeeded
+            && let Some(reason) = early_stop
+        {
+            decoded.reason = Some(format!(
+                "provider stopped early: {}",
+                provenant_confinement::redact::known_shapes(reason.as_bytes())
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .unwrap_or_default()
+            ));
         }
         if let Some(ProviderEvent::Denied { action }) = events
             .iter()
@@ -686,6 +855,24 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         )
     };
     Ok(provenant_routing::RouteRequest {
+        intent: provenant_routing::RouteIntent {
+            writes: task.writer.is_some() || !task.access.write_roots.is_empty(),
+            workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
+                provenant_routing::Workload::Review
+            } else {
+                match task
+                    .profile
+                    .knobs
+                    .get("routing.workload")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("read_heavy") => provenant_routing::Workload::ReadHeavy,
+                    Some("edit_heavy") => provenant_routing::Workload::EditHeavy,
+                    Some("review") => provenant_routing::Workload::Review,
+                    _ => provenant_routing::Workload::General,
+                }
+            },
+        },
         choice,
         effort,
         fallback,
@@ -957,7 +1144,7 @@ pub fn worktree_access(writer: bool, worktree: Option<&Path>) -> Result<(), Fail
 /// Resolve dispatch access flags into the sealed record. Roots must be
 /// existing directories, stored canonically, and clear of the state root;
 /// the confinement compiler refuses credential, broad and Git roots.
-fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
+pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
     let invalid = |message: String| Fail::new(Status::Invalid, ErrorKind::Invalid, message);
     let mut postgres = false;
     for name in &access.capability {
@@ -1392,6 +1579,7 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         ));
     }
     let timed_out = result.result.status == Status::Timeout;
+    let mut next = None;
     for row in rows {
         let Some(id) = row["attempt_id"].as_str() else {
             continue;
@@ -1444,28 +1632,33 @@ fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                 ));
             }
         }
-        if timed_out && matches!(state, "queued" | "starting" | "running" | "settling") {
-            human.push_str(&format!(
-                "attempt {id}\nkeep waiting: provenant lanes --id {id} --wait 4m\n"
-            ));
+        // One typed next step: the first lane that needs one.
+        if next.is_none() {
+            if timed_out && matches!(state, "queued" | "starting" | "running" | "settling") {
+                next = Some(format!("provenant lanes --id {id} --wait 4m"));
+            } else if state == "input_required" {
+                next = Some(format!("provenant resume {id} --prompt-file ANSWER"));
+            } else if !matches!(state, "succeeded") {
+                next = Some(format!("provenant output {id}"));
+            }
         }
-        if state == "input_required" {
-            human.push_str(&format!(
-                "input required: provenant resume {id} --prompt-file ANSWER\n"
-            ));
-        }
-        human.push_str(&format!("more: provenant output {id}\n"));
-        if !timed_out && !matches!(state, "succeeded" | "review_required" | "input_required") {
+        if !timed_out
+            && !row["superseded_by"].is_string()
+            && !matches!(state, "succeeded" | "review_required" | "input_required")
+        {
             result.result.status = Status::Failed;
         }
     }
+    result.summary = Some(crate::Summary::verbatim(&human, next));
     result.human = human;
+    result.read_only = false;
     result
 }
 
 /// Active attempts plus the twenty most recent settled lanes.
 pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Reply {
-    reply(
+    let mut summary = None;
+    let mut out = reply(
         "status",
         (|| {
             let clock = SystemClock::new();
@@ -1486,8 +1679,12 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             } else {
                 open_read_only(edge, &call)?
             };
+            let (exempt, exempt_line) = review_exempt_view(&context);
             let Some(store) = store else {
-                return Ok((json!({"lanes": []}), "no lanes\n".into()));
+                return Ok((
+                    json!({"lanes": [], "review_exempt": exempt}),
+                    format!("no lanes\n{exempt_line}"),
+                ));
             };
             let session = Session { store, context };
             let full = command.all || command.id.is_some();
@@ -1556,29 +1753,180 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             } else {
                 compact_status(&rows, &waits, now)
             };
-            let human = match next {
-                Some(cursor) => {
-                    let target = targets
-                        .first()
-                        .map(|target| {
-                            [
-                                target.run.map(|id| id.to_string()),
-                                target.task.map(|id| id.to_string()),
-                                target.attempt.map(|id| id.to_string()),
-                            ]
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>()
-                            .join("/")
-                        })
-                        .unwrap_or_default();
-                    format!("{human}more: provenant status {target} --all --cursor {cursor}\n")
-                }
-                None => human,
-            };
-            Ok((json!({"lanes": rows, "next_cursor": next}), human))
+            let continuation = next.map(|cursor| {
+                let target = targets
+                    .first()
+                    .map(|target| {
+                        [
+                            target.run.map(|id| id.to_string()),
+                            target.task.map(|id| id.to_string()),
+                            target.attempt.map(|id| id.to_string()),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("/")
+                    })
+                    .unwrap_or_default();
+                format!("provenant status {target} --all --cursor {cursor}")
+            });
+            let lines: Vec<LaneLine> = rows
+                .iter()
+                .map(|lane| {
+                    let (state, reason) = state_and_reason(&lane.state);
+                    let reason = reason.or_else(|| {
+                        waits
+                            .iter()
+                            .find(|wait| wait.attempt_id == lane.attempt_id)
+                            .map(|wait| wait.waiting_for.clone())
+                    });
+                    LaneLine {
+                        id: lane.attempt_id.to_string(),
+                        state,
+                        model: lane
+                            .applied_route
+                            .as_ref()
+                            .and_then(|route| route.model.clone())
+                            .unwrap_or_else(|| "unresolved".into()),
+                        reason: reason.unwrap_or_default(),
+                    }
+                })
+                .collect();
+            let mut compact = lane_summary(&lines, continuation);
+            // The compact view keeps the paths a writer may change unreviewed.
+            compact.lines.push(exempt_line.trim_end().to_owned());
+            summary = Some(compact);
+            let human = format!("{human}{exempt_line}");
+            Ok((
+                json!({"lanes": rows, "next_cursor": next, "review_exempt": exempt}),
+                human,
+            ))
         })(),
-    )
+    );
+    out.summary = summary;
+    out.read_only = true;
+    out
+}
+
+/// One lane as the compact views show it.
+struct LaneLine {
+    id: String,
+    state: String,
+    model: String,
+    reason: String,
+}
+/// Needs action (0), still moving (1), or finished well (2).
+fn lane_rank(state: &str) -> u8 {
+    match state {
+        "queued" | "starting" | "running" | "settling" => 1,
+        "succeeded" | "cancelled" => 2,
+        _ => 0,
+    }
+}
+/// Counts by state, then the lanes that need action, then those still moving,
+/// then the one typed next command. Finished lanes are counted, not listed.
+fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> crate::Summary {
+    if lanes.is_empty() {
+        return crate::Summary {
+            lines: vec!["no lanes".into()],
+            next: None,
+            omitted: 0,
+        };
+    }
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for lane in lanes {
+        match counts.iter_mut().find(|(state, _)| *state == lane.state) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((lane.state.clone(), 1)),
+        }
+    }
+    counts.sort_by_key(|(state, count)| (lane_rank(state), std::cmp::Reverse(*count)));
+    let tally = crate::Summary::tally(
+        &counts
+            .iter()
+            .map(|(state, count)| (state.as_str(), *count))
+            .collect::<Vec<_>>(),
+    );
+    let headline = format!(
+        "{} lane{}: {tally}",
+        lanes.len(),
+        if lanes.len() == 1 { "" } else { "s" }
+    );
+    let mut listed: Vec<&LaneLine> = lanes
+        .iter()
+        .filter(|lane| lane_rank(&lane.state) < 2)
+        .collect();
+    listed.sort_by_key(|lane| lane_rank(&lane.state));
+    let rows = listed
+        .iter()
+        .map(|lane| {
+            format!(
+                "{} {} {} {}",
+                &lane.id[..lane.id.len().min(8)],
+                lane.state,
+                plain_text(&lane.model, usize::MAX),
+                plain_text(&lane.reason, usize::MAX)
+            )
+            .trim_end()
+            .to_owned()
+        })
+        .collect();
+    let next = continuation.or_else(|| {
+        listed.first().map(|lane| {
+            if lane_rank(&lane.state) == 0 {
+                format!("provenant output {}", lane.id)
+            } else {
+                format!("provenant lanes --id {} --wait 4m", lane.id)
+            }
+        })
+    });
+    crate::Summary::new(headline, rows, next)
+}
+/// The lane rows of a `lanes` or `run` reply, in the shape `lane_summary` reads.
+fn lane_lines(data: &Value) -> Vec<LaneLine> {
+    data["lanes"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(LaneLine {
+                        id: row["attempt_id"].as_str()?.to_owned(),
+                        state: row["state"].as_str()?.to_owned(),
+                        model: row["applied_route"]["model"]
+                            .as_str()
+                            .unwrap_or("unresolved")
+                            .to_owned(),
+                        reason: row["reason"]
+                            .as_str()
+                            .or_else(|| row["waiting_for"].as_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+/// The paths a writer may change without review in this project, as JSON and
+/// as the line `status` ends with, so the chair sees what will not stop a lane.
+fn review_exempt_view(context: &run::ExecutionContext) -> (serde_json::Value, String) {
+    use provenant_confinement::run_config::RunConfig;
+    match RunConfig::read(context.state_root.as_path()) {
+        Ok(config) => {
+            let paths = config.review_exempt_for(&context.project_id.to_string());
+            let line = if paths.is_empty() {
+                "review-exempt paths: none\n".to_owned()
+            } else {
+                format!("review-exempt paths: {}\n", paths.join(", "))
+            };
+            (json!(paths), line)
+        }
+        Err(_) => (
+            json!([]),
+            "review-exempt paths: none (config unreadable; every protected change needs review)\n"
+                .to_owned(),
+        ),
+    }
 }
 fn compact_status(rows: &[run::AttemptRecord], waits: &[run::LaneWait], now: WallTime) -> String {
     if rows.is_empty() {
@@ -1897,6 +2245,9 @@ fn dispatch_inner(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
+    if command.route.read_heavy {
+        command.knobs.push("routing.workload=read_heavy".into());
+    }
     let flag_route = (
         command.route.model.as_ref().map(|m| m.0.clone()),
         command.route.route.clone(),
@@ -2476,6 +2827,9 @@ struct PreparedProvider<'a> {
     ready: Option<&'a run::PreparedStart>,
 }
 impl run::Providers for PreparedProvider<'_> {
+    fn runtime_cap(&self, provider: &str) -> Option<u64> {
+        self.fallback.runtime_cap(provider)
+    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         self.fallback.priority(task)
     }
@@ -2594,6 +2948,67 @@ fn seal_launch_task(
         task_id: task.task_id,
         effective_network: task.access.network(task.writer.is_some()),
     }
+}
+
+/// Called after guardian custody is released. The successor was queued in the
+/// terminal transaction; a crashed launcher leaves it for ordinary recovery.
+pub fn launch_policy_successor(context: &run::HolderContext) -> Result<(), String> {
+    let Some(host) = context.launch.as_ref() else {
+        return Ok(());
+    };
+    if host.configuration_root != context.roots.state_root {
+        return Ok(());
+    }
+    let mut inputs =
+        provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
+    inputs.state_dir = Some(context.roots.state_root.clone());
+    let roots = inputs
+        .resolve(&provenant_os::fs::SystemPathResolver)
+        .map_err(|error| error.to_string())?;
+    let (_, store) =
+        run::HolderContext::open(&context.encode().map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|error| error.message)?;
+    let pending = store
+        .pending_attempts(context.run_id, &call)
+        .map_err(|error| error.to_string())?;
+    if !pending.iter().any(|attempt| {
+        attempt.retry_of == Some(context.attempt_id)
+            && matches!(
+                attempt.continuation.as_deref(),
+                Some("policy_fallback" | "policy_continuation")
+            )
+    }) {
+        return Ok(());
+    }
+    let session = Session {
+        context: run::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: context.project_id,
+            actor_id: context.actor_id,
+            read_prompts: true,
+        },
+        store,
+    };
+    let edge = Edge {
+        roots: &roots,
+        home: &context.roots.home,
+        assets: &context.roots.checkout,
+        cwd: &host.cwd,
+    };
+    launch_on_host(
+        &session,
+        context.run_id,
+        &edge,
+        &call,
+        Some(host),
+        None,
+        None,
+    )
+    .map_err(|error| error.message)?;
+    Ok(())
 }
 
 /// A child carries the request `validate_child` returned, which is the only
@@ -2902,6 +3317,12 @@ fn report(
     let canonical = session.store.request(record.run_id, call)?;
     if let Some(rows) = data["lanes"].as_array_mut() {
         for row in rows {
+            if let Some(id) = row["attempt_id"].as_str().and_then(|id| id.parse().ok()) {
+                let tail = session.store.policy_tail(id, call)?;
+                if tail.attempt_id != id {
+                    row["superseded_by"] = json!(tail.attempt_id);
+                }
+            }
             if let Some(task) = canonical
                 .tasks
                 .iter()
@@ -3035,11 +3456,59 @@ fn render_lanes(
                 .as_deref()
                 .map(|title| format!(" {}", plain_text(title, usize::MAX)))
                 .unwrap_or_default();
+            // A partial finish keeps its outcome; the header says so beside it.
+            let state_text = if lane.partial_signals.is_empty() {
+                state.clone()
+            } else {
+                format!("{state} (partial)")
+            };
             // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
-                "{}/{}/{}{title_text} {state} {route_text}{account_field}{reason_text}\n",
+                "{}/{}/{}{title_text} {state_text} {route_text}{account_field}{reason_text}\n",
                 lane.run_id, lane.task_id, lane.attempt_id,
             ));
+            if !lane.partial_signals.is_empty() {
+                // The outcome is untouched; the chair decides whether to resume.
+                human.push_str(&format!(
+                    "  partial finish: {}; the chair decides whether to resume\n",
+                    lane.partial_signals
+                        .iter()
+                        .map(|signal| signal.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                if lane
+                    .session
+                    .as_deref()
+                    .is_some_and(|session| !session.is_empty())
+                {
+                    human.push_str(&format!(
+                        "  continue: provenant resume {} --prompt-file PROMPT\n",
+                        lane.attempt_id
+                    ));
+                }
+            }
+            if matches!(lane.state, run::AttemptState::Running { .. })
+                && let Some(deadline) = lane.runtime_deadline
+            {
+                human.push_str(&format!("  runtime deadline {deadline}\n"));
+            }
+            if matches!(
+                lane.state,
+                run::AttemptState::Terminal {
+                    outcome: run::Outcome::TimedOut,
+                    ..
+                }
+            ) && lane
+                .session
+                .as_deref()
+                .is_some_and(|session| !session.is_empty())
+            {
+                human.push_str(&format!(
+                    "  continue: provenant resume {} --prompt-file PROMPT\n",
+                    lane.attempt_id
+                ));
+            }
             if matches!(
                 lane.state,
                 run::AttemptState::Terminal {
@@ -3140,6 +3609,8 @@ fn render_lanes(
                 "priority": lane.priority,
                 "finished_at": finished_at,
                 "last_output_at": lane.last_output_at,
+                "runtime_deadline": lane.runtime_deadline,
+                "partial_signals": lane.partial_signals,
                 "delivery_id": lane.delivery_id,
                 "write_grants": lane.write_grants,
                 "read_only_writable": lane.read_only_writable,
@@ -3148,6 +3619,7 @@ fn render_lanes(
                 "protected_paths": lane.protected_paths,
                 "delivery": lane.delivery,
                 "continuation": lane.continuation,
+                "cache_read_share": provenant_routing::cache_read_share(lane.usage.uncached_input, lane.usage.cache_read, lane.usage.cache_write),
                 "result_path": result,
                 "transcript": transcript,
             });
@@ -3352,10 +3824,24 @@ fn candidates<'a>(
             _ => select(session, picks.targets, seen, picks.owner, &call)?,
         };
         let mut lanes = Vec::with_capacity(ids.len());
-        for id in ids {
-            let lane = session.service().status_for_wait(id, &call)?;
-            if picks.label.is_none() || lane.verified_owner == Some(picks.owner) {
-                lanes.push(lane);
+        let mut included = std::collections::BTreeSet::new();
+        for mut id in ids {
+            // Settlement may have queued a successor after the selection read.
+            // Keep the original receipt and wait for its current policy tail.
+            for _ in 0..9 {
+                let lane = session.service().status_for_wait(id, &call)?;
+                if included.insert(id)
+                    && (picks.label.is_none() || lane.verified_owner == Some(picks.owner))
+                {
+                    lanes.push(lane);
+                }
+                // Read the tail after the state: a terminal state must already
+                // have committed any successor in the same transaction.
+                let tail = session.store.policy_tail(id, &call)?.attempt_id;
+                if tail == id {
+                    break;
+                }
+                id = tail;
             }
         }
         Ok(lanes)
@@ -3585,7 +4071,16 @@ pub fn lanes_streaming(
     } else {
         lanes_inner(&command, edge, json, out, None)
     };
-    reply_waited("lanes", result)
+    let mut out = reply_waited("lanes", result);
+    // A watch already printed its events; its final line is its own summary.
+    if out.result.error.is_none()
+        && out.result.data["lanes"].is_array()
+        && !(command.watch.is_some() && !json)
+    {
+        out.summary = Some(lane_summary(&lane_lines(&out.result.data), None));
+    }
+    out.read_only = true;
+    out
 }
 #[allow(clippy::disallowed_methods)]
 fn lanes_wait_entry(
@@ -3930,7 +4425,93 @@ pub fn attempt_facts(
 }
 
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
-    reply("output", output_inner(command, edge))
+    let receipt_tail = matches!(command.part, Part::Receipt)
+        .then_some(command.tail)
+        .flatten();
+    let headed = matches!(command.part, Part::Result) && !command.trace;
+    let mut out = reply(
+        "output",
+        output_inner(command, edge).map(|(mut data, mut text)| {
+            if let Some(lines) = receipt_tail {
+                text =
+                    text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
+                data["tail"] = json!(lines.min(limits::TAIL_LINES));
+                data["tail_text"] = json!(text);
+            }
+            (data, text)
+        }),
+    );
+    out.read_only = true;
+    if out.result.error.is_none() {
+        out.summary = Some(output_summary(&out.result.data, &out.human, headed));
+    }
+    out
+}
+
+/// What an agent needs from a read: how the attempt settled, what it changed,
+/// and the whole final text up to a generous bound, then its head and tail.
+/// Missing changed-file evidence stays null; it must never read as an empty diff.
+fn output_summary(data: &Value, text: &str, headed: bool) -> crate::Summary {
+    let mut lines = Vec::new();
+    if headed && let Some(state) = data["state"].as_str() {
+        let reason = data["reason"].as_str();
+        lines.push(match reason {
+            Some(reason) => format!(
+                "settlement: {} ({})",
+                crate::bounded_text(state, 64),
+                crate::bounded_text(reason, 160)
+            ),
+            None => format!("settlement: {}", crate::bounded_text(state, 64)),
+        });
+    }
+    if headed && let Some(files) = data.get("changed_files") {
+        lines.push(match files.as_array() {
+            Some(paths) => {
+                let total = data["changed_files_total"]
+                    .as_u64()
+                    .map_or(paths.len(), |total| total as usize);
+                let more = total.saturating_sub(paths.len());
+                let listed = paths
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let more = if more > 0 {
+                    format!(" (+{more} more)")
+                } else {
+                    String::new()
+                };
+                format!("changed files ({total}): {listed}{more}")
+            }
+            None => "changed files: unavailable".into(),
+        });
+    }
+    let body = crate::head_and_tail(text, limits::OUTPUT_BYTES);
+    lines.extend(body.lines().map(str::to_owned));
+    let target = data["attempt_id"].as_str().map(|id| {
+        data["host"]
+            .as_str()
+            .map_or_else(|| id.to_owned(), |host| format!("{host}/{id}"))
+    });
+    let state = data["state"].as_str().unwrap_or_default();
+    let next = target.and_then(|target| {
+        if data["eof"] == json!(false) {
+            let offset = data["next_offset"].as_u64()?;
+            Some(format!(
+                "provenant output {target} --part {} --offset {offset}",
+                data["part"].as_str().unwrap_or("result")
+            ))
+        } else if matches!(state, "queued" | "starting" | "running" | "settling") {
+            Some(format!("provenant lanes --id {target} --wait 4m"))
+        } else {
+            None
+        }
+    });
+    crate::Summary {
+        lines,
+        next,
+        omitted: 0,
+    }
 }
 fn receipt_model(adapter: Option<&str>, model: Option<&str>) -> Option<String> {
     let adapter = adapter.filter(|value| !value.is_empty())?;
@@ -4066,7 +4647,7 @@ fn reviewer_receipt(
     ))
 }
 /// The most lines `output --tail` returns; a larger request is clamped.
-const TAIL_MAX: u64 = 500;
+const TAIL_MAX: u64 = limits::TAIL_LINES;
 
 fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
     let site = match command.host.as_deref() {
@@ -4188,9 +4769,41 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         Part::Transcript => run::ArtifactPart::Transcript,
         Part::Events => {
             // An attempt has a handful of revisions; offset is an event cursor.
-            let events = session
+            let mut events = session
                 .service()
                 .events(command.offset, 64, Some(id), &call)?;
+            if let Some(lines) = command.tail {
+                let mut cursor = events.last().map_or(command.offset, |event| event.sequence);
+                let mut more = events.len() == 64;
+                while more {
+                    let page = session.service().events(cursor, 64, Some(id), &call)?;
+                    more = page.len() == 64;
+                    let next = page.last().map_or(cursor, |event| event.sequence);
+                    if more && next <= cursor {
+                        return Err(Fail::new(
+                            Status::Error,
+                            ErrorKind::StateCorrupt,
+                            "event cursor did not advance",
+                        ));
+                    }
+                    cursor = next;
+                    events.extend(page);
+                    let excess = events.len().saturating_sub(lines.min(TAIL_MAX) as usize);
+                    events.drain(..excess);
+                }
+                let excess = events.len().saturating_sub(lines.min(TAIL_MAX) as usize);
+                events.drain(..excess);
+                while !events.is_empty()
+                    && serde_json::to_vec(&events)
+                        .map_err(|error| {
+                            Fail::new(Status::Error, ErrorKind::Io, error.to_string())
+                        })?
+                        .len() as u64
+                        > command.max_bytes
+                {
+                    events.remove(0);
+                }
+            }
             let human = events
                 .iter()
                 .map(|e| format!("{} {}\n", e.revision, state_name(&e.change)))
@@ -4210,15 +4823,7 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         if !matches!(part, run::ArtifactPart::Transcript) || range.offset != chunk.offset {
             chunk = session.service().output(id, part, range, &call)?;
         }
-        let text = &chunk.bytes;
-        let body = text.strip_suffix(b"\n").unwrap_or(text);
-        let start = body
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, b)| **b == b'\n')
-            .nth(usize::try_from(lines - 1).unwrap_or(usize::MAX))
-            .map_or(0, |(i, _)| i + 1);
+        let start = tail_start(&chunk.bytes, lines);
         chunk.offset += start as u64;
         chunk.bytes.drain(..start);
     }
@@ -4247,7 +4852,84 @@ fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String),
         data["tail"] = json!(lines);
         data["tail_clamped"] = json!(command.tail != tail);
     }
+    if matches!(command.part, Part::Result) && command.tail.is_none() && command.offset == 0 {
+        let (paths, total) = changed_file_evidence(&session, &record, &call);
+        data["changed_files"] = paths;
+        data["changed_files_total"] = total;
+    }
     Ok((data, text))
+}
+
+/// Use the recorded base and final head, never the caller's current checkout
+/// diff. Pruned/private objects and read-only attempts may have no evidence.
+fn changed_file_evidence(
+    session: &Session,
+    record: &run::AttemptRecord,
+    call: &run::Request<'_>,
+) -> (Value, Value) {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let read = || -> Option<(Vec<String>, usize)> {
+        let task = session
+            .store
+            .request(record.run_id, call)
+            .ok()?
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == record.task_id)?;
+        let project = task.writer?.project;
+        let base: provenant_core::GitOid = task.base?.parse().ok()?;
+        let head = record.head?;
+        let git = provenant_os::git::git_executable()?;
+        let argv = [
+            git.into_os_string(),
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--no-textconv".into(),
+            "--name-only".into(),
+            "-z".into(),
+            base.to_string().into(),
+            head.to_string().into(),
+            "--".into(),
+        ];
+        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        options.stdout = StreamPolicy::Capture { limit: 65536 };
+        options.stderr = StreamPolicy::Discard;
+        options.stop_on_output_limit = true;
+        let output = SystemExecutor::new(1).ok()?.execute(options).ok()?;
+        if output.termination != Termination::Exit(0)
+            || output.timed_out
+            || output.cancelled
+            || output.stdout.truncated
+            || output.stdout.read_failed
+            || output.drain_truncated
+        {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout.bytes).ok()?;
+        let all: Vec<_> = text.split('\0').filter(|path| !path.is_empty()).collect();
+        Some((
+            all.iter()
+                .take(limits::OUTPUT_PATHS)
+                .map(|path| crate::bounded_text(path, limits::PATH_BYTES))
+                .collect(),
+            all.len(),
+        ))
+    };
+    read().map_or((Value::Null, Value::Null), |(paths, total)| {
+        (json!(paths), json!(total))
+    })
+}
+
+fn tail_start(bytes: &[u8], lines: u64) -> usize {
+    bytes
+        .strip_suffix(b"\n")
+        .unwrap_or(bytes)
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, b)| **b == b'\n')
+        .nth(usize::try_from(lines.saturating_sub(1)).unwrap_or(usize::MAX))
+        .map_or(0, |(i, _)| i + 1)
 }
 
 /// The attempt's trace, then each parent's, nearest first. The chain ends at an
@@ -5262,6 +5944,38 @@ fn reconcile_inner(
 pub fn stats(command: Stats, edge: &Edge<'_>) -> Reply {
     reply("telemetry stats", stats_inner(command, edge))
 }
+
+fn cache_kpi_rows(
+    facts: &[&provenant_records::AttemptFact],
+    domains: &crate::domains::Domains,
+    now: i64,
+) -> Value {
+    let mut grouped: BTreeMap<(Option<String>, Option<String>), Vec<&provenant_records::Usage>> =
+        BTreeMap::new();
+    let share = |usage: &provenant_records::Usage| {
+        provenant_routing::cache_read_share(
+            usage.uncached_input,
+            usage.cache_read,
+            usage.cache_write,
+        )
+    };
+    let lanes: Vec<_> = facts.iter().map(|fact| {
+        let route = fact.applied_route.as_ref();
+        let model = route.and_then(|route| route.model.clone());
+        let account = route.and_then(|route| route.account_label.clone());
+        grouped.entry((model.clone(), account.clone())).or_default().push(&fact.usage);
+        json!({"attempt_id": fact.attempt_id, "model": model, "account": account, "share": share(&fact.usage)})
+    }).collect();
+    let routes: Vec<_> = grouped.into_iter().map(|((model, account), usages)| {
+        let sum = |select: fn(&provenant_records::Usage) -> Option<u64>| usages.iter().try_fold(0u64, |sum, usage| sum.checked_add(select(usage)?));
+        let target = model.as_deref().and_then(|model| ModelId::parse(model).ok()).and_then(|model| {
+            let key = account.as_deref().and_then(|label| domains.accounts.entries.values().find(|entry| entry.adapter == model.adapter() && (entry.label == label || entry.key == label))).map(|entry| entry.key.as_str()).or(account.as_deref());
+            domains.routing.model_policy.effective(&model, key, now).policy.cache.read_share_target
+        });
+        json!({"model": model, "account": account, "share": provenant_routing::cache_read_share(sum(|u| u.uncached_input), sum(|u| u.cache_read), sum(|u| u.cache_write)), "target": target})
+    }).collect();
+    json!({"scope": "project terminal attempts", "routes": routes, "lanes": lanes})
+}
 fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
     use run::AttemptReader;
     let path = edge.assets.join("config/telemetry-prices.toml");
@@ -5351,15 +6065,75 @@ fn stats_inner(command: Stats, edge: &Edge<'_>) -> Result<(Value, String), Fail>
         })
         .transpose()?
         .unwrap_or_default();
-    let report = provenant_telemetry::stats(facts, &prices, window)
+    let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+    let selected: Vec<_> = facts
+        .iter()
+        .filter(|fact| {
+            window.since.is_none_or(|s| fact.finished_at >= s)
+                && window.until.is_none_or(|u| fact.finished_at < u)
+        })
+        .collect();
+    let cache_kpis = cache_kpi_rows(
+        &selected,
+        &config.domains,
+        jiff::Timestamp::now().as_second(),
+    );
+    // Chair sessions span projects, so the host's whole window is read. They are
+    // best effort: an unreadable usage log must not hide the lane figures.
+    let chair_window = (
+        window
+            .since
+            .map_or(jiff::Timestamp::MIN, |t| t.as_timestamp()),
+        window
+            .until
+            .map_or(jiff::Timestamp::MAX, |t| t.as_timestamp()),
+    );
+    let (chairs, chair_error) = match crate::quota::chair_sessions_with_usage(
+        edge.roots,
+        Some(edge.home),
+        chair_window.0,
+        chair_window.1,
+    ) {
+        Ok(chairs) => (chairs, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+    let report = provenant_telemetry::stats_with_chair(facts, chairs, &prices, window)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
-    let human = stats_summary(&report.totals);
-    let data = serde_json::to_value(&report)
+    let mut human = stats_summary(&report);
+    let total_share = totals_cache_read_share(&report.totals);
+    human.push_str(&format!(
+        "cache-read share: {}\n",
+        total_share.map_or_else(
+            || "unknown (incomplete input categories)".into(),
+            |share| format!("{:.1}%", share * 100.0)
+        )
+    ));
+    let mut data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    data["cache_read_share"] = cache_kpis;
+    data["cache_read_share"]["overall"] = json!(total_share);
+    if let Some(error) = chair_error {
+        human.push_str(&format!(
+            "chair sessions not read: {}\n",
+            plain_text(&error, usize::MAX)
+        ));
+        data["chair_error"] = Value::String(error);
+    }
     Ok((data, human))
 }
 
-fn stats_summary(totals: &provenant_telemetry::Totals) -> String {
+fn totals_cache_read_share(totals: &provenant_telemetry::Totals) -> Option<f64> {
+    let known =
+        |total: &provenant_telemetry::TokenTotal| (total.missing == 0).then_some(total.known);
+    provenant_routing::cache_read_share(
+        known(&totals.usage.uncached_input),
+        known(&totals.usage.cache_read),
+        known(&totals.usage.cache_write),
+    )
+}
+
+fn cost_summary(totals: &provenant_telemetry::Totals) -> String {
     let cost = &totals.cost;
     let human = if let Some(money) = &cost.complete {
         format!("est. API-equivalent ${}", money.usd)
@@ -5375,6 +6149,58 @@ fn stats_summary(totals: &provenant_telemetry::Totals) -> String {
         )
     };
     format!("{} attempts, {human}\n", totals.attempts)
+}
+
+fn stats_summary(report: &provenant_telemetry::StatsReport) -> String {
+    let totals = &report.totals;
+    let mut text = cost_summary(totals);
+    if totals.attempts == 0
+        && let Some(project) = report.window.project
+    {
+        text.push_str(&format!(
+            "no terminal attempts recorded for project {project}; run from its checkout to see its lanes\n"
+        ));
+    }
+    // Only figures that exist: a source with no cache split adds no line, and
+    // the JSON carries the counts of what was not reported.
+    let mut share = |label: &str, rows: &[provenant_telemetry::CacheGroup]| {
+        for row in rows.iter().filter(|row| row.cache.reporting > 0) {
+            let name = [&row.provider, &row.model, &row.account]
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let name = if name.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", plain_text(&name, usize::MAX))
+            };
+            text.push_str(&format!(
+                "cache read {label} [{}]{name}: {}\n",
+                row.source,
+                crate::quota::cache_share(&row.cache)
+            ));
+        }
+    };
+    share("by source", &report.cache.by_source);
+    share("by model", &report.cache.by_model);
+    share("by account", &report.cache.by_account);
+    if let Some(chair) = &report.chair {
+        let unread: u64 = chair.unread.values().sum();
+        text.push_str(&format!(
+            "chair: {} sessions on this host ({unread} unread), {}\n",
+            chair.sessions,
+            chair.cost.complete.as_ref().map_or_else(
+                || chair.cost.known_lower_bound.as_ref().map_or_else(
+                    || "cost unknown".to_owned(),
+                    |money| format!("est. API-equivalent at least ${}", money.usd),
+                ),
+                |money| format!("est. API-equivalent ${}", money.usd)
+            )
+        ));
+    }
+    text
 }
 
 /// Offline lane timeline: terminal attempts as Chrome Trace Event JSON.
@@ -5724,6 +6550,105 @@ mod lane_depth_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn model_policy_results_check_sections_and_bound_continuations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|error| error.message)?;
+        let store = trace_store(&temp, &call)?;
+        let input = trace_run(40, AttemptId::from_bytes([41; 16]), clock.wall_now()?)?;
+        store.create(&input, &call)?;
+        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        let task = &input.request.tasks[0];
+        let policies = provenant_routing::ModelPolicies::default();
+        let mut decoded = run::Decoded {
+            outcome: run::Outcome::Succeeded,
+            result: "unstructured answer".into(),
+            complete: true,
+            observed_route: None,
+            usage: Default::default(),
+            session: Some("fixture".into()),
+            reason: None,
+            partial_signals: Vec::new(),
+        };
+        let gemini = policies
+            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, 0)
+            .policy;
+        let decision =
+            assess_model_result(&gemini, task, &record, &decoded, record.attempt_number)?;
+        assert!(decision.refusal.is_some());
+        let fallback = decision.retry.ok_or("missing fallback")?;
+        assert!(!fallback.resume);
+        assert_eq!(fallback.max_attempts, 2);
+        record.continuation = Some("policy_fallback".into());
+        assert!(
+            assess_model_result(&gemini, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .is_none()
+        );
+        record.continuation = None;
+        decoded.result = "## Findings\nClean.\n## Evidence\nChecked.".into();
+        let decision =
+            assess_model_result(&gemini, task, &record, &decoded, record.attempt_number)?;
+        assert!(decision.refusal.is_none() && decision.retry.is_none());
+        // Typed quota and stop outcomes retain their own recovery semantics,
+        // even when their result is empty.
+        decoded.result.clear();
+        for outcome in [
+            run::Outcome::QuotaLimited,
+            run::Outcome::Cancelled,
+            run::Outcome::TimedOut,
+            run::Outcome::Lost,
+        ] {
+            decoded.outcome = outcome;
+            let decision = assess_model_result(&gemini, task, &record, &decoded, 1)?;
+            assert!(decision.refusal.is_none() && decision.retry.is_none());
+        }
+        decoded.outcome = run::Outcome::Succeeded;
+        let terra = policies
+            .effective(&ModelId::parse("codex/gpt-6.1-terra")?, None, 0)
+            .policy;
+        record.applied_route = Some(run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-terra".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+        decoded.result = "More work remains.\nStatus: incomplete".into();
+        let continuation =
+            assess_model_result(&terra, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .ok_or("missing continuation")?;
+        assert!(continuation.resume);
+        assert_eq!(continuation.max_attempts, 3);
+        // Trailing blank lines do not hide the marker.
+        decoded.result = "More work remains.\nStatus: incomplete\n\n".into();
+        assert!(
+            assess_model_result(&terra, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .is_some()
+        );
+        decoded.result = "More work remains.\nStatus: incomplete".into();
+        decoded.outcome = run::Outcome::Uncommitted;
+        assert!(
+            assess_model_result(&terra, task, &record, &decoded, 1)?
+                .retry
+                .is_some()
+        );
+        decoded.outcome = run::Outcome::Succeeded;
+        record.attempt_number = 3;
+        let decision = assess_model_result(&terra, task, &record, &decoded, record.attempt_number)?;
+        assert!(decision.refusal.is_some() && decision.retry.is_none());
+        decoded.result = "Done.\nStatus: complete".into();
+        assert!(
+            assess_model_result(&terra, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .is_none()
+        );
+        Ok(())
+    }
+    #[test]
     fn unsafe_store_path_reason_survives_cli_conversion() {
         let failure = super::Fail::from(provenant_run::RunError::UnsafePath {
             path: "runs/example/process.json".into(),
@@ -5741,6 +6666,7 @@ mod tests {
         let mut totals = Totals {
             attempts: 3,
             usage: Default::default(),
+            cache: Default::default(),
             cost: CostTotal {
                 cost_basis: "api_equivalent_estimate",
                 subscription_attempts: 0,
@@ -5751,8 +6677,14 @@ mod tests {
             },
             outcomes: Default::default(),
         };
+        assert_eq!(totals_cache_read_share(&totals), None);
+        totals.usage.uncached_input.known = 10;
+        totals.usage.cache_read.known = 90;
+        assert_eq!(totals_cache_read_share(&totals), Some(0.9));
+        totals.usage.cache_write.missing = 1;
+        assert_eq!(totals_cache_read_share(&totals), None);
         assert_eq!(
-            stats_summary(&totals),
+            cost_summary(&totals),
             "3 attempts, cost unknown (3 attempts missing cost data)\n"
         );
         totals.cost.known_lower_bound = Some(Money {
@@ -5762,14 +6694,115 @@ mod tests {
         totals.cost.priced_attempts = 1;
         totals.cost.missing_attempts = 2;
         assert_eq!(
-            stats_summary(&totals),
+            cost_summary(&totals),
             "3 attempts, est. API-equivalent at least $2.000000 (1 of 3 attempts priced)\n"
         );
         totals.cost.complete = totals.cost.known_lower_bound.clone();
         assert_eq!(
-            stats_summary(&totals),
+            cost_summary(&totals),
             "3 attempts, est. API-equivalent $2.000000\n"
         );
+    }
+
+    #[test]
+    fn stats_text_lists_cache_share_only_where_a_provider_reported_it() {
+        use provenant_telemetry::{ChairModelUsage, ConfiguredPrices, usage::ChairSession};
+        let prices = provenant_telemetry::validate_prices(&ConfiguredPrices {
+            schema_version: 1,
+            id: "empty".into(),
+            reviewed_at: "2026-10-29".into(), // timebomb: allow fixed price-table review date, never compared with the clock
+            units: "usd_microdollars_per_million_tokens".into(),
+            models: Vec::new(),
+        })
+        .unwrap();
+        let chair = |usage| ChairSession {
+            adapter: "claude".into(),
+            account: "work".into(),
+            session: "s".into(),
+            project: None,
+            config: None,
+            usage,
+            unread: None,
+        };
+        let usage = |read| {
+            vec![ChairModelUsage {
+                model: "claude-opus-5-5".into(),
+                usage: provenant_records::Usage {
+                    uncached_input: Some(10),
+                    cache_read: read,
+                    cache_write: Some(0),
+                    cache_write_1h: None,
+                    output_excluding_reasoning: Some(1),
+                    reasoning: None,
+                },
+            }]
+        };
+        let report = |usage| {
+            let report = provenant_telemetry::stats_with_chair(
+                [],
+                [chair(usage)],
+                &prices,
+                Default::default(),
+            )
+            .unwrap();
+            stats_summary(&report)
+        };
+        let text = report(usage(Some(90)));
+        assert!(
+            text.contains(
+                "cache read by source [chair]: 90.0% of 100 input tokens (1 records reported, 0 did not)\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("cache read by model [chair] claude claude/claude-opus-5-5: 90.0%"),
+            "{text}"
+        );
+        assert!(
+            text.contains("chair: 1 sessions on this host (0 unread)"),
+            "{text}"
+        );
+        let text = report(usage(None));
+        assert!(!text.contains("cache read"), "{text}");
+    }
+
+    #[test]
+    fn core_run_status_uses_policy_successor_and_retains_receipts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let edge = Edge {
+            roots: &roots,
+            home: &root.join("home"),
+            assets: root,
+            cwd: root,
+        };
+        for (tail, expected) in [("succeeded", Status::Ok), ("failed", Status::Failed)] {
+            let result = super::reply(
+                "dispatch",
+                Ok((
+                    json!({
+                        "lanes": [
+                            {"attempt_id":"01010101010101010101010101010101", "state":"failed", "superseded_by":"02020202020202020202020202020202"},
+                            {"attempt_id":"02020202020202020202020202020202", "state":tail}
+                        ]
+                    }),
+                    String::new(),
+                )),
+            );
+            let report = super::render_run(result, &edge);
+            assert_eq!(report.result.status, expected);
+            assert_eq!(
+                report.result.data["lanes"].as_array().ok_or("lanes")?.len(),
+                2
+            );
+            assert!(report.human.contains("01010101 failed"));
+            assert!(report.human.contains(&format!("02020202 {tail}")));
+        }
+        Ok(())
     }
 
     #[test]
@@ -5808,23 +6841,16 @@ mod tests {
                 .contains("codex/test (effort: high, network: open)")
         );
         assert_eq!(report.result.status, Status::Timeout);
+        let next = |reply: &super::Reply| {
+            reply
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.next.clone())
+        };
+        assert!(!report.human.contains("keep waiting:"), "{}", report.human);
         assert_eq!(
-            report.human.matches("keep waiting:").count(),
-            1,
-            "{}",
-            report.human
-        );
-        assert!(
-            report
-                .human
-                .contains("provenant lanes --id 01010101010101010101010101010101 --wait 4m")
-        );
-        assert!(
-            report
-                .human
-                .contains("provenant resume 03030303030303030303030303030303 --prompt-file ANSWER"),
-            "{}",
-            report.human
+            next(&report).as_deref(),
+            Some("provenant lanes --id 01010101010101010101010101010101 --wait 4m")
         );
         let input = super::reply(
             "dispatch",
@@ -5838,7 +6864,10 @@ mod tests {
         );
         let input = super::render_run(input, &edge);
         assert_eq!(input.result.status, Status::Ok);
-        assert!(input.human.contains("input required: provenant resume"));
+        assert_eq!(
+            next(&input).as_deref(),
+            Some("provenant resume 03030303030303030303030303030303 --prompt-file ANSWER")
+        );
         assert!(!input.human.contains("keep waiting:"));
         Ok(())
     }
@@ -8375,7 +9404,7 @@ mod tests {
         };
         let stream = concat!(
             "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":40,\"cache_creation\":{\"ephemeral_1h_input_tokens\":25}}}\n",
         );
         let decoded = Registry::default()
             .decode(
@@ -8389,7 +9418,61 @@ mod tests {
         assert_eq!(decoded.usage.output_excluding_reasoning, Some(20));
         assert_eq!(decoded.usage.cache_read, Some(30));
         assert_eq!(decoded.usage.cache_write, Some(40));
+        assert_eq!(decoded.usage.cache_write_1h, Some(25));
         assert_eq!(decoded.usage.source.as_deref(), Some("provider"));
+    }
+
+    #[test]
+    fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
+        let route = run::RouteRecord {
+            provider: Some("claude".into()),
+            model: Some("claude/claude-sonnet-5".into()),
+            ..Default::default()
+        };
+        let stream = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"half\",\"stop_reason\":\"max_tokens\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n",
+        );
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.partial_signals, [run::PartialSignal::ProviderStop]);
+        assert_eq!(
+            decoded.reason.as_deref(),
+            Some("provider stopped early: stop_reason max_tokens")
+        );
+        assert_ne!(decoded.outcome, run::Outcome::Failed);
+    }
+
+    #[test]
+    fn codex_usage_records_cache_read_apart_from_uncached_input() {
+        let route = run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6.1-terra".into()),
+            ..Default::default()
+        };
+        let stream = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7}}\n",
+        );
+        let decoded = Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap();
+        assert_eq!(decoded.usage.uncached_input, Some(20));
+        assert_eq!(decoded.usage.cache_read, Some(80));
+        assert_eq!(decoded.usage.cache_write, None);
+        assert_eq!(decoded.usage.output_excluding_reasoning, Some(7));
     }
 
     #[test]

@@ -2,11 +2,13 @@
 #![forbid(unsafe_code)]
 mod catalog;
 mod facts;
+mod policy;
 mod request;
 mod resolve;
 mod review;
 pub use catalog::*;
 pub use facts::*;
+pub use policy::*;
 pub use provenant_records::ResolvedRoute;
 pub use request::*;
 pub use resolve::*;
@@ -14,6 +16,8 @@ pub use review::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RoutingError {
+    #[error("model policy restricts this route to read-only and review work")]
+    ReadOnlyPolicy,
     #[error("model must be a bounded exact ADAPTER/ID selector")]
     InvalidModel,
     #[error("invalid route name or effort")]

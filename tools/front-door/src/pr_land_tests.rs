@@ -242,13 +242,22 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let warning = String::from_utf8(opened.stderr.bytes)?;
     assert!(warning.contains("warning:"));
     assert!(warning.contains("provenant pr contributions 1668 --bind"));
+    let closed_view = fs::read(landing.rig.project.join("view.json"))?;
+    let mut open_view: serde_json::Value = serde_json::from_slice(&closed_view)?;
+    open_view["state"] = serde_json::json!("OPEN");
+    fs::write(
+        landing.rig.project.join("view.json"),
+        serde_json::to_vec(&open_view)?,
+    )?;
     fs::write(landing.rig.project.join("checks-fail"), "")?;
     let unbound_land = command(&landing.rig, &["land", NUMBER, "--json"])?;
     assert_ne!(code(&unbound_land), 0);
+    assert_eq!(json(&unbound_land)?["error"]["code"], "CI_UNAVAILABLE");
     assert!(
         String::from_utf8_lossy(&unbound_land.stderr.bytes)
-            .contains("no open contribution binding")
+            .contains("provenant pr contributions 1668 --bind")
     );
+    fs::write(landing.rig.project.join("view.json"), closed_view)?;
     fs::remove_file(landing.rig.project.join("checks-fail"))?;
     db.execute_batch("DROP TRIGGER reject_binding;")?;
     let retry = || -> Result {
@@ -280,10 +289,19 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     db.execute_batch("CREATE TRIGGER reject_binding BEFORE INSERT ON branch_prs BEGIN SELECT RAISE(ABORT, 'fixture binding failure'); END;")?;
     db.execute_batch("CREATE TRIGGER reject_binding_update BEFORE UPDATE OF head ON branch_prs BEGIN SELECT RAISE(ABORT, 'fixture head refresh failure'); END;")?;
     // A failed bind/head refresh cannot prevent recording an observed closure,
-    // even when the separate CI gate refuses this land operation.
+    // even when CI is unavailable after the merge.
     fs::write(landing.rig.project.join("checks-fail"), "")?;
+    let retained = landing.worktree.join("cleanup-pending.txt");
+    fs::write(&retained, "uncommitted work must survive\n")?;
+    let before = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
     let refused = command(&landing.rig, &["land", NUMBER, "--json"])?;
-    assert_ne!(code(&refused), 0);
+    assert_eq!(code(&refused), 0);
+    assert_eq!(json(&refused)?["data"]["merged"], true);
+    assert_eq!(json(&refused)?["data"]["cleanup_pending"], true);
+    assert!(retained.exists());
+    let after = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
+    assert!(!after[before.len()..].contains("pr merge"));
+    assert!(!after[before.len()..].contains("/commits/"));
     assert_eq!(
         db.query_row(
             "SELECT min(closed) FROM branch_prs WHERE number=1668",
@@ -292,6 +310,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         )?,
         1
     );
+    fs::remove_file(retained)?;
     fs::remove_file(landing.rig.project.join("checks-fail"))?;
     let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
     assert_eq!(
@@ -340,7 +359,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         before["coverage"]["known_peer_hosts"],
         serde_json::json!(["unreachable"])
     );
-    let text = command(&landing.rig, &["pr", "contributions", NUMBER])?;
+    let text = command(&landing.rig, &["pr", "contributions", NUMBER, "--full"])?;
     assert_eq!(code(&text), 0);
     let text = String::from_utf8(text.stdout.bytes)?;
     assert!(text.contains("role=repair model=unknown account=unknown weight=unknown"));
@@ -682,6 +701,7 @@ fn contribution_terminal(
             observed_route: Some(route),
             usage: Default::default(),
             session: None,
+            partial_signals: Vec::new(),
         },
         &exit,
         call,
@@ -737,7 +757,35 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         "pr checks 1668 --watch" => {
             fs::write(dir.join("watched"), "")?;
         }
-        "pr checks 1668 --json bucket" => {
+        "pr view 1668 --json baseRefName,baseRepository,baseRepositoryOwner" => {
+            io::stdout().write_all(br#"{"baseRefName":"main","baseRepository":{"name":"repo"},"baseRepositoryOwner":{"login":"owner"}}"#)?;
+        }
+        "api repos/owner/repo/branches/main" => {
+            io::stdout().write_all(br#"{"protected":false}"#)?;
+        }
+        "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" => {
+            io::stdout().write_all(b"[[]]")?;
+        }
+        value
+            if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
+                && value.ends_with("/statuses?per_page=100") =>
+        {
+            io::stdout().write_all(b"[[]]")?;
+        }
+        value
+            if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
+                && value.ends_with("/check-runs?per_page=100&filter=latest") =>
+        {
+            if dir.join("checks-fail").exists() {
+                return Ok(1);
+            }
+            let head: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
+            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([{"check_runs":[{
+                "name":"build","head_sha":head["headRefOid"],"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"
+            }]}]))?)?;
+        }
+        "pr checks 1668 --json bucket" | "pr checks 1668 --json name,bucket" => {
             if dir.join("checks-fail").exists() {
                 return Ok(8);
             }
@@ -745,6 +793,12 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
         }
         value if value.starts_with("pr merge 1668 --merge --match-head-commit ") => {
             fs::write(dir.join("merge-args"), args.join("\n") + "\n")?;
+            if dir.join("merge-completes").exists() {
+                let mut view: serde_json::Value =
+                    serde_json::from_slice(&fs::read(dir.join("view.json"))?)?;
+                view["state"] = "MERGED".into();
+                fs::write(dir.join("view.json"), serde_json::to_vec(&view)?)?;
+            }
         }
         _ => return Err(format!("unexpected gh arguments: {call}").into()),
     }
@@ -798,7 +852,7 @@ fn landing_with_git_dir(separate: bool) -> Result<Landing> {
     *path = format!("{}:/usr/bin:/bin", bin.display()).into();
     fs::write(
         admin.join("info/exclude"),
-        "head.json\nview.json\ngh-calls\nwatched\nmerge-args\nchecks-fail\n",
+        "head.json\nview.json\ngh-calls\nwatched\nmerge-args\nchecks-fail\nmerge-completes\n",
     )?;
     fs::write(rig.project.join(".gitignore"), ".worktrees/\n**/target/\n")?;
     git(&rig, &["add", ".gitignore"])?;
@@ -852,7 +906,7 @@ fn land(landing: &Landing) -> Result<serde_json::Value> {
     let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
     let value = json(&output)?;
     assert!(
-        code(&output) == 0 || value["data"]["merged"] == true,
+        matches!(code(&output), 0 | 5) || value["data"]["merged"] == true,
         "{value}"
     );
     assert_eq!(value["data"]["head"], landing.head);
@@ -874,6 +928,11 @@ fn branch_exists(rig: &TestRig, branch: &str) -> Result<bool> {
 pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     let landing = landing()?;
     let rig = &landing.rig;
+    let mut view: serde_json::Value =
+        serde_json::from_slice(&fs::read(rig.project.join("view.json"))?)?;
+    view["state"] = "OPEN".into();
+    fs::write(rig.project.join("view.json"), serde_json::to_vec(&view)?)?;
+    fs::write(rig.project.join("merge-completes"), "")?;
     // Build output the worktree owns, which would otherwise block removal.
     fs::create_dir_all(landing.worktree.join("crate/target/debug"))?;
     fs::write(
@@ -893,7 +952,7 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
         merge.contains(&format!("--match-head-commit\n{}", landing.head)),
         "{merge}"
     );
-    assert!(rig.project.join("watched").exists());
+    assert!(!rig.project.join("watched").exists());
     assert_eq!(
         git(rig, &["rev-parse", "main"])?,
         git(rig, &["rev-parse", "origin/main"])?
@@ -902,7 +961,7 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     assert!(!landing.worktree.exists());
     assert!(!branch_exists(rig, "feat")?);
     // Landing again finds nothing left to prune, and the text form names each step.
-    let text = command(rig, &["land", NUMBER])?;
+    let text = command(rig, &["land", NUMBER, "--full"])?;
     assert_eq!(code(&text), 0);
     let text = String::from_utf8(text.stdout.bytes)?;
     assert!(
@@ -965,7 +1024,8 @@ pub(crate) fn pr_land_refuses_incomplete_worker_census() -> Result {
             ],
         )?;
         let value = json(&output)?;
-        assert_eq!(code(&output), 1, "{value}");
+        assert_eq!(code(&output), 0, "{value}");
+        assert_eq!(value["data"]["cleanup_pending"], true, "{value}");
         assert_eq!(status(&value, "worktree")?, "refused", "{value}");
         let text = value.to_string();
         assert!(
@@ -1066,7 +1126,8 @@ pub(crate) fn pr_land_from_lane_ignores_only_its_callers() -> Result {
             usize::from(!another_worker),
             "{value}"
         );
-        assert_eq!(code(&output), if another_worker { 1 } else { 0 }, "{value}");
+        assert_eq!(code(&output), 0, "{value}");
+        assert_eq!(value["data"]["cleanup_pending"], another_worker, "{value}");
         assert_eq!(
             status(&value, "worktree")?,
             if another_worker { "refused" } else { "done" },
@@ -1363,6 +1424,7 @@ pub(crate) fn pr_land_recovers_terminal_writer_leases_in_parent_and_child_stores
                 observed_route: Some(route),
                 usage: Default::default(),
                 session: None,
+                partial_signals: Vec::new(),
             },
             &exit,
             &call,
@@ -1516,7 +1578,8 @@ pub(crate) fn pr_land_out_of_tree_with_separate_git_directory() -> Result {
             assert!(!lane.exists());
             assert!(!branch_exists(&landing.rig, "feat")?);
         } else {
-            assert_ne!(code(&output), 0, "{value}");
+            assert_eq!(code(&output), 0, "{value}");
+            assert_eq!(value["data"]["cleanup_pending"], true);
             assert!(value.to_string().contains("worktree inventory"), "{value}");
             assert!(lane.exists());
             assert!(branch_exists(&landing.rig, "feat")?);
@@ -1534,7 +1597,8 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
         &["land", NUMBER, "--head", &landing.head, "--json"],
     )?;
     let value = json(&output)?;
-    assert_eq!(code(&output), 1, "{value}");
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(value["data"]["cleanup_pending"], true, "{value}");
     assert_eq!(value["data"]["merged"], true);
     assert_eq!(status(&value, "fast_forward")?, "refused");
     assert_eq!(status(&value, "worktree")?, "done");
@@ -1565,7 +1629,8 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
         ],
     )?;
     let value = json(&output)?;
-    assert_eq!(code(&output), 1, "{value}");
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(value["data"]["cleanup_pending"], true, "{value}");
     assert_eq!(status(&value, "worktree")?, "refused", "{value}");
     assert_eq!(status(&value, "branch")?, "refused", "{value}");
     assert!(landing.worktree.join("notes.txt").exists());
@@ -1595,7 +1660,8 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
         ],
     )?;
     let value = json(&output)?;
-    assert_eq!(code(&output), 1, "{value}");
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(value["data"]["cleanup_pending"], true, "{value}");
     assert_eq!(status(&value, "worktree")?, "refused", "{value}");
     assert_eq!(status(&value, "branch")?, "refused", "{value}");
     assert!(
@@ -1947,6 +2013,10 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
     for flag in ["checks-fail", "moved"] {
         let landing = landing()?;
         let rig = &landing.rig;
+        let mut view: serde_json::Value =
+            serde_json::from_slice(&fs::read(rig.project.join("view.json"))?)?;
+        view["state"] = "OPEN".into();
+        fs::write(rig.project.join("view.json"), serde_json::to_vec(&view)?)?;
         if flag == "moved" {
             fs::write(
                 rig.project.join("head.json"),

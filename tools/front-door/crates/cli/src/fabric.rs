@@ -15,7 +15,7 @@ pub(crate) fn identity(
     Ok((ctx.roots, ctx.identity.project, ctx.identity.inbox.actor))
 }
 
-use crate::{Globals, RenderMode};
+use crate::Globals;
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{
     ActorId, CancelToken, ClaimId, Clock, GitOid, OperationId, TaskId, WaitBudget,
@@ -294,7 +294,7 @@ pub enum Events {
         #[command(flatten)]
         page: SequencePage,
         /// Wait up to this many seconds for new entries
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS))]
         wait: Option<u64>,
     },
     /// Add a note to the activity log
@@ -496,7 +496,7 @@ pub enum Landing {
         #[arg(long)]
         generation: u64,
         /// Seconds to wait (1 to 14400)
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=14400))]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS))]
         wait: u64,
     },
 }
@@ -999,14 +999,7 @@ pub fn run(
     } else {
         String::new()
     };
-    let mode = if globals.json {
-        RenderMode::Json
-    } else {
-        RenderMode::Human {
-            text: &human,
-            read_only,
-        }
-    };
+    let mode = globals.render_mode(&human, read_only, None);
     // Runtime pages/mutation receipts are bounded well below the ordinary cap.
     match crate::render_or_publish(
         &result,

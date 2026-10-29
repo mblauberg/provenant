@@ -123,6 +123,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         document: document.clone(),
     })?;
     let mut bound = BoundGraphOwner {
+        integration_branch: None,
         factory: &factory,
         integration_base: None,
         budget,
@@ -255,6 +256,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         actor: &actor,
     };
     let mut owner = BoundGraphOwner {
+        integration_branch: None,
         factory: &factory,
         integration_base: None,
         budget,

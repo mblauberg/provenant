@@ -1,16 +1,7 @@
-## Breaking changes
+## Behaviour changes
+### CLI and install
 
-The CLI core path is `run`, `status`, `land`, `quota`, `install` and help.
-`run` creates a new requested worktree, submits, waits up to 240 seconds and
-prints a compact result tail. Duration budgets such as `--wait 30m` and
-`--wait 3600s` are accepted. Timeout reports the attempt and exact wait command.
-`status` shows active and recent lanes newest first; `--all` and `--json`
-provide full records. `land N` replaces the separate PR merge path, verifies
-CI at the current PR head and prunes after merge; `--head SHA` remains available.
-Bare `quota` shows usage. `help --all` and `help COMMAND` reveal advanced tools
-and flags.
-
-CLI run, dispatch, cancel and resume generate and print operation IDs when
-omitted; explicit IDs remain available for planned retries. Run and attempt
-targets accept unique hex prefixes of at least eight characters and
-`RUN/ATTEMPT`. Cancel and reconcile infer project scope from the run record.
+- The CLI is now organised around `run`, `status`, `land`, `quota` and `install`. `help --all` and `help COMMAND` show the advanced commands (#1947).
+- `run` now waits up to 240 seconds for its result and prints a short tail. On timeout it prints the exact wait command, and `--wait` accepts durations such as `30m` (#1947).
+- `status` is now the overview of active and recent lanes, with `--all` and `--json` for full records (#1947).
+- `run`, `dispatch`, `cancel` and `resume` print a generated operation ID when none is given, so pass one explicitly for planned retries. Run and attempt targets accept a unique hex prefix of eight or more characters (#1947).

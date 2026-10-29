@@ -16,6 +16,7 @@ WORKSPACE = Path("tools/front-door")
 ALL_SCHEMAS = WORKSPACE / "crates/fabric-mcp/tests/fixtures/all-tool-schemas.json"
 KNOBS = Path("config/harness-knobs.json")
 DEFAULT_TOOLS = {"fabric_context", "fabric_mail", "fabric_run", "fabric_output", "fabric_discover"}
+GLOBAL_OPTIONS = ("json", "full", "state_dir", "project")
 SNAPSHOTS = WORKSPACE / "crates/providers/tests/snapshots/seatbelt"
 
 
@@ -68,14 +69,33 @@ def cli_reference(data):
         "In argument contracts, omitted booleans are false, lists are empty and\n"
         "bounds are null. Positional arguments have no long flag.\n\n"
     )
+    # Global options apply to every command: document them once, not as a row
+    # on each of the commands.
+    globals_ = {}
+    for command in data["commands"]:
+        for argument in command["arguments"]:
+            if argument.get("name") in GLOBAL_OPTIONS:
+                globals_.setdefault(argument["name"], argument)
+    if globals_:
+        text += "## Global options\n\nAccepted by every command, before or after the subcommand.\n\n"
+        text += "| Argument | Contract |\n|---|---|\n"
+        for name in GLOBAL_OPTIONS:
+            argument = globals_.get(name)
+            if argument:
+                contract = {key: value for key, value in argument.items()
+                            if key != "long" and value not in (None, False, [])}
+                text += f"| `--{argument.get('long') or name}` | {cell(contract)} |\n"
+        text += "\n"
     for command in data["commands"]:
         text += f"## `{command['command']}`\n\n"
         if command["command"] == "provenant pr contributions":
             text += ("Response fields, nullability, coverage values and capture roles: "
                      "[PR contributions JSON reference](../specs/run.md#pr-contributions-json-reference).\n\n")
-        if command["arguments"]:
+        own = [argument for argument in command["arguments"]
+               if argument.get("name") not in GLOBAL_OPTIONS]
+        if own:
             text += "| Argument | Contract |\n|---|---|\n"
-            for argument in command["arguments"]:
+            for argument in own:
                 label = "--" + argument["long"] if argument.get("long") else argument["name"]
                 contract = {key: value for key, value in argument.items()
                             if key != "long" and value not in (None, False, [])}
@@ -100,12 +120,23 @@ def mcp_reference(data, all_tools):
     return text.rstrip() + "\n"
 
 
+HOST_SECTIONS = (
+    ("host_lane_build_settings", "Host lane build settings",
+     "Omit a key for its host-dependent default; -1 also selects automatic behaviour."),
+    ("host_graph_settings", "Host graph settings", "Omit a key for its default."),
+    ("host_model_policy_settings", "Host model policy settings",
+     "Omit a key for its bundled or empty default. `rules.policy` takes the same fields as `defaults`."),
+)
+
+
 def config_reference(data):
     text = header("Configuration keys", KNOBS.as_posix())
-    host = data.get("host_lane_build_settings")
-    if host:
-        text += (f"## Host lane build settings\n\nSet these in `[{host['path']}]` in the host configuration. "
-                 "Omit a key for its host-dependent default; -1 also selects automatic behaviour.\n\n| Key | Default | Effect |\n|---|---|---|\n")
+    for key, title, intro in HOST_SECTIONS:
+        host = data.get(key)
+        if not host:
+            continue
+        text += (f"## {title}\n\nSet these in `[{host['path']}]` in the host configuration. {intro}\n\n"
+                 "| Key | Default | Effect |\n|---|---|---|\n")
         for name, setting in host["settings"].items():
             auto = setting.get("auto_value")
             allowed = setting.get("allowed") or (
@@ -128,7 +159,7 @@ def config_reference(data):
             text += f"| `{key}` | {cell(value)} |\n"
         text += "\n"
     remainder = {key: value for key, value in data.items()
-                 if key not in {"knobs", "provider_updates", "host_lane_build_settings", "quota_history"}}
+                 if key not in {"knobs", "provider_updates", "quota_history", *(section[0] for section in HOST_SECTIONS)}}
     if remainder:
         text += "## Registry and profiles\n\n" + fenced(remainder)
     return text.rstrip() + "\n"

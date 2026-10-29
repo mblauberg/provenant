@@ -1,4 +1,4 @@
 ## Fixes
+### Accounts, quota and routing
 
-Resuming a named route keeps the prior attempt's applied provider, model and
-account instead of drawing the pool again.
+- Resuming a named route keeps the earlier attempt's provider, model and account instead of drawing from the pool again (#1960).

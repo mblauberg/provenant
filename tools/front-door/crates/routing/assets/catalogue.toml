@@ -1,7 +1,7 @@
 # Pool metadata is migrated from the legacy routing catalogue; exact execution
 # support still depends on each provider's current availability observation.
 schema_version = 1
-revision = "route-pools-20261028-v2"
+revision = "route-pools-20261029-policy"
 
 [[models]]
 model = "claude/claude-haiku-4-5-20251001"
@@ -200,12 +200,14 @@ trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode/deepseek-v4.1-flash-free"
+free = true
 efforts = []
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
 
 [[models]]
 model = "opencode/opencode/glm-5.3-flash-free"
+free = true
 efforts = []
 evidence_ref = "legacy config/model-routing.json@114e3331"
 trains_on_prompts = false
@@ -222,8 +224,6 @@ codex = "spend"
 utility = [
     { model = "claude/claude-haiku-5-5", weight = 4, effort = "low", efforts = ["low"] },
     { model = "codex/gpt-6-luna", weight = 2, effort = "low", efforts = ["low"] },
-    { model = "opencode/opencode/deepseek-v4.1-flash-free", weight = 1, efforts = [], free = true },
-    { model = "opencode/opencode/glm-5.3-flash-free", weight = 1, efforts = [], free = true },
 ]
 junior = [
     # Provisional pending local trial evidence.
@@ -234,8 +234,6 @@ junior = [
     { model = "claude/claude-haiku-5-5", weight = 4, effort = "high", efforts = ["medium", "high", "xhigh"] },
     { model = "agy/gemini-3.8-flash", weight = 2, effort = "medium", efforts = ["low", "medium", "high"] },
     { model = "agy/claude-sonnet-4-6", weight = 1, efforts = [] },
-    { model = "opencode/opencode/glm-5.3-flash-free", weight = 1, efforts = [], free = true },
-    { model = "opencode/opencode/deepseek-v4.1-flash-free", weight = 1, efforts = [], free = true },
 ]
 senior = [
     # Provisional pending local trial evidence.

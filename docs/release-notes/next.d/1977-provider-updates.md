@@ -1,4 +1,4 @@
 ## Additions
+### Telemetry and providers
 
-- Update idle provider CLIs from quota events in a detached, one-shot worker, with per-provider opt-out, direct argv command overrides, a configurable 24-hour default interval and a configurable 300-second updater timeout. Shared lane leases fence native updates, including fallback providers. Busy providers do not delay lanes using other candidates; preparation waits at most 30 seconds total only when all candidates are busy and honours cancellation. Nested launches retry missing executable discovery under the lease.
-- Updater groups inherit exclusive leases so killing the worker cannot admit lanes during an update. Timeout kills the updater process group; descendants that daemonise outside it retain the lease until they exit. Failed and interrupted updates and result-write errors back off for the interval. Activity and the next lane's availability record retain old and new versions. Provider background processes retain shared leases and defer updates until they exit.
+- Idle provider CLIs now update automatically, and never while their lanes run. Updates can be turned off per provider, and the interval (default 24 hours) and timeout are configurable (#1977).

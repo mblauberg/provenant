@@ -3,6 +3,7 @@
 mod admission;
 mod artifacts;
 mod board;
+mod completion;
 pub use board::{BoardLane, BoardPage};
 mod controls;
 mod correlation;
@@ -17,6 +18,8 @@ mod ledger;
 mod objects;
 mod overview;
 mod plan;
+mod policy;
+pub use policy::{PolicyRetry, ResultAssessment};
 mod pr_contribution;
 pub use pr_contribution::{Contribution, Contributions, PullRequest, WEIGHT_ONE};
 mod reader;
@@ -220,9 +223,14 @@ pub enum RunError {
     #[error("memory pressure is {level}; wait for host memory pressure to fall")]
     MemoryPressure { level: String },
     #[error(
-        "writer build slots full: {active} of {limit} active; wait for a writer to finish or adjust lanes.max_concurrent_builds"
+        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
+        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
     )]
-    BuildSlots { active: u64, limit: u64 },
+    LaneCap {
+        active: u64,
+        limit: u64,
+        scope: &'static str,
+    },
     #[error(
         "invalid host build settings: check domains.fabric.lanes.max_concurrent_builds, cargo_build_jobs and cargo_debug"
     )]

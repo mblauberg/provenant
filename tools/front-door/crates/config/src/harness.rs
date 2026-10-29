@@ -604,6 +604,7 @@ pub(crate) fn capture(
             }
             for (key, value) in synced.owned {
                 plan.owned.push(OwnedEntry {
+                    extra: Default::default(),
                     path: wire.clone(),
                     harness: Some(target.harness),
                     selector: format!("{}{key}", crate::shared_settings::PREFIX),
@@ -611,7 +612,6 @@ pub(crate) fn capture(
                         value,
                         extra: Default::default(),
                     },
-                    extra: Default::default(),
                 });
             }
             if synced.bytes != old {

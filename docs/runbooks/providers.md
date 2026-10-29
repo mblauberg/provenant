@@ -69,16 +69,13 @@ and alternates are lane-controlled, so lane Git output is not trusted host
 evidence. Scratch is removed at normal settlement; lost attempts retain it
 until later cleanup.
 
-On macOS, launch inspects the whole writable worktree, including ignored
-`target/` and `node_modules/` directories. Existing hard-linked regular files
-stay readable, but each in-tree alias is write-denied and its ancestor
-directories cannot be renamed. Other files remain writable. The census allows
-500,000 entries and at most 4,096 denied paths; the profile with those denials
-is bounded to 512 KiB. If the denials exceed either limit, launch refuses with
-recovery advice: move disposable build/dependency output out of the worktree,
-then retry. Fabric already supplies the Cargo build paths for the lane. Important files and
-links whose ownership is unclear should be preserved. Other censused writable
-roots, such as private scratch and Git objects, still refuse hard-linked files.
+On macOS, lanes cannot create hard links (`deny file-link`), and launch does
+not walk the worktree for existing ones: hard-linked files in `target/`,
+`node_modules/` or `.pnpm` neither refuse a launch nor become read-only. Launch
+checks that the host Git `config`, `index`, `hooks/*` and `info/*` have a single name and refuses,
+naming the file, if one has another; remove the other name and retry. A lane's
+Cargo and pnpm caches are private to it, so a link inside them cannot reach a
+shared store.
 
 A writer's `TMPDIR` lives in the attempt's `tmp/candidate-N`, which terminal
 commit and unreserved reconciliation collect. Account probes still use `scratch/`.

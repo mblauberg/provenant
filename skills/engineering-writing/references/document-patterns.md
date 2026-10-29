@@ -182,16 +182,7 @@ or amending requires separate authority.
 
 ## Changelog and Release Notes
 
-A changelog is the exhaustive, versioned record for developers; release notes are the curated, user-facing story of what a release means. Do not merge them: a changelog entry for every change, release notes only for changes a user notices.
-
-Changelog (per keepachangelog.com):
-
-1. One section per release, newest first, with version and date (ISO).
-2. Group entries: Added, Changed, Deprecated, Removed, Fixed, Security.
-3. One line per change, written for a user, not a copied commit subject.
-4. Keep an Unreleased section at the top.
-
-Release notes: lead with the change that matters most to the user, state what changed in their terms, then any action required (migration, config, re-auth). Breaking changes and deprecations first, never buried. Do not list internal refactors.
+A changelog is the exhaustive, versioned record for developers (Keep a Changelog); release notes are the curated, upgrader-facing account of what a release means. Do not merge them. A changelog has one section per release (newest first, version and ISO date), an Unreleased section on top, and entries grouped as Added, Changed, Deprecated, Removed, Fixed, Security. For release notes and fragments, follow [release notes](release-notes.md).
 
 ## Error Message
 

@@ -1,3 +1,4 @@
 ## Fixes
+### Lanes and settlement
 
-- Remove released attempts' temporary build output at settlement, and preserve scratch when an attempt is lost without exit evidence.
+- Settling an attempt now removes its temporary build output, except when the attempt is lost without exit evidence (#1934).

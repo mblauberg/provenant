@@ -41,6 +41,48 @@ fn terminal_status_sees_lanes_submitted_under_harness_markers() -> Result {
 }
 
 #[test]
+fn status_shows_the_review_exempt_paths_in_force() -> Result {
+    let rig = TestRig::new()?;
+    let status = |rig: &TestRig| -> Result<(String, serde_json::Value)> {
+        let human = rig.command(&["status"])?;
+        assert_eq!(code(&human), 0);
+        let out = rig.command(&["status", "--json"])?;
+        assert_eq!(code(&out), 0);
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        Ok((String::from_utf8(human.stdout.bytes)?, value))
+    };
+    let (human, value) = status(&rig)?;
+    assert!(human.starts_with("no lanes\n"), "{human}");
+    assert!(
+        human.contains("review-exempt paths: docs/release-notes/next.d/"),
+        "{human}"
+    );
+    assert_eq!(value["data"]["review_exempt"][2], "Cargo.lock", "{value}");
+    std::fs::create_dir_all(&rig.state)?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.run]\nreview_exempt = ['notes/', 'CHANGES.md']\n",
+    )?;
+    let (human, value) = status(&rig)?;
+    assert!(
+        human.ends_with("review-exempt paths: notes/, CHANGES.md\n"),
+        "{human}"
+    );
+    assert_eq!(
+        value["data"]["review_exempt"],
+        serde_json::json!(["notes/", "CHANGES.md"])
+    );
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.run]\nreview_exempt = []\n",
+    )?;
+    let (human, value) = status(&rig)?;
+    assert!(human.ends_with("review-exempt paths: none\n"), "{human}");
+    assert_eq!(value["data"]["review_exempt"], serde_json::json!([]));
+    Ok(())
+}
+
+#[test]
 fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     let mut rig = TestRig::new()?;
     let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
@@ -82,10 +124,41 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert_eq!(lanes[0]["attempt_id"], attempts[24]);
     assert_eq!(lanes[19]["attempt_id"], attempts[5]);
     assert!(lanes[0]["state"].is_object(), "full record: {value}");
+    assert_eq!(
+        value["data"]["review_exempt"],
+        serde_json::json!([
+            "docs/release-notes/next.d/",
+            "docs/specs/",
+            "Cargo.lock",
+            ".tracker-input"
+        ])
+    );
     let human = rig.command(&["status"])?;
     let text = String::from_utf8(human.stdout.bytes)?;
-    assert_eq!(text.lines().count(), 20, "{text}");
-    assert!(text.starts_with(&attempts[24][..8]), "{text}");
+    assert!(text.len() <= 2048, "{text}");
+    assert!(text.starts_with("20 lanes"), "{text}");
+    assert!(text.contains(&attempts[24][..8]), "{text}");
+    assert!(
+        text.contains("review-exempt paths: docs/release-notes/next.d/, docs/specs/, Cargo.lock, .tracker-input"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("next: provenant output {}", attempts[24])),
+        "{text}"
+    );
+    let full = rig.command(&["status", "--full"])?;
+    let full = String::from_utf8(full.stdout.bytes)?;
+    // --full is complete detail, not --all: the older lanes stay out.
+    assert!(
+        full.contains(&attempts[24]) && !full.contains(&attempts[0]),
+        "{full}"
+    );
+    let everything = rig.command(&["status", "--all", "--full"])?;
+    let everything = String::from_utf8(everything.stdout.bytes)?;
+    assert!(
+        everything.contains(&attempts[0]) && everything.contains(&attempts[24]),
+        "{everything}"
+    );
     let all = rig.command(&["status", "--all", "--json"])?;
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
     assert_eq!(all["data"]["lanes"].as_array().ok_or("all")?.len(), 25);
@@ -116,11 +189,11 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert!(stats["data"]["totals"]["cost"]["known_lower_bound"].is_null());
     assert_eq!(stats["data"]["totals"]["cost"]["priced_attempts"], 0);
     assert_eq!(stats["data"]["totals"]["cost"]["missing_attempts"], 25);
-    let stats = rig.command(&["telemetry", "stats"])?;
+    let stats = rig.command(&["telemetry", "stats", "--full"])?;
     assert_eq!(code(&stats), 0);
     assert_eq!(
         String::from_utf8(stats.stdout.bytes)?,
-        "25 attempts, cost unknown (25 attempts missing cost data)\n"
+        "25 attempts, cost unknown (25 attempts missing cost data)\ncache-read share: unknown (incomplete input categories)\n"
     );
     // Named status includes old terminal lanes by run, task or attempt ID.
     let oldest = &all["data"]["lanes"][24];
@@ -700,7 +773,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     assert_eq!(hops[0]["run"], lane["run_id"]);
     assert_eq!(hops[0]["attempt"], lane["attempt_id"]);
     assert!(hops[0]["parent"].is_null());
-    let human = rig.command(&["output", &attempt, "--trace"])?;
+    let human = rig.command(&["output", &attempt, "--trace", "--full"])?;
     let line = String::from_utf8(human.stdout.bytes.clone())?;
     assert_eq!(line.lines().count(), 1, "{line}");
     assert!(line.contains(&format!(
@@ -936,7 +1009,15 @@ fn root_uses_release_location_and_explicit_state_without_creating_it() -> Result
     assert_eq!(assets.to_path_buf()?, fs::canonicalize(&release)?);
     assert_eq!(selected.to_path_buf()?, state);
     assert!(!state.exists());
-    let human = rig.execute(&executable, &["root"], None)?;
+    let compact = rig.execute(&executable, &["root"], None)?;
+    assert_eq!(code(&compact), 0);
+    let text = String::from_utf8_lossy(&compact.stdout.bytes);
+    assert!(
+        !text.contains("next:"),
+        "no owner next, no invented one: {text}"
+    );
+    assert!(compact.stdout.bytes.len() <= 2048);
+    let human = rig.execute(&executable, &["root", "--full"], None)?;
     assert_eq!(code(&human), 0);
     assert_eq!(
         human.stdout.bytes,
@@ -1101,7 +1182,7 @@ fn config_show_reads_typed_defaults_and_refuses_invalid_input_without_writes() -
     let value: serde_json::Value = serde_json::from_slice(&defaults.stdout.bytes)?;
     assert_eq!(value["data"]["profile"], "balanced");
     assert!(value["data"]["domains"]["quota"].is_object());
-    let human = rig.command(&["config", "show"])?;
+    let human = rig.command(&["config", "show", "--full"])?;
     assert_eq!(code(&human), 0);
     let text = String::from_utf8_lossy(&human.stdout.bytes);
     assert_eq!(text.lines().count(), 1, "{text}");

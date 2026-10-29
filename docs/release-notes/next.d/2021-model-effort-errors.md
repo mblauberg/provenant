@@ -1,3 +1,4 @@
 ## Fixes
+### Accounts, quota and routing
 
-- Show supported efforts in route previews and effort errors, and suggest nearby catalogue IDs for unrecorded exact models.
+- Route previews and effort errors list the supported efforts, and an unrecorded exact model gets suggestions of nearby catalogue IDs (#2021).

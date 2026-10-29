@@ -10,13 +10,55 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 
 | Key | Default | Effect |
 |---|---|---|
-| `max_concurrent_builds` | 1 at 16 GiB or less, otherwise 2 | Maximum active worktree-write lanes across the host. (1 to 64 or -1 for auto). |
+| `max_concurrent_builds` | max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) | A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated. (1 to 64 or -1 for auto). |
+| `build_wait_minutes` | 30 | Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error. (1 to 1440 or -1 for auto). |
+| `max_writer_lanes` | 40 | Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap. (1 to 64 or -1 for auto). |
+| `max_project_writer_lanes` | 30 | Most writer lanes live at once for one project; at most max_writer_lanes. (1 to 32 or -1 for auto). |
 | `cargo_build_jobs` | Half the available cores, at least 1 | Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence. (1 to 1024 or -1 for auto). |
 | `cargo_incremental` | false | CARGO_INCREMENTAL for lanes. Incremental sessions grow a lane's target without bound and are rarely reused; a value already in the lane environment takes precedence. (true or false). |
 | `cargo_debug` | line-tables-only | CARGO_PROFILE_DEV_DEBUG for lanes. Line tables keep backtraces at a fraction of the size of full debug information; a value already in the lane environment takes precedence. (none, line-directives-only, line-tables-only, limited, full, 0, 1, 2, true or false). |
 | `build_dir_max_bytes` | 21474836480 (20 GiB) | Cap on the allocated bytes of all Cargo profile directories in lane caches, idle and busy alike. Collection removes idle directories, least recently used first, after a lane settles, when admission finds the disk below gc.free_floor, and in `provenant gc`; a directory whose Cargo locks are held is never removed. When busy directories alone exceed the cap, every eligible idle directory is removed and the total stays over. (bytes, 0 or more). |
 | `build_dir_grace_seconds` | 900 (15 minutes) | A profile directory whose newest file or directory modification is within this many seconds is never removed, even when its Cargo locks are free: test and run binaries execute after Cargo drops its locks, and Cargo may be opening its lock files. Zero removes the protection. It protects only recently written directories: a test or run binary that runs longer than the grace without writing under target/ is unprotected unless a Cargo lock is still held. (seconds, 0 or more). |
 | `build_dir_survey_interval_seconds` | 300 (5 minutes) | Settlement-triggered collection walks the lane caches at most this often, unless free space is below gc.free_floor or the last walk found the total within 10% of the cap. While free space stays below the floor, every settlement walks. Zero walks on every settlement. (seconds, 0 or more). |
+
+## Host graph settings
+
+Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `allowed_read_roots` | empty (read roots stay inside the project and its registered worktrees) | Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees. (absolute directory paths). |
+| `limits.expansion_depth` | 32 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 29. Graph documents cannot raise it. (1 or more). |
+
+## Host model policy settings
+
+Set these in `[domains.routing.model_policy]` in the host configuration. Omit a key for its bundled or empty default. `rules.policy` takes the same fields as `defaults`.
+
+| Key | Default | Effect |
+|---|---|---|
+| `bundled` | true | Start from the bundled per-model policy (cache prices, compaction windows, lane guidance, result checks). false starts empty. (true or false). |
+| `defaults.cache.read_share_target` | unset (bundled 0.9) | Advisory cache-read share a lane should reach; reported in stats, never enforced. (0 to 1). |
+| `defaults.cache.price_multiplier` | 1.0 (bundled: 2.0 in DeepSeek weekday peak) | Current price multiplier; divides the read-heavy preference weight. (number above 0). |
+| `defaults.cache.read_ratio` | per model | Cache-read price divided by uncached input price. (0 or more). |
+| `defaults.cache.write_ratio` | per model | Cache-write price divided by uncached input price. (0 or more). |
+| `defaults.cache.output_ratio` | per model | Output price divided by uncached input price, for compaction break-even guidance. (0 or more). |
+| `defaults.cache.ttl_seconds` | unset | Provider cache time to live. (seconds, 1 or more). |
+| `defaults.cache.min_prefix` | unset | Smallest prefix the provider caches. (tokens, 1 or more). |
+| `defaults.cache.context_window` | per model | Context window size; read-heavy preference needs at least 1000000. (tokens, 1 or more). |
+| `defaults.cache.read_heavy_weight` | 3 | Weight multiplier for read-heavy and review work on cheap-cache models. (1 to 255). |
+| `defaults.compaction.window` | per model | Context size at which compaction is advised. (tokens, 1 or more). |
+| `defaults.compaction.mode` | per model | When compaction is advised. (auto, task_boundary or never). |
+| `defaults.compaction.min_turns` | per model | Fewest turns before compaction is advised. (turns, 1 or more). |
+| `defaults.lane.max_context` | unset | Enforced largest context for a lane on this model. (tokens, 1 or more). |
+| `defaults.lane.max_turns` | unset | Enforced most turns for a lane on this model. (turns, 1 or more). |
+| `defaults.lane.stop_early_ok` | per model | false marks a model prone to stopping early; an unfinished result then gets a bounded continuation. (true or false). |
+| `defaults.lane.max_continuations` | 2 where stop_early_ok is false | Most continuations after an unfinished result. (0 to 255). |
+| `defaults.lane.read_only` | per model | true refuses write lanes on this model. (true or false). |
+| `defaults.result.check` | per model | Check the result for the required sections before accepting it. (true or false). |
+| `defaults.result.sections` | per model | Heading lines a result must contain. (exact section heading lines; empty clears). |
+| `defaults.result.fallback` | per model | Model for the one fallback attempt when the result check fails. (model id). |
+| `defaults.result.fallback_effort` | per model | Effort for the fallback attempt. (effort name). |
+| `rules` | empty | Layered overrides ordered by scope: global, adapter, model, account, model plus account; later rules win at equal scope. Inclusive start, exclusive expiry; an overnight window wraps midnight; inactive rules have no effect. (tables with adapter, model, account, starts_unix_seconds, expires_unix_seconds, windows (list of {start_hour, end_hour}, UTC) and policy (the same fields as defaults, under rules.policy)). |
 
 ## Quota history and plan prices
 
@@ -55,6 +97,13 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
     "agy",
     "opencode"
   ],
+  "runtime_deadline_seconds": {
+    "default": "unset",
+    "effect": "Cap on the wall-clock runtime of any lane on this provider. A dispatch's own --provider-timeout applies when it is shorter. At the deadline the provider is stopped and the attempt settles as timed_out, whatever the host did meanwhile, including sleeping.",
+    "max": 14400,
+    "min": 1,
+    "type": "int"
+  },
   "update": {
     "default": true,
     "effect": "Run the detected native updater between lanes in a detached one-shot worker scheduled by quota events. false opts out; {command: [program, argument, ...]} overrides the updater directly without a shell.",
@@ -246,6 +295,18 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"full catches interactions between the repair and untouched code at roughly the cost of the first review."` |
 | `type` | `"enum"` |
 | `values` | `["delta", "full"]` |
+
+## `routing.workload`
+
+| Field | Value |
+|---|---|
+| `default` | `"general"` |
+| `effect` | `"Describe the task for model policy. Read-heavy and review work give cheap-cache, million-token models a configurable preference in pools."` |
+| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"A preference preserves model choice and readiness gates; it does not force every read-heavy task onto one model."` |
+| `type` | `"enum"` |
+| `values` | `["general", "read_heavy", "edit_heavy", "review"]` |
 
 ## `usage.project_attribution`
 

@@ -16,6 +16,8 @@ pub struct AccessContext<'a> {
     pub confinement_ref: &'a str,
 }
 pub struct RoutingContext<'a> {
+    /// Preview-only account policy selection. It never supplies availability.
+    pub policy_account_hint: Option<&'a str>,
     pub catalogue: &'a Catalogue,
     pub config: &'a RoutingConfig,
     pub registry: &'a [Registration],
@@ -31,6 +33,15 @@ impl RoutingContext<'_> {
         self.now.as_timestamp().as_second()
     }
     fn validate(&self) -> Result<(), RoutingError> {
+        if self.policy_account_hint.is_some_and(|hint| {
+            hint.len() > 128
+                || hint.split('/').count() > 2
+                || hint
+                    .split('/')
+                    .any(|part| !crate::request::identifier(part))
+        }) {
+            return Err(RoutingError::InvalidValue);
+        }
         self.catalogue.validate()?;
         if effective_pool_names(self)
             .iter()
@@ -89,6 +100,7 @@ impl<'a> AccountSelection<'a> {
 }
 #[derive(Debug, Serialize)]
 pub struct RouteList {
+    pub valid_pairs: Vec<ValidRoutePair>,
     pub catalogue_revision: String,
     pub models: Vec<ModelEntry>,
     pub named_routes: std::collections::BTreeMap<String, NamedRoute>,
@@ -98,6 +110,11 @@ pub struct RouteList {
     pub configured_accounts: BTreeMap<String, PacingProfile>,
     pub configured_free: BTreeMap<String, PacingProfile>,
     pub active_overrides: Vec<PacingOverride>,
+}
+#[derive(Debug, Serialize)]
+pub struct ValidRoutePair {
+    pub model: ModelId,
+    pub effort: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct AccountPacingView {
@@ -172,20 +189,46 @@ pub fn list(
         }
     }
     let pacing = effective_pacing(context.catalogue, context.config);
+    let mut valid_pairs = Vec::new();
+    if query.valid {
+        for entry in context.catalogue.models.iter().filter(|entry| {
+            matches(entry.model.adapter())
+                && (query.pool.is_none()
+                    || pools
+                        .values()
+                        .flatten()
+                        .any(|member| member.model == entry.model))
+        }) {
+            if check_go_allowance(&entry.model, context.config, context.catalogue).is_err() {
+                continue;
+            }
+            let efforts = std::iter::once(None).chain(entry.efforts.iter().cloned().map(Some));
+            for effort in efforts {
+                if admissible(&entry.model, effort.as_deref(), context).is_ok() {
+                    valid_pairs.push(ValidRoutePair {
+                        model: entry.model.clone(),
+                        effort,
+                    });
+                }
+            }
+        }
+        pools.clear();
+    }
     Ok(RouteList {
+        valid_pairs,
         catalogue_revision: context.catalogue.revision.clone(),
         models: context
             .catalogue
             .models
             .iter()
-            .filter(|m| matches(m.model.adapter()))
+            .filter(|m| !query.valid && matches(m.model.adapter()))
             .cloned()
             .collect(),
         named_routes: context
             .config
             .routes
             .iter()
-            .filter(|(_, r)| matches(r.model.adapter()))
+            .filter(|(_, r)| !query.valid && matches(r.model.adapter()))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         pools,
@@ -1050,12 +1093,14 @@ fn candidate(
     effort: Option<&str>,
     context: &ValidatedContext<'_>,
     avoid_cooling: bool,
+    intent: RouteIntent,
 ) -> Result<RouteAlternative, RoutingError> {
     let entry = admissible(model, effort, context)?;
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
     // Several registered accounts may serve one adapter: take a ready one with
     // the most pacing headroom, so exhausted accounts are skipped rather than
     // chosen by registration order.
+    let mut policy_refused = false;
     let evaluated: Vec<_> = context
         .availability
         .iter()
@@ -1066,6 +1111,20 @@ fn candidate(
                         .as_deref()
                         .is_none_or(|key| spec.account_serves_model(key, model.model()))
                 })
+        })
+        .filter(|a| {
+            let permitted = context
+                .config
+                .model_policy
+                .effective(
+                    model,
+                    a.account_key.as_deref().or(context.policy_account_hint),
+                    context.now_seconds(),
+                )
+                .policy
+                .permits(intent);
+            policy_refused |= !permitted;
+            permitted
         })
         .map(|a| {
             let (reason, _) = account_reason(model, a, access, context);
@@ -1083,6 +1142,9 @@ fn candidate(
             )
         })
         .collect();
+    if evaluated.is_empty() && policy_refused {
+        return Err(RoutingError::ReadOnlyPolicy);
+    }
     let best = evaluated
         .iter()
         .filter(|(_, reason, _)| reason.is_none())
@@ -1263,7 +1325,13 @@ fn resolve_inner(
                 return Err(RoutingError::ConfidentialModel);
             }
             (
-                candidate(model, request.effort.as_deref(), context, false)?,
+                candidate(
+                    model,
+                    request.effort.as_deref(),
+                    context,
+                    false,
+                    request.intent,
+                )?,
                 None,
             )
         }
@@ -1290,6 +1358,7 @@ fn resolve_inner(
                         request.effort.as_deref().or(named.effort.as_deref()),
                         context,
                         false,
+                        request.intent,
                     )?,
                     None,
                 )
@@ -1301,13 +1370,40 @@ fn resolve_inner(
         Fallback::Models(models) => models.as_slice(),
     };
     let primary_model = ModelId::parse(&format!("{}/{}", primary.adapter, primary.model))?;
+    validate_intent(
+        &context
+            .config
+            .model_policy
+            .effective(
+                &primary_model,
+                primary
+                    .account_key
+                    .as_deref()
+                    .or(context.policy_account_hint),
+                context.now_seconds(),
+            )
+            .policy,
+        request.intent,
+    )?;
     if models.contains(&primary_model) {
         return Err(RoutingError::Alternatives);
     }
     let alternatives = models
         .iter()
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
-        .map(|model| candidate(model, primary.effort.as_deref(), context, false))
+        .map(|model| {
+            candidate(
+                model,
+                primary.effort.as_deref(),
+                context,
+                false,
+                request.intent,
+            )
+        })
+        .filter_map(|candidate| match candidate {
+            Err(RoutingError::ReadOnlyPolicy) => None,
+            candidate => Some(candidate),
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let exclusions = std::iter::once(&primary)
         .chain(alternatives.iter())
@@ -1434,8 +1530,43 @@ fn classify_pool(
             classified.exclusions.push(detail.to_owned());
             Some(kind.to_owned())
         } else {
-            match candidate(&member.model, effort.as_deref(), context, avoid_cooling) {
+            match candidate(
+                &member.model,
+                effort.as_deref(),
+                context,
+                avoid_cooling,
+                request.intent,
+            ) {
                 Ok(resolved) => {
+                    let model_policy = context
+                        .config
+                        .model_policy
+                        .effective(
+                            &member.model,
+                            resolved
+                                .account_key
+                                .as_deref()
+                                .or(context.policy_account_hint),
+                            context.now_seconds(),
+                        )
+                        .policy;
+                    if !model_policy.permits(request.intent) {
+                        classified
+                            .exclusions
+                            .push(format!("{}: read-only model policy", member.model.as_str()));
+                        classified.candidates.push(RouteSelectionCandidate {
+                            extra: Default::default(),
+                            model: member.model.as_str().into(),
+                            weight: member.weight,
+                            factor_basis_points,
+                            pacing_detail: None,
+                            effort,
+                            readiness: Some(resolved.readiness.clone()),
+                            exclusion: Some("read-only model policy".into()),
+                        });
+                        classified.routes.push(None);
+                        continue;
+                    }
                     let (policy, _, _, _) =
                         effective_profile(context, &member.model, resolved.account_key.as_deref());
                     let (factor, detail, is_standby) = pacing_factor_basis_points(
@@ -1444,7 +1575,9 @@ fn classify_pool(
                         resolved.account_key.as_deref(),
                         context,
                     );
-                    factor_basis_points = factor;
+                    let cache_factor = model_policy.cache_factor_basis_points(request.intent);
+                    factor_basis_points =
+                        ((u64::from(factor) * u64::from(cache_factor)) / 10_000) as u32;
                     if avoid_cooling
                         && cooling(&member.model, resolved.account_key.as_deref(), context)
                     {
@@ -1461,7 +1594,14 @@ fn classify_pool(
                         classified.routes.push(None);
                         continue;
                     }
-                    pacing_detail = Some(detail);
+                    pacing_detail = Some(if cache_factor != 10_000 {
+                        format!(
+                            "{detail}; cheap-cache read-heavy preference factor={cache_factor}/10000 (read ratio {:?}, context {:?})",
+                            model_policy.cache.read_ratio, model_policy.cache.context_window
+                        )
+                    } else {
+                        detail
+                    });
                     readiness = Some(resolved.readiness.clone());
                     if matches!(resolved.readiness, RouteReadiness::Ready { .. }) {
                         if is_standby {
@@ -1503,6 +1643,12 @@ fn classify_pool(
                     }
                     option = Some(resolved);
                     None
+                }
+                Err(RoutingError::ReadOnlyPolicy) => {
+                    classified
+                        .exclusions
+                        .push(format!("{}: read-only model policy", member.model.as_str()));
+                    Some("read-only model policy".into())
                 }
                 Err(RoutingError::UnsupportedEffort { .. }) => {
                     classified.exclusions.push("unsupported effort".into());

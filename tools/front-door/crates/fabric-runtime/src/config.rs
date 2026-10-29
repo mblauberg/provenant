@@ -32,6 +32,9 @@ pub struct GraphConfig {
         deserialize_with = "ignore_limit_ceiling"
     )]
     _limit_ceiling: (),
+    /// Absolute host directories graph nodes may read besides the project's own
+    /// registered worktrees. Empty confines read roots to the project.
+    pub allowed_read_roots: Vec<String>,
 }
 
 const LIMIT_CEILING_WARNING: &str = "warning: domains.fabric.graph.limit_ceiling is deprecated and ignored; host graph limits apply";
@@ -86,7 +89,7 @@ impl Default for GraphLimits {
             routes_per_node: 16,
             node_prompt_bytes: 256 * 1024,
             graph_prompt_bytes: 4 * 1024 * 1024,
-            expansion_depth: 4,
+            expansion_depth: 32,
             fan_out_width: 32,
             concurrency: None,
         }
@@ -101,6 +104,12 @@ pub struct Lanes {
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub max_writer_lanes: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub max_project_writer_lanes: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub build_wait_minutes: Option<u64>,
     /// `CARGO_INCREMENTAL` for lanes; off unless set.
     pub cargo_incremental: Option<bool>,
     /// `CARGO_PROFILE_DEV_DEBUG` for lanes; `line-tables-only` unless set.
@@ -126,6 +135,9 @@ impl Lanes {
             build_dir_max_bytes: self.build_dir_max_bytes,
             build_dir_grace_seconds: self.build_dir_grace_seconds,
             build_dir_survey_interval_seconds: self.build_dir_survey_interval_seconds,
+            max_writer_lanes: self.max_writer_lanes,
+            max_project_writer_lanes: self.max_project_writer_lanes,
+            build_wait_minutes: self.build_wait_minutes,
         }
     }
 }
@@ -330,6 +342,14 @@ impl DomainConfig for FabricConfig {
         if l.graph_timeout_seconds == 0 || l.graph_timeout_seconds > 14_400 {
             reject("limits.graph_timeout_seconds".into());
         }
+        if self
+            .graph
+            .allowed_read_roots
+            .iter()
+            .any(|root| !std::path::Path::new(root).is_absolute())
+        {
+            reject("graph.allowed_read_roots".into());
+        }
         let limits = &self.graph.limits;
         for (name, value) in [
             ("nodes", limits.nodes),
@@ -405,6 +425,9 @@ mod tests {
         let mut config = config();
         config.lanes.max_concurrent_builds = Some(0);
         config.lanes.cargo_build_jobs = Some(1025);
+        config.lanes.max_writer_lanes = Some(65);
+        config.lanes.max_project_writer_lanes = Some(0);
+        config.lanes.build_wait_minutes = Some(0);
         let errors = config.validate();
         assert!(
             errors
@@ -412,6 +435,13 @@ mod tests {
                 .any(|e| e.field == "lanes.max_concurrent_builds")
         );
         assert!(errors.iter().any(|e| e.field == "lanes.cargo_build_jobs"));
+        for key in [
+            "max_writer_lanes",
+            "max_project_writer_lanes",
+            "build_wait_minutes",
+        ] {
+            assert!(errors.iter().any(|e| e.field == format!("lanes.{key}")));
+        }
     }
 
     #[test]
@@ -601,6 +631,7 @@ mod tests {
     #[test]
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
+        assert_eq!(config.graph.limits.expansion_depth, 32);
         assert_eq!(config.graph.limits.nodes, 512);
         assert_eq!(config.graph.limits.continuations, 2);
         config.graph.limits.continuations = 0;

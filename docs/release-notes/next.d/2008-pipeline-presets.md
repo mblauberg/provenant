@@ -1,3 +1,4 @@
 ## Additions
+### Pipelines and graphs
 
-- Expand layered pipeline presets into Fabric graphs with `run --preset`, inspect the graph and origins with `--explain`, and compose preset slots.
+- `run --preset` expands layered pipeline presets into Fabric graphs, and `--explain` shows the graph and where each part came from (#2008).

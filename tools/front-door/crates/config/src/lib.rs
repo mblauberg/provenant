@@ -37,7 +37,9 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 
-pub use domains::{DomainConfig, DomainSection, DomainSections, NoDomains, SectionError};
+pub use domains::{
+    DomainConfig, DomainSection, DomainSections, NoDomains, SectionError, read_domain,
+};
 pub use knobs::{KnobEdit, KnobSource, KnobValue, edit_config};
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
 pub use presets::Profile;

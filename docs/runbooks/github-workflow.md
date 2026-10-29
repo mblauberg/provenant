@@ -251,13 +251,13 @@ other check is required.
 Use the core landing command:
 
 ```sh
-provenant land 148
+provenant land 148 --wait
 ```
 
 It captures the PR's current head, waits for green CI at that exact head,
 merges with a matching-head check and prunes the eligible local worktree and
-merged refs. Landing a reviewed head passes `provenant land 148 --head SHA`;
-`provenant land 148` alone lands the current verified head. Pending, failed,
+merged refs. Landing a reviewed head passes `provenant land 148 --head SHA --wait`;
+`provenant land 148` alone checks once and lands the current verified head. Pending, failed,
 cancelled or absent checks and a changed head refuse the merge. GitHub still
 enforces branch protection and any merge queue. `provenant pr watch 148` is
 available when only observing CI; `gh pr merge --auto` can queue a merge after
@@ -280,17 +280,35 @@ must be at the attempt's head on the remote. Complete the gate rows marked
 attempt must be local and `succeeded` or `review_required`, with a recorded
 head; read-only reviews supply the reviewer rows. `provenant pr status 148 149`
 prints `#148 OPEN <head> checks=3/4 pending=1 merge=blocked review=none`, one
-line each, for polling without parsing `gh` output. If checks cannot be read,
+line each, from one head-and-checks snapshot per PR. Use
+`provenant pr status 148 --wait=5m` to block until that snapshot changes;
+an unchanged snapshot at the limit exits 124. If checks cannot be read,
 the line says `checks=unavailable` and the JSON check counts are null. An empty
-checks result is also unavailable.
+checks result is also unavailable. A failed PR lookup appears as an unavailable
+row and preserves other PRs' results. Human output is bounded to 2 KiB;
+`--full` includes every row and `--json` carries the complete machine envelope.
 
 ### Land a pull request
 
-`provenant land 148` waits for CI, merges at the verified PR head, then runs
-the local follow-up below. `--head <reviewed-sha>` optionally pins the head.
-Nothing after the merge changes what merged, and no step forces: a refusal is
-reported in `data.steps` and the command exits 1 with `merged: true`, so rerun
-it after fixing the cause (every step is safe to repeat).
+`provenant land 148 --wait` waits up to one hour for CI, merges at the verified
+PR head, then runs the local follow-up below. `--wait=30m` changes the limit,
+up to four hours; omit `--wait` for one check. `--head <reviewed-sha>` pins
+the reviewed head. Waiting reads check runs and legacy statuses by the pinned commit SHA,
+verifies required check names have registered and checks the head before and
+after each sample. Failed checks or head movement
+stop the wait. Progress uses at most eight stderr lines; JSON stdout remains
+one machine envelope. CI timeout exits 124 without attempting a merge.
+A merge that is queued or left to auto-merge exits 5 (`pending`); if a merge
+call errors but the PR is merged, the report is landed. With no required
+check, landing also waits 60 seconds after the newest check registers. If
+`land` reports `CI_PENDING`, rerun it with `--wait`.
+
+Nothing after the merge changes what merged, and no step forces. A refusal is
+reported in `data.steps` with `cleanup_pending: true` and reason
+`cleanup_pending`. The merge still exits 0. Inspect `land 148 --full`, fix the
+reported cause and rerun: an already-merged PR skips CI and merge and retries
+only safe cleanup. CI failures use `CI_PENDING`, `CI_FAILED`,
+`CI_UNAVAILABLE`, `CI_POLICY_UNAVAILABLE`, `CI_TIMEOUT` or `HEAD_MOVED`.
 
 | Step | Does | Refuses when |
 |---|---|---|

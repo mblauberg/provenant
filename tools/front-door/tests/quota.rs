@@ -49,15 +49,17 @@ fn usage_reads_terminal_lanes_across_projects_and_keeps_unknown_accounts() -> Re
     for row in rows {
         assert_eq!(row["lane_attempts"], 1);
         assert_eq!(row["chair_sessions"], 0);
+        assert_eq!(row["chair_sessions_unread"], 0);
         assert!(row["account"].is_null());
         assert_eq!(row["lane_usage"]["uncached_input"]["missing"], 1);
     }
     assert!(!String::from_utf8_lossy(&output.stdout.bytes).contains("private fixture prompt"));
     let human = rig.command(&["quota", "usage"])?;
     let human = String::from_utf8(human.stdout.bytes)?;
-    assert!(human.contains("Chair token usage is not recorded"));
+    assert!(human.contains("Chair tokens are read from each recorded chair session"));
     assert!(human.contains("unknown account"));
-    assert!(human.contains("attempts missing this category"));
+    assert!(human.contains("records missing this category"));
+    assert!(human.contains("lanes cache-read share: not reported"));
     assert!(!rig.state.join("quota").exists());
     rig.assert_legacy_unchanged()
 }
@@ -178,6 +180,15 @@ fn disabled_modes_never_read_auth_or_invoke_external_tools() -> Result {
     let bin = rig.root.join("bin");
     fs::create_dir(&bin)?;
     let marker = rig.root.join("forbidden-invocation");
+    // `quota tick` may launch the detached provider-update worker. Whether that
+    // worker updates anything is a separate contract, so opt every provider out
+    // and leave this test to what the quota commands themselves invoke.
+    let config = rig.state.join("config.toml");
+    let mut text = fs::read_to_string(&config)?;
+    for provider in ["agy", "claude", "codex", "cursor", "opencode"] {
+        text.push_str(&format!("\n[providers.{provider}]\nupdate = false\n"));
+    }
+    fs::write(&config, text)?;
     for tool in [
         "curl", "security", "claude", "codex", "cursor", "agy", "opencode",
     ] {
@@ -394,7 +405,11 @@ fn failed_auth_refresh_shows_last_known_usage_age_and_auth_marker() -> Result {
     assert_eq!(row["status"], "auth_required");
     assert!(row["age_seconds"].as_u64().is_some_and(|age| age >= 10));
     assert_eq!(row["snapshot"]["windows"][0]["used_basis_points"], 5300);
-    let human = rig.command(&["quota", "show"])?;
+    let compact = rig.command(&["quota", "show"])?;
+    let compact = String::from_utf8(compact.stdout.bytes)?;
+    assert!(compact.contains("pro [claude]: auth_required"), "{compact}");
+    assert!(compact.contains("next: provenant quota tick"), "{compact}");
+    let human = rig.command(&["quota", "show", "--full"])?;
     let text = String::from_utf8(human.stdout.bytes)?;
     for expected in [
         "pro",

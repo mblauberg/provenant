@@ -1,0 +1,29 @@
+stages = [
+  { id = "scouts", parallel = [{ role = "scout", count = "${width}" }] },
+  { id = "synthesis", role = "synthesiser" },
+]
+exports = [{ node = "synthesis", outputs = ["result", "findings"] }]
+
+[parameters]
+width = 4
+read_roots = []
+
+[roles.scout]
+tier = "junior"
+title = "Scout ${index}"
+read_roots = "${read_roots}"
+prompt = """
+Scout assignment ${index}. Research read-only: ${prompt}
+Use judgement to choose a distinct useful scope. Map call sites, constraints,
+risks and tests. Cite files and evidence, state uncertainties, and preserve your
+findings for the senior synthesis. Do not edit files or take Git writer locks.
+"""
+
+[roles.synthesiser]
+tier = "senior"
+kind = "synthesise"
+prompt = """
+Reconcile the scouts' evidence for: ${prompt}
+Preserve useful scope partitions, file references and unresolved uncertainty.
+Choose next implementation steps using judgement; retain every child's evidence.
+"""

@@ -53,11 +53,25 @@ pub struct AccountUsage {
     pub project: Option<ProjectId>,
     pub lane_attempts: u64,
     pub lane_usage: Categories<TokenTotal>,
+    pub lane_cache: CacheSummary,
     pub chair_sessions: u64,
+    /// Chair sessions whose transcript could not be read, so they add no tokens.
+    pub chair_sessions_unread: u64,
+    pub chair_usage: Categories<TokenTotal>,
+    pub chair_cache: CacheSummary,
 }
 
-/// Recorded lane tokens and observed chair session counts, grouped by account
-/// label and project. Chair records have no token measurements.
+#[derive(Default)]
+struct QuotaRow {
+    lane: Accumulator,
+    chair: Accumulator,
+    sessions: u64,
+    unread: u64,
+}
+
+/// Recorded lane and chair tokens, grouped by account label and project. Chair
+/// tokens come from the sessions' transcripts (`attach_chair_usage`); a chair
+/// session with none is counted as unread rather than as zero.
 pub fn quota_usage(
     facts: impl IntoIterator<Item = AttemptFact>,
     chairs: impl IntoIterator<Item = crate::usage::ChairSession>,
@@ -66,7 +80,7 @@ pub fn quota_usage(
     if window.since.zip(window.until).is_some_and(|(s, u)| s >= u) {
         return Err(TelemetryError::InvalidWindow);
     }
-    let mut rows = BTreeMap::<_, (Accumulator, u64)>::new();
+    let mut rows = BTreeMap::<_, QuotaRow>::new();
     let mut attempts = BTreeSet::new();
     for fact in facts {
         if !window.includes(&fact) {
@@ -85,10 +99,13 @@ pub fn quota_usage(
             account_label: None,
         });
         let key = (route.provider, route.account_label, Some(fact.project_id));
-        rows.entry(key)
-            .or_default()
-            .0
-            .record(&fact, 0, false, false)?;
+        rows.entry(key).or_default().lane.record_usage(
+            &fact.usage,
+            Some(fact.terminal_state),
+            0,
+            false,
+            false,
+        )?;
         if rows.len() as u64 > MAX_GROUPS {
             return Err(TelemetryError::TooLarge("10,000 groups"));
         }
@@ -100,7 +117,13 @@ pub fn quota_usage(
         }
         let key = (Some(chair.adapter), Some(chair.account), chair.project);
         if sessions.insert((key.clone(), chair.session)) {
-            add(&mut rows.entry(key).or_default().1, 1)?;
+            let row = rows.entry(key).or_default();
+            add(&mut row.sessions, 1)?;
+            add(&mut row.unread, u64::from(chair.unread.is_some()))?;
+            for model in &chair.usage {
+                row.chair
+                    .record_usage(&model.usage, None, 0, false, false)?;
+            }
         }
         if rows.len() as u64 > MAX_GROUPS {
             return Err(TelemetryError::TooLarge("10,000 groups"));
@@ -108,17 +131,76 @@ pub fn quota_usage(
     }
     Ok(rows
         .into_iter()
-        .map(
-            |((adapter, account, project), (lane, chair_sessions))| AccountUsage {
-                adapter,
-                account,
-                project,
-                lane_attempts: lane.attempts,
-                lane_usage: lane.usage,
-                chair_sessions,
-            },
-        )
+        .map(|((adapter, account, project), row)| AccountUsage {
+            adapter,
+            account,
+            project,
+            lane_attempts: row.lane.attempts,
+            lane_usage: row.lane.usage,
+            lane_cache: row.lane.cache.finish(),
+            chair_sessions: row.sessions,
+            chair_sessions_unread: row.unread,
+            chair_usage: row.chair.usage,
+            chair_cache: row.chair.cache.finish(),
+        })
         .collect())
+}
+
+/// Cache economics for a group of usage records. Cache reads are the cheap
+/// input, so their share of all input is the figure to raise.
+///
+/// Only records whose provider reported cache reads enter the share: counting
+/// the input of a provider that reports no cache split would read as a miss.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CacheSummary {
+    /// Records that reported cache reads.
+    pub reporting: u64,
+    /// Records that did not.
+    pub missing: u64,
+    /// Uncached input, cache reads and cache writes of the reporting records.
+    pub input_tokens: u64,
+    pub read_tokens: u64,
+    pub write_tokens: u64,
+    /// The long-TTL part of `write_tokens`, where the provider splits writes.
+    pub write_1h_tokens: u64,
+    /// Cache reads as a share of all input, in basis points.
+    pub read_share_basis_points: Option<u64>,
+}
+impl CacheSummary {
+    fn record(&mut self, usage: &Usage) -> Result<(), TelemetryError> {
+        let Some(read) = usage.cache_read else {
+            return add(&mut self.missing, 1);
+        };
+        add(&mut self.reporting, 1)?;
+        add(&mut self.read_tokens, read)?;
+        let write = usage.cache_write.unwrap_or(0);
+        add(&mut self.write_tokens, write)?;
+        add(&mut self.write_1h_tokens, usage.cache_write_1h.unwrap_or(0))?;
+        let input = usage
+            .uncached_input
+            .unwrap_or(0)
+            .checked_add(read)
+            .and_then(|n| n.checked_add(write))
+            .ok_or(TelemetryError::Overflow)?;
+        add(&mut self.input_tokens, input)
+    }
+    fn merge(&mut self, other: &Self) -> Result<(), TelemetryError> {
+        add(&mut self.reporting, other.reporting)?;
+        add(&mut self.missing, other.missing)?;
+        add(&mut self.input_tokens, other.input_tokens)?;
+        add(&mut self.read_tokens, other.read_tokens)?;
+        add(&mut self.write_tokens, other.write_tokens)?;
+        add(&mut self.write_1h_tokens, other.write_1h_tokens)
+    }
+    fn finish(mut self) -> Self {
+        self.read_share_basis_points = (self.input_tokens > 0).then(|| {
+            // Reads are part of input, so the share cannot pass 10,000.
+            u64::try_from(u128::from(self.read_tokens) * 10_000 / u128::from(self.input_tokens))
+                .unwrap_or(10_000)
+                .min(10_000)
+        });
+        self
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -159,6 +241,7 @@ pub struct CostTotal {
 pub struct Totals {
     pub attempts: u64,
     pub usage: Categories<TokenTotal>,
+    pub cache: CacheSummary,
     pub cost: CostTotal,
     pub outcomes: BTreeMap<AttemptOutcome, u64>,
 }
@@ -207,12 +290,19 @@ pub struct StatsReport {
     /// Highest numbered selected terminal attempt per task; never active work.
     pub latest_task_outcomes: BTreeMap<AttemptOutcome, u64>,
     pub coverage: Coverage,
+    /// Cache-read share, the figure to raise, by model, account, provider and
+    /// source (lane or chair).
+    pub cache: CacheRows,
+    /// Present when the caller supplied chair sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chair: Option<ChairStats>,
 }
 
 #[derive(Default)]
 struct Accumulator {
     attempts: u64,
     usage: Categories<TokenTotal>,
+    cache: CacheSummary,
     numerator: u128,
     missing_cost: u64,
     subscription_attempts: u64,
@@ -241,26 +331,49 @@ impl Accumulator {
         missing: bool,
         subscription: bool,
     ) -> Result<(), TelemetryError> {
+        self.record_usage(
+            &fact.usage,
+            Some(fact.terminal_state),
+            numerator,
+            missing,
+            subscription,
+        )
+    }
+    /// One usage record: an attempt, or one model's total in a chair session
+    /// (which has no outcome).
+    fn record_usage(
+        &mut self,
+        usage: &Usage,
+        outcome: Option<AttemptOutcome>,
+        numerator: u128,
+        missing: bool,
+        subscription: bool,
+    ) -> Result<(), TelemetryError> {
         add(&mut self.attempts, 1)?;
-        for (total, count) in self.usage.values_mut().into_iter().zip(counts(&fact.usage)) {
+        for (total, count) in self.usage.values_mut().into_iter().zip(counts(usage)) {
             match count {
                 Some(n) => add(&mut total.known, n)?,
                 None => add(&mut total.missing, 1)?,
             }
         }
+        self.cache.record(usage)?;
         self.numerator = self
             .numerator
             .checked_add(numerator)
             .ok_or(TelemetryError::Overflow)?;
         add(&mut self.missing_cost, u64::from(missing))?;
         add(&mut self.subscription_attempts, u64::from(subscription))?;
-        add(self.outcomes.entry(fact.terminal_state).or_default(), 1)
+        if let Some(outcome) = outcome {
+            add(self.outcomes.entry(outcome).or_default(), 1)?;
+        }
+        Ok(())
     }
     fn finish(self) -> Result<Totals, TelemetryError> {
         let known_lower_bound = Money::from_numerator(self.numerator)?;
         Ok(Totals {
             attempts: self.attempts,
             usage: self.usage,
+            cache: self.cache.finish(),
             cost: CostTotal {
                 cost_basis: "api_equivalent_estimate",
                 complete: (self.missing_cost == 0).then(|| known_lower_bound.clone()),
@@ -276,6 +389,67 @@ impl Accumulator {
         })
     }
 }
+
+/// What a usage record costs at the price table's rates.
+struct Priced {
+    numerator: u128,
+    /// A positive category lacks its exact price.
+    missing_price: bool,
+    /// The cost is a lower bound: a count or a price is unknown.
+    missing_cost: bool,
+    subscription: bool,
+    /// Per category, in `Categories` order, whether the count is absent.
+    absent: [bool; 5],
+}
+/// Unknown routes and models have no rates. A validated table only holds
+/// all-zero rates for verified-free entries.
+///
+/// Reasoning tokens use the output rate and every provider counts them inside
+/// its output total, so an absent reasoning count leaves the cost exact.
+fn priced(
+    usage: &Usage,
+    provider: Option<&str>,
+    model: Option<&str>,
+    prices: &PriceTable,
+) -> Result<Priced, TelemetryError> {
+    let price = provider.zip(model).and_then(|(p, m)| prices.get(p, m));
+    let subscription = price.is_some_and(|(_, billing)| *billing == BillingKind::Subscription);
+    let rates = price.map(|(rates, _)| rates.clone()).unwrap_or_default();
+    let verified_free = rates.values() == [Some(0); 4];
+    let mut out = Priced {
+        numerator: 0,
+        missing_price: false,
+        missing_cost: false,
+        subscription,
+        absent: [false; 5],
+    };
+    for (index, (count, rate)) in counts(usage)
+        .into_iter()
+        .zip(rates.usage_rates())
+        .enumerate()
+    {
+        match (count, rate) {
+            (None, _) => {
+                out.absent[index] = true;
+                out.missing_cost |= !verified_free && index != REASONING;
+            }
+            (Some(0), _) => {}
+            (Some(n), Some(r)) => {
+                out.numerator = out
+                    .numerator
+                    .checked_add(u128::from(n) * u128::from(r))
+                    .ok_or(TelemetryError::Overflow)?;
+            }
+            (Some(_), None) => {
+                out.missing_price = true;
+                out.missing_cost = true;
+            }
+        }
+    }
+    Ok(out)
+}
+/// Position of `reasoning` in [`Categories`] order.
+const REASONING: usize = 4;
 
 #[derive(Default)]
 struct GroupBudget {
@@ -325,6 +499,18 @@ pub fn stats(
     prices: &PriceTable,
     window: Window,
 ) -> Stats {
+    stats_with_chair(facts, std::iter::empty(), prices, window)
+}
+
+/// As [`stats`], with the host's chair sessions beside the lanes. Chair
+/// sessions are whatever the caller selected; they are not filtered by the
+/// window's project, since a session spans projects.
+pub fn stats_with_chair(
+    facts: impl IntoIterator<Item = AttemptFact>,
+    chairs: impl IntoIterator<Item = crate::usage::ChairSession>,
+    prices: &PriceTable,
+    window: Window,
+) -> Stats {
     if window.since.zip(window.until).is_some_and(|(s, u)| s >= u) {
         return Err(TelemetryError::InvalidWindow);
     }
@@ -371,56 +557,34 @@ pub fn stats(
             effort: None,
             account_label: None,
         });
-        // Unknown routes and models have no rates. A validated table only holds
-        // all-zero rates for verified-free entries.
-        let price = key
-            .provider
-            .as_deref()
-            .zip(key.model.as_deref())
-            .and_then(|(p, m)| prices.get(p, m));
-        let subscription = price.is_some_and(|(_, billing)| *billing == BillingKind::Subscription);
-        let rates = price.map(|(rates, _)| rates.clone()).unwrap_or_default();
-        let verified_free = rates.values() == [Some(0); 4];
-        let counts = counts(&fact.usage);
-        let mut numerator = 0u128;
-        let mut missing_price = false;
-        let mut missing_cost = false;
-        for ((count, rate), missing) in counts
+        let cost = priced(
+            &fact.usage,
+            key.provider.as_deref(),
+            key.model.as_deref(),
+            prices,
+        )?;
+        for (missing, absent) in coverage
+            .missing_categories
+            .values_mut()
             .into_iter()
-            .zip(rates.usage_rates())
-            .zip(coverage.missing_categories.values_mut())
+            .zip(cost.absent)
         {
-            match (count, rate) {
-                (None, _) => {
-                    add(missing, 1)?;
-                    missing_cost |= !verified_free;
-                }
-                (Some(0), _) => {}
-                (Some(n), Some(r)) => {
-                    numerator = numerator
-                        .checked_add(u128::from(n) * u128::from(r))
-                        .ok_or(TelemetryError::Overflow)?;
-                }
-                (Some(_), None) => {
-                    missing_price = true;
-                    missing_cost = true;
-                }
-            }
+            add(missing, u64::from(absent))?;
         }
         add(
             &mut coverage.missing_usage,
-            u64::from(counts.iter().all(Option::is_none)),
+            u64::from(cost.absent.iter().all(|absent| *absent)),
         )?;
-        add(&mut coverage.missing_price, u64::from(missing_price))?;
+        add(&mut coverage.missing_price, u64::from(cost.missing_price))?;
         add(
             &mut coverage.missing_account,
             u64::from(key.account_label.is_none()),
         )?;
         budget.group(&mut routes, key.clone(), bytes)?.record(
             &fact,
-            numerator,
-            missing_cost,
-            subscription,
+            cost.numerator,
+            cost.missing_cost,
+            cost.subscription,
         )?;
         if window.detail {
             let day = fact
@@ -432,9 +596,9 @@ pub fn stats(
             let bytes = bytes + day.len();
             budget.group(&mut daily, (day, key), bytes)?.record(
                 &fact,
-                numerator,
-                missing_cost,
-                subscription,
+                cost.numerator,
+                cost.missing_cost,
+                cost.subscription,
             )?;
         }
         let current = latest
@@ -443,9 +607,11 @@ pub fn stats(
         if fact.attempt_number > current.0 {
             *current = (fact.attempt_number, fact.terminal_state);
         }
-        total.record(&fact, numerator, missing_cost, subscription)?;
+        total.record(&fact, cost.numerator, cost.missing_cost, cost.subscription)?;
     }
     coverage.selected_attempts = total.attempts;
+    let chair = chair_stats(chairs, prices)?;
+    let cache = cache_report(&routes, chair.as_ref())?;
     let mut latest_task_outcomes = BTreeMap::new();
     for (_, state) in latest.into_values() {
         add(latest_task_outcomes.entry(state).or_default(), 1)?;
@@ -467,6 +633,209 @@ pub fn stats(
         window,
         latest_task_outcomes,
         coverage,
+        cache: cache.rows,
+        chair: chair.map(|chair| chair.report),
+    })
+}
+
+/// A chair account's use of one model, summed over its sessions.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChairGroup {
+    pub adapter: String,
+    pub account: String,
+    pub model: String,
+    pub sessions: u64,
+    pub usage: Categories<TokenTotal>,
+    pub cache: CacheSummary,
+    pub cost: CostTotal,
+}
+/// Chair sessions observed on this host by the SessionStart hook, with the
+/// tokens read from their transcripts.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChairStats {
+    pub scope: &'static str,
+    pub sessions: u64,
+    /// Sessions with no token counts, by reason.
+    pub unread: BTreeMap<crate::Unread, u64>,
+    pub usage: Categories<TokenTotal>,
+    pub cache: CacheSummary,
+    pub cost: CostTotal,
+    pub groups: Vec<ChairGroup>,
+}
+struct Chair {
+    report: ChairStats,
+    /// Unfinished per-group cache tallies, for the cross-source roll-up.
+    cache: Vec<(String, String, String, CacheSummary)>,
+}
+
+fn chair_stats(
+    chairs: impl IntoIterator<Item = crate::usage::ChairSession>,
+    prices: &PriceTable,
+) -> Result<Option<Chair>, TelemetryError> {
+    type Key = (String, String, String);
+    let mut groups = BTreeMap::<Key, (Accumulator, BTreeSet<String>)>::new();
+    let mut total = Accumulator::default();
+    let mut sessions = BTreeSet::new();
+    let mut unread = BTreeMap::<crate::Unread, u64>::new();
+    let mut seen = false;
+    for chair in chairs {
+        seen = true;
+        if !sessions.insert((
+            chair.adapter.clone(),
+            chair.account.clone(),
+            chair.session.clone(),
+        )) {
+            continue;
+        }
+        if let Some(reason) = chair.unread {
+            add(unread.entry(reason).or_default(), 1)?;
+        }
+        for model in &chair.usage {
+            let name = if model.model.contains('/') {
+                model.model.clone()
+            } else {
+                format!("{}/{}", chair.adapter, model.model)
+            };
+            let cost = priced(&model.usage, Some(&chair.adapter), Some(&name), prices)?;
+            let key = (chair.adapter.clone(), chair.account.clone(), name);
+            if !groups.contains_key(&key) && groups.len() as u64 >= MAX_GROUPS {
+                return Err(TelemetryError::TooLarge("10,000 groups"));
+            }
+            let (accumulator, ids) = groups.entry(key).or_default();
+            ids.insert(chair.session.clone());
+            for target in [accumulator, &mut total] {
+                target.record_usage(
+                    &model.usage,
+                    None,
+                    cost.numerator,
+                    cost.missing_cost,
+                    cost.subscription,
+                )?;
+            }
+        }
+    }
+    if !seen {
+        return Ok(None);
+    }
+    let mut cache = Vec::new();
+    let mut out = Vec::new();
+    for ((adapter, account, model), (accumulator, ids)) in groups {
+        cache.push((
+            adapter.clone(),
+            account.clone(),
+            model.clone(),
+            accumulator.cache.clone(),
+        ));
+        let totals = accumulator.finish()?;
+        out.push(ChairGroup {
+            adapter,
+            account,
+            model,
+            sessions: ids.len() as u64,
+            usage: totals.usage,
+            cache: totals.cache,
+            cost: totals.cost,
+        });
+    }
+    let totals = total.finish()?;
+    Ok(Some(Chair {
+        report: ChairStats {
+            scope: "host_chair_sessions",
+            sessions: sessions.len() as u64,
+            unread,
+            usage: totals.usage,
+            cache: totals.cache,
+            cost: totals.cost,
+            groups: out,
+        },
+        cache,
+    }))
+}
+
+/// One roll-up row of the cache-read share, from lanes or the chair.
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheGroup {
+    /// `lane` for dispatched attempts, `chair` for interactive sessions.
+    pub source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    pub cache: CacheSummary,
+}
+/// Cache-read share per model, per account, per provider and per source.
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheRows {
+    pub by_model: Vec<CacheGroup>,
+    pub by_account: Vec<CacheGroup>,
+    pub by_provider: Vec<CacheGroup>,
+    pub by_source: Vec<CacheGroup>,
+}
+struct CacheReport {
+    rows: CacheRows,
+}
+
+fn cache_report(
+    routes: &BTreeMap<RouteFact, Accumulator>,
+    chair: Option<&Chair>,
+) -> Result<CacheReport, TelemetryError> {
+    type Key = (&'static str, Option<String>, Option<String>, Option<String>);
+    let mut by_model = BTreeMap::<Key, CacheSummary>::new();
+    let mut by_account = BTreeMap::<Key, CacheSummary>::new();
+    let mut by_provider = BTreeMap::<Key, CacheSummary>::new();
+    let mut by_source = BTreeMap::<Key, CacheSummary>::new();
+    let mut fold = |source: &'static str,
+                    provider: Option<&String>,
+                    model: Option<&String>,
+                    account: Option<&String>,
+                    cache: &CacheSummary|
+     -> Result<(), TelemetryError> {
+        let keep = |value: Option<&String>| value.cloned();
+        for (map, key) in [
+            (&mut by_model, (source, keep(provider), keep(model), None)),
+            (
+                &mut by_account,
+                (source, keep(provider), None, keep(account)),
+            ),
+            (&mut by_provider, (source, keep(provider), None, None)),
+            (&mut by_source, (source, None, None, None)),
+        ] {
+            map.entry(key).or_default().merge(cache)?;
+        }
+        Ok(())
+    };
+    for (route, accumulator) in routes {
+        fold(
+            "lane",
+            route.provider.as_ref(),
+            route.model.as_ref(),
+            route.account_label.as_ref(),
+            &accumulator.cache,
+        )?;
+    }
+    for (adapter, account, model, cache) in chair.iter().flat_map(|chair| &chair.cache) {
+        fold("chair", Some(adapter), Some(model), Some(account), cache)?;
+    }
+    let rows = |map: BTreeMap<Key, CacheSummary>| -> Vec<CacheGroup> {
+        map.into_iter()
+            .map(|((source, provider, model, account), cache)| CacheGroup {
+                source,
+                provider,
+                model,
+                account,
+                cache: cache.finish(),
+            })
+            .collect()
+    };
+    Ok(CacheReport {
+        rows: CacheRows {
+            by_model: rows(by_model),
+            by_account: rows(by_account),
+            by_provider: rows(by_provider),
+            by_source: rows(by_source),
+        },
     })
 }
 

@@ -136,6 +136,8 @@ pub enum Fallback {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteRequest {
+    #[serde(default)]
+    pub intent: crate::RouteIntent,
     pub choice: RouteChoice,
     pub effort: Option<String>,
     #[serde(default)]
@@ -148,6 +150,8 @@ pub struct RouteRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteListQuery {
+    #[serde(default)]
+    pub valid: bool,
     pub adapter: Option<String>,
     pub pool: Option<String>,
 }
