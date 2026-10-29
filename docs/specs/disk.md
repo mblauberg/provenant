@@ -214,7 +214,7 @@ using the one-day idle floor when below the free floor. It skips Git fetches and
 worktree deletion and honours `gc.schedule=false`. Admission-triggered collection
 selects only the launching project, including its caches and temporary run
 payloads; it does not enumerate other registered projects. Applied sweeps share
-a nonblocking collection lock. The scheduled agent runs at load and daily.
+a nonblocking collection lock. The host tick runs at load and every minute; collection is a daily tick task.
 Manual `gc --pressure` reports one notice line when `gc.schedule=false`, a
 transient project is skipped or no eligible data is in scope. JSON includes
 the same reason in `notice`.
@@ -223,9 +223,9 @@ the removed worktree's cache. Settlement lane-cache and delivery-integration
 event wiring remains with those callers.
 - Why: free reclaimable space before sending the chair a manual remedy.
 - Test: `crates/cli/src/run.rs::writer_rechecks_once_after_collection_and_reports_reclaimed_bytes`;
-  `src/gc_agent.rs::plist_renders_interval_arguments_state_logs_and_xml_escaping`;
+  `src/tick_agent.rs::plist_renders_interval_arguments_state_logs_and_xml_escaping`;
   `src/disk_guard.rs::settlement_collects_below_the_shared_floor_only`;
   `::lane_pause_rereads_the_floor_each_observation`;
   `crates/run/src/dispatch_tests.rs::admission_rereads_gc_floor_after_submission_and_while_waiting`;
   `crates/confinement/src/disk.rs::lane_sample_uses_each_output_volume_and_propagates_errors`
-- Owner: `crates/cli/src/run.rs`, `src/worktrees.rs`, `src/gc_agent.rs`
+- Owner: `crates/cli/src/run.rs`, `src/worktrees.rs`, `src/tick_agent.rs`

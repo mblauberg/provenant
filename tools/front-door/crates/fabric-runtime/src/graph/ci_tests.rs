@@ -25,6 +25,9 @@ struct Owner {
     wall_seconds: i64,
     monotonic_micros: u64,
     boot: String,
+    tick: bool,
+    backoff: CiPollBackoff,
+    policies: std::collections::BTreeMap<String, CiPollBackoff>,
 }
 impl CiStatus for Owner {
     fn host_stamp(&self) -> Option<CiHostStamp> {
@@ -44,6 +47,15 @@ impl CiStatus for Owner {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn wall_now(&self) -> Option<provenant_core::WallTime> {
+        provenant_core::WallTime::from_micros(self.wall_seconds.saturating_mul(1_000_000)).ok()
+    }
+    fn ci_poll_backoff(&self, node_id: &str) -> CiPollBackoff {
+        self.policies.get(node_id).copied().unwrap_or(self.backoff)
+    }
+    fn respect_ci_wake(&self) -> bool {
+        self.tick
+    }
     fn actor(&self) -> String {
         "fixture".into()
     }
@@ -164,6 +176,198 @@ fn ci_pending_checkpoint_replays_then_passes() {
     assert_eq!(evidence.state, CiState::Passed);
     assert_eq!(evidence.summary, "1 check passed");
     assert_eq!(owner.attempts, 0);
+}
+
+#[test]
+fn ci_tick_deadlines_and_backoff_survive_restart_and_stop_after_settlement() {
+    let mut owner = Owner {
+        tick: true,
+        backoff: CiPollBackoff {
+            initial_seconds: 60,
+            max_seconds: 240,
+        },
+        observations: VecDeque::from([
+            observation(CiState::Pending, "waiting"),
+            observation(CiState::Pending, "still waiting"),
+            observation(CiState::Passed, "green"),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let first = advance(&document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.wake_at.unwrap().as_micros(), 60_000_000);
+    journal.0 =
+        Some(serde_json::from_slice(&serde_json::to_vec(&first.checkpoint).unwrap()).unwrap());
+    owner.wall_seconds = 59;
+    let early = advance(&document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(early.checkpoint, first.checkpoint);
+    assert_eq!(owner.targets.len(), 1);
+    owner.wall_seconds = 60;
+    let second = advance(&document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(second.checkpoint.wake_at.unwrap().as_micros(), 180_000_000);
+    assert_eq!(
+        second.checkpoint.nodes[0]
+            .ci
+            .as_ref()
+            .unwrap()
+            .pending_observations,
+        2
+    );
+    journal.0 =
+        Some(serde_json::from_slice(&serde_json::to_vec(&second.checkpoint).unwrap()).unwrap());
+    owner.wall_seconds = 179;
+    advance(&document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.targets.len(), 2);
+    owner.wall_seconds = 180;
+    let done = advance(&document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(done.status, GraphStatus::Complete);
+    assert!(done.checkpoint.wake_at.is_none());
+    assert!(
+        done.checkpoint.nodes[0]
+            .ci
+            .as_ref()
+            .unwrap()
+            .wake_at
+            .is_none()
+    );
+    advance(&document(), &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.targets.len(), 3);
+}
+
+#[test]
+fn ci_tick_observes_only_each_due_gate() {
+    let mut doc = document();
+    let mut slow = doc.nodes[0].clone();
+    slow.id = "slow".into();
+    doc.nodes.push(slow);
+    let mut owner = Owner {
+        tick: true,
+        backoff: CiPollBackoff {
+            initial_seconds: 60,
+            max_seconds: 60,
+        },
+        policies: std::collections::BTreeMap::from([(
+            "slow".into(),
+            CiPollBackoff {
+                initial_seconds: 300,
+                max_seconds: 300,
+            },
+        )]),
+        observations: VecDeque::from([
+            observation(CiState::Pending, "fast waiting"),
+            observation(CiState::Pending, "slow waiting"),
+            observation(CiState::Passed, "fast green"),
+            observation(CiState::Passed, "slow green"),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let first = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.wake_at.unwrap().as_micros(), 60_000_000);
+    owner.wall_seconds = 60;
+    let next = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(next.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(next.checkpoint.nodes[1].state, NodeState::Running);
+    assert_eq!(next.checkpoint.wake_at.unwrap().as_micros(), 300_000_000);
+    assert_eq!(owner.targets.len(), 3);
+    owner.wall_seconds = 300;
+    assert_eq!(
+        advance(&doc, &mut owner, &mut journal).unwrap().status,
+        GraphStatus::Complete
+    );
+    assert_eq!(owner.targets.len(), 4);
+}
+
+#[test]
+fn ci_and_ask_deadlines_share_the_earliest_wake() {
+    let mut doc = document();
+    doc.decision_session = Some("chair-session".into());
+    doc.nodes.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "choose", "kind": "decide", "access": "read_only",
+            "decide": {
+                "question": "Continue?", "default": "yes", "timeout_seconds": 30,
+                "options": [{"id": "yes", "label": "Continue"}, {"id": "no", "label": "Stop"}]
+            }
+        }))
+        .unwrap(),
+    );
+    let mut owner = Owner {
+        tick: true,
+        backoff: CiPollBackoff {
+            initial_seconds: 60,
+            max_seconds: 60,
+        },
+        observations: VecDeque::from([
+            observation(CiState::Pending, "waiting"),
+            observation(CiState::Passed, "green"),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let first = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.wake_at.unwrap().as_micros(), 30_000_000);
+    owner.wall_seconds = 30;
+    let decision = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(decision.checkpoint.wake_at.unwrap().as_micros(), 60_000_000);
+    assert_eq!(owner.targets.len(), 1);
+    assert!(decision.checkpoint.asks.iter().all(|ask| ask.resolved));
+    owner.wall_seconds = 60;
+    let done = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(done.status, GraphStatus::Complete);
+    assert!(done.checkpoint.wake_at.is_none());
+}
+
+#[test]
+fn zero_backoff_polls_once_even_when_a_loop_reschedules_the_advance() {
+    let mut doc: GraphDocument =
+        serde_json::from_str(include_str!("../fixtures/loop-exhausts.json")).unwrap();
+    doc.nodes.insert(0, document().nodes[0].clone());
+    let mut owner = Owner {
+        tick: true,
+        observations: VecDeque::from([observation(CiState::Pending, "waiting")]),
+        ..Default::default()
+    };
+    let limits = crate::config::GraphLimits {
+        expansion_depth: 16,
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let run =
+        advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
+    assert_eq!(owner.targets.len(), 1);
+    assert_eq!(owner.attempts, 2);
+    assert_eq!(run.checkpoint.wake_at.unwrap().as_micros(), 0);
+}
+
+#[test]
+fn ci_backoff_never_delays_the_gate_timeout() {
+    let mut doc = document();
+    let Some(GateCondition::Ci {
+        timeout_seconds, ..
+    }) = &mut doc.nodes[0].condition
+    else {
+        unreachable!()
+    };
+    *timeout_seconds = 120;
+    let mut owner = Owner {
+        tick: true,
+        backoff: CiPollBackoff {
+            initial_seconds: u64::MAX,
+            max_seconds: u64::MAX,
+        },
+        observations: VecDeque::from([observation(CiState::Pending, "waiting")]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let first = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.wake_at.unwrap().as_micros(), 120_000_000);
+    owner.wall_seconds = 120;
+    owner.monotonic_micros = 120_000_000;
+    let done = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(done.checkpoint.nodes[0].state, NodeState::Failed);
+    assert!(done.checkpoint.wake_at.is_none());
+    assert_eq!(owner.targets.len(), 1);
 }
 
 #[test]

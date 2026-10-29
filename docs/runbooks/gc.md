@@ -1,6 +1,6 @@
 # Collect caches and expired provider state
 Owner: provenant
-Anchor: tools/front-door/src/gc_agent.rs
+Anchor: tools/front-door/src/tick.rs
 
 Preview collection before inspecting the named removals:
 
@@ -75,12 +75,12 @@ sweep retries an interrupted deletion only for the authorised path and
 matching device and inode. Do not manually rename a refused tree into a
 tombstone.
 
-On macOS, the installed default-state agent runs at load and daily.
+On macOS, the installed default-state host tick runs every 60 seconds and
+collects when its persisted daily deadline is due.
 `[gc] schedule = false` disables scheduled sweeps; manual GC and settlement
 cache pruning remain available. See
-[configuration](configuration.md#lane-cache-collection) for agent installation
-and logs. Other installations need an explicit scheduler invoking
-`provenant gc`.
+[configuration](configuration.md#lane-cache-collection) for tick installation
+and logs. Other installations can schedule `provenant tick` explicitly.
 
 Writer admission and lane settlement use pressure collection without network
 fetches or worktree removal. Each caps its single attempt at five seconds

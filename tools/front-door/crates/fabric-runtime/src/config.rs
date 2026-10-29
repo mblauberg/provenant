@@ -26,6 +26,9 @@ pub struct FabricConfig {
 pub struct GraphConfig {
     pub limits: GraphLimits,
     pub budget: GraphBudget,
+    /// Backoff for pending CI observations; node overrides take precedence.
+    pub ci_poll_backoff: crate::graph::CiPollBackoff,
+    pub ci_poll_overrides: BTreeMap<String, crate::graph::CiPollBackoff>,
     #[serde(
         rename = "limit_ceiling",
         skip_serializing,
@@ -669,11 +672,34 @@ mod tests {
         inputs.state_dir = Some("/fixture/state".into());
         let roots = inputs.resolve(&Resolver).unwrap();
         let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
-        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.limit_ceiling]\nnodes = 1\n";
+        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.limit_ceiling]\nnodes = 1\n[domains.fabric.graph.ci_poll_backoff]\ninitial_seconds = 60\nmax_seconds = 300\n[domains.fabric.graph.ci_poll_overrides.build]\ninitial_seconds = 120\nmax_seconds = 600\n";
         let config =
             provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
         assert_eq!(config.domains.fabric.graph.limits.nodes, 10);
         assert_eq!(config.domains.fabric.graph.limits.edges, 20);
+        assert_eq!(
+            config.domains.fabric.graph.ci_poll_backoff.initial_seconds,
+            60
+        );
+        assert_eq!(config.domains.fabric.graph.ci_poll_backoff.max_seconds, 300);
+        assert_eq!(
+            config.domains.fabric.graph.ci_poll_overrides["build"].initial_seconds,
+            120
+        );
+        assert!(matches!(
+            config.origins["domains.fabric.graph.ci_poll_backoff.initial_seconds"],
+            provenant_config::Origin::User { .. }
+        ));
+        assert!(matches!(
+            config.origins["domains.fabric.graph.ci_poll_overrides.build.max_seconds"],
+            provenant_config::Origin::User { .. }
+        ));
+        let defaults =
+            provenant_config::load_with_domains(&roots, None::<&[u8]>, &sections).unwrap();
+        assert!(matches!(
+            defaults.origins["domains.fabric.graph.ci_poll_backoff.initial_seconds"],
+            provenant_config::Origin::Compiled { .. }
+        ));
 
         for (text, key, rejected, should_echo, rule) in [
             (

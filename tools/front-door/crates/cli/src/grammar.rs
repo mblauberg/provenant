@@ -139,6 +139,8 @@ pub enum Command {
     Pr(Pr),
     /// Collect lane caches, ignored output, merged worktrees and expired captures
     Gc(Gc),
+    /// Advance due graphs and run scheduled host tasks
+    Tick,
     /// Inspect disk use without changing files
     #[command(subcommand)]
     Disk(Disk),
@@ -1090,6 +1092,7 @@ pub enum Internal {
         request: String,
     },
     ProviderUpdates,
+    TickGc,
     /// Take a host build slot, then run the given cargo command (the lane's cargo shim). The slot directory, count and wait come from the host's environment (`PROVENANT_BUILD_SLOT_STATE`, `PROVENANT_BUILD_SLOTS`, `PROVENANT_BUILD_WAIT_SECS`), never from arguments.
     BuildSlot {
         /// The real cargo, then its arguments.

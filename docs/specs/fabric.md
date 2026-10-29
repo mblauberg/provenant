@@ -525,8 +525,36 @@ the gate re-anchors its timeout to the new host stamp. The checkpoint retains
 the re-anchor count; after three re-anchors, another such change settles the
 gate as `timeout` with a reason naming the re-anchor limit. Replay restores
 waiting without querying the host; explicit graph advance, resume and attempt
-settlement re-evaluate the gate. Graph status reads
-the saved snapshot, and there is no automatic background re-check.
+settlement re-evaluate the gate. Graph status reads the saved snapshot.
+Pending CI gates persist their next `wake_at` and observation count in the
+checkpoint. The graph's `wake_at` is the earliest running CI deadline or open
+node ask deadline. The host's `provenant tick` advances only due graphs, checks
+the deadline again under the graph journal lock, and honours each gate's own
+deadline when several gates share a graph. Terminal and cancelled graphs do
+not wake. Restart resumes from the stored deadlines without an in-process timer.
+
+`domains.fabric.graph.ci_poll_backoff` controls `initial_seconds` and
+`max_seconds`, both zero by default, making pending gates eligible on every tick. A positive
+initial delay doubles after each pending observation up to the maximum, capped
+by the remaining CI timeout.
+`domains.fabric.graph.ci_poll_overrides.<node_id>` overrides that policy for a
+named gate. Host configuration inspection reports effective values and their
+origins. Explicit advancement can re-check a gate before its deadline.
+For example, set both `initial_seconds = 60` and `max_seconds = 300` in
+`[domains.fabric.graph.ci_poll_backoff]` to poll after 60, 120, 240 and then
+300 seconds of continued waiting, rounded up to the next tick.
+On macOS, one `dev.provenant.tick` LaunchAgent runs every 60 seconds and at
+login. It also attempts GC daily, with the next daily deadline persisted under
+`tick/cadence.json`; `gc.schedule = false` disables that task alone.
+Daily collection runs in a detached one-shot worker under the collector's
+existing lock, so slow fetches and cache walks do not delay the next tick.
+`tick/gc-result.json` retains its queued, running, complete or failed state;
+spawn failures stay due and are retried on the next tick.
+Ticks detect interrupted workers through the worker lock and retain an error;
+skipped projects and failed upstream observations are reported as incomplete.
+Notice batch flushing and opportunistic quota refresh are reserved tick tasks with
+no effect until their respective implementations land. Scheduler installation
+is a platform seam; a Linux timer is deferred.
 Gates must save their decision before dependants run and retain it on replay,
 even if budgets change. Gates expose `PASS` or `FAIL` as their typed verdict.
 

@@ -27,6 +27,9 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 
 | Key | Default | Effect |
 |---|---|---|
+| `ci_poll_backoff.initial_seconds` | 0 | Initial delay after a pending CI observation. Each later observation doubles the delay up to max_seconds; the remaining CI timeout takes precedence. Zero makes the gate eligible at the next tick. (seconds, 0 or more). |
+| `ci_poll_backoff.max_seconds` | 0 | Maximum per-gate polling delay. The 60-second scheduler interval determines the earliest automatic re-check. (seconds, 0 or more). |
+| `ci_poll_overrides.<node_id>` | empty | Override the host CI polling policy for one node ID. Values and origins appear in config show. (initial_seconds and max_seconds). |
 | `allowed_read_roots` | empty (read roots stay inside the project and its registered worktrees) | Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees. (absolute directory paths). |
 | `limits.expansion_depth` | 64 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 33. Graph documents cannot raise it. (1 or more). |
 

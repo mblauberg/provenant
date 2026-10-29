@@ -397,6 +397,12 @@ pub struct CiHostStamp {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CiEvidence {
+    /// Next host poll, persisted independently for every running CI gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_at: Option<provenant_core::WallTime>,
+    /// Pending observations already made, which selects the next backoff.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub pending_observations: u64,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -553,7 +559,7 @@ pub struct GraphCheckpoint {
     /// Actor every ask is raised under, recorded before the first ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_actor: Option<String>,
-    /// Earliest deadline of an open ask, for a host tick to wake the graph.
+    /// Earliest deadline of an open ask or running CI gate, for the host tick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_at: Option<provenant_core::WallTime>,
     /// Pause asks raised so far, which numbers the next one.
@@ -857,6 +863,26 @@ pub struct NodeInput<'a> {
     pub required_verdict: Option<&'a str>,
 }
 
+/// Host polling policy. Defaults observe pending gates once per tick; hosts
+/// can select a longer exponential backoff independently for each gate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CiPollBackoff {
+    pub initial_seconds: u64,
+    pub max_seconds: u64,
+}
+
+impl CiPollBackoff {
+    fn delay_seconds(self, pending_observations: u64) -> u64 {
+        let factor = 1_u64
+            .checked_shl(pending_observations.min(64) as u32)
+            .unwrap_or(u64::MAX);
+        self.initial_seconds
+            .saturating_mul(factor)
+            .min(self.max_seconds)
+    }
+}
+
 /// Narrow read-only host interface for CI checks.
 pub trait CiStatus {
     fn host_stamp(&self) -> Option<CiHostStamp>;
@@ -880,6 +906,17 @@ pub trait AttemptOwner {
     /// A host without CI support fails closed.
     fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
         None
+    }
+
+    /// Effective host policy for this CI gate.
+    fn ci_poll_backoff(&self, _node_id: &str) -> CiPollBackoff {
+        CiPollBackoff::default()
+    }
+
+    /// Scheduled ticks honour per-gate deadlines. Explicit advances can probe
+    /// immediately without waiting for the scheduled poll.
+    fn respect_ci_wake(&self) -> bool {
+        false
     }
 
     /// The actor this owner submits as, recorded before the first submit.
@@ -1536,7 +1573,16 @@ pub fn advance_with_budget<R: AttemptOwner, J: GraphJournal>(
     limits: &crate::config::GraphLimits,
     budget: &crate::config::GraphBudget,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
-    advance_inner(document, owner, journal, limits, budget, false, &[])
+    advance_inner(
+        document,
+        owner,
+        journal,
+        limits,
+        budget,
+        false,
+        &[],
+        &mut Default::default(),
+    )
 }
 
 pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
@@ -1547,9 +1593,22 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
     budget: &crate::config::GraphBudget,
     extensions: &[String],
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
-    advance_inner(document, owner, journal, limits, budget, true, extensions)
+    advance_inner(
+        document,
+        owner,
+        journal,
+        limits,
+        budget,
+        true,
+        extensions,
+        &mut Default::default(),
+    )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one observation set follows internal rescheduling for this advance"
+)]
 fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
     owner: &mut R,
@@ -1558,6 +1617,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     budget: &crate::config::GraphBudget,
     mut resume: bool,
     extensions: &[String],
+    observed_ci: &mut std::collections::BTreeSet<String>,
 ) -> Result<GraphRun, GraphError<R::Error, J::Error>> {
     let unbounded = crate::config::GraphLimits {
         nodes: usize::MAX,
@@ -1805,7 +1865,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             loops::reconcile(&mut checkpoint, &extended);
             checkpoint.cancelled = false;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
-            return advance_inner(document, owner, journal, limits, budget, false, &[]);
+            return advance_inner(
+                document,
+                owner,
+                journal,
+                limits,
+                budget,
+                false,
+                &[],
+                observed_ci,
+            );
         }
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
@@ -1926,6 +1995,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             budget,
                             true,
                             &[extension],
+                            observed_ci,
                         );
                     }
                 }
@@ -1962,6 +2032,21 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     ..
                 } = condition
                 {
+                    if observed_ci.contains(&node.id) {
+                        continue;
+                    }
+                    let wall_now = owner.wall_now();
+                    if owner.respect_ci_wake()
+                        && checkpoint.nodes[node_index]
+                            .ci
+                            .as_ref()
+                            .and_then(|ci| ci.wake_at)
+                            .is_some_and(|wake| wall_now.is_none_or(|now| now < wake))
+                    {
+                        continue;
+                    }
+                    let backoff = owner.ci_poll_backoff(&node.id);
+                    observed_ci.insert(node.id.clone());
                     let mut host = owner.ci_status();
                     let sampled =
                         host.as_ref()
@@ -1974,6 +2059,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     let mut anchor = prior.and_then(|e| e.first_observed_stamp.clone());
                     let mut reanchor_reason = prior.and_then(|e| e.clock_reanchor_reason.clone());
                     let mut reanchors = prior.map_or(0, |e| e.clock_reanchors);
+                    let pending_observations = prior.map_or(0, |e| e.pending_observations);
                     const REANCHOR_LIMIT: u8 = 3;
                     if let Some(now) = &sampled {
                         match &anchor {
@@ -2031,8 +2117,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         );
                         let state = observation.state;
                         checkpoint.nodes[node_index].ci = Some(CiEvidence {
+                            wake_at: None,
+                            pending_observations,
                             extra: Default::default(),
-                            first_observed_stamp: anchor,
+                            first_observed_stamp: anchor.clone(),
                             clock_reanchors: reanchors,
                             clock_reanchor_reason: reanchor_reason,
                             state,
@@ -2040,7 +2128,36 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         });
                         match state {
                             CiState::Pending => {
-                                checkpoint.nodes[node_index].state = NodeState::Running;
+                                let now = wall_now.ok_or_else(|| GraphError::Refused(format!(
+                                    "node {}: no wall clock to set its CI wake deadline; retry the advance", node.id
+                                )))?;
+                                let remaining =
+                                    sampled.as_ref().zip(anchor.as_ref()).map(|(now, first)| {
+                                        timeout_seconds.saturating_mul(1_000_000).saturating_sub(
+                                            now.host_monotonic_micros
+                                                .saturating_sub(first.host_monotonic_micros),
+                                        )
+                                    });
+                                let delay_micros = backoff
+                                    .delay_seconds(pending_observations)
+                                    .saturating_mul(1_000_000);
+                                let duration = provenant_core::DurationMicros::from_micros(
+                                    remaining.map_or(delay_micros, |remaining| {
+                                        delay_micros.min(remaining)
+                                    }),
+                                );
+                                let wake_at = now.checked_add(duration).ok()
+                                    .ok_or_else(|| GraphError::Refused(format!(
+                                        "node {}: CI wake deadline passes the last representable wall time; lower ci_poll_backoff", node.id
+                                    )))?;
+                                let progress = &mut checkpoint.nodes[node_index];
+                                progress.state = NodeState::Running;
+                                let evidence =
+                                    progress.ci.as_mut().ok_or(GraphError::BadCheckpoint)?;
+                                evidence.wake_at = Some(wake_at);
+                                evidence.pending_observations =
+                                    pending_observations.saturating_add(1);
+                                asks::refresh_wake(&mut checkpoint);
                                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                                 continue;
                             }
@@ -2065,6 +2182,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     on_fail: node.on_fail.clone(),
                 });
                 progress.outputs = Some(gate_outputs(progress.state == NodeState::Succeeded));
+                if let Some(ci) = progress.ci.as_mut() {
+                    ci.wake_at = None;
+                }
+                asks::refresh_wake(&mut checkpoint);
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 continue;
             }
@@ -2515,7 +2636,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             journal,
             &effective_budget,
         )? {
-            return advance_inner(document, owner, journal, limits, budget, false, &[]);
+            return advance_inner(
+                document,
+                owner,
+                journal,
+                limits,
+                budget,
+                false,
+                &[],
+                observed_ci,
+            );
         }
         if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
             && !checkpoint.delivered
@@ -3862,10 +3992,11 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 }
                 (None, NodeState::Running) => {
                     matches!(node.condition, Some(GateCondition::Ci { .. }))
-                        && progress
-                            .ci
-                            .as_ref()
-                            .is_some_and(|ci| ci.state == CiState::Pending)
+                        && progress.ci.as_ref().is_some_and(|ci| {
+                            ci.state == CiState::Pending
+                                && ci.wake_at.is_some()
+                                && ci.pending_observations > 0
+                        })
                         && progress.outputs.is_none()
                         && dependency_state(node, plan, checkpoint, &positions).is_none()
                 }
@@ -3879,6 +4010,8 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 _ => false,
             };
             if !valid
+                || (progress.state != NodeState::Running
+                    && progress.ci.as_ref().is_some_and(|ci| ci.wake_at.is_some()))
                 || !progress.attempts.is_empty()
                 || progress.advance_error.is_some()
                 || (progress.ci.is_some()

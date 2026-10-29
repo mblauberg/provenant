@@ -363,12 +363,23 @@ pub(super) fn identity<R: AttemptOwner, J: Error + 'static>(
 }
 
 pub(super) fn refresh_wake(checkpoint: &mut GraphCheckpoint) {
-    checkpoint.wake_at = checkpoint
+    checkpoint.wake_at = next_wake(checkpoint);
+}
+
+fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
+    checkpoint
         .asks
         .iter()
         .filter(|ask| !ask.resolved)
         .filter_map(|ask| ask.wake_at)
-        .min();
+        .chain(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.state == NodeState::Running)
+                .filter_map(|node| node.ci.as_ref().and_then(|ci| ci.wake_at)),
+        )
+        .min()
 }
 
 /// Read an answer. An inbox failure is kept on the ask and returned.
@@ -813,13 +824,7 @@ pub fn close_resolved_asks<R: AttemptOwner, J: GraphJournal>(
 
 /// Checkpoint-level ask invariants. Node-level state is checked beside each kind.
 pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Result<(), ()> {
-    let open_wake = checkpoint
-        .asks
-        .iter()
-        .filter(|ask| !ask.resolved)
-        .filter_map(|ask| ask.wake_at)
-        .min();
-    if checkpoint.wake_at != open_wake {
+    if checkpoint.wake_at != next_wake(checkpoint) {
         return Err(());
     }
     if checkpoint.asks.is_empty() {

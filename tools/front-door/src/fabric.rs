@@ -836,6 +836,134 @@ fn factory(
         workers,
     })
 }
+
+/// Wake only expired journals. The snapshot is a discovery hint; the deadline
+/// is checked again while holding the same journal lock as explicit advance.
+pub(crate) fn tick_graphs(
+    resolved: &crate::roots::Resolved,
+    now: provenant_core::WallTime,
+    workers: &'static dyn WorkerObserver,
+) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
+    let mut report = crate::tick::Graphs::default();
+    for binding in provenant_config::registered_projects(&resolved.roots)? {
+        let project = binding.project_id();
+        let ids = match FileJournal::graph_ids(&resolved.roots.state, project) {
+            Ok(ids) => ids,
+            Err(error) => {
+                report.errors.push(format!("{project}: {error}"));
+                continue;
+            }
+        };
+        for id in ids {
+            let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
+                let Some(checkpoint) =
+                    FileJournal::read_checkpoint(&resolved.roots.state, project, &id)?
+                else {
+                    return Ok(false);
+                };
+                if !graph_wake_due(&checkpoint, now) {
+                    return Ok(false);
+                }
+                let clock = SystemClock::new();
+                let cancel = CancelToken::new();
+                let budget = WaitBudget::cli(clock.mono_now(), 55)?;
+                let mut journal = match FileJournal::open(
+                    &resolved.roots.state,
+                    project,
+                    &id,
+                    WaitBudget::nonblocking(clock.mono_now()),
+                    &cancel,
+                    &clock,
+                ) {
+                    Ok(journal) => journal,
+                    Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+                        provenant_os::fs::FsError::LockTimeout { .. },
+                    )) => return Ok(false),
+                    Err(error) => return Err(error.into()),
+                };
+                let Some(checkpoint) = journal.load(&id)? else {
+                    return Ok(false);
+                };
+                if !graph_wake_due(&checkpoint, clock.wall_now()?) {
+                    return Ok(false);
+                }
+                // Execution can be rebound to another worktree by a manual
+                // resume, so resolve it only after acquiring journal custody.
+                let Some(execution) =
+                    FileJournal::pending_execution(&resolved.roots.state, project, &id)?
+                else {
+                    return Ok(false);
+                };
+                let context =
+                    Context::open(resolved.roots.clone(), &resolved.home, &execution.directory)?;
+                if context.identity.project != project || context.in_lane {
+                    return Err(EdgeError::Invalid.into());
+                }
+                let factory = Factory {
+                    project_attribution: crate::usage::attribution_enabled(&context.roots),
+                    context,
+                    clock: SystemClock::new(),
+                    backoff: ThreadWait,
+                    executor: SystemExecutor::new(4)?,
+                    home: resolved.home.clone(),
+                    cwd: execution.directory,
+                    assets: resolved.assets.clone(),
+                    host_launch: None,
+                    mcp_project: None,
+                    workers,
+                };
+                let mut owner = BoundGraphOwner {
+                    factory: &factory,
+                    integration_base: execution.integration_base,
+                    integration_branch: execution.document.integration_branch.clone(),
+                    budget,
+                    cancel: &cancel,
+                    prices: None,
+                    tick: true,
+                };
+                let config = &factory.context.config.graph;
+                advance_with_budget(
+                    &execution.document,
+                    &mut owner,
+                    &mut journal,
+                    &config.limits,
+                    &config.budget,
+                )?;
+                Ok(true)
+            })();
+            match result {
+                Ok(true) => {
+                    report.advanced += 1;
+                    if let Err(error) =
+                        FileJournal::set_advance_error(&resolved.roots.state, project, &id, None)
+                    {
+                        report.errors.push(format!("{project}/{id}: {error}"));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let reason = error.to_string();
+                    let _ = FileJournal::set_advance_error(
+                        &resolved.roots.state,
+                        project,
+                        &id,
+                        Some(&reason),
+                    );
+                    report.errors.push(format!("{project}/{id}: {reason}"));
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
+fn graph_wake_due(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    now: provenant_core::WallTime,
+) -> bool {
+    !checkpoint.cancelled && checkpoint.wake_at.is_some_and(|deadline| now >= deadline)
+}
 pub fn hosts(globals: &provenant_cli::Globals, workers: &'static dyn WorkerObserver) -> u8 {
     let result = (|| -> Result<Vec<HostHealth>, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
@@ -2933,6 +3061,7 @@ struct BoundGraphOwner<'a> {
     budget: WaitBudget,
     cancel: &'a CancelToken,
     prices: Option<Result<provenant_telemetry::PriceTable, String>>,
+    tick: bool,
 }
 
 /// The inbox request for a stored graph ask. The checkpoint keeps the rendered
@@ -3430,6 +3559,7 @@ fn advance_graphs_after_settlement(
                 budget,
                 cancel: &cancel,
                 prices: None,
+                tick: false,
             };
             let graph_config = &factory.context.config.graph;
             advance_with_budget(
@@ -4133,6 +4263,17 @@ impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
+    fn respect_ci_wake(&self) -> bool {
+        self.tick
+    }
+    fn ci_poll_backoff(&self, node_id: &str) -> provenant_fabric_runtime::graph::CiPollBackoff {
+        let config = &self.factory.context.config.graph;
+        config
+            .ci_poll_overrides
+            .get(node_id)
+            .copied()
+            .unwrap_or(config.ci_poll_backoff)
+    }
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
         let branch =
             self.integration_branch
@@ -4767,6 +4908,7 @@ impl Factory {
                 budget,
                 cancel,
                 prices: None,
+                tick: false,
             };
             let graph_config = &self.context.config.graph;
             let run = if resume {
@@ -4851,6 +4993,7 @@ impl Factory {
                 budget,
                 cancel,
                 prices: None,
+                tick: false,
             };
             if provenant_fabric_runtime::graph::close_resolved_asks(
                 &mut checkpoint,
@@ -6418,6 +6561,10 @@ mod peer_tests {
         include!("fabric/loop_repair_tests.rs");
     }
 
+    mod tick_tests {
+        include!("fabric/tick_tests.rs");
+    }
+
     struct SettlementFixture {
         rig: crate::worktree_tests::support::TestRig,
         roots: provenant_core::Roots,
@@ -7081,6 +7228,7 @@ mod peer_tests {
                 budget,
                 cancel: &cancel,
                 prices: None,
+                tick: false,
             };
             let run = graph::advance_with_budget(
                 &document,
@@ -7190,6 +7338,7 @@ mod peer_tests {
             budget,
             cancel: &cancel,
             prices: None,
+            tick: false,
         };
         let run = graph::advance_with_budget(
             &document,
