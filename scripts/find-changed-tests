@@ -3,8 +3,9 @@
 
 Default output is a nextest filterset expression, empty when no test changed:
   find-changed-tests --base <ref> [--head <ref>] [--format nextest-expr|list]
-A test counts as changed when a changed line falls inside its attributes or
-body. Bodies are delimited by indentation, so the source must be rustfmt-clean.
+Tests in a changed test file are selected when its helper code changes.
+Custom harness and shared integration helpers select their owning binaries.
+Bodies are delimited by indentation, so the source must be rustfmt-clean.
 """
 
 import argparse
@@ -79,16 +80,51 @@ def main():
 
     diff = git("diff", "-U0", f"{args.base}...{args.head}", "--", "*.rs")
     names = set()
+    binaries = set()
+    harness_files = {
+        "tools/front-door/src/worktree_tests.rs": "worktrees",
+        "tools/front-door/src/compose_tests.rs": "worktrees",
+        "tools/front-door/src/pr_land_tests.rs": "worktrees",
+        "tools/front-door/tests/worktree_driver.rs": "worktrees",
+        "tools/front-door/tests/dispatch_provider.rs": "dispatch_provider",
+        "tools/front-door/tests/pr.rs": "pr",
+        "tools/front-door/tests/fake_provider.rs": "fake_provider",
+        "tools/front-door/crates/supervisor/tests/process.rs": "process",
+        "tools/front-door/crates/supervisor/tests/custody.rs": "custody",
+        "tools/front-door/crates/supervisor/tests/publication.rs": "publication",
+    }
     for path, touched in changed_lines(diff).items():
+        if not touched:
+            continue
+        if path in harness_files:
+            binaries.add(harness_files[path])
+            continue
+        if path.startswith("tools/front-door/tests/support/"):
+            # Select the integration binaries that include this module, plus
+            # worktrees, which includes it by path from src/worktree_tests.rs.
+            consumers = git("grep", "-l", "mod support;", args.head, "--", "tools/front-door/tests/*.rs")
+            binaries.update(line.split(":", 1)[1].rsplit("/", 1)[-1][:-3]
+                            for line in consumers.splitlines())
+            binaries.add("worktrees")
+            continue
         source = git("show", f"{args.head}:{path}").splitlines()
-        names.update(n for n, a, b in test_spans(source) if any(a <= t <= b for t in touched))
+        spans = test_spans(source)
+        changed = {n for n, a, b in spans if any(a <= t <= b for t in touched)}
+        # A helper or fixture in the same file can affect every test in it.
+        if any(not any(a <= t <= b for _, a, b in spans) for t in touched):
+            changed.update(n for n, _, _ in spans)
+        names.update(changed)
 
     if args.format == "list":
         for n in sorted(names):
             print(n)
-    elif names:
+        for binary in sorted(binaries):
+            print(f"binary:{binary}")
+    elif names or binaries:
         # Nextest test names are module paths, so match the final segment.
-        print(" | ".join(f"test(/(^|::){n}$/)" for n in sorted(names)))
+        filters = [f"test(/(^|::){n}$/)" for n in sorted(names)]
+        filters.extend(f"binary(={binary})" for binary in sorted(binaries))
+        print(" | ".join(filters))
     return 0
 
 

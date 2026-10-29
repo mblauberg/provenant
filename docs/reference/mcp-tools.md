@@ -2,7 +2,7 @@
 
 # MCP tool reference
 
-Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/tool-schemas.json and tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json`.
+Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json`.
 
 ## `fabric_context`
 

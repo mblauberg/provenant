@@ -56,12 +56,12 @@ check() { # name expected-list
   fi
 }
 
-# No change, and a non-test change outside any test, select nothing.
+# No change selects nothing; a helper change selects tests in its file.
 git commit -q --allow-empty -m empty
 check "empty diff" ""
 sed -i.bak 's/^    1$/    2/' tests/a.rs && rm tests/a.rs.bak
 git commit -qam helper
-check "helper-only change" ""
+check "helper-only change" "deleted_line edited renamed_away untouched "
 
 # An edited body, a deleted line, a new test and a deleted file's test.
 sed -i.bak 's/assert_eq!(x, "{");/assert_eq!(x, "{{"[..1]);/' tests/a.rs && rm tests/a.rs.bak
@@ -75,12 +75,29 @@ fn added() {
 RS
 git rm -q tests/gone.rs
 git commit -qam tests
-check "changed tests" "added deleted_line edited "
+check "changed tests" "added deleted_line edited renamed_away untouched "
 
 # Matching is on the final path segment of the nextest name.
 expr=$("$script" --base "$base")
 case "$expr" in
-  'test(/(^|::)added$/) | test(/(^|::)deleted_line$/) | test(/(^|::)edited$/)') ;;
+  'test(/(^|::)added$/) | test(/(^|::)deleted_line$/) | test(/(^|::)edited$/) | test(/(^|::)renamed_away$/) | test(/(^|::)untouched$/)') ;;
   *) echo "find-changed-tests: unexpected expression: $expr" >&2; exit 1 ;;
+esac
+# Custom harnesses select the binary, including aliases and cross-file dispatch.
+mkdir -p tools/front-door/src tools/front-door/tests/support
+printf 'mod support;\n' > tools/front-door/tests/consumer.rs
+printf 'fn alias_target() {}\n' > tools/front-door/src/worktree_tests.rs
+git add tools/front-door/src/worktree_tests.rs tools/front-door/tests/consumer.rs
+git commit -qm harness
+case $("$script" --base "$base") in
+  *'binary(=worktrees)'*) ;;
+  *) echo 'custom harness binary was not selected' >&2; exit 1 ;;
+esac
+printf 'fn shared_helper() {}\n' > tools/front-door/tests/support/mod.rs
+git add tools/front-door/tests/support/mod.rs
+git commit -qm support
+case $("$script" --base "$base") in
+  *'binary(=consumer)'*'binary(=worktrees)'*) ;;
+  *) echo 'shared helper did not select its consumers' >&2; exit 1 ;;
 esac
 echo 'find-changed-tests tests passed'
