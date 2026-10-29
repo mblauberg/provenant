@@ -14,6 +14,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use thiserror::Error;
 
+mod asks;
 #[cfg(test)]
 #[path = "graph/ci_tests.rs"]
 mod ci_tests;
@@ -24,8 +25,12 @@ mod envelope;
 mod forward_compatibility;
 mod loops;
 mod plans;
+pub use asks::{
+    AnswerSource, AskAnswer, AskKind, AskOption, AskReply, AskScope, DecideSpec, NodeAsk,
+    close_resolved_asks, loop_ask,
+};
 pub use composites::CompositeSpec;
-pub use loops::{LoopAsk, LoopDecision, LoopRound, LoopScope, LoopSpec, close_resolved_loop_asks};
+pub use loops::{LoopDecision, LoopRound, LoopSpec};
 pub use plans::{Expansion, PlanSpec, RemainingBudgets};
 
 const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
@@ -49,8 +54,6 @@ const PAUSE_REASON_BYTES: usize = 4_096;
 const HOST_ID_BYTES: usize = 256;
 const MAX_UNKNOWN_USAGE: usize = 64;
 const MAX_USAGE_EVENTS: usize = 128;
-const MAX_EXTENSIONS: usize = 256;
-const EXTENSION_BYTES: usize = 256;
 
 /// Canonical encoding length, or `usize::MAX` when the value cannot be encoded.
 fn canonical_len<T: Serialize>(value: &T) -> usize {
@@ -68,6 +71,9 @@ pub struct GraphDocument {
     /// A graph may open one PR after all its nodes succeed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<provenant_records::run::DeliveryMode>,
+    /// Inbox session for pause asks and decide nodes without their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_session: Option<String>,
     pub schema_version: u64,
     pub graph_id: String,
     pub nodes: Vec<GraphNode>,
@@ -140,6 +146,8 @@ pub struct GraphNode {
     pub acceptance_checks: Vec<String>,
     #[serde(default, rename = "loop", skip_serializing_if = "Option::is_none")]
     pub loop_body: Option<LoopSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decide: Option<DecideSpec>,
     #[serde(skip)]
     round: Option<LoopRound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -187,6 +195,7 @@ impl GraphNode {
                 Some(GateCondition::Verdict { expected, .. }) => expected.len(),
                 _ => 0,
             })
+            .saturating_add(self.decide.as_ref().map_or(0, |spec| spec.question.len()))
     }
 }
 
@@ -198,7 +207,7 @@ impl GraphDocument {
     pub fn expanded(&self, limits: &crate::config::GraphLimits) -> Result<Self, String> {
         let expanded = loops::expand(self, &[], limits)?;
         if let Ok((plan, _)) = validate_flat_plan(&expanded, &plans::generous())
-            && let Some(reason) = envelope::reason(self, &[], &plan)
+            && let Some(reason) = envelope::reason(self, &[], &[], &plan)
         {
             return Err(reason);
         }
@@ -264,6 +273,7 @@ pub enum NodeKind {
     Synthesise,
     Gate,
     Loop,
+    Decide,
 }
 
 /// Immutable review subject or the commit a later writer must start from.
@@ -484,6 +494,18 @@ pub struct GraphCheckpoint {
     pub usage_events_omitted: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
+    /// Inbox decisions raised by loops, decide nodes and pauses, by ask ID.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asks: Vec<NodeAsk>,
+    /// Actor every ask is raised under, recorded before the first ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_actor: Option<String>,
+    /// Earliest deadline of an open ask, for a host tick to wake the graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_at: Option<provenant_core::WallTime>,
+    /// Pause asks raised so far, which numbers the next one.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub pause_asks: u64,
     /// Warnings about ignored document limit overrides.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limit_notes: Vec<String>,
@@ -516,16 +538,10 @@ pub struct NodeProgress {
     pub handoff: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expansion_pause: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub loop_asks: Vec<LoopAsk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub loop_inbox_error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<LoopRound>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub loop_decision_actor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -658,8 +674,15 @@ impl GraphCheckpoint {
 impl NodeProgress {
     /// Attempt-less evidence for final graph delivery.
     pub fn deterministic_summary(&self) -> Option<String> {
+        let decision = self
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.result.as_ref())
+            .filter(|_| self.attempts.is_empty() && self.children.is_empty());
         if self.state == NodeState::Skipped {
             Some(format!("Node {}: skipped\n\n", self.id))
+        } else if let Some(decision) = decision {
+            Some(format!("Node {}: {}\n\n", self.id, decision.excerpt))
         } else if self.attempts.is_empty() && self.outputs.is_some() && self.gate.is_none() {
             Some(format!(
                 "Node {}: {} {:?}\n\n",
@@ -801,14 +824,18 @@ pub trait AttemptOwner {
     /// The actor this owner submits as, recorded before the first submit.
     fn actor(&self) -> String;
 
-    fn loop_decision(
-        &mut self,
-        _scope: LoopScope<'_>,
-    ) -> Result<Option<LoopDecision>, Self::Error> {
+    /// Raise the ask if it is new, idempotently by its ask ID, and return its
+    /// answer once there is one. A host without an inbox never answers.
+    fn node_ask(&mut self, _scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         Ok(None)
     }
-    fn close_loop_ask(&mut self, _scope: LoopScope<'_>) -> Result<(), Self::Error> {
+    /// Withdraw a resolved ask's inbox request. Closing never creates one.
+    fn close_node_ask(&mut self, _scope: AskScope<'_>) -> Result<(), Self::Error> {
         Ok(())
+    }
+    /// Wall clock for ask deadlines. Without one, a deadline never fires.
+    fn wall_now(&self) -> Option<provenant_core::WallTime> {
+        None
     }
     fn deliver_graph(
         &mut self,
@@ -1068,12 +1095,11 @@ impl FileJournal {
                         && stored.execution.document.delivery
                             == Some(provenant_records::run::DeliveryMode::Pr)
                         && stored.checkpoint.successful())
-                || stored.checkpoint.nodes.iter().any(|n| {
-                    n.loop_asks.iter().any(|ask| {
-                        !ask.closed
-                            && (ask.resolved || stored.checkpoint.cancelled || n.state.settled())
-                    })
-                }))
+                || stored
+                    .checkpoint
+                    .asks
+                    .iter()
+                    .any(|ask| !ask.closed && (ask.resolved || stored.checkpoint.cancelled)))
             .then_some(stored.execution)
         }))
     }
@@ -1324,6 +1350,8 @@ struct PlannedGraph {
     integration_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delivery: Option<provenant_records::run::DeliveryMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_session: Option<String>,
     schema_version: u64,
     graph_id: String,
     nodes: Vec<PlannedNode>,
@@ -1355,6 +1383,8 @@ struct PlannedNode {
     acceptance_checks: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     loop_body: Option<LoopSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decide: Option<DecideSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     round: Option<LoopRound>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1486,20 +1516,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             checkpoint
         }
         None => {
-            if let Some(reason) = envelope::reason(document, &[], &plan) {
+            if let Some(reason) = envelope::reason(document, &[], &[], &plan) {
                 return Err(GraphError::Invalid(reason));
             }
+            let asks = may_ask(&plan);
             let checkpoint = GraphCheckpoint {
                 extra: Default::default(),
                 expansions: Vec::new(),
                 remaining: None,
-                instance_id: if plan.nodes.iter().any(|n| n.loop_body.is_some()) {
+                instance_id: if asks {
                     Some(provenant_core::hex(
                         &provenant_os::fs::entropy_128().map_err(GraphError::Instance)?,
                     ))
                 } else {
                     None
                 },
+                asks: Vec::new(),
+                ask_actor: asks.then(|| owner.actor()),
+                wake_at: None,
+                pause_asks: 0,
                 delivery_required: document.delivery
                     == Some(provenant_records::run::DeliveryMode::Pr),
                 delivered: false,
@@ -1526,11 +1561,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         fragment: None,
                         handoff: None,
                         expansion_pause: None,
-                        loop_asks: Vec::new(),
                         loop_pause: None,
-                        loop_inbox_error: None,
                         round: node.round.clone(),
-                        loop_decision_actor: node.loop_body.as_ref().map(|_| owner.actor()),
                         gate: None,
                         ci: None,
                         id: node.id.clone(),
@@ -1548,26 +1580,26 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         }
     };
 
-    if plan.nodes.iter().any(|n| n.loop_body.is_some()) && checkpoint.instance_id.is_none() {
-        checkpoint.instance_id = Some(provenant_core::hex(
-            &provenant_os::fs::entropy_128().map_err(GraphError::Instance)?,
-        ));
+    if may_ask(&plan) && (checkpoint.instance_id.is_none() || checkpoint.ask_actor.is_none()) {
+        asks::identity::<R, J::Error>(&mut checkpoint, owner)?;
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
-    let added = extensions
+    // Extensions have no count or length limit of their own; they only have
+    // to fit in the checkpoint envelope with everything else.
+    if extensions
         .iter()
-        .filter(|e| !checkpoint.extensions.contains(e))
-        .collect::<std::collections::BTreeSet<_>>();
-    if let Some(extension) = added.iter().find(|e| encoded_len(e) > EXTENSION_BYTES) {
-        return Err(GraphError::Extension(format!(
-            "{}: longer than {EXTENSION_BYTES} bytes",
-            bounded(extension, 64)
-        )));
-    }
-    if checkpoint.extensions.len() + added.len() > MAX_EXTENSIONS {
-        return Err(GraphError::Extension(format!(
-            "a graph keeps at most {MAX_EXTENSIONS} extensions"
-        )));
+        .any(|e| !checkpoint.extensions.contains(e))
+    {
+        let mut all = checkpoint.extensions.clone();
+        all.extend(
+            extensions
+                .iter()
+                .filter(|e| !checkpoint.extensions.contains(e))
+                .cloned(),
+        );
+        if let Some(reason) = envelope::reason(document, &checkpoint.expansions, &all, &plan) {
+            return Err(GraphError::Extension(reason));
+        }
     }
     let mut effective_budget = budget.clone();
     for (extension, replay) in
@@ -1634,8 +1666,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
             let (preview_plan, _) = validate_flat_plan(&preview, &unbounded)
                 .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
-            if let Some(reason) = structural_limit_reason(&preview, &preview_plan, limits)
-                .or_else(|| envelope::reason(document, &checkpoint.expansions, &preview_plan))
+            if let Some(reason) =
+                structural_limit_reason(&preview, &preview_plan, limits).or_else(|| {
+                    envelope::reason(
+                        document,
+                        &checkpoint.expansions,
+                        &prospective.extensions,
+                        &preview_plan,
+                    )
+                })
             {
                 for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
                     let name = extension
@@ -1680,7 +1719,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .ok_or(GraphError::Invalid(String::from("loop extension")))?;
                 if let Some(node) = checkpoint.nodes.iter_mut().find(|n| n.id == name) {
                     node.loop_pause = None;
-                    node.loop_inbox_error = None;
                 }
             }
             loops::reconcile(&mut checkpoint, &extended);
@@ -1729,7 +1767,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
 
-        close_resolved_loop_asks(&mut checkpoint, owner, journal)?;
+        close_resolved_asks(&mut checkpoint, owner, journal)?;
         if checkpoint.cancelled {
             if !resume {
                 return Ok(GraphRun {
@@ -1787,8 +1825,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     if let Err(reason) =
                         loops::prepare_decision_extension(document, &checkpoint, &extension, limits)
                     {
-                        for ask in &mut checkpoint.nodes[node_index].loop_asks {
-                            ask.resolved = true;
+                        for ask in &mut checkpoint.asks {
+                            if ask.node.as_deref() == Some(node.id.as_str()) {
+                                ask.resolved = true;
+                                if let Some(answer) = ask.answer.as_mut() {
+                                    answer.rejected.get_or_insert_with(|| {
+                                        bounded(&reason, MAX_ADVANCE_ERROR_BYTES)
+                                    });
+                                }
+                            }
                         }
                         loops::pause_invalid_decision(&mut checkpoint, &node.id, &reason, journal)?;
                     } else {
@@ -1811,6 +1856,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     checkpoint.nodes[node_index].state = state;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
+                continue;
+            }
+            if let Some(spec) = &node.decide {
+                asks::decide(
+                    node_index,
+                    node,
+                    spec,
+                    &plan,
+                    &mut checkpoint,
+                    owner,
+                    journal,
+                )?;
                 continue;
             }
             if let Some(condition) = &node.condition {
@@ -2302,7 +2359,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
         }
 
-        close_resolved_loop_asks(&mut checkpoint, owner, journal)?;
+        close_resolved_asks(&mut checkpoint, owner, journal)?;
         loops::refresh_pause(&mut checkpoint);
         let all_settled = checkpoint.nodes.iter().all(|node| node.state.settled());
         if all_settled
@@ -2310,6 +2367,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             && checkpoint.pause_reason.take().is_some()
         {
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
+        }
+        if asks::pause(
+            document,
+            &plan,
+            &mut checkpoint,
+            owner,
+            journal,
+            &effective_budget,
+        )? {
+            return advance_inner(document, owner, journal, limits, budget, false, &[]);
         }
         if document.delivery == Some(provenant_records::run::DeliveryMode::Pr)
             && !checkpoint.delivered
@@ -2339,6 +2406,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             advance_error,
         });
     }
+}
+
+/// Whether this plan can raise an inbox ask, which needs a durable identity.
+fn may_ask(plan: &PlannedGraph) -> bool {
+    plan.decision_session.is_some()
+        || plan
+            .nodes
+            .iter()
+            .any(|n| n.loop_body.is_some() || n.decide.is_some())
 }
 
 /// A failure target must declare its gate as a dependency. Other dependants
@@ -2865,6 +2941,13 @@ fn validate_flat_plan(
     if !valid_identifier(&document.graph_id) {
         return Err("graph id");
     }
+    if document
+        .decision_session
+        .as_ref()
+        .is_some_and(|session| crate::inbox::session_id(session).is_err())
+    {
+        return Err("invalid decision_session");
+    }
     if document.nodes.is_empty() || document.nodes.len() > limits.nodes {
         return Err("node count");
     }
@@ -2889,6 +2972,11 @@ fn validate_flat_plan(
         if is_loop != node.loop_body.is_some() {
             return Err("loop requires a body");
         }
+        let is_decide = node.kind == Some(NodeKind::Decide);
+        if is_decide != node.decide.is_some() {
+            return Err("decide requires a question and options");
+        }
+        asks::validate_decide(node, document.decision_session.as_deref())?;
         let is_gate = node.kind == Some(NodeKind::Gate);
         if is_gate != node.condition.is_some()
             || !is_gate && node.on_fail.is_some()
@@ -3008,7 +3096,7 @@ fn validate_flat_plan(
             }
             _ => {}
         }
-        if (is_gate || is_loop || is_composite)
+        if (is_gate || is_loop || is_composite || is_decide)
             && (node.source.is_some() || !node.read_roots.is_empty())
         {
             return Err("execution bindings require an agent node");
@@ -3022,7 +3110,7 @@ fn validate_flat_plan(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err("graph PR is exclusive with node PRs");
         }
-        if !is_gate && !is_loop && !is_composite && node.prompt.is_empty()
+        if !is_gate && !is_loop && !is_composite && !is_decide && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
             return Err("prompt size");
@@ -3041,7 +3129,7 @@ fn validate_flat_plan(
         }
 
         let routes = match (&node.route, &node.routes) {
-            (None, None) if is_gate || is_loop || is_composite => Vec::new(),
+            (None, None) if is_gate || is_loop || is_composite || is_decide => Vec::new(),
             (Some(route), None) => vec![route.clone()],
             (None, Some(routes)) if !routes.is_empty() => routes.clone(),
             (Some(_), Some(_)) => return Err("route and routes are exclusive"),
@@ -3120,6 +3208,7 @@ fn validate_flat_plan(
             write_scope: node.write_scope.clone(),
             acceptance_checks: node.acceptance_checks.clone(),
             loop_body: node.loop_body.clone(),
+            decide: node.decide.clone(),
             round: node.round.clone(),
             kind: match node.kind {
                 Some(
@@ -3127,7 +3216,8 @@ fn validate_flat_plan(
                     | NodeKind::Synthesise
                     | NodeKind::Gate
                     | NodeKind::Loop
-                    | NodeKind::Composite,
+                    | NodeKind::Composite
+                    | NodeKind::Decide,
                 ) => node.kind,
                 _ => None,
             },
@@ -3226,6 +3316,7 @@ fn validate_flat_plan(
             extra: document.extra.clone(),
             integration_branch: document.integration_branch.clone(),
             delivery: document.delivery.clone(),
+            decision_session: document.decision_session.clone(),
             schema_version: 1,
             graph_id: document.graph_id.clone(),
             nodes: topological_nodes,
@@ -3489,9 +3580,15 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
     if checkpoint.plan_digest != digest {
         return Err(GraphError::PlanChanged);
     }
-    if checkpoint.nodes.len() != plan.nodes.len() {
+    if checkpoint.nodes.len() != plan.nodes.len()
+        || plan
+            .decision_session
+            .as_ref()
+            .is_some_and(|session| crate::inbox::session_id(session).is_err())
+    {
         return Err(GraphError::BadCheckpoint);
     }
+    asks::validate(checkpoint, plan).map_err(|_| GraphError::BadCheckpoint)?;
     let positions = plan
         .nodes
         .iter()
@@ -3568,6 +3665,11 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         }
         if node.composite.is_some() {
             composites::validate_progress(progress, node, plan, checkpoint, &positions)
+                .map_err(|_| GraphError::BadCheckpoint)?;
+            continue;
+        }
+        if node.decide.is_some() {
+            asks::validate_progress(progress, node, checkpoint)
                 .map_err(|_| GraphError::BadCheckpoint)?;
             continue;
         }
@@ -3712,6 +3814,20 @@ mod tests {
         source_commits: Vec<Option<String>>,
         read_roots: Vec<Vec<String>>,
         distinct_from: Vec<Vec<String>>,
+        answers: std::collections::BTreeMap<String, AskReply>,
+        now: Option<provenant_core::WallTime>,
+        asked: Vec<String>,
+        closed_asks: Vec<String>,
+    }
+
+    /// An inbox reply from `chair`, choosing `option` or sending `text`.
+    fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
+        AskReply {
+            option: option.map(str::to_owned),
+            text: text.map(str::to_owned),
+            actor: "chair".into(),
+            at: None,
+        }
     }
 
     impl AttemptOwner for FakeOwner {
@@ -3719,6 +3835,17 @@ mod tests {
 
         fn actor(&self) -> String {
             self.actor.clone()
+        }
+        fn node_ask(&mut self, scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
+            self.asked.push(scope.ask.ask_id.clone());
+            Ok(self.answers.get(&scope.ask.ask_id).cloned())
+        }
+        fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), Self::Error> {
+            self.closed_asks.push(scope.ask.ask_id.clone());
+            Ok(())
+        }
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            self.now
         }
         fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
             Ok(self.integration_heads.pop_front())
@@ -3806,6 +3933,7 @@ mod tests {
             plan: None,
             write_scope: Vec::new(),
             acceptance_checks: Vec::new(),
+            decide: None,
             loop_body: None,
             round: None,
             kind: None,
@@ -3828,6 +3956,7 @@ mod tests {
     fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         GraphDocument {
             extra: Default::default(),
+            decision_session: None,
             integration_branch: None,
             delivery: None,
             limits: None,
@@ -5664,6 +5793,7 @@ mod tests {
             plan: None,
             write_scope: Vec::new(),
             acceptance_checks: Vec::new(),
+            decide: None,
             loop_body: None,
             round: None,
             kind: None,
@@ -5849,6 +5979,7 @@ mod tests {
                 plan: None,
                 write_scope: Vec::new(),
                 acceptance_checks: Vec::new(),
+                decide: None,
                 loop_body: None,
                 round: None,
                 kind: None,
@@ -6107,6 +6238,7 @@ mod tests {
             plan: None,
             write_scope: Vec::new(),
             acceptance_checks: Vec::new(),
+            decide: None,
             loop_body: None,
             round: None,
             kind: None,
@@ -6977,6 +7109,9 @@ mod tests {
     }
     mod envelope_tests {
         include!("graph/envelope_tests.rs");
+    }
+    mod ask_tests {
+        include!("graph/ask_tests.rs");
     }
 }
 

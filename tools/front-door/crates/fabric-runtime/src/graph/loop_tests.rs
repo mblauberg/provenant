@@ -28,6 +28,18 @@ fn fixture(name: &str) -> GraphDocument {
     serde_json::from_str(text).unwrap()
 }
 
+/// The inbox reply that carries a loop decision.
+fn loop_reply(decision: &LoopDecision) -> AskReply {
+    match decision {
+        LoopDecision::Stop => reply(Some("stop"), None),
+        LoopDecision::Accept => reply(Some("accept"), None),
+        LoopDecision::Extend { rounds } => reply(
+            None,
+            Some(&format!(r#"{{"decision":"extend","rounds":{rounds}}}"#)),
+        ),
+    }
+}
+
 fn reviews(results: &[&str]) -> FakeOwner {
     FakeOwner {
         actor: "chair".into(),
@@ -156,16 +168,7 @@ fn loop_fixture_exhausts_and_pauses_without_delivery() {
     );
     assert!(!run.checkpoint.successful());
     assert_eq!(owner.deliveries, 0);
-    assert_eq!(
-        run.checkpoint
-            .nodes
-            .iter()
-            .find(|n| n.id == "revise")
-            .unwrap()
-            .loop_decision_actor
-            .as_deref(),
-        Some("chair")
-    );
+    assert_eq!(run.checkpoint.ask_actor.as_deref(), Some("chair"));
     assert_eq!(
         advance(&document, &mut reviews(&[]), &mut journal)
             .unwrap()
@@ -524,13 +527,13 @@ fn loop_inbox_extension_keeps_original_actor_and_applies_once() {
         fn actor(&self) -> String {
             self.inner.actor()
         }
-        fn loop_decision(
-            &mut self,
-            scope: LoopScope<'_>,
-        ) -> Result<Option<LoopDecision>, NoObservation> {
-            self.targets
-                .push((scope.rounds, scope.session.into(), scope.actor.into()));
-            Ok(self.decision.take())
+        fn node_ask(&mut self, scope: AskScope<'_>) -> Result<Option<AskReply>, NoObservation> {
+            self.targets.push((
+                scope.ask.rounds.unwrap(),
+                scope.ask.session.clone(),
+                scope.actor.into(),
+            ));
+            Ok(self.decision.take().as_ref().map(loop_reply))
         }
         fn observe_or_start(
             &mut self,
@@ -679,17 +682,14 @@ fn loop_outside_dependencies_do_not_multiply_fan_out() {
 fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
     struct Owner {
         inner: FakeOwner,
-        answer: LoopDecision,
+        answer: AskReply,
     }
     impl AttemptOwner for Owner {
         type Error = NoObservation;
         fn actor(&self) -> String {
             self.inner.actor()
         }
-        fn loop_decision(
-            &mut self,
-            _: LoopScope<'_>,
-        ) -> Result<Option<LoopDecision>, NoObservation> {
+        fn node_ask(&mut self, _: AskScope<'_>) -> Result<Option<AskReply>, NoObservation> {
             Ok(Some(self.answer.clone()))
         }
         fn observe_or_start(
@@ -706,12 +706,10 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
         }
     }
     for answer in [
-        LoopDecision::Invalid {
-            reason: "invalid JSON reply".into(),
-        },
-        LoopDecision::Extend { rounds: 6 },
-        LoopDecision::Extend { rounds: 2000 },
-        LoopDecision::Extend { rounds: usize::MAX },
+        reply(None, Some("extend by two")),
+        loop_reply(&LoopDecision::Extend { rounds: 6 }),
+        loop_reply(&LoopDecision::Extend { rounds: 2000 }),
+        loop_reply(&LoopDecision::Extend { rounds: usize::MAX }),
     ] {
         let mut document = fixture("extend");
         document.nodes[0]
@@ -926,14 +924,17 @@ impl AttemptOwner for DecisionOwner {
     fn actor(&self) -> String {
         self.inner.actor()
     }
-    fn loop_decision(&mut self, _: LoopScope<'_>) -> Result<Option<LoopDecision>, Self::Error> {
+    fn node_ask(&mut self, _: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         match &self.response {
-            Ok(decision) => Ok(decision.clone()),
+            Ok(decision) => Ok(decision.as_ref().map(loop_reply)),
             Err(_) => Err(NoObservation),
         }
     }
-    fn close_loop_ask(&mut self, scope: LoopScope<'_>) -> Result<(), Self::Error> {
-        self.closed.push((scope.node_id.into(), scope.rounds));
+    fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), Self::Error> {
+        self.closed.push((
+            scope.ask.node.clone().unwrap_or_default(),
+            scope.ask.rounds.unwrap_or_default(),
+        ));
         Ok(())
     }
     fn observe_or_start(
@@ -1423,17 +1424,14 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
         fn actor(&self) -> String {
             self.inner.actor()
         }
-        fn loop_decision(
-            &mut self,
-            scope: LoopScope<'_>,
-        ) -> Result<Option<LoopDecision>, Self::Error> {
-            self.inner.loop_decision(scope)
+        fn node_ask(&mut self, scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
+            self.inner.node_ask(scope)
         }
-        fn close_loop_ask(&mut self, scope: LoopScope<'_>) -> Result<(), Self::Error> {
+        fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), Self::Error> {
             if self.fail {
                 Err(NoObservation)
             } else {
-                self.inner.close_loop_ask(scope)
+                self.inner.close_node_ask(scope)
             }
         }
         fn observe_or_start(
@@ -1518,12 +1516,9 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
         assert_eq!(run.status, GraphStatus::Cancelled);
         assert!(
             run.checkpoint
-                .nodes
+                .asks
                 .iter()
-                .find(|n| n.id == "revise")
-                .unwrap()
-                .loop_inbox_error
-                .is_some()
+                .any(|ask| ask.inbox_error.is_some())
         );
     }
     assert!(
@@ -1599,9 +1594,9 @@ fn loop_inbox_recovery_clears_stale_unavailable_pause_durably() {
     assert!(
         recovered
             .checkpoint
-            .nodes
+            .asks
             .iter()
-            .all(|n| n.loop_inbox_error.is_none())
+            .all(|ask| ask.inbox_error.is_none())
     );
     assert_eq!(journal.0.as_ref().unwrap(), &recovered.checkpoint);
 }
@@ -1671,17 +1666,14 @@ fn loop_close_success_does_not_hide_another_pending_close_failure() {
         fn actor(&self) -> String {
             self.inner.actor()
         }
-        fn loop_decision(
-            &mut self,
-            scope: LoopScope<'_>,
-        ) -> Result<Option<LoopDecision>, Self::Error> {
-            self.inner.loop_decision(scope)
+        fn node_ask(&mut self, scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
+            self.inner.node_ask(scope)
         }
-        fn close_loop_ask(&mut self, scope: LoopScope<'_>) -> Result<(), Self::Error> {
-            if scope.rounds == 1 && self.fail_first {
+        fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), Self::Error> {
+            if scope.ask.rounds == Some(1) && self.fail_first {
                 Err(NoObservation)
             } else {
-                self.inner.close_loop_ask(scope)
+                self.inner.close_node_ask(scope)
             }
         }
         fn observe_or_start(
@@ -1722,31 +1714,18 @@ fn loop_close_success_does_not_hide_another_pending_close_failure() {
     )
     .unwrap()
     .checkpoint;
-    let wrapper = checkpoint
-        .nodes
-        .iter_mut()
-        .find(|n| n.id == "revise")
-        .unwrap();
-    wrapper.loop_asks.insert(
-        0,
-        LoopAsk {extra: Default::default(),
-            rounds: 1,
-            session: "chair-session".into(),
-            resolved: true,
-            closed: false,
-        },
-    );
+    let mut first = asks::loop_ask(&checkpoint.graph_id, "revise", 1, "chair-session");
+    first.resolved = true;
+    checkpoint.asks.insert(0, first);
     checkpoint.cancelled = true;
-    close_resolved_loop_asks(&mut checkpoint, &mut owner, &mut journal).unwrap();
-    let wrapper = checkpoint.nodes.iter().find(|n| n.id == "revise").unwrap();
-    assert!(!wrapper.loop_asks[0].closed);
-    assert!(wrapper.loop_asks[1].closed);
-    assert!(wrapper.loop_inbox_error.is_some());
+    close_resolved_asks(&mut checkpoint, &mut owner, &mut journal).unwrap();
+    assert!(!checkpoint.asks[0].closed);
+    assert!(checkpoint.asks[0].inbox_error.is_some());
+    assert!(checkpoint.asks[1].closed);
     owner.fail_first = false;
-    close_resolved_loop_asks(&mut checkpoint, &mut owner, &mut journal).unwrap();
-    let wrapper = checkpoint.nodes.iter().find(|n| n.id == "revise").unwrap();
-    assert!(wrapper.loop_asks.iter().all(|ask| ask.closed));
-    assert!(wrapper.loop_inbox_error.is_none());
+    close_resolved_asks(&mut checkpoint, &mut owner, &mut journal).unwrap();
+    assert!(checkpoint.asks.iter().all(|ask| ask.closed));
+    assert!(checkpoint.asks.iter().all(|ask| ask.inbox_error.is_none()));
 }
 
 #[test]
@@ -1773,22 +1752,10 @@ fn loop_decision_recovery_resets_pause_even_after_prior_ask_cleanup() {
     )
     .unwrap()
     .checkpoint;
-    checkpoint
-        .nodes
-        .iter_mut()
-        .find(|n| n.id == "revise")
-        .unwrap()
-        .loop_asks
-        .insert(
-            0,
-            LoopAsk {extra: Default::default(),
-                rounds: 1,
-                session: "chair-session".into(),
-                resolved: true,
-                closed: false,
-            },
-        );
-    close_resolved_loop_asks(&mut checkpoint, &mut owner, &mut journal).unwrap();
+    let mut first = asks::loop_ask(&checkpoint.graph_id, "revise", 1, "chair-session");
+    first.resolved = true;
+    checkpoint.asks.insert(0, first);
+    close_resolved_asks(&mut checkpoint, &mut owner, &mut journal).unwrap();
     owner.response = Ok(None);
     let run = advance_with_budget(
         &document,
@@ -1799,4 +1766,22 @@ fn loop_decision_recovery_resets_pause_even_after_prior_ask_cleanup() {
     )
     .unwrap();
     assert!(!run.checkpoint.pause_reason.unwrap().contains("unavailable"));
+}
+
+#[test]
+fn loop_reply_rejects_zero_unknown_fields_and_unstructured_text() {
+    for text in [
+        "{\"decision\":\"extend\",\"rounds\":0}",
+        "{\"decision\":\"extend\",\"rounds\":-1}",
+        "{\"decision\":\"extend\",\"rounds\":2,\"other\":true}",
+        "{\"decision\":\"accept\",\"rounds\":2}",
+        "extend by two",
+    ] {
+        assert!(LoopDecision::parse(None, Some(text)).is_err(), "accepted {text}");
+    }
+    assert!(LoopDecision::parse(Some("stop"), Some("{}")).is_err());
+    assert_eq!(
+        LoopDecision::parse(None, Some("{\"decision\":\"extend\",\"rounds\":2}")),
+        Ok(LoopDecision::Extend { rounds: 2 })
+    );
 }

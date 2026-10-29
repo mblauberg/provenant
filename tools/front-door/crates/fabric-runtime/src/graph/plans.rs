@@ -46,7 +46,7 @@ pub(super) fn prompt(node: &GraphNode) -> String {
     let mut prompt = node.prompt.clone();
     if let Some(spec) = &node.plan {
         let kinds = serde_json::to_string(&spec.kinds).unwrap_or_default();
-        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, write_scope (relative literal files/directories), `acceptance_checks` and local depends_on. Route defaults to {{\"alias\":\"senior\"}}. Writers require the `worktree` key naming an existing registered worktree. Synthesise nodes require `inputs` selecting dependency outputs. Gate nodes use the graph gate condition schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", spec.max_nodes));
+        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, write_scope (relative literal files/directories), `acceptance_checks` and local depends_on. Route defaults to {{\"alias\":\"senior\"}}. Writers require the `worktree` key naming an existing registered worktree. Synthesise nodes require `inputs` selecting dependency outputs. Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", spec.max_nodes));
     }
     prompt
 }
@@ -292,9 +292,9 @@ fn fragment(
                 child.kind.unwrap_or(NodeKind::Task)
             ));
         }
-        // Gate evidence lives in its condition. Agent nodes carry explicit
-        // scope and acceptance prose in their submitted brief.
-        if child.kind != Some(NodeKind::Gate) {
+        // Gate evidence lives in its condition and a decision in its question.
+        // Agent nodes carry explicit scope and acceptance prose in their brief.
+        if !matches!(child.kind, Some(NodeKind::Gate | NodeKind::Decide)) {
             if child.prompt.trim().is_empty()
                 || child.write_scope.is_empty()
                 || child.acceptance_checks.is_empty()
@@ -343,6 +343,7 @@ fn fragment(
         nodes: fragment.nodes,
         limits: None,
         delivery: None,
+        decision_session: document.decision_session.clone(),
         integration_branch: document.integration_branch.clone(),
     };
     let (plan, _) = validate_flat_plan(&local, &generous()).map_err(str::to_owned)?;
@@ -647,7 +648,7 @@ pub(super) fn settle(
         }
         let mut expansions = checkpoint.expansions.clone();
         expansions.push(addition.clone());
-        if let Some(reason) = envelope::reason(source, &expansions, &plan) {
+        if let Some(reason) = envelope::reason(source, &expansions, &checkpoint.extensions, &plan) {
             return Err(reason);
         }
         Ok((addition, plan, positions, preview))

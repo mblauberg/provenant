@@ -1,7 +1,7 @@
 //! Worst-case checkpoint size for a plan.
 //!
-//! A checkpoint holds the submitted document, its admitted expansions and one
-//! progress row per expanded node. Every runtime string a row can gain is cut
+//! A checkpoint holds the submitted document, its admitted expansions and
+//! extensions, its asks and one progress row per expanded node. Every runtime string a row can gain is cut
 //! to a fixed canonical-byte share when it is stored, and every list it can
 //! grow is either bounded by the plan or capped with an omitted count. The sum
 //! below is therefore an upper bound for every checkpoint the plan can
@@ -21,19 +21,49 @@ const UNKNOWN_USAGE_TEXT_BYTES: usize = 64;
 pub(super) fn reason(
     document: &GraphDocument,
     expansions: &[Expansion],
+    extensions: &[String],
     plan: &PlannedGraph,
 ) -> Option<String> {
-    let bound = checkpoint_bound(document, expansions, plan);
+    let bound = checkpoint_bound(document, expansions, extensions, plan);
     (bound > MAX_CHECKPOINT_BYTES as usize).then(|| {
         format!(
-            "graph checkpoint could reach {bound} bytes, over its {MAX_CHECKPOINT_BYTES}-byte limit; use fewer nodes, routes or loop rounds, or smaller prompts"
+            "graph checkpoint could reach {bound} bytes, over its {MAX_CHECKPOINT_BYTES}-byte limit; use fewer nodes, routes, loop rounds or extensions, or smaller prompts"
         )
     })
+}
+
+pub(super) fn latest() -> provenant_core::WallTime {
+    provenant_core::WallTime::parse("9999-12-30T22:00:00.999999Z")
+        .or_else(|_| provenant_core::WallTime::from_micros(0))
+        .unwrap_or_else(|_| unreachable!("the epoch is a valid wall time"))
+}
+
+/// Worst-case ask: its rendered text, deadline, answer and inbox error.
+fn ask_bound(mut ask: NodeAsk, variable: usize) -> usize {
+    ask.wake_at = Some(latest());
+    ask.answer = Some(AskAnswer {
+        extra: Default::default(),
+        source: AnswerSource::Answered,
+        option: Some(String::new()),
+        text: Some(String::new()),
+        actor: Some(String::new()),
+        at: Some(latest()),
+        rejected: Some(String::new()),
+    });
+    ask.inbox_error = Some(String::new());
+    canonical_len(&ask)
+        + variable
+        + asks::OPTION_BYTES
+        + asks::ANSWER_BYTES
+        + HOST_ID_BYTES
+        + 2 * MAX_ADVANCE_ERROR_BYTES
+        + 1
 }
 
 pub(super) fn checkpoint_bound(
     document: &GraphDocument,
     expansions: &[Expansion],
+    extensions: &[String],
     plan: &PlannedGraph,
 ) -> usize {
     let skeleton = GraphCheckpoint {
@@ -46,6 +76,10 @@ pub(super) fn checkpoint_bound(
             continuations: usize::MAX,
         }),
         instance_id: Some(String::new()),
+        asks: Vec::new(),
+        ask_actor: Some(String::new()),
+        wake_at: Some(latest()),
+        pause_asks: u64::MAX,
         delivery_required: true,
         delivered: true,
         pull_request: Some(String::new()),
@@ -56,7 +90,7 @@ pub(super) fn checkpoint_bound(
         unknown_usage_omitted: usize::MAX,
         usage_events: Vec::new(),
         usage_events_omitted: u64::MAX,
-        extensions: Vec::new(),
+        extensions: extensions.to_vec(),
         limit_notes: document_limit_notes(document),
         schema_version: 1,
         graph_id: plan.graph_id.clone(),
@@ -81,11 +115,18 @@ pub(super) fn checkpoint_bound(
         DIRECTORY_BYTES,
         canonical_len(document),
         canonical_len(&skeleton),
-        // instance ID, PR URL, integration pin, pause reason and plan digest
-        64 + OUTPUT_FIELD_BYTES + 64 + PAUSE_REASON_BYTES + 80,
+        // instance ID, ask actor, PR URL, integration pin, pause reason and plan digest
+        64 + HOST_ID_BYTES + OUTPUT_FIELD_BYTES + 64 + PAUSE_REASON_BYTES + 80,
         MAX_UNKNOWN_USAGE * (UNKNOWN_USAGE_TEXT_BYTES + longest_id + 1),
         MAX_USAGE_EVENTS * (canonical_len(&event) + 64 + NOTE_BYTES + 1),
-        MAX_EXTENSIONS * (EXTENSION_BYTES + 3),
+        // Pause asks: the kept history, one open and one awaiting its close.
+        plan.decision_session.as_deref().map_or(0, |session| {
+            (asks::MAX_PAUSE_ASKS + 2)
+                * ask_bound(
+                    asks::pause_ask(&plan.graph_id, u64::MAX, session, "", Some("")),
+                    PAUSE_REASON_BYTES + MAX_ADVANCE_ERROR_BYTES,
+                )
+        }),
     ];
     let mut loop_rounds = std::collections::BTreeMap::<&str, usize>::new();
     for node in &plan.nodes {
@@ -128,11 +169,8 @@ fn node_bound(
         fragment: (node.plan.is_some() && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
         expansion_pause: expands.then(String::new),
-        loop_asks: Vec::new(),
         loop_pause: node.loop_body.as_ref().map(|_| String::new()),
-        loop_inbox_error: node.loop_body.as_ref().map(|_| String::new()),
         round: node.round.clone(),
-        loop_decision_actor: node.loop_body.as_ref().map(|_| String::new()),
         gate: gate.then(|| GateResult {
             extra: Default::default(),
             passed: false,
@@ -192,19 +230,17 @@ fn node_bound(
         bytes += plans::STORED_NOTE_BYTES;
     }
     if let Some(spec) = &node.loop_body {
-        let ask = LoopAsk {
-            extra: Default::default(),
-            rounds: usize::MAX,
-            session: spec.decision_session.clone().unwrap_or_default(),
-            resolved: true,
-            closed: true,
-        };
-        bytes += MAX_ADVANCE_ERROR_BYTES
-            + LOOP_PAUSE_TEXT_BYTES
-            + 3 * node.id.len()
-            + MAX_ADVANCE_ERROR_BYTES
-            + HOST_ID_BYTES
-            + loop_rounds * (canonical_len(&ask) + 1);
+        bytes += MAX_ADVANCE_ERROR_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
+        if let Some(session) = &spec.decision_session {
+            let ask = asks::loop_ask(&plan.graph_id, &node.id, usize::MAX, session);
+            bytes += loop_rounds * ask_bound(ask, 0);
+        }
+    }
+    if let Some(spec) = &node.decide {
+        // One ask per decide node: a withdrawn ask is replaced, not kept.
+        let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap_or("");
+        let ask = asks::decide_ask(&plan.graph_id, node, spec, session, usize::MAX, None);
+        bytes += ask_bound(ask, 0);
     }
     if gate {
         bytes += OUTPUT_FIELD_BYTES; // gate reason

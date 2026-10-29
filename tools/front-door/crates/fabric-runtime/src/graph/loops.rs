@@ -25,26 +25,6 @@ fn is_default_extension_rounds(value: &usize) -> bool {
     *value == 5
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct LoopScope<'a> {
-    pub graph_id: &'a str,
-    pub instance_id: &'a str,
-    pub node_id: &'a str,
-    pub rounds: usize,
-    pub session: &'a str,
-    pub actor: &'a str,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoopAsk {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub rounds: usize,
-    pub session: String,
-    pub resolved: bool,
-    pub closed: bool,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopRound {
     #[serde(flatten)]
@@ -61,7 +41,32 @@ pub enum LoopDecision {
     Stop,
     Extend { rounds: usize },
     Accept,
-    Invalid { reason: String },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+enum LoopReply {
+    Stop {},
+    Extend { rounds: usize },
+    Accept {},
+}
+
+impl LoopDecision {
+    /// Read a loop ask's answer: an option, or a JSON reply to extend by K rounds.
+    pub fn parse(option: Option<&str>, text: Option<&str>) -> Result<Self, String> {
+        match (option, text) {
+            (Some("stop"), None) => Ok(Self::Stop),
+            (Some("extend"), None) => Ok(Self::Extend { rounds: 1 }),
+            (Some("accept"), None) => Ok(Self::Accept),
+            (None, Some(text)) => match serde_json::from_str(text) {
+                Ok(LoopReply::Stop {}) => Ok(Self::Stop),
+                Ok(LoopReply::Extend { rounds }) if rounds > 0 => Ok(Self::Extend { rounds }),
+                Ok(LoopReply::Accept {}) => Ok(Self::Accept),
+                _ => Err(asks::LOOP_ANSWER_HELP.into()),
+            },
+            _ => Err(asks::LOOP_ANSWER_HELP.into()),
+        }
+    }
 }
 
 fn id(owner: &str, round: usize, node: &str) -> String {
@@ -466,11 +471,8 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 fragment: None,
                 handoff: None,
                 expansion_pause: None,
-                loop_asks: Vec::new(),
                 loop_pause: None,
-                loop_inbox_error: None,
                 round: n.round.clone(),
-                loop_decision_actor: None,
                 gate: None,
                 ci: None,
                 title: Some(n.title.as_deref().unwrap_or(&n.id).into()),
@@ -491,7 +493,7 @@ pub(super) fn validate_progress(
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> Result<(), ()> {
-    if progress.loop_decision_actor.is_none()
+    if checkpoint.ask_actor.is_none()
         || !progress.attempts.is_empty()
         || progress.gate.is_some()
         || progress.advance_error.is_some()
@@ -508,21 +510,11 @@ pub(super) fn validate_progress(
         .filter_map(|n| n.round.as_ref().map(|r| r.round))
         .max()
         .unwrap_or(0);
-    let mut asks = std::collections::BTreeSet::new();
-    for ask in &progress.loop_asks {
-        if !asks.insert(ask.rounds)
-            || ask.rounds == 0
-            || ask.rounds > max_round
-            || ask.closed && !ask.resolved
-            || node
-                .loop_body
-                .as_ref()
-                .and_then(|spec| spec.decision_session.as_deref())
-                != Some(ask.session.as_str())
-            || checkpoint.instance_id.is_none()
-        {
-            return Err(());
-        }
+    if checkpoint.asks.iter().any(|ask| {
+        ask.node.as_deref() == Some(node.id.as_str())
+            && ask.rounds.is_none_or(|rounds| rounds > max_round)
+    }) {
+        return Err(());
     }
 
     let passed = body
@@ -629,100 +621,111 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
             ));
         }
         refresh_pause(checkpoint);
-        if let (Some(session), Some(actor), Some(instance)) = (
-            &spec.decision_session,
-            &checkpoint.nodes[index].loop_decision_actor,
-            &checkpoint.instance_id,
-        ) {
-            let session = session.clone();
-            let actor = actor.clone();
-            let instance = instance.clone();
-            if !checkpoint.nodes[index]
-                .loop_asks
-                .iter()
-                .any(|ask| ask.rounds == rounds)
-            {
-                checkpoint.nodes[index].loop_asks.push(LoopAsk {
-                    extra: Default::default(),
-                    rounds,
-                    session: session.clone(),
-                    resolved: false,
-                    closed: false,
-                });
-            }
-            let resolved = checkpoint.nodes[index]
-                .loop_asks
-                .iter()
-                .any(|ask| ask.rounds == rounds && ask.resolved);
+        let Some(session) = &spec.decision_session else {
             journal.save(checkpoint).map_err(GraphError::Journal)?;
-            if resolved {
-                if checkpoint.nodes[index]
-                    .loop_pause
-                    .as_ref()
-                    .is_none_or(|reason| !reason.contains("graph resume"))
-                {
-                    checkpoint.nodes[index].loop_pause = Some(format!(
-                        "loop {} exhausted after {rounds} rounds; ask closed; use graph resume --extend loop.{}.rounds=N or --extend loop.{}.decision=stop|accept",
-                        node.id, node.id, node.id
-                    ));
-                    refresh_pause(checkpoint);
+            return Ok(None);
+        };
+        asks::identity::<R, J::Error>(checkpoint, owner)?;
+        let ask_id = format!("{}.rounds-{rounds}", node.id);
+        let position = match checkpoint.asks.iter().position(|ask| ask.ask_id == ask_id) {
+            Some(position) => position,
+            None => {
+                let ask = asks::loop_ask(&checkpoint.graph_id, &node.id, rounds, session);
+                checkpoint.asks.push(ask);
+                checkpoint.asks.len() - 1
+            }
+        };
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+        if checkpoint.asks[position].resolved {
+            // A recorded answer is applied again after a crash; an ask
+            // resolved without one leaves the decision to graph resume.
+            if let Some(answer) = checkpoint.asks[position].answer.clone() {
+                return apply(&node.id, rounds, &answer, checkpoint, journal);
+            }
+            if checkpoint.nodes[index]
+                .loop_pause
+                .as_ref()
+                .is_none_or(|reason| !reason.contains("graph resume"))
+            {
+                checkpoint.nodes[index].loop_pause = Some(format!(
+                    "loop {} exhausted after {rounds} rounds; ask closed; use graph resume --extend loop.{}.rounds=N or --extend loop.{}.decision=stop|accept",
+                    node.id, node.id, node.id
+                ));
+                refresh_pause(checkpoint);
+                journal.save(checkpoint).map_err(GraphError::Journal)?;
+            }
+            return Ok(None);
+        }
+        match asks::poll(checkpoint, position, owner) {
+            Ok(reply) => {
+                checkpoint.nodes[index].loop_pause = Some(format!(
+                    "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
+                    node.id
+                ));
+                refresh_pause(checkpoint);
+                let Some(reply) = reply else {
                     journal.save(checkpoint).map_err(GraphError::Journal)?;
-                }
+                    return Ok(None);
+                };
+                let answer = asks::answered(reply);
+                let ask = &mut checkpoint.asks[position];
+                ask.answer = Some(answer.clone());
+                ask.resolved = true;
+                journal.save(checkpoint).map_err(GraphError::Journal)?;
+                return apply(&node.id, rounds, &answer, checkpoint, journal);
+            }
+            Err(error) => {
+                pause_invalid_decision(
+                    checkpoint,
+                    &node.id,
+                    &format!("inbox unavailable: {error}"),
+                    journal,
+                )?;
                 return Ok(None);
             }
-            let scope = LoopScope {
-                graph_id: &checkpoint.graph_id,
-                instance_id: &instance,
-                node_id: &node.id,
-                rounds,
-                session: &session,
-                actor: &actor,
-            };
-            let decision = match owner.loop_decision(scope) {
-                Ok(decision) => {
-                    checkpoint.nodes[index].loop_inbox_error = None;
-                    checkpoint.nodes[index].loop_pause = Some(format!(
-                        "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
-                        node.id
-                    ));
-                    refresh_pause(checkpoint);
-                    journal.save(checkpoint).map_err(GraphError::Journal)?;
-                    decision
-                }
-                Err(error) => {
-                    let reason = format!("inbox unavailable: {error}");
-                    checkpoint.nodes[index].loop_inbox_error =
-                        Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-                    pause_invalid_decision(checkpoint, &node.id, &reason, journal)?;
-                    return Ok(None);
-                }
-            };
-            if let Some(decision) = decision {
-                let extension = match decision {
-                    LoopDecision::Stop => Ok(format!("loop.{}.decision=stop", node.id)),
-                    LoopDecision::Accept => Ok(format!("loop.{}.decision=accept", node.id)),
-                    LoopDecision::Extend { rounds: extra } => rounds
-                        .checked_add(extra)
-                        .filter(|_| extra > 0)
-                        .map(|total| format!("loop.{}.rounds={total}", node.id))
-                        .ok_or_else(|| {
-                            "loop extension must be positive and cannot overflow".to_owned()
-                        }),
-                    LoopDecision::Invalid { reason } => Err(reason),
-                };
-                match extension {
-                    Ok(extension) => return Ok(Some(extension)),
-                    Err(reason) => {
-                        resolve_ask(checkpoint, &node.id, rounds);
-                        pause_invalid_decision(checkpoint, &node.id, &reason, journal)?;
-                    }
-                }
-            }
-        } else {
-            journal.save(checkpoint).map_err(GraphError::Journal)?;
         }
     }
     Ok(None)
+}
+
+/// Turn a recorded loop answer into its extension, or pause on a bad one.
+fn apply<R: Error + 'static, J: GraphJournal>(
+    node: &str,
+    rounds: usize,
+    answer: &asks::AskAnswer,
+    checkpoint: &mut GraphCheckpoint,
+    journal: &mut J,
+) -> Result<Option<String>, GraphError<R, J::Error>> {
+    let extension = match &answer.rejected {
+        Some(reason) => Err(reason.clone()),
+        None => LoopDecision::parse(answer.option.as_deref(), answer.text.as_deref()).and_then(
+            |decision| match decision {
+                LoopDecision::Stop => Ok(format!("loop.{node}.decision=stop")),
+                LoopDecision::Accept => Ok(format!("loop.{node}.decision=accept")),
+                LoopDecision::Extend { rounds: extra } => rounds
+                    .checked_add(extra)
+                    .map(|total| format!("loop.{node}.rounds={total}"))
+                    .ok_or_else(|| "loop extension cannot overflow".to_owned()),
+            },
+        ),
+    };
+    match extension {
+        Ok(extension) => Ok(Some(extension)),
+        Err(reason) => {
+            for ask in &mut checkpoint.asks {
+                if ask.node.as_deref() == Some(node)
+                    && ask.rounds == Some(rounds)
+                    && let Some(answer) = ask.answer.as_mut()
+                {
+                    answer
+                        .rejected
+                        .get_or_insert_with(|| bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+                }
+            }
+            pause_invalid_decision(checkpoint, node, &reason, journal)?;
+            Ok(None)
+        }
+    }
 }
 
 /// A rejected immutable answer remains inspectable; explicit resume can resolve it.
@@ -762,7 +765,7 @@ pub(super) fn prepare_decision_extension(
     if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
         return Err(reason);
     }
-    if let Some(reason) = envelope::reason(document, &checkpoint.expansions, &plan) {
+    if let Some(reason) = envelope::reason(document, &checkpoint.expansions, &extensions, &plan) {
         return Err(reason);
     }
     Ok(())
@@ -803,85 +806,4 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
             )
         });
     }
-}
-
-pub(super) fn resolve_ask(checkpoint: &mut GraphCheckpoint, node: &str, rounds: usize) {
-    if let Some(progress) = checkpoint.nodes.iter_mut().find(|n| n.id == node) {
-        for ask in &mut progress.loop_asks {
-            if ask.rounds == rounds {
-                ask.resolved = true;
-            }
-        }
-    }
-}
-
-pub fn close_resolved_loop_asks<R: AttemptOwner, J: GraphJournal>(
-    checkpoint: &mut GraphCheckpoint,
-    owner: &mut R,
-    journal: &mut J,
-) -> Result<(), GraphError<R::Error, J::Error>> {
-    let Some(instance) = checkpoint.instance_id.clone() else {
-        return Ok(());
-    };
-    for index in 0..checkpoint.nodes.len() {
-        if checkpoint.nodes[index].loop_asks.is_empty() {
-            continue;
-        }
-        let id = checkpoint.nodes[index].id.clone();
-        let rounds = checkpoint
-            .nodes
-            .iter()
-            .filter_map(|n| {
-                n.round
-                    .as_ref()
-                    .filter(|r| r.loop_id == id)
-                    .map(|r| r.round)
-            })
-            .max()
-            .unwrap_or(0);
-        let resolved = checkpoint.cancelled || checkpoint.nodes[index].state.settled();
-        for ask in &mut checkpoint.nodes[index].loop_asks {
-            if resolved || ask.rounds < rounds {
-                ask.resolved = true;
-            }
-        }
-        if !checkpoint.nodes[index]
-            .loop_asks
-            .iter()
-            .any(|a| a.resolved && !a.closed)
-        {
-            continue;
-        }
-        journal.save(checkpoint).map_err(GraphError::Journal)?;
-        let actor = checkpoint.nodes[index]
-            .loop_decision_actor
-            .clone()
-            .unwrap_or_default();
-        let mut close_error = None;
-        for ask_index in 0..checkpoint.nodes[index].loop_asks.len() {
-            let ask = checkpoint.nodes[index].loop_asks[ask_index].clone();
-            if !ask.resolved || ask.closed {
-                continue;
-            }
-            let scope = LoopScope {
-                graph_id: &checkpoint.graph_id,
-                instance_id: &instance,
-                node_id: &id,
-                rounds: ask.rounds,
-                session: &ask.session,
-                actor: &actor,
-            };
-            match owner.close_loop_ask(scope) {
-                Ok(()) => checkpoint.nodes[index].loop_asks[ask_index].closed = true,
-                Err(error) => {
-                    close_error.get_or_insert_with(|| {
-                        bounded(&format!("close loop ask: {error}"), MAX_ADVANCE_ERROR_BYTES)
-                    });
-                }
-            }
-            checkpoint.nodes[index].loop_inbox_error = close_error.clone();
-            journal.save(checkpoint).map_err(GraphError::Journal)?;
-        }
-    }
-    Ok(())
 }

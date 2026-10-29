@@ -15,10 +15,14 @@ fn routes(count: usize) -> serde_json::Value {
 
 fn mixed() -> GraphDocument {
     serde_json::from_value(json!({
-        "schema_version":1, "graph_id":"envelope-mixed", "delivery":"pr", "integration_branch":"integration/envelope", "nodes":[
+        "schema_version":1, "graph_id":"envelope-mixed", "delivery":"pr", "integration_branch":"integration/envelope",
+        "decision_session":"chair", "nodes":[
             {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Slice the work",
              "route":{"alias":"senior"}, "plan":{"kinds":["task"], "max_nodes":4}},
             {"id":"review", "access":"read_only", "prompt":"Review", "routes":routes(3)},
+            {"id":"choose", "kind":"decide", "access":"read_only", "depends_on":["review"],
+             "decide":{"question":"Ship the reviewed change?", "default":"hold", "timeout_seconds":60,
+                "options":[{"id":"ship", "label":"Ship"}, {"id":"hold", "label":"Hold", "description":"Wait for more review"}]}},
             {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["review"],
              "condition":{"type":"ci", "target":"feature/example"}},
             {"id":"repair", "kind":"loop", "access":"read_only", "depends_on":["ci"],
@@ -88,6 +92,57 @@ fn filled_outputs(composite: bool, writer: bool) -> NodeOutputs {
     outputs
 }
 
+/// An ask holding the longest deadline, answer and inbox error it can store.
+fn filled_ask(mut ask: NodeAsk) -> NodeAsk {
+    ask.wake_at = Some(envelope::latest());
+    ask.answer = Some(AskAnswer {
+        extra: Default::default(),
+        source: AnswerSource::Answered,
+        option: Some(worst(asks::OPTION_BYTES)),
+        text: Some(worst(asks::ANSWER_BYTES)),
+        actor: Some(worst(HOST_ID_BYTES)),
+        at: Some(envelope::latest()),
+        rejected: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+    });
+    ask.inbox_error = Some(worst(MAX_ADVANCE_ERROR_BYTES));
+    ask
+}
+
+/// Every ask the plan can hold at once: each loop round, each decide node and
+/// the pause history with one open and one awaiting its close.
+fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
+    let mut asks = Vec::new();
+    for node in &plan.nodes {
+        if let Some(session) = node.loop_body.as_ref().and_then(|spec| spec.decision_session.as_deref()) {
+            let rounds = plan
+                .nodes
+                .iter()
+                .filter_map(|n| n.round.as_ref().filter(|r| r.loop_id == node.id).map(|r| r.round))
+                .max()
+                .unwrap_or(0);
+            asks.extend(
+                (1..=rounds).map(|round| filled_ask(asks::loop_ask(&plan.graph_id, &node.id, usize::MAX - round, session))),
+            );
+        }
+        if let Some(spec) = &node.decide {
+            let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap();
+            asks.push(filled_ask(asks::decide_ask(&plan.graph_id, node, spec, session, usize::MAX, None)));
+        }
+    }
+    if let Some(session) = &plan.decision_session {
+        asks.extend((0..asks::MAX_PAUSE_ASKS as u64 + 2).map(|index| {
+            filled_ask(asks::pause_ask(
+                &plan.graph_id,
+                u64::MAX - index,
+                session,
+                &worst(PAUSE_REASON_BYTES),
+                Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
+            ))
+        }));
+    }
+    asks
+}
+
 fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphCheckpoint {
     let longest = plan.nodes.iter().map(|node| node.id.clone()).max_by_key(String::len).unwrap();
     let nodes = plan
@@ -103,17 +158,6 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 handoff: plans::writer(node).then(|| "\"".repeat(plans::STORED_NOTE_BYTES / 2 - 1)),
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
                     .then(|| worst(MAX_ADVANCE_ERROR_BYTES)),
-                loop_asks: node.loop_body.as_ref().map_or_else(Vec::new, |spec| {
-                    (1..=spec.max_rounds)
-                        .map(|rounds| LoopAsk {
-                            extra: Default::default(),
-                            rounds: usize::MAX - rounds,
-                            session: spec.decision_session.clone().unwrap_or_default(),
-                            resolved: true,
-                            closed: true,
-                        })
-                        .collect()
-                }),
                 loop_pause: node.loop_body.as_ref().map(|_| {
                     format!(
                         "loop {0} exhausted; decision cannot be applied: {1}; use graph resume --extend loop.{0}.rounds=N or --extend loop.{0}.decision=stop|accept",
@@ -121,9 +165,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                         worst(MAX_ADVANCE_ERROR_BYTES)
                     )
                 }),
-                loop_inbox_error: node.loop_body.as_ref().map(|_| worst(MAX_ADVANCE_ERROR_BYTES)),
                 round: node.round.clone(),
-                loop_decision_actor: node.loop_body.as_ref().map(|_| worst(HOST_ID_BYTES)),
                 gate: node.condition.as_ref().map(|_| GateResult {
                     extra: Default::default(),
                     passed: false,
@@ -195,6 +237,10 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
             continuations: usize::MAX,
         }),
         instance_id: Some("f".repeat(32)),
+        asks: filled_asks(plan),
+        ask_actor: Some(worst(HOST_ID_BYTES)),
+        wake_at: Some(envelope::latest()),
+        pause_asks: u64::MAX,
         delivery_required: true,
         delivered: true,
         pull_request: Some(worst(OUTPUT_FIELD_BYTES)),
@@ -217,7 +263,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
             MAX_USAGE_EVENTS
         ],
         usage_events_omitted: u64::MAX,
-        extensions: vec![worst(EXTENSION_BYTES - 2); MAX_EXTENSIONS],
+        extensions: vec![worst(256); 64],
         limit_notes: document_limit_notes(document),
         schema_version: 1,
         graph_id: plan.graph_id.clone(),
@@ -247,7 +293,7 @@ fn worst_case_checkpoint_fits_its_bound() {
         execution,
     };
     let size = canonical_len(&stored);
-    let bound = envelope::checkpoint_bound(&document, &[], &plan);
+    let bound = envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
     assert!(size <= bound, "filled checkpoint is {size} bytes, over its {bound}-byte bound");
     assert!(bound < size * 2, "bound {bound} is loose against {size}");
 }
@@ -368,7 +414,7 @@ fn stored_text_is_cut_by_its_canonical_size() {
 }
 
 #[test]
-fn extensions_are_bounded_in_length_and_count() {
+fn long_and_many_extensions_are_kept_and_count_toward_the_envelope() {
     let document = fixture_task();
     let mut journal = MemoryJournal::default();
     let mut owner = FakeOwner {
@@ -376,27 +422,27 @@ fn extensions_are_bounded_in_length_and_count() {
         ..Default::default()
     };
     advance(&document, &mut owner, &mut journal).unwrap();
-    let resume = |journal: &mut MemoryJournal, extensions: Vec<String>| {
-        resume_with_budget(
-            &document,
-            &mut FakeOwner::default(),
-            journal,
-            &Default::default(),
-            &Default::default(),
-            &extensions,
-        )
-        .map(|_| ())
-    };
-    let long = format!("budget.per_graph.tokens={}", "9".repeat(EXTENSION_BYTES));
-    assert!(matches!(
-        resume(&mut journal, vec![long]),
-        Err(GraphError::Extension(reason)) if reason.contains("longer than 256 bytes")
-    ));
-    let many = (0..=MAX_EXTENSIONS).map(|index| format!("budget.per_graph.tokens={index}")).collect();
-    assert!(matches!(
-        resume(&mut journal, many),
-        Err(GraphError::Extension(reason)) if reason.contains("at most 256 extensions")
-    ));
+    let plan = planned(&document);
+    let without = envelope::checkpoint_bound(&document, &[], &[], &plan);
+    let mut extensions = vec![format!("budget.per_graph.tokens={}", "9".repeat(18))];
+    extensions.extend((1..=300).map(|index| format!("budget.per_graph.tokens={index}")));
+    assert!(envelope::checkpoint_bound(&document, &[], &extensions, &plan) > without);
+    let run = resume_with_budget(
+        &document,
+        &mut FakeOwner {
+            observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
+            ..Default::default()
+        },
+        &mut journal,
+        &Default::default(),
+        &crate::config::GraphBudget {
+            per_graph: crate::config::BudgetLimit { tokens: Some(1), ..Default::default() },
+            ..Default::default()
+        },
+        &extensions,
+    )
+    .unwrap();
+    assert_eq!(run.checkpoint.extensions.len(), 301);
 }
 
 fn fixture_task() -> GraphDocument {
