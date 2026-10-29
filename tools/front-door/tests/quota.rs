@@ -180,6 +180,15 @@ fn disabled_modes_never_read_auth_or_invoke_external_tools() -> Result {
     let bin = rig.root.join("bin");
     fs::create_dir(&bin)?;
     let marker = rig.root.join("forbidden-invocation");
+    // `quota tick` may launch the detached provider-update worker. Whether that
+    // worker updates anything is a separate contract, so opt every provider out
+    // and leave this test to what the quota commands themselves invoke.
+    let config = rig.state.join("config.toml");
+    let mut text = fs::read_to_string(&config)?;
+    for provider in ["agy", "claude", "codex", "cursor", "opencode"] {
+        text.push_str(&format!("\n[providers.{provider}]\nupdate = false\n"));
+    }
+    fs::write(&config, text)?;
     for tool in [
         "curl", "security", "claude", "codex", "cursor", "agy", "opencode",
     ] {
