@@ -17,10 +17,10 @@ use thiserror::Error;
 #[cfg(test)]
 #[path = "graph/ci_tests.rs"]
 mod ci_tests;
+mod composites;
 #[cfg(test)]
 #[path = "graph/forward_compatibility.rs"]
 mod forward_compatibility;
-mod composites;
 mod loops;
 mod plans;
 pub use composites::CompositeSpec;

@@ -41,6 +41,48 @@ fn terminal_status_sees_lanes_submitted_under_harness_markers() -> Result {
 }
 
 #[test]
+fn status_shows_the_review_exempt_paths_in_force() -> Result {
+    let rig = TestRig::new()?;
+    let status = |rig: &TestRig| -> Result<(String, serde_json::Value)> {
+        let human = rig.command(&["status"])?;
+        assert_eq!(code(&human), 0);
+        let out = rig.command(&["status", "--json"])?;
+        assert_eq!(code(&out), 0);
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        Ok((String::from_utf8(human.stdout.bytes)?, value))
+    };
+    let (human, value) = status(&rig)?;
+    assert!(human.starts_with("no lanes\n"), "{human}");
+    assert!(
+        human.contains("review-exempt paths: docs/release-notes/next.d/"),
+        "{human}"
+    );
+    assert_eq!(value["data"]["review_exempt"][2], "Cargo.lock", "{value}");
+    std::fs::create_dir_all(&rig.state)?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.run]\nreview_exempt = ['notes/', 'CHANGES.md']\n",
+    )?;
+    let (human, value) = status(&rig)?;
+    assert!(
+        human.ends_with("review-exempt paths: notes/, CHANGES.md\n"),
+        "{human}"
+    );
+    assert_eq!(
+        value["data"]["review_exempt"],
+        serde_json::json!(["notes/", "CHANGES.md"])
+    );
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.run]\nreview_exempt = []\n",
+    )?;
+    let (human, value) = status(&rig)?;
+    assert!(human.ends_with("review-exempt paths: none\n"), "{human}");
+    assert_eq!(value["data"]["review_exempt"], serde_json::json!([]));
+    Ok(())
+}
+
+#[test]
 fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     let mut rig = TestRig::new()?;
     let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
@@ -82,10 +124,24 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert_eq!(lanes[0]["attempt_id"], attempts[24]);
     assert_eq!(lanes[19]["attempt_id"], attempts[5]);
     assert!(lanes[0]["state"].is_object(), "full record: {value}");
+    assert_eq!(
+        value["data"]["review_exempt"],
+        serde_json::json!([
+            "docs/release-notes/next.d/",
+            "docs/specs/",
+            "Cargo.lock",
+            ".tracker-input"
+        ])
+    );
     let human = rig.command(&["status"])?;
     let text = String::from_utf8(human.stdout.bytes)?;
-    assert_eq!(text.lines().count(), 20, "{text}");
+    // Twenty lanes, then the paths a writer may change without review.
+    assert_eq!(text.lines().count(), 21, "{text}");
     assert!(text.starts_with(&attempts[24][..8]), "{text}");
+    assert!(
+        text.ends_with("review-exempt paths: docs/release-notes/next.d/, docs/specs/, Cargo.lock, .tracker-input\n"),
+        "{text}"
+    );
     let all = rig.command(&["status", "--all", "--json"])?;
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
     assert_eq!(all["data"]["lanes"].as_array().ok_or("all")?.len(), 25);

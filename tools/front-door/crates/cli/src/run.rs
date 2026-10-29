@@ -1522,8 +1522,12 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             } else {
                 open_read_only(edge, &call)?
             };
+            let (exempt, exempt_line) = review_exempt_view(&context);
             let Some(store) = store else {
-                return Ok((json!({"lanes": []}), "no lanes\n".into()));
+                return Ok((
+                    json!({"lanes": [], "review_exempt": exempt}),
+                    format!("no lanes\n{exempt_line}"),
+                ));
             };
             let session = Session { store, context };
             let full = command.all || command.id.is_some();
@@ -1612,9 +1616,34 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 }
                 None => human,
             };
-            Ok((json!({"lanes": rows, "next_cursor": next}), human))
+            let human = format!("{human}{exempt_line}");
+            Ok((
+                json!({"lanes": rows, "next_cursor": next, "review_exempt": exempt}),
+                human,
+            ))
         })(),
     )
+}
+/// The paths a writer may change without review in this project, as JSON and
+/// as the line `status` ends with, so the chair sees what will not stop a lane.
+fn review_exempt_view(context: &run::ExecutionContext) -> (serde_json::Value, String) {
+    use provenant_confinement::run_config::RunConfig;
+    match RunConfig::read(context.state_root.as_path()) {
+        Ok(config) => {
+            let paths = config.review_exempt_for(&context.project_id.to_string());
+            let line = if paths.is_empty() {
+                "review-exempt paths: none\n".to_owned()
+            } else {
+                format!("review-exempt paths: {}\n", paths.join(", "))
+            };
+            (json!(paths), line)
+        }
+        Err(_) => (
+            json!([]),
+            "review-exempt paths: none (config unreadable; every protected change needs review)\n"
+                .to_owned(),
+        ),
+    }
 }
 fn compact_status(rows: &[run::AttemptRecord], waits: &[run::LaneWait], now: WallTime) -> String {
     if rows.is_empty() {

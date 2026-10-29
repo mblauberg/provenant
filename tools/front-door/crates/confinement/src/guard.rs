@@ -11,15 +11,15 @@ use std::path::{Component, Path, PathBuf};
 pub const RULES: [(&str, &str); 3] = [
     (
         "force-push",
-        "Force push to the default branch is refused. Push your own branch and open a PR; `git push --force-with-lease` is fine on a topic branch.",
+        "Force push to the default branch is refused. Accepted: `git push origin my-topic` then open a PR; the pre-push hook refuses non-fast-forward updates on every branch, so integrate with `git fetch origin && git merge origin/my-topic` rather than forcing.",
     ),
     (
         "rm-root",
-        "Recursively removing the home directory, the repository root or a parent of either is refused. Name the files or the subdirectory to delete.",
+        "Recursively removing the home directory, the repository root or a parent of either is refused. Accepted: name the subdirectory, for example `rm -r ./target` or `rm -r ~/old-project/build`.",
     ),
     (
         "rm-state",
-        "Deleting Provenant state is refused. Remove a lane with `provenant worktree remove`, or delete a named subdirectory.",
+        "Deleting Provenant state is refused. Accepted: `provenant worktree remove my-lane`, or `rm -r` on one named subdirectory below the state directory.",
     ),
 ];
 const DEFAULT_DENY: &str = r#"deny = ["force-push", "rm-root", "rm-state"]
@@ -362,6 +362,31 @@ mod tests {
     }
     fn denies(command: &str, root: &Path) -> bool {
         denies_in(command, root, "home/project", &GuardConfig::default())
+    }
+
+    #[test]
+    fn no_remedy_recommends_a_force_push() {
+        for (id, remedy) in RULES {
+            assert!(
+                !remedy.contains("--force") && !remedy.contains("push -f"),
+                "{id}: {remedy}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_refusal_shows_an_accepted_example() {
+        let (_dir, root) = tree();
+        for (id, remedy) in RULES {
+            let examples: Vec<_> = remedy.split('`').skip(1).step_by(2).collect();
+            assert!(!examples.is_empty(), "{id} shows no example: {remedy}");
+            for example in examples {
+                assert!(
+                    !denies(example, &root),
+                    "{id} example is refused: {example}"
+                );
+            }
+        }
     }
 
     #[test]

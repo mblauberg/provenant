@@ -103,7 +103,8 @@ provenant lane deliver ATTEMPT --deliver pr
 This refuses a dirty checkout, a changed head or live custody. Repeating a
 successful delivery returns its receipt, including after checkout cleanup.
 When a writer settles as `review_required`, the chair can review its protected
-changes and then deliver the reviewed head with:
+changes and then deliver the reviewed head with (paths the project lists in
+[`review_exempt`](configuration.md#writer-review-exempt-paths) never cause this):
 
 ```sh
 provenant lane deliver --accept-review ATTEMPT
@@ -186,8 +187,8 @@ write rebase state, stop with `needs_host_rebase`; do not create a clone or
 second checkout to bypass the permission failure. A host-authorised merge of
 `origin/main` is an alternative when rebasing is blocked.
 
-On macOS, existing hard-linked files in the writable worktree stay readable
-but are write-denied, including inside ignored directories. Excessive denials
-still refuse launch; see the [writer limits and recovery advice](providers.md#writer-lanes).
+On macOS, existing hard-linked files in the writable worktree no longer refuse
+a launch or become write-denied; only Git control files with another name do.
+See the [writer limits](providers.md#writer-lanes).
 The hard-link fixtures remain enabled in macOS CI because lane sandboxes can
 deny their `hard_link` calls before the launch check runs.

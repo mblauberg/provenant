@@ -493,6 +493,42 @@ or names a credential directory such as `~/.ssh`; a launch is refused if an
 entry overlaps the state directory's protected parts or Git metadata.
 `/usr/bin` is already executable in lanes, so `/usr/bin/lockf` works.
 
+## Writer review-exempt paths
+
+A writer whose commits change a protected path ends `review_required` until
+the chair accepts it. Paths every implementation legitimately changes should
+not cost that stop, so the host lists them:
+
+```toml
+[domains.run]
+review_exempt = ["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock", ".tracker-input"]
+
+[domains.run.projects."PROJECT_ID"]
+review_exempt = ["docs/release-notes/next.d/", "CHANGELOG.md"]
+```
+
+The values above are the defaults (the first list). An entry is a
+repository-relative path with no wildcards: `dir/` names a directory at the
+repository root, a bare name such as `Cargo.lock` matches a file of that name
+at any depth, and anything else is one exact path. Names compare without ASCII
+case. A project's own list replaces the host-wide one for that project, and
+`review_exempt = []` turns the exemption off. At most 64 entries of 256 bytes.
+
+A listed path never makes a writer `review_required`: a committed change to it
+is not protected evidence, and an unmerged or renamed entry that names only
+listed paths does not force review. A listed path left uncommitted does not
+make a lane that committed nothing end `uncommitted`. Git metadata and
+attributes, hook directories, provider control roots (`.claude`, `.codex`,
+`.mcp.json` and the rest) and CI workflows under `.github/` can never be
+listed, whatever the config says. Instruction documents (`AGENTS.md`,
+`CLAUDE.md`, `GEMINI.md`, `HARNESS.md`) and the `.agents/` tree can be listed
+and are not on by default. A writer reads the list when it launches and again
+when it settles. If `config.toml` cannot be read at settlement, nothing is
+exempt.
+
+`provenant status` ends with the list that applies to the current project, and
+`status --json` carries it as `review_exempt`.
+
 Fabric supplies private Cargo paths to each lane; see
 [writer lanes](providers.md#writer-lanes). Native unconfined agents may share a
 per-host target outside worktrees, taking care to run the intended checkout's

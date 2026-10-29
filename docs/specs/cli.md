@@ -288,7 +288,9 @@ rejects conflicting task settings rather than silently choosing a source.
 `status` lists active lanes and the twenty most recent settled lanes. An optional
 run, qualified task or attempt target uses the shared ID resolver and includes
 older terminal records. `--all` includes full records and supports pagination;
-`lanes --all --id ID` is also valid.
+`lanes --all --id ID` is also valid. The output ends with the project's
+`review-exempt paths:` line (`review_exempt` in `--json`), the paths a writer
+may change without ending `review_required`.
 - Test: `tests/parser.rs::core_run_reports_generated_operation_and_status_is_newest_first`
 - Owner: `crates/cli/src/run.rs`
 
@@ -554,7 +556,8 @@ denial cannot be written it exits 2. It never echoes or persists input.
 
 ### Bash guard policy
 
-The guard refuses only irreversible actions, naming the alternative: a force
+The guard refuses only irreversible actions, naming the alternative with an
+accepted one-line example: a force
 push to the default branch, and recursive `rm` of the home directory, the
 repository root or the Provenant state directory (or a parent of any). It
 applies the configured rule IDs `force-push`, `rm-root` and `rm-state` to every
@@ -565,15 +568,17 @@ The guard is advisory: confinement and custody stay authoritative.
 - Why: an aligned model is trusted with everything it can undo; config damage
   must not disable protection.
 - Test: `tests/hooks.rs::unreadable_guard_config_keeps_the_default_rules_on`;
-  `crates/confinement/src/guard.rs::force_pushes_to_the_default_branch_are_refused`
+  `crates/confinement/src/guard.rs::force_pushes_to_the_default_branch_are_refused`;
+  `::every_refusal_shows_an_accepted_example`
 - Owner: `crates/confinement/src/guard.rs`, `src/hooks.rs`
 
 ### Pre-push refuses data loss
 
 `hook git pre-push` refuses default-branch deletion, non-fast-forward
 updates, pushes from linked worktrees to the default branch and conflict
-markers. It identifies the default branch from the remote's advertisement,
-refuses when any inspection fails and never fetches.
+markers, each with an accepted example on stderr. It identifies the default
+branch from the remote's advertisement, refuses when any inspection fails,
+disables inherited redirects and never fetches.
 - Why: the last local guard before shared history changes.
 - Test: `tests/hooks.rs::pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers`
 - Owner: `src/hooks.rs`

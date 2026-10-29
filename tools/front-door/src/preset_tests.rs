@@ -312,14 +312,8 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
         limits.expansion_depth = 64;
         let mut owner = PresetOwner::default();
         let mut journal = PresetJournal::default();
-        let run = advance_with_budget(
-            &document,
-            &mut owner,
-            &mut journal,
-            &limits,
-            &config.budget,
-        )
-        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &config.budget)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(
             run.status,
             GraphStatus::Complete,
@@ -375,14 +369,9 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
             );
         }
         let attempts = owner.launched.clone();
-        let replay = advance_with_budget(
-            &document,
-            &mut owner,
-            &mut journal,
-            &limits,
-            &config.budget,
-        )
-        .unwrap();
+        let replay =
+            advance_with_budget(&document, &mut owner, &mut journal, &limits, &config.budget)
+                .unwrap();
         assert_eq!(replay.checkpoint, run.checkpoint);
         assert_eq!(owner.launched, attempts);
     }

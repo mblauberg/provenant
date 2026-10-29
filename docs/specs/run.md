@@ -573,12 +573,20 @@ Success needs a supervisor-observed exit 0, a matching provider identity and
 a complete, validated, non-empty result; capture bytes are never completion
 evidence. A dead owner is not a failed provider. A completed writer whose
 protected changes need review ends `review_required`, and one with only
-uncommitted edits ends `uncommitted`; neither delivers. Run reads no provider
+uncommitted edits ends `uncommitted`; neither delivers. Paths in the project's
+`[domains.run] review_exempt` list (release-note fragments, specs, lock files
+and `.tracker-input` by default) never count toward either, and Git metadata,
+hooks and provider control roots can never be listed. Run reads no provider
 transcript except Codex's post-exit identity projection.
 - Why: a crash, truncation or impostor must never read as success.
 - Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
-  `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`
-- Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`
+  `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
+  `crates/confinement/src/quarantine.rs::exempt_instruction_tree_paths_settle_without_review`;
+  `::hard_controls_stay_under_review_even_when_listed`;
+  `::a_staged_rename_of_exempt_paths_does_not_force_review`;
+  `::ordinary_project_paths_never_need_review`;
+  `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
+- Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`, `crates/confinement/src/review_exempt.rs`
 
 ## A partial finish is flagged, not failed
 
@@ -608,12 +616,21 @@ A host failure to read the stored prompt, or to stage or read back a context
 file, ends the attempt `rejected` before launch with its cause. `--base`
 context is captured on the host with fsmonitor, external diff, textconv,
 mailmap and fetching disabled, limited to 10 s per read and 1 MiB per file; a timeout keeps
-partial output and is recorded. Reviewers must report inputs they could not
-read and truncated captures.
+partial output and is recorded. The capture holds the log, the whole patch,
+a `--stat` summary and one patch slice per changed file (at most 400, in
+`git-diff-slices/` with an `index.txt`), and the prompt points a reviewer at the
+stat and the slices before the whole patch. When `slices_complete` is false the
+prompt says so and lists the changed files with no slice. Reviewers must report inputs they
+could not read, truncated captures and `slices_complete: false`.
 - Why: repository config is hostile input, and a lane must not run on input
-  the host could not verify.
+  the host could not verify; slices are navigation aids into the patch, and a
+  reviewer still reads the surrounding code in the checkout.
 - Test: `crates/run/src/dispatch_tests.rs::missing_stored_prompt_ends_the_attempt_rejected_with_the_cause`;
-  `crates/run/src/git_context.rs::git_context_pins_hardening_flags_and_writes_prompt_paths`
+  `crates/run/src/git_context.rs::git_context_pins_hardening_flags_and_writes_prompt_paths`;
+  `::slices_cover_every_file_and_the_index_names_them`;
+  `::slices_stop_at_their_limit_and_say_so`;
+  `::an_incomplete_prompt_names_the_changed_files_without_a_slice`;
+  `::real_git_stat_and_slices_match_the_whole_patch`
 - Owner: `crates/run/src/git_context.rs`
 
 ## Launch prompts
@@ -760,18 +777,39 @@ guard, not a security boundary: a lane can invoke the real `gh` directly.
   `crates/providers/src/lane.rs::github_policy_guards_labels_and_verb_prefixes`
 - Owner: `crates/config/src/github_policy.rs`; `crates/providers/src/lane.rs`
 
-## Writer hard-link refusal
+## Writer hard-link boundary
 
-On macOS, launch refuses a writable worktree containing an existing hard-linked
-regular file and names the offending path. Directories Git ignores wholesale,
-such as an in-tree Cargo `target/` or `node_modules/`, are skipped by the
-census and its entry bound. An operator can inspect a refused file and remove or
-rebuild it if it is disposable output before retrying.
-- Why: a writable hard link could modify data outside the granted tree.
-- Test: `crates/confinement/src/permissions.rs::writable_tree_hard_link_refusal_names_nested_file`;
-  `::the_census_neither_walks_nor_counts_skipped_directories`;
-  `crates/confinement/src/ignored.rs::wholly_ignored_directories_are_listed_and_others_are_not`
-- Owner: `crates/confinement/src/permissions.rs`, `crates/confinement/src/ignored.rs`
+The sandbox profile carries `(deny file-link)`, so a lane cannot create a hard
+link. Launch no longer walks the writable worktree, scratch, provider state or
+lane build cache for existing hard links, and no hard-linked build or
+dependency file refuses a launch or adds a per-path deny. Launch inspects only
+what a second name would let the lane write: the exact write grants (provider
+credential files), the selected `HEAD`, and the host Git control files the lane
+may not write, `config`, `packed-refs`, `config.worktree`, the linked `index`,
+`hooks/*` and `info/*`. Any of those with another hard link refuses the launch
+and names the file. A held directory that fails revalidation, a provider executable that is
+missing and a scratch directory that is not private each name their path and
+check. A grant on a file in a directory that does not exist grants nothing and
+needs no anchor. The compiled profile may be up to 512 KiB and the error names
+its size.
+
+Accepted risk: a hard link the host itself created inside a lane-writable tree
+is writable through its alias, so a write through the alias modifies the file
+outside the tree, and launch does not look for it. Host code that seeds a lane tree must therefore copy or clone (`clonefile`), never hard-link,
+from a shared store. The Cargo target and registry seeds clone, retained
+provider state is copied with hard-link refusal, and the pnpm store is
+read-only to the lane, so no host path creates such a link today.
+- Why: a writable hard link could modify data outside the granted tree, but
+  only a link made by something other than the lane can exist, and only the
+  Git control files make such a link dangerous; refusing whole build trees cost
+  launches without protecting anything.
+- Test: `crates/confinement/src/permissions.rs::only_git_control_files_are_checked_for_other_names`;
+  `::a_hard_linked_exact_grant_names_its_path`;
+  `::held_path_failures_name_the_path_and_the_check`;
+  `::a_grant_in_a_directory_that_does_not_exist_needs_no_anchor`;
+  `::profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_size`;
+  `::native_sandbox_blocks_path_escape_probes`
+- Owner: `crates/confinement/src/permissions.rs`
 
 ## Reconcile and temporary cleanup
 
