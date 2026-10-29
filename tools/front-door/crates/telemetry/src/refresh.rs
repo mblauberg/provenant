@@ -32,7 +32,7 @@ impl Source {
             Self::Litellm => Self::Openrouter,
         }
     }
-    pub fn parse(self, document: &Value) -> BTreeMap<String, Rates> {
+    pub fn parse(self, document: &Value) -> Result<BTreeMap<String, Rates>, &'static str> {
         match self {
             Self::Openrouter => parse_openrouter(document),
             Self::Litellm => parse_litellm(document),
@@ -89,12 +89,18 @@ fn number_rate(value: &Value) -> Option<u64> {
 
 /// OpenRouter `/api/v1/models`: `data[].pricing` in USD per token. Conditional
 /// `overrides` are ignored: the sheet records standard API-equivalent rates.
-pub fn parse_openrouter(document: &Value) -> BTreeMap<String, Rates> {
+pub fn parse_openrouter(document: &Value) -> Result<BTreeMap<String, Rates>, &'static str> {
     let mut out = BTreeMap::new();
-    for entry in document["data"].as_array().into_iter().flatten() {
+    let entries = document["data"]
+        .as_array()
+        .ok_or("OpenRouter document has no `data` array")?;
+    for entry in entries {
         let (Some(id), pricing) = (entry["id"].as_str(), &entry["pricing"]) else {
             continue;
         };
+        if !pricing.is_object() {
+            continue;
+        }
         out.insert(
             id.to_owned(),
             Rates {
@@ -105,15 +111,25 @@ pub fn parse_openrouter(document: &Value) -> BTreeMap<String, Rates> {
             },
         );
     }
-    out
+    if out.is_empty() {
+        return Err("OpenRouter document lists no priced models");
+    }
+    Ok(out)
 }
 
 /// LiteLLM `model_prices_and_context_window.json`: an object keyed by model.
-pub fn parse_litellm(document: &Value) -> BTreeMap<String, Rates> {
-    document
+pub fn parse_litellm(document: &Value) -> Result<BTreeMap<String, Rates>, &'static str> {
+    let priced = |entry: &Value| {
+        entry.get("input_cost_per_token").is_some() || entry.get("output_cost_per_token").is_some()
+    };
+    let map = document
         .as_object()
-        .into_iter()
-        .flatten()
+        .ok_or("LiteLLM document is not an object")?;
+    if !map.values().any(priced) {
+        return Err("LiteLLM document lists no priced models");
+    }
+    Ok(map
+        .iter()
         .map(|(id, entry)| {
             (
                 id.clone(),
@@ -125,7 +141,7 @@ pub fn parse_litellm(document: &Value) -> BTreeMap<String, Rates> {
                 },
             )
         })
-        .collect()
+        .collect())
 }
 
 const CATEGORIES: [&str; 4] = [
@@ -166,7 +182,7 @@ pub struct Proposal {
 }
 impl Proposal {
     pub fn is_clean(&self) -> bool {
-        self.changes.is_empty() && self.discrepancies.is_empty()
+        self.changes.is_empty() && self.discrepancies.is_empty() && self.missing.is_empty()
     }
 }
 
@@ -215,14 +231,11 @@ pub fn propose(
                 });
             }
             if let Some(second) = other.and_then(|o| o[index]) {
-                let high = new.max(second);
+                let high = u128::from(new.max(second));
                 let difference = u128::from(new.abs_diff(second)) * 10_000;
-                let bps = if high == 0 {
-                    0
-                } else {
-                    u64::try_from(difference / u128::from(high)).unwrap_or(u64::MAX)
-                };
-                if bps > threshold {
+                // Exact: a fractional basis point over the threshold still counts.
+                if difference > u128::from(threshold) * high {
+                    let bps = u64::try_from(difference / high).unwrap_or(u64::MAX);
                     out.discrepancies.push(Discrepancy {
                         provider: model.provider.clone(),
                         model: model.model.clone(),
@@ -264,5 +277,82 @@ mod tests {
             Some(1_500_000),
             "JSON numbers convert the same way"
         );
+    }
+}
+
+#[cfg(test)]
+mod proposal_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sheet() -> ConfiguredPrices {
+        toml_edit::de::from_str(
+            r#"
+schema_version = 1
+id = "t"
+reviewed_at = "2026-10-22"
+units = "usd_microdollars_per_million_tokens"
+discrepancy_threshold_bps = 1000
+[[models]]
+provider = "p"
+model = "m"
+billing = "api"
+sources = ["s"]
+openrouter_id = "v/m"
+litellm_id = "m"
+[models.rates]
+uncached_input = 1000000
+"#,
+        )
+        .unwrap()
+    }
+    fn run(openrouter: &str, litellm: &str) -> Proposal {
+        let or = parse_openrouter(&json!({"data":[{"id":"v/m","pricing":{"prompt":openrouter}}]}))
+            .unwrap();
+        let ll = parse_litellm(&json!({"m":{"input_cost_per_token":litellm}})).unwrap();
+        propose(&sheet(), (Source::Openrouter, &or), (Source::Litellm, &ll))
+    }
+
+    #[test]
+    fn a_difference_just_over_the_threshold_is_reported() {
+        // 1_000_000 vs 1_111_112: 1_111_112 - 1_000_000 = 111_112 over 1_111_112 is
+        // 1000.0008 bps, which rounds down to the threshold but exceeds it.
+        let over = run("0.000001", "0.000001111112");
+        assert_eq!(over.discrepancies.len(), 1);
+        assert_eq!(over.discrepancies[0].difference_bps, 1000);
+        // 111_111 over 1_111_111 is just under 1000 bps.
+        assert!(run("0.000001", "0.000001111111").discrepancies.is_empty());
+    }
+
+    #[test]
+    fn a_model_the_source_no_longer_lists_is_not_clean() {
+        let other =
+            parse_openrouter(&json!({"data":[{"id":"v/other","pricing":{"prompt":"0.000001"}}]}))
+                .unwrap();
+        let ll = parse_litellm(&json!({"m":{"input_cost_per_token":0.000001}})).unwrap();
+        let proposal = propose(
+            &sheet(),
+            (Source::Openrouter, &other),
+            (Source::Litellm, &ll),
+        );
+        assert_eq!(proposal.missing, ["p:m"]);
+        assert!(!proposal.is_clean());
+    }
+
+    #[test]
+    fn unrelated_documents_are_rejected() {
+        for document in [
+            json!({"name":"icon"}),
+            json!([]),
+            json!({"data":[]}),
+            json!({"data":[{"id":"x"}]}),
+        ] {
+            assert!(parse_openrouter(&document).is_err(), "{document}");
+        }
+        for document in [json!([]), json!({}), json!({"name":"icon","size":3})] {
+            assert!(parse_litellm(&document).is_err(), "{document}");
+        }
+        // Optional fields stay optional.
+        assert!(parse_openrouter(&json!({"data":[{"id":"x","pricing":{}}]})).is_ok());
     }
 }

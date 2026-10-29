@@ -6564,7 +6564,9 @@ fn stats_inner(
                 billing
             ));
         }
-        return Ok((json!({ "native_claude_subagents": native }), human));
+        let mut data = json!({ "native_claude_subagents": native });
+        attach_freshness(&prices, &mut data, &mut human)?;
+        return Ok((data, human));
     }
     let instant = |time: Option<jiff::Timestamp>| {
         time.map(|t| WallTime::from_micros(t.as_microsecond()))
@@ -6795,21 +6797,7 @@ fn stats_inner(
     }
     data["plan_value"] = json!(plan_value);
     data["graph_quality"] = json!(graph_quality);
-    let freshness = prices.freshness(
-        jiff::Timestamp::from_microsecond(now(&SystemClock::new())?.as_micros())
-            .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?
-            .to_zoned(jiff::tz::TimeZone::UTC)
-            .date(),
-    );
-    if freshness.stale {
-        human.push_str(&format!(
-            "price sheet reviewed {} days ago ({}), over the {}-day limit\nnext: review and refresh with `provenant telemetry prices refresh`\n",
-            freshness.age_days,
-            freshness.reviewed_at,
-            freshness.max_age_days.unwrap_or(0)
-        ));
-    }
-    data["price_freshness"] = json!(freshness);
+    attach_freshness(&prices, &mut data, &mut human)?;
     if by == Some(crate::StatsBy::Pr) {
         data["pr_attribution"] = json!({
             "merged_prs_read": merged_pr_count,
@@ -6825,6 +6813,29 @@ fn stats_inner(
         data["chair_error"] = Value::String(error);
     }
     Ok((data, human))
+}
+
+/// Report the sheet's review age in JSON and, once stale, in the human text.
+fn attach_freshness(
+    prices: &provenant_telemetry::PriceTable,
+    data: &mut Value,
+    human: &mut String,
+) -> Result<(), Fail> {
+    let today = jiff::Timestamp::from_microsecond(now(&SystemClock::new())?.as_micros())
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date();
+    let freshness = prices.freshness(today);
+    if freshness.stale {
+        human.push_str(&format!(
+            "price sheet reviewed {} days ago ({}), over the {}-day limit\nnext: review and refresh with `provenant telemetry prices refresh`\n",
+            freshness.age_days,
+            freshness.reviewed_at,
+            freshness.max_age_days.unwrap_or(0)
+        ));
+    }
+    data["price_freshness"] = json!(freshness);
+    Ok(())
 }
 
 fn grouped_token_count(
@@ -7207,9 +7218,34 @@ pub fn prices_refresh(command: PricesRefresh, edge: &Edge<'_>) -> Reply {
     }
     out
 }
+/// True when both paths name one file, through symlinks, `..` or hard links.
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let resolve = |path: &Path| {
+        let name = path.file_name()?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::canonicalize(parent).ok().map(|p| p.join(name))
+    };
+    let resolved = |path: &Path| std::fs::canonicalize(path).ok().or_else(|| resolve(path));
+    if resolved(a).is_some_and(|a| Some(a) == resolved(b)) {
+        return true;
+    }
+    matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(a), Ok(b)) if a.dev() == b.dev() && a.ino() == b.ino())
+}
 fn prices_refresh_inner(command: PricesRefresh, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
     use provenant_telemetry::refresh::{Source, propose};
     let (sheet, _) = load_price_sheet(edge)?;
+    let out_path = edge.cwd.join(&command.out);
+    if same_file(&out_path, &edge.assets.join("config/telemetry-prices.toml")) {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "--out must not be the price sheet; the proposal never replaces it",
+        ));
+    }
     let (primary, cross) = match command.source {
         crate::PriceSource::Openrouter => (Source::Openrouter, Source::Litellm),
         crate::PriceSource::Litellm => (Source::Litellm, Source::Openrouter),
@@ -7224,11 +7260,18 @@ fn prices_refresh_inner(command: PricesRefresh, edge: &Edge<'_>) -> Result<(Valu
     let clock = SystemClock::new();
     let fetched_at = jiff::Timestamp::from_microsecond(now(&clock)?.as_micros())
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Time, error.to_string()))?;
-    let proposal = propose(
-        &sheet,
-        (primary, &primary.parse(&primary_doc)),
-        (cross, &cross.parse(&cross_doc)),
-    );
+    let parse = |source: Source, document: &Value, origin: &str| {
+        source.parse(document).map_err(|error| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                format!("{origin}: {error}"),
+            )
+        })
+    };
+    let primary_rates = parse(primary, &primary_doc, &primary_origin)?;
+    let cross_rates = parse(cross, &cross_doc, &cross_origin)?;
+    let proposal = propose(&sheet, (primary, &primary_rates), (cross, &cross_rates));
     let data = json!({
         "primary": {"source": primary, "url": primary_origin},
         "cross_check": {"source": cross, "url": cross_origin},
@@ -7240,7 +7283,6 @@ fn prices_refresh_inner(command: PricesRefresh, edge: &Edge<'_>) -> Result<(Valu
     });
     let text = serde_json::to_string_pretty(&data)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
-    let out_path = edge.cwd.join(&command.out);
     std::fs::write(&out_path, format!("{text}\n")).map_err(|error| {
         Fail::new(
             Status::Error,

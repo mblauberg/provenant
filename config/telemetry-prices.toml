@@ -13,6 +13,8 @@ discrepancy_threshold_bps = 1000
 provider = "agy"
 model = "agy/claude-opus-4-6-thinking"
 billing = "subscription"
+openrouter_id = "anthropic/claude-opus-4.6"
+litellm_id = "claude-opus-4-6"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 # Google subscription route; Anthropic Claude Opus 4.6 API prices as the equivalent.
 [models.rates]
@@ -25,6 +27,8 @@ output_excluding_reasoning = 25000000
 provider = "agy"
 model = "agy/claude-sonnet-4-6"
 billing = "subscription"
+openrouter_id = "anthropic/claude-sonnet-4.6"
+litellm_id = "claude-sonnet-4-6"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 # Google subscription route; Anthropic Claude Sonnet 4.6 API prices as the equivalent.
 [models.rates]
@@ -37,6 +41,8 @@ output_excluding_reasoning = 15000000
 provider = "agy"
 model = "agy/gemini-3.8-flash"
 billing = "subscription"
+openrouter_id = "google/gemini-3.8-flash"
+litellm_id = "gemini-3.8-flash"
 sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only; no verified price)"]
 # No official Google price was verified for this model.
 [models.rates]
@@ -45,6 +51,8 @@ sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only
 provider = "claude"
 model = "claude/claude-fable-5-1"
 billing = "subscription"
+openrouter_id = "anthropic/claude-fable-5.1"
+litellm_id = "claude-fable-5-1"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 [models.rates]
 uncached_input = 10000000
@@ -70,6 +78,7 @@ output_excluding_reasoning = 5000000
 provider = "claude"
 model = "claude/claude-haiku-4-5-20251001"
 billing = "subscription"
+litellm_id = "claude-haiku-4-5-20251001"
 sources = ["https://platform.claude.com/docs/en/models/haiku-4-5/overview"]
 [models.rates]
 uncached_input = 1000000
@@ -81,6 +90,8 @@ output_excluding_reasoning = 5000000
 provider = "claude"
 model = "claude/claude-haiku-5-5"
 billing = "subscription"
+openrouter_id = "anthropic/claude-haiku-5.5"
+litellm_id = "claude-haiku-5-5"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 # Prompts of 100K tokens or fewer; larger prompts bill $0.50 input and $2.50 output.
 [models.rates]
@@ -93,6 +104,8 @@ output_excluding_reasoning = 500000
 provider = "claude"
 model = "claude/claude-opus-5"
 billing = "subscription"
+openrouter_id = "anthropic/claude-opus-5"
+litellm_id = "claude-opus-5"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 [models.rates]
 uncached_input = 5000000
@@ -104,6 +117,8 @@ output_excluding_reasoning = 25000000
 provider = "claude"
 model = "claude/claude-opus-5-5"
 billing = "subscription"
+openrouter_id = "anthropic/claude-opus-5.5"
+litellm_id = "claude-opus-5-5"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 [models.rates]
 uncached_input = 4000000
@@ -115,6 +130,8 @@ output_excluding_reasoning = 20000000
 provider = "claude"
 model = "claude/claude-sonnet-5"
 billing = "subscription"
+openrouter_id = "anthropic/claude-sonnet-5"
+litellm_id = "claude-sonnet-5"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 [models.rates]
 uncached_input = 2000000
@@ -126,6 +143,8 @@ output_excluding_reasoning = 10000000
 provider = "claude"
 model = "claude/claude-sonnet-5-5"
 billing = "subscription"
+openrouter_id = "anthropic/claude-sonnet-5.5"
+litellm_id = "claude-sonnet-5-5"
 sources = ["claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)"]
 [models.rates]
 uncached_input = 2000000
@@ -137,6 +156,8 @@ output_excluding_reasoning = 10000000
 provider = "codex"
 model = "codex/gpt-6.1-terra"
 billing = "subscription"
+openrouter_id = "openai/gpt-6.1-terra"
+litellm_id = "gpt-6.1-terra"
 sources = ["https://developers.openai.com/api/docs/models/gpt-6.1-terra", "https://developers.openai.com/api/docs/pricing"]
 # Standard speed, prompts up to 272K input tokens, 30-minute cache writes.
 [models.rates]
@@ -149,6 +170,8 @@ output_excluding_reasoning = 5000000
 provider = "codex"
 model = "codex/gpt-6-luna"
 billing = "subscription"
+openrouter_id = "openai/gpt-6-luna"
+litellm_id = "gpt-6-luna"
 sources = ["https://developers.openai.com/api/docs/models/compare"]
 [models.rates]
 uncached_input = 100000
@@ -160,6 +183,8 @@ output_excluding_reasoning = 500000
 provider = "codex"
 model = "codex/gpt-6.1-sol"
 billing = "subscription"
+openrouter_id = "openai/gpt-6.1-sol"
+litellm_id = "gpt-6.1-sol"
 sources = ["https://developers.openai.com/api/docs/models/compare"]
 [models.rates]
 uncached_input = 2000000
@@ -197,6 +222,8 @@ sources = ["tools/front-door/crates/routing/assets/catalogue.toml (identity only
 provider = "cursor"
 model = "cursor/grok-4.7"
 billing = "subscription"
+openrouter_id = "x-ai/grok-4.7"
+litellm_id = "xai/grok-4.7"
 sources = ["https://cursor.com/docs/models-and-pricing"]
 # Standard speed; context above 256K bills at 2x. Cache-write rate is not published.
 [models.rates]
@@ -208,6 +235,8 @@ output_excluding_reasoning = 6000000
 provider = "opencode"
 model = "opencode/opencode-go/deepseek-v4.1-flash"
 billing = "subscription"
+openrouter_id = "deepseek/deepseek-v4.1-flash"
+litellm_id = "None"
 sources = ["https://opencode.ai/docs/go/"]
 # Off-peak rate; peak hours (01-04 and 06-10 UTC, Monday to Friday) bill at 2x.
 [models.rates]
@@ -229,6 +258,8 @@ output_excluding_reasoning = 20000000
 provider = "opencode"
 model = "opencode/opencode-go/glm-5.3-flash"
 billing = "subscription"
+openrouter_id = "z-ai/glm-5.3-flash"
+litellm_id = "zai/glm-5.3-flash"
 sources = ["https://opencode.ai/docs/go/"]
 [models.rates]
 uncached_input = 150000
