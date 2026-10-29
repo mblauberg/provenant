@@ -1835,7 +1835,13 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
-| `name` | `{"name": "name", "positional": true, "required": true}` |
+| `name` | `{"name": "name", "positional": true}` |
+| `--risk` | `{"name": "risk"}` |
+| `--kind` | `{"name": "kind"}` |
+| `--path` | `{"name": "paths", "repeatable": true}` |
+| `--size` | `{"name": "size"}` |
+| `--ready` | `{"defaults": ["false"], "name": "ready", "values": ["true", "false"]}` |
+| `--underspecified` | `{"conflicts": ["ready"], "defaults": ["false"], "name": "underspecified", "values": ["true", "false"]}` |
 | `--help` | `{"name": "help"}` |
 | `--version` | `{"name": "version"}` |
 
@@ -1844,7 +1850,13 @@ Accepted by every command, before or after the subcommand.
   "groups": [
     {
       "arguments": [
-        "name"
+        "name",
+        "risk",
+        "kind",
+        "paths",
+        "size",
+        "ready",
+        "underspecified"
       ],
       "multiple": true,
       "name": "Explain",
@@ -1862,6 +1874,9 @@ Accepted by every command, before or after the subcommand.
 | `--set` | `{"name": "preset_set", "repeatable": true}` |
 | `--params-file` | `{"name": "preset_params_file"}` |
 | `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
+| `--risk-tier` | `{"name": "risk_tier"}` |
+| `--task-kind` | `{"name": "task_kind"}` |
+| `--path` | `{"name": "selection_paths", "repeatable": true}` |
 | `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |
@@ -1903,7 +1918,7 @@ Accepted by every command, before or after the subcommand.
 ```json
 {
   "constraints": [
-    "single prompt requires exactly one of model or route, or a named preset",
+    "single prompt selects a preset by rules when model, route and preset are omitted",
     "operation-id is generated when omitted; supply it for planned retries",
     "manifest conflicts with per-task route, access, metadata and provider-timeout",
     "concurrency requires manifest or preset",
@@ -2074,6 +2089,9 @@ Accepted by every command, before or after the subcommand.
 | `--set` | `{"name": "preset_set", "repeatable": true}` |
 | `--params-file` | `{"name": "preset_params_file"}` |
 | `--explain` | `{"defaults": ["false"], "name": "explain", "values": ["true", "false"]}` |
+| `--risk-tier` | `{"name": "risk_tier"}` |
+| `--task-kind` | `{"name": "task_kind"}` |
+| `--path` | `{"name": "selection_paths", "repeatable": true}` |
 | `--build-heavy` | `{"defaults": ["false"], "name": "build_heavy", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"name": "prompt_file"}` |
 | `--prompt-stdin` | `{"defaults": ["false"], "name": "prompt_stdin", "values": ["true", "false"]}` |

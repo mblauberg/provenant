@@ -30,6 +30,7 @@ mod pr;
 mod pr_land_tests;
 mod preset;
 mod preset_roles;
+mod preset_select;
 #[cfg(test)]
 #[allow(
     dead_code,
@@ -812,7 +813,15 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }
         }
         Command::Preset(cmd) => preset::command(cmd, globals),
-        Command::Run(cmd) if cmd.preset.is_some() => preset::run(*cmd, globals, process.workers()),
+        Command::Run(cmd)
+            if cmd.preset.is_some()
+                || (cmd.input.manifest.is_none()
+                    && (cmd.input.prompt_file.is_some() || cmd.input.prompt_stdin)
+                    && cmd.route.model.is_none()
+                    && cmd.route.route.is_none()) =>
+        {
+            preset::run(*cmd, globals, process.workers())
+        }
         Command::Run(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::run(*cmd, edge);
             if let Err(error) =

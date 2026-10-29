@@ -1420,6 +1420,7 @@ pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::Lan
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
+    pub context: Option<provenant_records::run::WorkContext>,
     pub build_heavy: bool,
     pub title: Option<String>,
     pub task_id: TaskId,
@@ -1627,7 +1628,7 @@ pub fn submit_with_host(
         .into_iter()
         .map(|task| {
             Ok(run::DispatchTask {
-                context: None,
+                context: task.context,
                 build_heavy: task.build_heavy,
                 profile: profile.clone(),
                 title: task.title,
@@ -2810,6 +2811,7 @@ fn dispatch_inner(
                 build_heavy,
             )| {
                 Submitted {
+                    context: None,
                     build_heavy,
                     title,
                     base,
@@ -8081,6 +8083,7 @@ mod tests {
             chair: chair.clone(),
             operation_id: OperationId::parse("context-ref-replay").unwrap(),
             tasks: vec![Submitted {
+                context: None,
                 build_heavy: false,
                 title: None,
                 task_id: TaskId::from_bytes([3; 16]),

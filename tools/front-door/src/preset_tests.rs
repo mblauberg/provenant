@@ -255,6 +255,7 @@ struct PresetOwner {
     launched: Vec<String>,
     /// The brief each launched node received, inputs included.
     prompts: Vec<(String, String)>,
+    contexts: Vec<Option<provenant_records::run::WorkContext>>,
     integration_pins: usize,
 }
 
@@ -283,6 +284,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         self.launched.push(key.node_id.clone());
         self.prompts
             .push((key.node_id.clone(), node.prompt.to_owned()));
+        self.contexts.push(node.work_context.cloned());
         let mut result =
             provenant_records::result_capture::ResultCapture::new(node.required_verdict);
         result.push(if self.failing.contains(&key.node_id) {
@@ -310,6 +312,38 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             },
         })
     }
+}
+
+#[test]
+fn graph_attempt_input_carries_preset_selection_context() {
+    use provenant_fabric_runtime::graph::advance_with_budget;
+    let mut document = bundled_fixture("single");
+    document.extra.insert(
+        "work_context".into(),
+        serde_json::json!({
+            "preset": "single",
+            "selection_source": "readiness",
+            "graph_id": document.graph_id,
+        }),
+    );
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner::default();
+    let mut journal = PresetJournal::default();
+    advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    let context = owner.contexts[0].as_ref().unwrap();
+    assert_eq!(context.preset.as_deref(), Some("single"));
+    assert_eq!(context.selection_source.as_deref(), Some("readiness"));
+    assert_eq!(
+        context.graph_id.as_deref(),
+        Some(document.graph_id.as_str())
+    );
 }
 
 #[test]
