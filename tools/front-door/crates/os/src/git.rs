@@ -37,20 +37,17 @@ pub fn repository_marker(top: &Path) -> Option<RepositoryMarker> {
     let git_dir = read_marker_line(&marker)
         .ok()
         .and_then(|line| {
-            line.strip_prefix("gitdir: ")
+            line.strip_prefix("gitdir:")
                 .map(|path| path.trim().to_owned())
         })
         .filter(|line| !line.is_empty())
         .map(|line| top.join(line));
-    let common_dir =
-        git_dir.as_ref().and_then(
-            |private| match read_marker_line(&private.join("commondir")) {
-                Ok(line) if !line.trim().is_empty() => Some(private.join(line.trim())),
-                Ok(_) => None,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Some(private.clone()),
-                Err(_) => None,
-            },
-        );
+    let common_dir = git_dir.as_ref().map(|private| {
+        read_marker_line(&private.join("commondir"))
+            .ok()
+            .filter(|line| !line.trim().is_empty())
+            .map_or_else(|| private.clone(), |line| private.join(line.trim()))
+    });
     Some(RepositoryMarker {
         git_dir,
         common_dir,
@@ -342,6 +339,11 @@ mod tests {
             repository_marker(&top).unwrap().common_dir,
             Some(private.join("../common"))
         );
+        fs::write(top.join(".git"), format!("gitdir:{}\n", private.display())).unwrap();
+        fs::write(private.join("commondir"), b"bad\nextra\n").unwrap();
+        let marker = repository_marker(&top).unwrap();
+        assert_eq!(marker.git_dir, Some(private.clone()));
+        assert_eq!(marker.common_dir, Some(private.clone()));
         fs::write(top.join(".git"), b"gitdir: bad\nextra\n").unwrap();
         let marker = repository_marker(&top).unwrap();
         assert!(marker.git_dir.is_none());
