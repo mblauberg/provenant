@@ -873,6 +873,41 @@ fi
         fixtures.join("checksum"),
         format!("{digest}  package.tar.gz\n"),
     )?;
+    let app_fixture = fixtures.join("apps");
+    let app_binaries = app_fixture.join("Provenant Console.app/Contents/MacOS");
+    fs::create_dir_all(&app_binaries)?;
+    for binary in ["provenant-console", "quota-menubar"] {
+        let path = app_binaries.join(binary);
+        fs::write(&path, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    let apps_archive = fixtures.join("provenant-apps-aarch64-apple-darwin.tar.gz");
+    let tar = rig.execute_os(
+        Path::new("/usr/bin/tar"),
+        &[
+            "-czf".into(),
+            apps_archive.clone().into(),
+            "-C".into(),
+            app_fixture.into(),
+            ".".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&tar), 0);
+    let hash = rig.execute_os(
+        Path::new("/usr/bin/shasum"),
+        &["-a".into(), "256".into(), apps_archive.clone().into()],
+        None,
+    )?;
+    let apps_digest = String::from_utf8(hash.stdout.bytes)?
+        .split_whitespace()
+        .next()
+        .ok_or("apps archive hash")?
+        .to_owned();
+    fs::write(
+        fixtures.join("apps-checksum"),
+        format!("{apps_digest}  provenant-apps-aarch64-apple-darwin.tar.gz\n"),
+    )?;
     let curl = fake_bin.join("curl");
     fs::write(
         &curl,
@@ -886,11 +921,20 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$url" in
+  */provenant-apps-aarch64-apple-darwin.tar.gz.sha256)
+    [ "${{PROVENANT_TEST_APPS_AVAILABLE:-}}" = 1 ] || {{ printf '%s' 404; exit 0; }}
+    cp '{}/apps-checksum' "$out" ;;
+  */provenant-apps-aarch64-apple-darwin.tar.gz)
+    [ "${{PROVENANT_TEST_APPS_AVAILABLE:-}}" = 1 ] || {{ printf '%s' 404; exit 0; }}
+    cp '{}/provenant-apps-aarch64-apple-darwin.tar.gz' "$out"
+    [ -z "${{format:-}}" ] || printf '%s' 200 ;;
   */provenant-aarch64-apple-darwin.tar.gz.sha256) cp '{}/checksum' "$out"; [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 200 ;;
   */provenant-aarch64-apple-darwin.tar.gz) cp '{}/package.tar.gz' "$out"; [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 200 ;;
   *) [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 404 ;;
 esac
 "#,
+            fixtures.display(),
+            fixtures.display(),
             fixtures.display(),
             fixtures.display()
         ),
@@ -938,7 +982,7 @@ esac
         Some(&piped_script),
     )?;
     assert_eq!(code(&piped), 0, "{piped:?}");
-    assert_eq!(piped.stdout.bytes, b"PIPE_COMPLETE\n");
+    assert!(piped.stdout.bytes.ends_with(b"PIPE_COMPLETE\n"));
     assert!(!git_called.exists());
     fs::remove_file(&recorded)?;
     rig.env.push(("PROVENANT_INSTALL_TTY".into(), "1".into()));
@@ -1035,6 +1079,80 @@ esac
     );
     assert!(!account.join("CLAUDE.md").exists());
     fs::remove_file(&recorded)?;
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_ACCOUNT_FAILURE");
+    rig.env
+        .push(("PROVENANT_TEST_APPS_AVAILABLE".into(), "1".into()));
+    fs::remove_file(rig.state.join("install/receipt.json"))?;
+    let installed_app = rig.home.join("Applications/Provenant Console.app");
+    fs::create_dir_all(&installed_app)?;
+    fs::write(installed_app.join("old-build"), "preserve this app")?;
+    let instructions_before_app_failure = fs::read_to_string(&codex)?;
+    let mv = fake_bin.join("mv");
+    fs::write(
+        &mv,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in */.provenant-upgrade.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
+            rig.root.join("direct-install-mv-failed-once").display()
+        ),
+    )?;
+    fs::set_permissions(&mv, fs::Permissions::from_mode(0o755))?;
+    let failed_app_swap = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&failed_app_swap), 4, "{failed_app_swap:?}");
+    assert!(installed_app.join("old-build").exists());
+    assert_eq!(
+        fs::read_to_string(&codex)?,
+        format!("{instructions_before_app_failure}\nfixture instructions\n")
+    );
+    assert!(fs::read_dir(rig.home.join("Applications"))?.all(|entry| {
+        entry.is_ok_and(|entry| {
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-upgrade.")
+        })
+    }));
+    fs::remove_file(&recorded)?;
+    fs::remove_file(&mv)?;
+    let agent = rig
+        .home
+        .join("Library/LaunchAgents/dev.provenant.quota-menubar.plist");
+    fs::create_dir_all(agent.parent().ok_or("LaunchAgent parent")?)?;
+    fs::write(&agent, "fake LaunchAgent")?;
+    let plutil = fake_bin.join("plutil");
+    fs::write(&plutil, "#!/bin/sh\nexit 0\n")?;
+    fs::set_permissions(&plutil, fs::Permissions::from_mode(0o755))?;
+    let launchctl = fake_bin.join("launchctl");
+    fs::write(
+        &launchctl,
+        "#!/bin/sh\n[ \"$1\" != print ] || exit 19\nexit 0\n",
+    )?;
+    fs::set_permissions(&launchctl, fs::Permissions::from_mode(0o755))?;
+    let failed_restart = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&failed_restart), 4, "{failed_restart:?}");
+    assert!(installed_app.join("old-build").exists());
+    assert!(fs::read_dir(rig.home.join("Applications"))?.all(|entry| {
+        entry.is_ok_and(|entry| {
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-upgrade.")
+        })
+    }));
+    fs::remove_file(&recorded)?;
+    fs::remove_file(agent)?;
+    fs::remove_file(plutil)?;
+    fs::remove_file(launchctl)?;
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_AVAILABLE");
     fs::write(
         fixtures.join("checksum"),
         format!("{}  package.tar.gz\n", "0".repeat(64)),
@@ -1360,7 +1478,8 @@ esac
         rejected_value["data"][0]["output"]
             .as_str()
             .ok_or("output")?
-            .contains("Release checksum mismatch")
+            .contains("Release checksum mismatch"),
+        "{rejected_value}"
     );
     let before: provenant_records::InstallReceipt = provenant_records::decode_v1(
         fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
@@ -1382,7 +1501,7 @@ esac
         rejected_value["data"][0]["output"]
             .as_str()
             .ok_or("output")?
-            .contains("Release checksum mismatch")
+            .contains("Bundled app checksum mismatch")
     );
     assert!(installed_app.join("old-build").exists());
     assert!(!launch_log.exists());
@@ -1408,6 +1527,12 @@ esac
     let checksum_failure_value: serde_json::Value =
         serde_json::from_slice(&checksum_failure.stdout.bytes)?;
     assert_eq!(checksum_failure_value["data"][0]["success"], false);
+    assert!(
+        checksum_failure_value["data"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot download bundled app checksum")
+    );
     assert!(installed_app.join("old-build").exists());
     rig.env
         .retain(|(key, _)| key != "PROVENANT_TEST_APPS_CHECKSUM_FAIL");
@@ -1416,6 +1541,12 @@ esac
     let bad_tar = rig.command(&["upgrade", "--json"])?;
     let bad_tar_value: serde_json::Value = serde_json::from_slice(&bad_tar.stdout.bytes)?;
     assert_eq!(bad_tar_value["data"][0]["success"], false);
+    assert!(
+        bad_tar_value["data"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot unpack bundled app archive")
+    );
     assert!(installed_app.join("old-build").exists());
     rig.env
         .retain(|(key, _)| key != "PROVENANT_TEST_APPS_BAD_TAR");
@@ -1476,7 +1607,6 @@ esac
     assert!(arguments.contains("worker.example\n"));
     assert!(arguments.contains("'--tag' 'v9.8.7'"));
     assert!(arguments.contains("-oBatchMode=yes"));
-    assert!(arguments.contains("provenant-apps-aarch64-apple-darwin.tar.gz"));
     let downloads = fs::read_to_string(&curl_log)?;
     assert_eq!(
         downloads

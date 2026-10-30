@@ -1,3 +1,3 @@
 ## Fixes
 
-- `provenant upgrade` now refreshes the bundled macOS app once, verifies its downloaded archive without downloading it again, and swaps it while retaining the previous app until the new bundle is in place. A failed app refresh no longer rolls back committed instruction files (#2417).
+- `provenant upgrade` now delegates bundled macOS app refresh to the packaged installer, which also owns the direct install path. Swaps keep the previous app through installation and menu-bar restart, and interrupted or failed refreshes restore it without rolling back committed instruction files (#2417).
