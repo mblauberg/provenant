@@ -297,9 +297,11 @@ dates. It needs a web-capable route; define a routing route named `web`.
 Without one the compiler falls back to `junior` and `run --explain` prints the
 substitution. `--set parameters.external=0` opts out of external scouts, which
 the origins record. The same applies to `verifier_tier` in `review-council`:
-define a route named `verifier` in another model family. The graph's
-`distinct_from` separates only a node from its writer, so cross-family review
-is a routing property for now, shown by `explain` as `cross_preferred`.
+define a route named `verifier` in another model family. The role settings
+`family = "cross_preferred"` and `family = "cross_required"` set
+`distinct_from = "dependencies"`, excluding the families of all upstream
+attempts. The low-level `distinct_from = "writer"` only separates a node
+from its writer.
 
 ## Review and source subjects
 
@@ -307,7 +309,7 @@ is a routing property for now, shown by `explain` as `cross_preferred`.
 against the spec, design fit and reuse, simplicity, conventions and
 readability, and tests. `security-privacy` and `concurrency-data-errors` join
 when `risk_tags` names `security` or `concurrency`, and `adversarial` joins
-when it names `terminal`. `generator-evaluator` takes the same list, with
+when it names `terminal`; `risk_tier = "terminal"` counts as that tag. `generator-evaluator` takes the same list, with
 correctness against the spec and simplicity by default. Every lens prompt
 carries the same context. The reviewer has read access to the whole
 repository, treats the diff stat and slices as navigation aids rather than the
@@ -320,10 +322,10 @@ finding one disposition: accepted, rejected or deferred, with a reason. The
 `generator-evaluator` evaluator does the same over its lens findings.
 
 The routing review shapes are canonical for who reviews. A lens whose `tier`
-is empty takes its pool from the shape that `routing.review.select_shape`
-picks for `risk_tier` (or the `review_shape` override): `quick` runs one junior
-reviewer, `standard` two, and `deep` up to six with its named lenses. Conditional
-lenses add to that count. Set a lens `tier` to override the shape for that lens.
+is empty takes its pool from the review selection for `risk_tier` or the
+`review_shape` override. See [review shapes](model-routing.md#review-shapes)
+for the shape rules and reviewer counts. Conditional lenses add to that count.
+Set a lens `tier` to override the shape for that lens.
 `--explain` prints the selected shape. Synthesis reconciles the evidence and
 does not take a majority vote.
 

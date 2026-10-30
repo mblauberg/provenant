@@ -324,10 +324,8 @@ their `operation_id`.
 ### Pipeline presets
 
 `provenant run --preset NAME --prompt-file FILE` expands a preset into an
-ordinary graph and submits it through the graph owner. `--wait DURATION`
-waits for graph progress, `--concurrency N` bounds admission, `--worktree PATH`
-supplies a writer binding, and repeatable `--read-root PATH` grants additional
-read access. Writer worktrees must already exist and be registered; presets
+ordinary graph and submits it through the graph owner; run flags are in
+[`docs/reference/cli.md`](../reference/cli.md). Writer worktrees must already exist and be registered; presets
 do not provision branches or checkouts. The [preset runbook](../runbooks/presets.md)
 contains starting points and batch preparation guidance.
 
@@ -403,8 +401,9 @@ Bundled `scout-swarm`, `generator-evaluator`, `review-council`, `big-batch`,
 evaluating lenses, combined review, a full batch, scouting and scoping before
 a run, and delivery through CI to land respectively. Scouts use junior tiers and remain read-only;
 implementation uses senior tiers; the end-of-batch refactor uses principal.
-The implementation lens challenges redundancy, test quality, cleanup and
-rigid over-engineering. Junior reviews on senior or principal work are
+The `generator-evaluator` default lenses are correctness-spec and simplicity;
+add `tests` or `design-fit-reuse` through its `lenses` list to challenge test
+quality and reuse. Junior reviews on senior or principal work are
 advisory. Counted acceptance reviews must meet the author's tier under
 `HARNESS.md`; add principal coverage for high-risk areas and principal-authored
 refactors. Synthesis reconciles evidence rather than taking a majority vote.

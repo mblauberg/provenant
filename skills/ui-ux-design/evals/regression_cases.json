@@ -28,7 +28,7 @@
           "engineering-docs"
         ]
       },
-      "note": "Original frontend-review boundary case (WCAG-companion). The companion places the recorded findings; this skill still owns the review workflow and the finding contract, per references/craft.md."
+      "note": "Original frontend-review boundary case (WCAG-companion). The companion places the recorded findings; this skill still owns the review workflow and the reporting paragraph in references/craft.md."
     },
     {
       "id": "r003",
@@ -43,7 +43,7 @@
           "engineering-docs"
         ]
       },
-      "note": "Lighthouse-evidence companion to r002: a Lighthouse run is one evidence lane, not a substitute for manual inspection or a standards certification; see the claim-boundary section in references/craft.md."
+      "note": "Lighthouse-evidence companion to r002: a Lighthouse run is one evidence lane, not a substitute for manual inspection or a standards certification; see the references/craft.md paragraph saying a screenshot cannot prove assistive-technology support, full WCAG conformance, field performance or cross-browser coverage."
     },
     {
       "id": "r004",
@@ -97,7 +97,9 @@
       ],
       "expected": {
         "primary_skill": "ui-ux-design",
-        "companion_skills": []
+        "companion_skills": [
+          "playwright"
+        ]
       },
       "note": "Check browser availability/version without downloading it implicitly. Keep navigation, snapshots and screenshots read-only, with output outside the reviewed tree; mark unavailable browser evidence not tested."
     },

@@ -3151,8 +3151,8 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
     for target in &f.targets.harnesses {
         fs::create_dir_all(&target.skills_dir).unwrap();
         symlink(
-            f.home.join("personal-skills/autopilot"),
-            target.skills_dir.join("autopilot"),
+            f.home.join("personal-skills/notes"),
+            target.skills_dir.join("notes"),
         )
         .unwrap();
     }
@@ -3185,8 +3185,8 @@ fn five_client_install_preserves_foreign_hooks_comments_and_reapplies() {
     install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
     for target in &f.targets.harnesses {
         assert_eq!(
-            fs::read_link(target.skills_dir.join("autopilot")).unwrap(),
-            f.home.join("personal-skills/autopilot")
+            fs::read_link(target.skills_dir.join("notes")).unwrap(),
+            f.home.join("personal-skills/notes")
         );
         assert!(target.mcp_file.is_file());
         if let Some(instruction) = &target.instruction {

@@ -35,7 +35,10 @@ each a disposition. For a quick fan-out without a graph:
   `git diff`, never the working tree, and uses no Git write verbs.
 - The brief carries the subject, the base and the spec. Never send the
   author's hypothesis, expected verdict or scratchpad.
-- Distinct model families are preferred, not guaranteed. Record when the
+- Use a distinct model family from the author when one is available; the
+  HARNESS.md review ladder requires it for `substantial` and higher work. When
+  none is available, require an independent same-family reviewer through a
+  different lens, without reducing the review count, and record that the
   family separation was unavailable; do not claim it.
 - A review that cannot read its rubric or required context is `incomplete`,
   never `clean`.

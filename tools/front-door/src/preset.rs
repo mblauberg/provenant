@@ -1636,12 +1636,15 @@ impl StageBuilder<'_> {
     /// An item without a tier takes it from the shape, and only such items count
     /// against the shape's reviewer total; a tier set in the preset is an override.
     fn select_items(&self, list: Vec<Value>) -> Result<Vec<Value>, String> {
-        let tags: Vec<&str> = self
+        let mut tags: Vec<&str> = self
             .parameters
             .get("risk_tags")
             .and_then(Value::as_array)
             .map(|tags| tags.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
+        if self.parameters.get("risk_tier").and_then(Value::as_str) == Some("terminal") {
+            tags.push("terminal");
+        }
         let hint = self.shape_hint()?;
         let shape = hint.as_ref();
         let limit = shape.map_or(usize::MAX, |shape| shape.slots.len().max(1));

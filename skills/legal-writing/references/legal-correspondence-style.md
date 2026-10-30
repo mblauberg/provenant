@@ -1,6 +1,6 @@
 # Legal Correspondence Style
 
-Use this reference for emails and letters to registries, the other party, solicitors, service contacts and internal legal-support readers. Use the forum skill for filing method, service rules, deadlines and form requirements.
+Use this reference for emails and letters to registries, the other party, solicitors, service contacts and internal legal-support readers. Use the forum skill, where one exists, for filing method, service rules, deadlines and form requirements; otherwise follow the Source Hierarchy in `verification-and-escalation.md`.
 
 ## Main Rule
 

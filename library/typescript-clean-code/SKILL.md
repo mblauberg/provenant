@@ -11,4 +11,4 @@ Parse JSON, environment, storage and network values at the boundary instead of a
 
 A voided promise can still reject: await, return or attach an error handler. Type-aware lint must be enabled for floating-promise checks. A normal test run may not check type assertions; run the project's typecheck mode.
 
-Change one compiler flag at a time and run the project-specific `tsc --noEmit` after each change. Record diagnostics and tooling incompatibilities rather than suppressing them. Leave working naming and import conventions alone.
+Change one compiler flag at a time and run the repository-prescribed targeted typecheck after each change, using `tsc --build` where project references require it. Record diagnostics and tooling incompatibilities rather than suppressing them. Leave working naming and import conventions alone.

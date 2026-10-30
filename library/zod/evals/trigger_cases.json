@@ -5,19 +5,7 @@
     {
       "id": "q1",
       "relation": "positive",
-      "prompt": "Review zod boundary behaviour.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "zod",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q2",
-      "relation": "positive",
-      "prompt": "Update the zod integration for its installed version.",
+      "prompt": "Our Zod schema parses the API payload but the default is not applied when the field is null; fix the parsing.",
       "tags": [
         "direct"
       ],
@@ -29,47 +17,73 @@
       }
     },
     {
+      "id": "q2",
+      "relation": "positive",
+      "prompt": "Add a transform to this Zod schema that normalises dates, and keep the input and output types straight.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "zod",
+        "companion_skills": []
+      }
+    },
+    {
       "id": "q3",
-      "relation": "negative",
-      "prompt": "Investigate the root cause of this zod failure without fixing it.",
+      "relation": "positive",
+      "prompt": "Migrate our schemas to the new Zod major version and list the behaviour changes in parsing and error formatting.",
       "tags": [
-        "near-miss"
+        "direct"
       ],
       "expected": {
-        "primary_skill": "diagnose",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q4",
-      "relation": "negative",
-      "prompt": "Restructure this zod code without changing behaviour.",
-      "tags": [
-        "near-miss"
-      ],
-      "expected": {
-        "primary_skill": "refactor",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q5",
-      "relation": "boundary",
-      "prompt": "Implement the approved change using zod.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "implement",
+        "primary_skill": "zod",
         "companion_skills": [
-          "zod"
+          "implement"
         ]
       }
     },
     {
+      "id": "q4",
+      "relation": "positive",
+      "prompt": "This wire contract changes a field from string to number; update the Zod schema without breaking older clients.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "zod",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q5",
+      "relation": "negative",
+      "prompt": "Fix the tsconfig strictness flags that make these types too loose.",
+      "tags": [
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "typescript-clean-code",
+        "companion_skills": []
+      }
+    },
+    {
       "id": "q6",
+      "relation": "negative",
+      "prompt": "Choose which cases to test for this validation module.",
+      "tags": [
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "test-design",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q7",
       "relation": "boundary",
-      "prompt": "Review the diff involving zod without edits.",
+      "prompt": "Review the diff that changes our Zod request schemas, read-only.",
       "tags": [
         "composition"
       ],
@@ -81,27 +95,17 @@
       }
     },
     {
-      "id": "q7",
-      "relation": "positive",
-      "prompt": "Check a subtle zod migration behaviour.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "zod",
-        "companion_skills": []
-      }
-    },
-    {
       "id": "q8",
-      "relation": "negative",
-      "prompt": "Write visual design guidance for this page.",
+      "relation": "boundary",
+      "prompt": "Implement the approved schema change using Zod at the boundary.",
       "tags": [
-        "adjacent"
+        "composition"
       ],
       "expected": {
-        "primary_skill": "ui-ux-design",
-        "companion_skills": []
+        "primary_skill": "implement",
+        "companion_skills": [
+          "zod"
+        ]
       }
     }
   ]

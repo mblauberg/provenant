@@ -30,7 +30,7 @@ Run the checks the task needs, not all of them:
 | `draft` / `rewrite` submissions | Concision and naturalising + Argument Structure + Integrity |
 | `condense` / `final-scrub` | Concision and naturalising + Integrity (condense gate) |
 | affidavit work | Affidavit + Source + Safety |
-| orders/minutes | Document Function + the Orders cut-list in `forum-and-document-recipes.md` |
+| orders/minutes | Document Function + the Orders And Minutes section of `forum-and-document-recipes.md` |
 | correspondence | Correspondence + Filing-Facing Style |
 | letter of demand or pre-action letter | Correspondence + Source + the checks in `demands-and-pre-action-correspondence.md` |
 | statutory declaration | Source + Safety + the regime and execution checks in `statutory-declarations.md` |

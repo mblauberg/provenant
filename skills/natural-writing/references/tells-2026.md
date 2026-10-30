@@ -28,8 +28,7 @@ check before they are quoted.
   (arXiv 2406.07016) measured the 2024 surge; the words turn over each release.
 - Em-dash overuse is model-specific: high in GPT-4.1 and GPT-5, low in the
   newest Anthropic and Google models (S). Explicit bans failed in some models
-  and tracked training habits ("The Last Fingerprint", arXiv 2603.27006). This
-  repository still forbids the em-dash in its own prose, as a house rule.
+  and tracked training habits ("The Last Fingerprint", arXiv 2603.27006).
 - Heavy bullets and bold in short chat answers fell for Fable 5.1 (Anthropic).
   Remove old anti-formatting rules; ask when formatting helps the reader.
 

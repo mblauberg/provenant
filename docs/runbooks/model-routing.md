@@ -128,7 +128,7 @@ reviewers = [
 
 [domains.routing.review.select]
 default = "standard"
-by_risk = { low = "quick", high = "deep" }
+by_risk = { routine = "quick", substantial = "standard", crucial = "deep", terminal = "deep" }
 by_paths = { ".github/workflows/**" = "deep" }
 ```
 
@@ -141,7 +141,7 @@ dispatch at most 64 reviewers.
 For example, review a commit with changed paths from a Git range:
 
 ```sh
-provenant review HEAD --brief-file review-brief.md --risk high --kind code --range origin/main...HEAD
+provenant review HEAD --brief-file review-brief.md --risk crucial --kind code --range origin/main...HEAD
 provenant --json review HEAD --brief-file review-brief.md --shape quick
 ```
 

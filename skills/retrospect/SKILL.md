@@ -23,8 +23,9 @@ success from a clean final answer:
   correction of an unattended run. A correction names a class of defect: sweep
   for the class.
 - Test-suite health: tests added against removed, the mock ratio and
-  assertion changes (`scripts/assertion-diff`, `scripts/find-changed-tests`).
-  A suite that only grows is a finding.
+  assertion changes. Use the target repository's test-diff tooling where its
+  `AGENTS.md`, `CONTRIBUTING` or runbooks name it; otherwise compare the test
+  diff by hand. A suite that only grows is a finding.
 
 For a wide review, fan out readers with `provenant run --preset
 fan-out-synthesise --set 'parameters.width=3' --prompt-file Q.md`, one slice of

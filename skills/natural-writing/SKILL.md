@@ -56,7 +56,8 @@ diagnose (findings only, no edit).
 ## Bounds
 
 - Never style-pass gates, ADR decisions or process runbooks.
-- Use the punctuation the sentence needs. `provenant check writing` flags
-  em-dashes and lexical hints; its silence is necessary, not sufficient, and
-  its word rules are advisory prompts for a human read.
+- Use the punctuation the sentence needs. Run `provenant check writing` if the
+  provenant CLI is available; it flags em-dashes and lexical hints, and its
+  silence is necessary, not sufficient, and its word rules are advisory prompts
+  for a human read.
 - Do not fabricate experience or sources. Flag a missing source.

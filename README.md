@@ -86,9 +86,10 @@ should not depend on judgement:
 - **Records** of every attempt, its output, cost and final state.
 - **Coordination** between sessions through durable messages, tasks and claims.
 
-Fixed task graphs are still available through `provenant fabric graph` when a
-job does have a known shape; they are one option, not the frame every task must
-fit.
+Preset graphs are the default dispatch: `provenant run --preset NAME` expands a
+bundled or repository preset into a graph. Direct single-lane dispatch is the
+alternative for one bounded job, and hand-written graphs through
+`provenant fabric graph` remain available for a known shape.
 
 ## What you get
 

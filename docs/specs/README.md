@@ -25,7 +25,7 @@ generate them instead:
 - CLI grammar: [`docs/reference/cli.md`](../reference/cli.md), from
   `provenant help --all --json`.
 - MCP tools: [`docs/reference/mcp-tools.md`](../reference/mcp-tools.md),
-  from `crates/fabric-mcp/tests/fixtures/tool-schemas.json`.
+  from `crates/fabric-mcp/tests/fixtures/all-tool-schemas.json`.
 - Config keys: [`docs/reference/config-keys.md`](../reference/config-keys.md),
   from `config/harness-knobs.json`.
 - Seatbelt profiles: `crates/providers/tests/snapshots/seatbelt/`.

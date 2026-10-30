@@ -22,8 +22,11 @@ scratch project holding the adopted package versions.
 - `npx -y` fetches Intent itself, so the first run needs the network. Its
   `list` and `load` do not call the registry (only `stale` does). Whether any
   other call is made was not tested offline.
-- Writers, never run in an app: `install`, `hooks install`, `setup`,
-  `setup-github-actions`, `edit-package-json`, `exclude`, `maintainer`.
+- Writers, which change the app: `install` and `hooks install` write skill
+  files and hooks, `setup` and `setup-github-actions` write workflow files,
+  `edit-package-json` edits `package.json`, `exclude` edits ignore config, and
+  `maintainer` is for package maintainers. Run one only when the user or the
+  repository's instructions authorise that write.
 
 ## CLI (docs only)
 
@@ -36,6 +39,8 @@ scratch project holding the adopted package versions.
 - Docs resolve to `latest` or a major (`v5`), never the installed patch. A page
   can describe an API newer than the installed version, so check the installed
   type declarations (`dist/*.d.ts`) before using a symbol.
-- Do not run `create`, `dev`, `add`, `add-on`, `template`, `starter`,
-  `pin-versions`, `clean-demos` or `telemetry`.
+- `create`, `add`, `add-on`, `template`, `starter`, `pin-versions` and
+  `clean-demos` write project files, `dev` starts a server and `telemetry`
+  changes settings. Run one only when the user or the repository's
+  instructions authorise that effect.
 - The CLI MCP server was not exercised; use the commands above.

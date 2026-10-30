@@ -46,8 +46,7 @@ will not check every line.
 
 ## Bounds
 
-- Edit living docs in place; do not append dated entries. Placement and ADR
-  scope belong to `engineering-docs`.
+- Living docs, placement and ADR scope belong to `engineering-docs`.
 - Never style-pass gates, credential custody, decision records or literal
   runbooks; edit them by hand, and check first whether a test matches their
   exact wording.

@@ -122,8 +122,10 @@ confinement checks. Edit-heavy work gets no cache preference.
 Compaction modes are `auto`, `task_boundary` and `never`. Claude launches receive
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` for a configured window unless mode is `never`.
 Task-boundary mode asks the model to compact deliberately while the cache is warm
-and prefer a fresh lane with a handoff over repeated compaction. Chair guidance
-is about 250–300k; do not lower it below about 150k without evidence. `never`
+and prefer a fresh lane with a handoff over repeated compaction. For models
+without an explicit per-model window, chair guidance is about 250–300k; do not
+lower it below about 150k without evidence. Use the per-model windows in the
+table above where specified. `never`
 suppresses deliberate compaction guidance and the window override; native
 provider safety compaction may still occur.
 

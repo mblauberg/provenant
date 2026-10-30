@@ -2,7 +2,7 @@
 
 Owner: orchestrate
 Anchor: skills/orchestrate/SKILL.md
-Source: local CLI inspection, 15 July 2026. Recheck installed help before use.
+Source: local CLI inspection, 30 October 2026 (Herdr 0.9.5). Recheck installed help before use.
 
 Herdr observes interactive work and sends fire-and-forget steering. Fabric owns
 answer-bearing assignments and retained results. Pane telemetry and scrollback
@@ -33,26 +33,28 @@ with `--no-focus` unless directed otherwise.
 
 ## Start and observe
 
-Choose `right` or `down` using the caller's layout. Start the selected
-agent's normal interactive executable, then inspect its readiness:
+Choose `right` or `down` using the caller's layout. Split the pane, set
+`pane_id` to the returned pane ID, then start the selected agent in that
+pane at its interactive shell prompt and inspect its readiness:
 
 ```sh
-herdr agent start review-peer --cwd "$PWD" --split right --no-focus -- claude
-herdr agent wait review-peer --status idle --timeout 30000
+herdr pane split --current --direction right --cwd "$PWD" --no-focus
+herdr agent start review-peer --kind claude --pane "$pane_id"
+herdr agent wait review-peer --until idle --timeout 30000
 herdr agent read review-peer --source recent-unwrapped --lines 80
 ```
 
 Record the returned pane and terminal IDs. Agent-level `idle` describes
 integration readiness; `unknown` means the integration cannot establish it.
-The pane-level unseen-completion state `done` belongs to `herdr wait
-agent-status`, not `herdr agent wait`. Neither state certifies a result.
+Use `herdr agent wait review-peer --until done --timeout 30000` to wait for
+the `done` state. Neither state certifies a result.
 
 For ordinary shell commands, use a unique completion marker and a bounded
 tail. If there is no independent work, wait once with a deadline:
 
 ```sh
 herdr pane read "$pane_id" --source recent-unwrapped --lines 80
-herdr wait output "$pane_id" --match '<completion marker>' --timeout 30000
+herdr pane wait-output "$pane_id" --match '<completion marker>' --timeout 30000
 ```
 
 Do not build a polling loop around pane status. For agents, collect the
@@ -60,9 +62,10 @@ correlated Fabric reply or durable run result and verify its evidence.
 
 ## Steering and results
 
-`herdr agent send TARGET 'bounded steering'` sends literal text and returns.
-It does not prove uptake and cannot return an answer. Use it only to steer an
-already tracked assignment. Send answer-bearing reviews, research and peer
+`herdr pane send-text "$pane_id" 'bounded steering'` sends literal text without
+submitting it. To submit a prompt, use `herdr agent prompt TARGET 'bounded
+steering' --wait --timeout 30000`. Neither proves uptake or returns an answer.
+Use these only to steer an already tracked assignment. Send answer-bearing reviews, research and peer
 tasks through Fabric; preserve correlation and named output artefacts.
 Use `provenant status` and `provenant output TARGET` for run evidence.
 

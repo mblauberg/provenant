@@ -123,14 +123,8 @@
     "catalogue_owner_count": 28,
     "dataset": "routing-holdout.yaml",
     "evaluation_id": "skill-portfolio-catalogue-20260830-live",
-    "infrastructure_fixture": {
-      "path": "tests/fixtures/current-routing-eval/dispatch_fixture.py",
-      "route": "provider-free",
-      "semantic_holdout": "unrun",
-      "status": "contract-pass"
-    },
     "planned_attempts": 6,
-    "planned_case_rows": 108,
+    "planned_case_rows": 102,
     "protocol": "live-catalogue",
     "repetitions": 3,
     "status": "provider-dependent/not-run"

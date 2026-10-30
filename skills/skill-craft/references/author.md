@@ -11,21 +11,18 @@ authoring adds.
 2. Choose the smallest container: a project rule, a skill, a deterministic
    script, an MCP or app, or a separately versioned plugin. Split only for a
    distinct trigger, authority, artefact or gate.
-3. Choose one kebab-case name. Workflow skills go under `skills/`; stack
-   technique skills go under `library/`. Role-loaded references load only from
-   under `skills/`.
-4. Keep frontmatter to `name` and `description`. Keep the body near 500 words.
-   Put repeated logic in `scripts/`, stable depth in `references/`, and output
-   shapes in `templates/`. Keep references one hop from `SKILL.md`.
+3. Choose one kebab-case name and follow the target repository's layout.
+4. Keep the skill concise and load supporting detail when needed. Follow the
+   target repository's frontmatter, size and layout rules where provided.
 5. Match freedom to risk: principles for judgement, templates for repeatable
    structure, and tested scripts for fragile steps.
-6. Write fixtures and run `scripts/check-skill-negatives`.
+6. Write trigger fixtures, including near-miss negatives, where the target
+   repository keeps them.
 7. Run the baseline, then a forward test on a realistic task in a fresh
    context. Do not leak the intended answer or diagnosis. Repair what the test
    exposes, and keep only the lines that changed behaviour.
-8. Run the gates: `scripts/check-harness`, `scripts/check-skill-negatives`,
-   `scripts/check-writing` and `provenant check writing PATHS --rules general`
-   (add `--rules legal` for legal skills).
+8. Run the validation gates the target repository's `AGENTS.md`, `CONTRIBUTING`
+   and runbooks name. If it names none, say which checks were not run.
 
 ## Description
 
