@@ -139,6 +139,155 @@ pub fn memory() -> io::Result<MemorySample> {
     })
 }
 
+/// The user's process table: how many processes the uid holds against the
+/// `RLIMIT_NPROC` soft limit. A `limit` of `u64::MAX` means unlimited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessBudget {
+    pub used: u64,
+    pub limit: u64,
+}
+
+impl ProcessBudget {
+    pub const UNLIMITED: Self = Self {
+        used: 0,
+        limit: u64::MAX,
+    };
+
+    /// Processes kept free for the user's own tools and for the recovery that
+    /// ends a runaway: a tenth of the limit, and never fewer than 64.
+    pub fn headroom(&self) -> u64 {
+        (self.limit / 10).max(64)
+    }
+
+    /// Whether a new lane or worker may start while leaving the headroom.
+    pub fn has_room(&self) -> bool {
+        self.used.saturating_add(self.headroom()) < self.limit
+    }
+}
+
+/// Sample this user's process count and limit. One probe costs about one
+/// sysctl on macOS and a `/proc` walk on Linux, so callers probe at admission
+/// and detached spawns, never per command.
+pub fn process_budget() -> io::Result<ProcessBudget> {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::zeroed();
+    // SAFETY: limit is a live, writable rlimit and the kernel retains no pointer.
+    let result = unsafe { libc::getrlimit(libc::RLIMIT_NPROC, limit.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a successful getrlimit initialised the record.
+    let limit = unsafe { limit.assume_init() }.rlim_cur;
+    let limit = if limit == libc::RLIM_INFINITY {
+        u64::MAX
+    } else {
+        #[allow(clippy::useless_conversion)]
+        u64::from(limit)
+    };
+    Ok(ProcessBudget {
+        used: user_process_count()?,
+        limit,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn user_process_count() -> io::Result<u64> {
+    /// `PROC_UID_ONLY` from `<libproc.h>`; the libc crate does not export it.
+    const PROC_UID_ONLY: u32 = 4;
+    // SAFETY: getuid has no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    // A null buffer returns a size for every process on the host, not just
+    // this uid's, so fill a buffer and count the entries the kernel writes.
+    // SAFETY: a null buffer with size 0 asks only for a byte count; no memory
+    // is written.
+    let estimate = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
+    let estimate = usize::try_from(estimate).map_err(|_| io::Error::last_os_error())? / PID_BYTES;
+    let mut slots = estimate.saturating_add(64);
+    for _ in 0..4 {
+        let mut pids = vec![0 as libc::pid_t; slots];
+        let capacity = i32::try_from(
+            pids.len()
+                .checked_mul(PID_BYTES)
+                .ok_or_else(|| io::Error::other("invalid process list size"))?,
+        )
+        .map_err(|_| io::Error::other("invalid process list size"))?;
+        // SAFETY: pids is writable for capacity bytes and the kernel retains no pointer.
+        let bytes =
+            unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity) };
+        let bytes = usize::try_from(bytes).map_err(|_| io::Error::last_os_error())?;
+        if bytes < capacity as usize {
+            return Ok(pids[..bytes / PID_BYTES]
+                .iter()
+                .filter(|pid| **pid != 0)
+                .count() as u64);
+        }
+        slots = slots
+            .checked_mul(2)
+            .ok_or_else(|| io::Error::other("invalid process list size"))?;
+    }
+    Err(io::Error::other("process list remained full after retries"))
+}
+
+#[cfg(target_os = "macos")]
+const PID_BYTES: usize = std::mem::size_of::<libc::pid_t>();
+
+/// Linux counts tasks, because `RLIMIT_NPROC` does: every thread of a process
+/// the user owns uses an entry.
+#[cfg(target_os = "linux")]
+fn user_process_count() -> io::Result<u64> {
+    // SAFETY: getuid has no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    count_linux_tasks(std::path::Path::new("/proc"), uid)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn count_linux_tasks(proc: &std::path::Path, uid: libc::uid_t) -> io::Result<u64> {
+    let mut tasks = 0_u64;
+    for entry in std::fs::read_dir(proc)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !name
+            .to_str()
+            .is_some_and(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            continue;
+        }
+        let status = match std::fs::read_to_string(entry.path().join("status")) {
+            Ok(status) => status,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let real_uid = status
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Uid:")
+                    .and_then(|value| value.split_whitespace().next())
+            })
+            .and_then(|value| value.parse::<libc::uid_t>().ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing real uid in process status",
+                )
+            })?;
+        if real_uid != uid {
+            continue;
+        }
+        let threads = match std::fs::read_dir(entry.path().join("task")) {
+            Ok(threads) => threads,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for thread in threads {
+            match thread {
+                Ok(_) => tasks = tasks.saturating_add(1),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(tasks)
+}
+
 /// Bytes available to this unprivileged user on the filesystem holding `file`.
 pub(crate) fn available_bytes(file: &File) -> io::Result<u64> {
     let stats = filesystem(file)?;
@@ -208,6 +357,34 @@ pub(crate) fn filesystem_bytes_at(path: &Path) -> io::Result<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn counts_tasks_by_real_uid_and_rejects_invalid_status() -> std::io::Result<()> {
+        let proc = tempfile::tempdir()?;
+        for (pid, status, count) in [
+            ("101", "Uid:\t42\t0\t0\t0\n", 3),
+            ("102", "Uid:\t43\t42\t42\t42\n", 2),
+        ] {
+            let process = proc.path().join(pid);
+            std::fs::create_dir_all(process.join("task"))?;
+            std::fs::write(process.join("status"), status)?;
+            for task in 0..count {
+                std::fs::create_dir(process.join("task").join(task.to_string()))?;
+            }
+        }
+        // A vanished process is ignored, including one that lost its task directory.
+        std::fs::create_dir(proc.path().join("103"))?;
+        std::fs::create_dir(proc.path().join("104"))?;
+        std::fs::write(proc.path().join("104/status"), "Uid:\t42\t42\t42\t42\n")?;
+        assert_eq!(super::count_linux_tasks(proc.path(), 42)?, 3);
+        std::fs::write(proc.path().join("104/status"), "Name:\tbroken\n")?;
+        assert_eq!(
+            super::count_linux_tasks(proc.path(), 42)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        Ok(())
+    }
+    #[test]
     fn samples_are_plausible() {
         let memory = super::memory().unwrap();
         assert!(memory.total_bytes > 0 && memory.available_bytes <= memory.total_bytes);
@@ -215,6 +392,33 @@ mod tests {
         let available = super::available_bytes(&file).unwrap();
         let total = super::total_bytes(&file).unwrap();
         assert!(available > 0 && available <= total);
+    }
+
+    #[test]
+    fn process_budget_counts_this_users_processes() {
+        let budget = super::process_budget().unwrap();
+        assert!(budget.used > 0, "this test process is in the count");
+        assert!(budget.limit >= budget.used);
+        // Only this uid's processes count, never the whole host's.
+        #[cfg(target_os = "macos")]
+        {
+            // `PROC_ALL_PIDS` is 1. SAFETY: a null buffer with size 0 only asks
+            // for a byte count.
+            let host = unsafe { libc::proc_listpids(1, 0, std::ptr::null_mut(), 0) };
+            assert!(budget.used < u64::try_from(host).unwrap() / 4);
+        }
+        assert!(super::ProcessBudget::UNLIMITED.has_room());
+    }
+
+    #[test]
+    fn headroom_is_a_tenth_of_the_limit_and_at_least_sixty_four() {
+        let at = |used, limit| super::ProcessBudget { used, limit }.has_room();
+        assert!(at(0, 2666));
+        assert!(at(2399, 2666), "headroom 266");
+        assert!(!at(2400, 2666));
+        assert!(at(99, 200), "headroom is 64 for a small limit");
+        assert!(!at(136, 200));
+        assert!(!at(10, 10));
     }
 
     #[test]

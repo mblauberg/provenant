@@ -2483,6 +2483,60 @@ fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
 }
 
 #[test]
+fn admission_refuses_near_the_user_process_limit() -> TestResult {
+    use provenant_os::sys::resources::ProcessBudget;
+    struct Processes(ProcessBudget);
+    impl Resources for Processes {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Host { available: 100 }.memory()
+        }
+        fn process_budget(&self) -> std::io::Result<ProcessBudget> {
+            Ok(self.0)
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+    }
+    for (used, limit, full) in [(2601, 2666, true), (2666, 2666, true), (100, 2666, false)] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        let run = lane(55, true);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let resources = Processes(ProcessBudget { used, limit });
+        let waits = store.lane_waits_with_resources(&[store.record(id, &call)?], &call, &resources);
+        assert_eq!(
+            waits[0]
+                .waiting_for
+                .contains(&format!("user process count {used} of {limit}")),
+            full
+        );
+        let result = store.admit(id, &attempt, &resources, &clock, &cancel);
+        if full {
+            assert!(matches!(
+                result,
+                Err(RunError::Admission(AdmissionError::Processes { used: u, limit: l }))
+                    if u == used && l == limit
+            ));
+        } else {
+            assert_eq!(
+                result?.state,
+                AttemptState::Running {
+                    extra: Default::default()
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
     use provenant_os::sys::resources::MemoryPressure;
     struct Probe {

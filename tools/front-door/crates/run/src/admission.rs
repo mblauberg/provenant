@@ -84,6 +84,10 @@ pub trait Resources {
     fn pressure(&self) -> std::io::Result<Option<resources::MemoryPressure>> {
         Ok(None)
     }
+    /// The user's process count against its limit. Test probes are unlimited.
+    fn process_budget(&self) -> std::io::Result<resources::ProcessBudget> {
+        Ok(resources::ProcessBudget::UNLIMITED)
+    }
     fn disk(&self, attempt: &Directory) -> std::io::Result<u64>;
     /// Host admission observes the same output volumes as the running guardian.
     /// Test probes may retain their synthetic attempt-level observation.
@@ -111,6 +115,9 @@ impl Resources for SystemResources {
     }
     fn pressure(&self) -> std::io::Result<Option<resources::MemoryPressure>> {
         resources::memory_pressure()
+    }
+    fn process_budget(&self) -> std::io::Result<resources::ProcessBudget> {
+        resources::process_budget()
     }
     fn disk(&self, attempt: &Directory) -> std::io::Result<u64> {
         attempt.available_bytes()
@@ -217,7 +224,14 @@ impl RunStore {
                     self.disk_pause_wait(lane)
                         .or_else(|| self.build_slot_wait(lane, call))?
                 } else if matches!(lane.state, AttemptState::Queued { .. }) {
-                    "launch: not yet handed to a guardian".to_owned()
+                    self.recovery_process_wait(lane.run_id, call)
+                        .unwrap_or_else(|| match resources.process_budget() {
+                            Ok(budget) if !budget.has_room() => format!(
+                                "host capacity: user process count {} of {}",
+                                budget.used, budget.limit
+                            ),
+                            _ => "launch: not yet handed to a guardian".to_owned(),
+                        })
                 } else {
                     let active: i64 = self
                         .db
@@ -250,6 +264,13 @@ impl RunStore {
                         && pressure_threshold.defers(pressure)
                     {
                         format!("host capacity: memory pressure {pressure:?}")
+                    } else if let Ok(budget) = resources.process_budget()
+                        && !budget.has_room()
+                    {
+                        format!(
+                            "host capacity: user process count {} of {}",
+                            budget.used, budget.limit
+                        )
                     } else {
                         "host capacity: active lane caps and memory or disk floors".to_owned()
                     }
@@ -511,6 +532,13 @@ impl RunStore {
             {
                 return Err(RunError::Admission(AdmissionError::BuildSettings));
             }
+            // Like pressure, an unreadable process budget is logged and does
+            // not hold the lane: the limit is unknown, not exceeded.
+            let processes = resources
+                .process_budget()
+                .inspect_err(|error| eprintln!("admission: process budget probe failed: {error}"))
+                .ok()
+                .filter(|budget| !budget.has_room());
             let fits = match (
                 resources.memory(),
                 pressure,
@@ -535,14 +563,20 @@ impl RunStore {
                             free: disk,
                             floor,
                         }))
+                    } else if let Some(level) = pressure {
+                        Some(RunError::Admission(AdmissionError::MemoryPressure {
+                            level: format!("{level:?}"),
+                        }))
                     } else {
-                        pressure.map(|level| {
-                            RunError::Admission(AdmissionError::MemoryPressure {
-                                level: format!("{level:?}"),
+                        processes.map(|budget| {
+                            RunError::Admission(AdmissionError::Processes {
+                                used: budget.used,
+                                limit: budget.limit,
                             })
                         })
                     };
                     pressure.is_none()
+                        && processes.is_none()
                         && memory.total_bytes > 0
                         && u128::from(memory.available_bytes) * 10_000
                             >= u128::from(memory.total_bytes)
@@ -737,4 +771,44 @@ pub(crate) fn update_attempt(
         return Err(RunError::Conflict);
     }
     insert_event(tx, next)
+}
+
+#[cfg(test)]
+mod process_wait_tests {
+    use super::*;
+
+    struct Full;
+    impl Resources for Full {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            SystemResources.memory()
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+        fn process_budget(&self) -> std::io::Result<resources::ProcessBudget> {
+            Ok(resources::ProcessBudget {
+                used: 950,
+                limit: 1000,
+            })
+        }
+    }
+
+    #[test]
+    fn queued_lane_reports_process_capacity() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let lane = store.record(run.attempts[0].attempt_id, &call)?;
+        let waits = store.lane_waits_with_resources(&[lane], &call, &Full);
+        assert_eq!(
+            waits[0].waiting_for,
+            "host capacity: user process count 950 of 1000"
+        );
+        Ok(())
+    }
 }

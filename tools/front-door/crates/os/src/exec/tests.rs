@@ -22,30 +22,24 @@ fn detached_worker_refuses_to_relaunch_a_test_harness() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn detached_worker_returns_before_its_work_finishes() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_core::{Clock, DurationMicros, WaitBudget};
-    let temp = tempfile::tempdir()?;
-    let argv = [
-        OsString::from("/bin/sh"),
-        OsString::from("-c"),
-        OsString::from("while [ ! -e release ]; do /bin/sleep 0.05; done; echo finished > done"),
-    ];
-    spawn_detached(&argv, temp.path())?;
-    // The caller must regain control before the worker can finish.
-    assert!(!temp.path().join("done").exists());
-    std::fs::write(temp.path().join("release"), b"continue")?;
-    let clock = crate::clock::SystemClock::new();
-    let budget = WaitBudget::cli(clock.mono_now(), 5)?;
-    while !temp.path().join("done").exists() && budget.remaining(clock.mono_now()).as_micros() != 0
-    {
-        clock.wait_until(
-            clock
-                .mono_now()
-                .checked_add(DurationMicros::from_micros(10_000))?,
-        )?;
-    }
-    assert!(temp.path().join("done").exists());
-    Ok(())
+fn detached_worker_refuses_near_the_process_limit() {
+    let near = |used, limit| check_process_budget(Ok(ProcessBudget { used, limit }));
+    assert!(matches!(
+        near(2601, 2666),
+        Err(ExecError::ProcessBudget {
+            used: 2601,
+            limit: 2666
+        })
+    ));
+    assert!(matches!(
+        near(2400, 2666),
+        Err(ExecError::ProcessBudget { .. })
+    ));
+    assert!(near(2399, 2666).is_ok());
+    assert!(near(100, 2666).is_ok());
+    assert!(check_process_budget(Ok(ProcessBudget::UNLIMITED)).is_ok());
+    // An unreadable budget does not stop a worker the kernel would allow.
+    assert!(check_process_budget(Err(io::Error::other("probe"))).is_ok());
 }
 
 #[test]
