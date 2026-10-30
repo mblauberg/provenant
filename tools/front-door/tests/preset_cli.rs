@@ -7,6 +7,13 @@ use std::{path::PathBuf, process::Command};
 fn fixture_cli() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
     provenant_os::fixture::scrub_git_env(&mut command);
+    // Drop inherited PROVENANT_* settings: a lane's markers would make the
+    // fixture CLI act as a lane member.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("PROVENANT_") {
+            command.env_remove(key);
+        }
+    }
     command.env("GIT_CONFIG_GLOBAL", "/dev/null");
     command.env("GIT_CONFIG_NOSYSTEM", "1");
     command
@@ -922,7 +929,7 @@ impl ExperimentProject {
 
     fn run(&self, extra: &[&str]) -> std::io::Result<std::process::Output> {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        Command::new(env!("CARGO_BIN_EXE_provenant"))
+        fixture_cli()
             .current_dir(&self.project)
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
