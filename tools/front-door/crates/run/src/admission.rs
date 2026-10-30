@@ -232,7 +232,11 @@ impl RunStore {
                     "host_stalled: supervisor is in uninterruptible sleep".to_owned()
                 } else if matches!(lane.state, AttemptState::Running { .. }) {
                     self.disk_pause_wait(lane)
-                        .or_else(|| self.build_slot_wait(lane, call))?
+                        .or_else(|| self.build_slot_wait(lane, call))
+                        .or_else(|| {
+                            lane.provider_silent_for_ms.0
+                                .map(provenant_records::run::provider_silence_reason)
+                        })?
                 } else if matches!(lane.state, AttemptState::Queued { .. }) {
                     self.recovery_process_wait(lane.run_id, call)
                         .unwrap_or_else(|| match resources.process_budget() {

@@ -345,7 +345,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 
 | Field | Value |
 |---|---|
-| `default` | `300` |
+| `default` | `1800` |
 | `effect` | `"Mark a provider observation silent after this many seconds without output or CPU progress; never kill it for silence."` |
 | `max` | `3600` |
 | `min` | `1` |

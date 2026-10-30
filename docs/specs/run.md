@@ -445,6 +445,13 @@ capacity. It reads the store and host ledger, from a nested lane too, and names 
 listings show the same two fields: the peer derives them from its own store and
 ledger (peer action `lane_waits`) and an older peer that does not know the
 action simply shows none.
+While a running lane's identity-checked guardian checkpoint reports silence,
+`lanes` and `status` show `provider silent for <duration>; provider still
+running` as its reason and `waiting_for`, unless a visible disk pause or build
+slot wait supplies a more specific reason. This observation clears when
+progress resumes and never changes the lane state. Wait commands return early
+with `condition_met: false`, `timed_out: false`, and a reason naming the silent
+lane; silence never counts as completion or settlement.
 - Why: an accepted receipt must mean durable admission, and read-only lanes
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.

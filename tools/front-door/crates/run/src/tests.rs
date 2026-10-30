@@ -1249,6 +1249,77 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
+    for checkpoint in [
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": {"run": RunId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 9},
+            "silent": true,
+            "silent_for_ms": 1_800_000
+        }),
+        serde_json::json!({"schema_version": 1, "scope": "invalid", "silent": true}),
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": {"run": RunId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 0},
+            "observed_at": WallTime::from_micros(1_000_000)?,
+            "silent": true,
+            "silent_for_ms": 1_800_000
+        }),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = TestClock::new(WallTime::from_micros(10_000_000)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let directory = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, true)?;
+        artifacts::seal(
+            &directory,
+            "process.json",
+            &serde_json::to_vec(&checkpoint)?,
+            RECORD_LIMIT,
+        )?;
+        let id = input.attempts[0].attempt_id;
+        assert!(
+            store
+                .record_observed(id, &call)?
+                .provider_silent_for_ms
+                .0
+                .is_none()
+        );
+        // Recovery and mutation reads still refuse a checkpoint for another scope.
+        if checkpoint["observed_at"].is_null() {
+            assert!(store.record(id, &call).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn process_checkpoint_freshness_allows_one_second_of_clock_skew() -> TestResult {
+    let now = WallTime::from_micros(10_000_000)?;
+    assert!(crate::reader::process_observation_fresh(
+        WallTime::from_micros(11_000_000)?,
+        now
+    ));
+    assert!(!crate::reader::process_observation_fresh(
+        WallTime::from_micros(11_000_001)?,
+        now
+    ));
+    assert!(crate::reader::process_observation_fresh(
+        WallTime::from_micros(5_000_000)?,
+        now
+    ));
+    assert!(!crate::reader::process_observation_fresh(
+        WallTime::from_micros(4_999_999)?,
+        now
+    ));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn read_only_open_works_without_directory_write_access_or_creating_files() -> TestResult {

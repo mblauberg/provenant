@@ -761,7 +761,7 @@ pub struct CapturePlan {
 }
 // Registry default for lanes.silence_seconds, expressed in milliseconds.
 fn default_silence_ms() -> u64 {
-    300_000
+    1_800_000
 }
 impl Default for CapturePlan {
     fn default() -> Self {
@@ -783,6 +783,17 @@ impl CapturePlan {
     /// Silence is an observation only and never authorises a stop.
     pub fn silent(&self, now_ms: u64, last_progress_ms: Option<u64>) -> bool {
         now_ms.saturating_sub(last_progress_ms.unwrap_or(0)) >= self.silence_ms
+    }
+
+    /// Silence is inapplicable while the guardian has paused disk work.
+    pub fn silent_for_ms(
+        &self,
+        now_ms: u64,
+        last_progress_ms: Option<u64>,
+        disk_paused: bool,
+    ) -> Option<u64> {
+        (!disk_paused && self.silent(now_ms, last_progress_ms))
+            .then(|| now_ms.saturating_sub(last_progress_ms.unwrap_or(0)))
     }
 
     pub(crate) fn validate(&self) -> Result<()> {

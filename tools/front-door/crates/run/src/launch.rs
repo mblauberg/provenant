@@ -83,7 +83,7 @@ pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64) -> CapturePlan {
         silence_ms: task
             .profile
             .knob_u64("lanes.silence_seconds")
-            .unwrap_or(300)
+            .unwrap_or(1800)
             .saturating_mul(1000),
         ..CapturePlan::default()
     }
