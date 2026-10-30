@@ -65,7 +65,7 @@ disallowed_methods = "deny"
 
 [package]
 name = "provenant"
-version = "1.4.1"
+version = "1.4.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Provenant command composition and transport edge"

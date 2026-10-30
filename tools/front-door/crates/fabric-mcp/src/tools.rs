@@ -1,6 +1,8 @@
 //! Typed tool inputs and the single service boundary used by the transport.
 use crate::{render, schema};
-use provenant_core::{CancelToken, Clock, DurationMicros, OperationId, WaitBudget, WaitTransport};
+use provenant_core::{
+    CancelToken, Clock, DurationMicros, MonoTime, OperationId, WaitBudget, WaitTransport,
+};
 use provenant_fabric_runtime::config::Limits;
 pub use provenant_fabric_runtime::coordination::facade::*;
 use provenant_fabric_runtime::coordination::input::{InputError, ValidateInput};
@@ -9,6 +11,7 @@ pub use provenant_fabric_runtime::coordination::{
     MailInput, Mutation, TaskInput,
 };
 use provenant_fabric_runtime::inbox::{InboxError, InboxInput};
+use provenant_fabric_runtime::runs::RunResult;
 use provenant_records::control::CONTROL_UNSUPPORTED;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1201,7 +1204,14 @@ impl ToolCall {
                     | RunInput::Resume { operation_id, .. } => Some(operation_id.clone()),
                     _ => None,
                 };
-                let mut value = serde_json::to_value(service.facade.run(input, budget, cancel)?)?;
+                let wait = match &input {
+                    RunInput::Wait { condition, .. } => Some(*condition),
+                    _ => None,
+                };
+                let mut value = match service.facade.run(input, budget, cancel) {
+                    Ok(run) => serde_json::to_value(run)?,
+                    Err(error) => expired_wait(error, wait, budget, service.clock.mono_now())?,
+                };
                 compact_run(&mut value)?;
                 if let Some(operation_id) = operation_id {
                     value["operation_id"] = serde_json::to_value(operation_id)?;
@@ -1214,7 +1224,14 @@ impl ToolCall {
                     | RunInput::Resume { operation_id, .. } => Some(operation_id.clone()),
                     _ => None,
                 };
-                let mut value = serde_json::to_value(service.facade.run(input, budget, cancel)?)?;
+                let wait = match &input {
+                    RunInput::Wait { condition, .. } => Some(*condition),
+                    _ => None,
+                };
+                let mut value = match service.facade.run(input, budget, cancel) {
+                    Ok(run) => serde_json::to_value(run)?,
+                    Err(error) => expired_wait(error, wait, budget, service.clock.mono_now())?,
+                };
                 if let Some(operation_id) = operation_id {
                     value["operation_id"] = serde_json::to_value(operation_id)?;
                 }
@@ -1414,6 +1431,36 @@ fn compact_run(value: &mut Value) -> Result<(), ServiceError> {
         }
     }
     Ok(())
+}
+
+/// A wait whose budget expires before its first observation is still a
+/// timed-out wait, not a failed call. Reply with the same typed wire shape
+/// `RunResult::Wait` uses everywhere else, including the empty `attempts` list.
+/// A timeout from any other source (for example a subprocess deadline) stays an
+/// error: only an exhausted wait budget converts it.
+fn expired_wait(
+    error: FacadeError,
+    condition: Option<WaitCondition>,
+    budget: WaitBudget,
+    now: MonoTime,
+) -> Result<Value, ServiceError> {
+    let exhausted = budget.remaining(now).as_micros() == 0;
+    let Some(condition) = condition.filter(|_| exhausted && matches!(error, FacadeError::Timeout))
+    else {
+        return Err(error.into());
+    };
+    let mut extra = provenant_records::ExtraFields::new();
+    extra.insert(
+        "observation_error".into(),
+        serde_json::json!({"code": error.code(), "message": error.to_string(), "hint": "Repeat the wait with the same targets to keep observing the runs."}),
+    );
+    Ok(serde_json::to_value(RunResult::Wait {
+        extra,
+        condition,
+        attempts: Vec::new(),
+        satisfied: false,
+        timed_out: true,
+    })?)
 }
 
 fn coverage_after_timeout(

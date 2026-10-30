@@ -76,8 +76,13 @@ pub fn hint(state_dir: &Path, scopes: &[Scope]) {
 /// The write is not fsynced. A power loss can roll the signal back to an
 /// earlier generation; the owner's commit itself is already durable.
 pub fn bump_scopes(state_dir: &Path, scopes: &[Scope]) -> io::Result<()> {
+    bump_applied(state_dir, scopes).map(|_| ())
+}
+
+/// `bump_scopes`, reporting whether the bump was written or skipped.
+fn bump_applied(state_dir: &Path, scopes: &[Scope]) -> io::Result<bool> {
     if scopes.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let dir = Directory::open_anchor(state_dir).map_err(io::Error::from)?;
     let name = OsStr::new(FILE_NAME);
@@ -93,7 +98,7 @@ pub fn bump_scopes(state_dir: &Path, scopes: &[Scope]) -> io::Result<()> {
     };
     if !lock_bounded(&file)? {
         // Another writer holds the signal and will bump on its own commit.
-        return Ok(());
+        return Ok(false);
     }
 
     dir.verify_signal_file(name, &file)
@@ -132,7 +137,7 @@ pub fn bump_scopes(state_dir: &Path, scopes: &[Scope]) -> io::Result<()> {
     file.write_all(&data)?;
     file.set_len(data.len() as u64)?;
     // No fsync: this is a hint, and the commit it follows is already durable.
-    Ok(())
+    Ok(true)
 }
 
 /// Take the exclusive signal lock within the bounded retry. `false` on timeout.
@@ -184,17 +189,24 @@ mod tests {
         // Create the signal first: the test pins writer serialisation, not
         // coincident first creation, which owners tolerate.
         std::fs::write(path.join(FILE_NAME), b"{}").unwrap();
+        // A bump that times out on the lock is skipped by contract, so count
+        // the bumps that were written: none may be lost or torn.
+        let applied = std::sync::atomic::AtomicU64::new(0);
         std::thread::scope(|threads| {
             for _ in 0..4 {
                 threads.spawn(|| {
                     for _ in 0..10 {
-                        bump(path, Scope::Inbox).unwrap();
+                        if bump_applied(path, &[Scope::Inbox]).unwrap() {
+                            applied.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                 });
             }
         });
         let first = read(path).unwrap();
-        assert_eq!(first.inbox, Some(40));
+        let applied = applied.into_inner();
+        assert!(applied > 0);
+        assert_eq!(first.inbox, Some(applied));
         std::fs::remove_file(path.join(FILE_NAME)).unwrap();
         assert!(read(path).unwrap().epoch.is_none());
         bump(path, Scope::Inbox).unwrap();

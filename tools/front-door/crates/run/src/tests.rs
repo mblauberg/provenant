@@ -131,6 +131,18 @@ pub(super) fn clock() -> TestClock {
 pub(super) fn call<'a>(clock: &'a TestClock, cancel: &'a CancelToken) -> Request<'a> {
     Request { clock, cancel }
 }
+/// The provenance of a refused artifact. Any other outcome fails the test.
+pub(super) fn artifact_provenance<T>(result: Result<T>) -> ArtifactProvenance {
+    match result {
+        Err(RunError::ArtifactMismatch(provenance)) => provenance,
+        other => panic!("expected an artifact mismatch, got {:?}", other.err()),
+    }
+}
+/// The 12-digit prefix a digest comparison reports, built without the code under test.
+pub(super) fn digest_prefix(digest: impl std::fmt::Display) -> ArtifactValue {
+    let text = digest.to_string();
+    ArtifactValue::Digest(text.trim_start_matches("sha256:")[..12].to_string())
+}
 pub(super) fn input() -> PreparedRun {
     let task = TaskId::from_bytes([3; 16]);
     PreparedRun {
@@ -726,11 +738,60 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
         );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
+    std::fs::write(&path, vec![b'x'; text.len() + 1])?;
+    assert_eq!(
+        artifact_provenance(store.stream_result(id, &call, None)),
+        ArtifactProvenance {
+            check: ArtifactCheck::RecordedLength,
+            artifact: "result.md".into(),
+            expected: Some(ArtifactValue::Length(text.len() as u64)),
+            actual: Some(ArtifactValue::Length(text.len() as u64 + 1)),
+        }
+    );
     std::fs::write(path, vec![b'x'; text.len()])?;
-    assert!(matches!(
-        store.stream_result(id, &call, None),
-        Err(RunError::ArtifactMismatch)
-    ));
+    assert_eq!(
+        artifact_provenance(store.stream_result(id, &call, None)),
+        ArtifactProvenance {
+            check: ArtifactCheck::RecordedDigest,
+            artifact: "result.md".into(),
+            expected: Some(digest_prefix(CanonicalV1::file_digest(text.as_bytes()))),
+            actual: Some(digest_prefix(CanonicalV1::file_digest(&vec![
+                b'x';
+                text.len()
+            ]))),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let stored = store.run(input.run_id, &call)?.request_digest;
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/request.json", input.run_id));
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    value["concurrency"] = 99.into();
+    let recomputed = serde_json::from_value::<CanonicalRequest>(value.clone())?.digest()?;
+    std::fs::write(&path, serde_json::to_vec(&value)?)?;
+    assert_eq!(
+        artifact_provenance(store.request(input.run_id, &call)),
+        ArtifactProvenance {
+            check: ArtifactCheck::RequestDigest,
+            artifact: "request.json".into(),
+            expected: Some(digest_prefix(stored)),
+            actual: Some(digest_prefix(recomputed)),
+        }
+    );
     Ok(())
 }
 
@@ -1476,10 +1537,19 @@ fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResu
     )?;
     let mut recomputed = publication();
     recomputed.result = "different text after restart";
-    assert!(matches!(
-        store.publish_terminal(id, 1, &recomputed, &exit(), &call),
-        Err(RunError::ArtifactMismatch)
-    ));
+    assert_eq!(
+        artifact_provenance(store.publish_terminal(id, 1, &recomputed, &exit(), &call)),
+        ArtifactProvenance {
+            check: ArtifactCheck::SealConflict,
+            artifact: "result.md".into(),
+            expected: Some(digest_prefix(CanonicalV1::file_digest(
+                publication().result.as_bytes()
+            ))),
+            actual: Some(digest_prefix(CanonicalV1::file_digest(
+                recomputed.result.as_bytes()
+            ))),
+        }
+    );
     store.recover_result_only(id, &recomputed, &exit(), &call)?;
     assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
     assert_eq!(

@@ -1,8 +1,8 @@
 //! The MCP dependency edge is runtime-only, including the real-store tests.
 use crate::tools::*;
 use provenant_core::{
-    ActorId, CancelToken, Clock, MonoTime, PathResolver, ProjectId, RootInputs, TestClock,
-    WaitBudget, WallTime,
+    ActorId, CancelToken, Clock, DurationMicros, MonoTime, PathResolver, ProjectId, RootInputs,
+    TestClock, WaitBudget, WallTime,
 };
 use provenant_fabric_runtime::coordination::{CoordinationService, ThreadPause};
 use provenant_fabric_runtime::inbox::{InboxError, InboxInput, InboxResult};
@@ -32,11 +32,47 @@ impl PathResolver for Resolver {
 struct Fact {
     state: &'static str,
 }
+
+/// A clock the fake facade and the service share, so a simulated wait can
+/// exhaust its budget before the facade returns `Timeout`.
+#[derive(Clone)]
+struct SharedClock(std::sync::Arc<std::sync::Mutex<TestClock>>);
+impl SharedClock {
+    fn new(wall: WallTime, mono: MonoTime) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(TestClock::new(
+            wall, mono,
+        ))))
+    }
+    fn advance(&self, duration: DurationMicros) {
+        let mut clock = self.0.lock().unwrap();
+        clock.advance(duration).unwrap();
+    }
+}
+impl Clock for SharedClock {
+    fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
+        self.0.lock().unwrap().wall_now()
+    }
+    fn mono_now(&self) -> MonoTime {
+        self.0.lock().unwrap().mono_now()
+    }
+    fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+        self.0.lock().unwrap().wait_until(deadline)
+    }
+    fn host_monotonic_micros(&self) -> Result<u64, provenant_core::TimeError> {
+        self.0.lock().unwrap().host_monotonic_micros()
+    }
+    fn boot_identity(&self) -> Result<String, provenant_core::TimeError> {
+        self.0.lock().unwrap().boot_identity()
+    }
+}
+
 struct FakeFacade;
 
 struct SubmitFacade {
     fail_first: bool,
     large_wait: bool,
+    expire_run: bool,
+    clock: Option<SharedClock>,
     budgets: Vec<u64>,
     reads: Vec<u64>,
 }
@@ -73,6 +109,12 @@ impl F3Facade for SubmitFacade {
     ) -> Result<Value, FacadeError> {
         self.budgets
             .push(budget.remaining(MonoTime::from_micros(0)).as_micros());
+        if self.expire_run {
+            if let Some(clock) = &self.clock {
+                clock.advance(DurationMicros::from_seconds(2 * crate::MAX_WAIT_SECONDS).unwrap());
+            }
+            return Err(FacadeError::Timeout);
+        }
         Ok(
             json!({"timed_out":false, "padding": if self.large_wait { "x".repeat(5000) } else { String::new() }}),
         )
@@ -127,6 +169,8 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
     let facade = SubmitFacade {
         fail_first: true,
         large_wait: false,
+        expire_run: false,
+        clock: None,
         budgets: vec![],
         reads: vec![],
     };
@@ -185,6 +229,47 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
     assert!(response["continuation"].as_str().is_some());
     Ok(())
 }
+
+#[test]
+fn wait_that_expires_before_observation_reports_timed_out() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.join("state"));
+    let root = inputs.resolve(&Resolver)?.state;
+    let clock = SharedClock::new(
+        WallTime::from_micros(2_000_000_000_000_000)?,
+        MonoTime::from_micros(0),
+    );
+    let coordination = CoordinationService::open(
+        &root,
+        ProjectId::from_bytes([1; 16]),
+        ActorId::from_bytes([2; 16]),
+        &clock,
+        &ThreadPause,
+        &CancelToken::new(),
+    )?;
+    let facade = SubmitFacade {
+        fail_first: false,
+        large_wait: false,
+        expire_run: true,
+        clock: Some(clock.clone()),
+        budgets: vec![],
+        reads: vec![],
+    };
+    let mut service = Service::new(coordination, facade, &clock);
+    let response = ToolCall::parse("fabric_run", json!({"op":"wait","targets":[{"attempt":"11111111111111111111111111111111"}],"condition":"all","wait_seconds":1}))?
+        .execute(&mut service, &CancelToken::new())?
+        .structured_content;
+    assert_eq!(response["timed_out"], true, "{response}");
+    assert_eq!(response["satisfied"], false, "{response}");
+    assert_eq!(
+        response["observation_error"]["code"], "timeout",
+        "{response}"
+    );
+    Ok(())
+}
+
 impl F3Facade for FakeFacade {
     type Identity = Fact;
     type Submit = Fact;

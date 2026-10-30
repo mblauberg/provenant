@@ -548,17 +548,22 @@ mod tests {
     }
 
     #[test]
-    fn only_accounts_that_are_configuration_directories_become_install_targets() {
+    fn only_accounts_that_are_configuration_directories_become_install_targets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // `homes` canonicalizes each directory, and macOS links `/home` away,
+        // so build the fixture under the canonical temp dir instead.
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?.join("u");
         let mut settings = Settings::default();
         for (adapter, label, directory) in [
-            ("claude", "work", "/home/u/.claude-work"),
-            ("codex", "alt", "/home/u/.codex-alt"),
-            ("cursor", "me", "/home/u/Library/Cursor"),
-            ("opencode", "local", "/home/u/ledger"),
+            ("claude", "work", home.join(".claude-work")),
+            ("codex", "alt", home.join(".codex-alt")),
+            ("cursor", "me", home.join("Library/Cursor")),
+            ("opencode", "local", home.join("ledger")),
         ] {
             settings.entries.insert(
                 format!("{adapter}-{label}"),
-                registration(adapter, label, directory),
+                registration(adapter, label, &directory.to_string_lossy()),
             );
         }
         let homes: Vec<_> = homes(&settings)
@@ -568,10 +573,11 @@ mod tests {
         assert_eq!(
             homes,
             [
-                ("claude", PathBuf::from("/home/u/.claude-work")),
-                ("codex", PathBuf::from("/home/u/.codex-alt")),
+                ("claude", home.join(".claude-work")),
+                ("codex", home.join(".codex-alt")),
             ]
         );
+        Ok(())
     }
 
     #[test]

@@ -5,8 +5,8 @@
 use super::*;
 use crate::tools::*;
 use provenant_core::{
-    ActorId, CancelToken, MonoTime, PathResolver, ProjectId, RootInputs, TestClock, WaitBudget,
-    WallTime,
+    ActorId, CancelToken, Clock, DurationMicros, MonoTime, PathResolver, ProjectId, RootInputs,
+    TestClock, WaitBudget, WallTime,
 };
 use provenant_fabric_runtime::coordination::{CoordinationService, ThreadPause};
 use serde::Serialize;
@@ -199,6 +199,119 @@ fn invalid_tool_arguments_are_results_with_the_field_path() {
             .unwrap()
             .contains("extra")
     );
+    assert!(matches!(server.finish(), Ok(())));
+}
+
+#[test]
+fn expired_wait_is_a_typed_wait_result_not_an_error() {
+    let gate = Arc::new(Gate::default());
+    gate.fail_run(FacadeError::Timeout);
+    let server = Server::start(FakeFactory::new(gate), false);
+    server.send(&initialize());
+    server.send(&notification("notifications/initialized", json!({})));
+    server.send(&tool_call(
+        "expired",
+        "fabric_run",
+        json!({"op":"wait","targets":[{"attempt":"00000000000000000000000000000001"}],"condition":"all","wait_seconds":1}),
+    ));
+    let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
+    let result = &frames[1]["result"];
+    assert!(
+        result.get("isError").is_none() || result["isError"] == false,
+        "{result}"
+    );
+    let payload = &result["structuredContent"];
+    assert_eq!(payload["result"], "wait", "{payload}");
+    assert_eq!(payload["timed_out"], true, "{payload}");
+    assert_eq!(payload["satisfied"], false, "{payload}");
+    assert_eq!(payload["attempts"], json!([]), "{payload}");
+    assert_eq!(payload["observation_error"]["code"], "timeout", "{payload}");
+    // The wire shape every other wait reply uses must decode here too.
+    let decoded: provenant_fabric_runtime::runs::RunResult =
+        serde_json::from_value(payload.clone()).unwrap();
+    assert!(
+        matches!(
+            decoded,
+            provenant_fabric_runtime::runs::RunResult::Wait {
+                timed_out: true,
+                satisfied: false,
+                ref attempts,
+                ..
+            } if attempts.is_empty()
+        ),
+        "{payload}"
+    );
+    assert!(matches!(server.finish(), Ok(())));
+}
+
+#[test]
+fn wait_that_fails_for_another_reason_stays_an_error() {
+    let gate = Arc::new(Gate::default());
+    gate.fail_run(FacadeError::NotFound);
+    let server = Server::start(FakeFactory::new(gate), false);
+    server.send(&initialize());
+    server.send(&notification("notifications/initialized", json!({})));
+    server.send(&tool_call(
+        "missing",
+        "fabric_run",
+        json!({"op":"wait","targets":[{"attempt":"00000000000000000000000000000001"}],"condition":"all","wait_seconds":1}),
+    ));
+    let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
+    let result = &frames[1]["result"];
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(result["structuredContent"]["code"], "not_found", "{result}");
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not_found"),
+        "{result}"
+    );
+    assert!(matches!(server.finish(), Ok(())));
+}
+
+#[test]
+fn timeout_outside_a_wait_stays_an_error_even_when_the_budget_is_spent() {
+    let gate = Arc::new(Gate::default());
+    gate.fail_run(FacadeError::Timeout);
+    let server = Server::start(FakeFactory::new(gate), false);
+    server.send(&initialize());
+    server.send(&notification("notifications/initialized", json!({})));
+    server.send(&tool_call(
+        "status",
+        "fabric_run",
+        json!({"op":"status","target":{"attempt":"00000000000000000000000000000001"}}),
+    ));
+    let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
+    let result = &frames[1]["result"];
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(result["structuredContent"]["code"], "timeout", "{result}");
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("timeout"),
+        "{result}"
+    );
+    assert!(matches!(server.finish(), Ok(())));
+}
+
+#[test]
+fn wait_timeout_with_budget_left_is_propagated_as_an_error() {
+    let gate = Arc::new(Gate::default());
+    gate.fail_run_without_spending_budget(FacadeError::Timeout);
+    let server = Server::start(FakeFactory::new(gate), false);
+    server.send(&initialize());
+    server.send(&notification("notifications/initialized", json!({})));
+    server.send(&tool_call(
+        "provider-timeout",
+        "fabric_run",
+        json!({"op":"wait","targets":[{"attempt":"00000000000000000000000000000001"}],"condition":"all","wait_seconds":5}),
+    ));
+    let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
+    let result = &frames[1]["result"];
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(result["structuredContent"]["code"], "timeout", "{result}");
     assert!(matches!(server.finish(), Ok(())));
 }
 
@@ -912,6 +1025,37 @@ fn shipped_clients_first_requests_negotiate_the_supported_eras() {
     }
 }
 
+/// A clock the fake facade and the service share, so a simulated wait can
+/// exhaust its budget before the facade returns `Timeout`.
+#[derive(Clone)]
+struct SharedClock(Arc<Mutex<TestClock>>);
+impl SharedClock {
+    fn new(wall: WallTime, mono: MonoTime) -> Self {
+        Self(Arc::new(Mutex::new(TestClock::new(wall, mono))))
+    }
+    fn advance(&self, duration: DurationMicros) {
+        let mut clock = self.0.lock().unwrap();
+        clock.advance(duration).unwrap();
+    }
+}
+impl Clock for SharedClock {
+    fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
+        self.0.lock().unwrap().wall_now()
+    }
+    fn mono_now(&self) -> MonoTime {
+        self.0.lock().unwrap().mono_now()
+    }
+    fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
+        self.0.lock().unwrap().wait_until(deadline)
+    }
+    fn host_monotonic_micros(&self) -> Result<u64, provenant_core::TimeError> {
+        self.0.lock().unwrap().host_monotonic_micros()
+    }
+    fn boot_identity(&self) -> Result<String, provenant_core::TimeError> {
+        self.0.lock().unwrap().boot_identity()
+    }
+}
+
 #[derive(Default)]
 struct Gate {
     state: Mutex<GateState>,
@@ -928,6 +1072,8 @@ struct GateState {
     run_cancel_calls: usize,
     output_bytes: Vec<u8>,
     submit_error: Option<FacadeError>,
+    run_error: Option<FacadeError>,
+    spend_run_budget: bool,
     tokens: Vec<CancelToken>,
 }
 impl Gate {
@@ -956,6 +1102,16 @@ impl Gate {
     }
     fn panic_next(&self, count: usize) {
         self.state.lock().unwrap().panic_remaining = count;
+    }
+    fn fail_run(&self, error: FacadeError) {
+        let mut state = self.state.lock().unwrap();
+        state.run_error = Some(error);
+        state.spend_run_budget = true;
+    }
+    fn fail_run_without_spending_budget(&self, error: FacadeError) {
+        let mut state = self.state.lock().unwrap();
+        state.run_error = Some(error);
+        state.spend_run_budget = false;
     }
     fn maybe_panic(&self) {
         let should_panic = {
@@ -1015,7 +1171,7 @@ impl PathResolver for Resolver {
 struct FactoryState {
     _temp: tempfile::TempDir,
     root: provenant_core::StateRoot,
-    clock: TestClock,
+    clock: SharedClock,
     backoff: ThreadPause,
     gate: Arc<Gate>,
     open_failures: Mutex<usize>,
@@ -1029,7 +1185,7 @@ impl FakeFactory {
         let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
         inputs.state_dir = Some(base.join("state"));
         let root = inputs.resolve(&Resolver).unwrap().state;
-        let clock = TestClock::new(
+        let clock = SharedClock::new(
             WallTime::from_micros(2_000_000_000_000_000).unwrap(),
             MonoTime::from_micros(0),
         );
@@ -1062,7 +1218,7 @@ impl FakeFactory {
 struct Fact {
     state: &'static str,
 }
-struct FakeFacade(Arc<Gate>);
+struct FakeFacade(Arc<Gate>, SharedClock);
 impl F3Facade for FakeFacade {
     type Identity = Fact;
     type Submit = Fact;
@@ -1097,6 +1253,19 @@ impl F3Facade for FakeFacade {
     ) -> Result<Fact, FacadeError> {
         if matches!(input, RunInput::Cancel { .. }) {
             self.0.run_cancel_call();
+        }
+        let (error, spend_budget) = {
+            let state = self.0.state.lock().unwrap();
+            (state.run_error.clone(), state.spend_run_budget)
+        };
+        if let Some(error) = error {
+            if matches!(error, FacadeError::Timeout) && spend_budget {
+                // Exhaust the wait budget the way a real facade does before it
+                // reports that the wait, rather than the call, timed out.
+                self.1
+                    .advance(DurationMicros::from_seconds(2 * crate::MAX_WAIT_SECONDS).unwrap());
+            }
+            return Err(error);
         }
         self.0.hold(cancel);
         Ok(Fact { state: "running" })
@@ -1164,7 +1333,7 @@ impl Factory for FakeFactory {
         )?;
         Ok(Service::new(
             coordination,
-            FakeFacade(self.0.gate.clone()),
+            FakeFacade(self.0.gate.clone(), self.0.clock.clone()),
             &self.0.clock,
         ))
     }
