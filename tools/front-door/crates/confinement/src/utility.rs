@@ -4,7 +4,7 @@ use crate::repo::{
     RepoProbeData, VerifiedRepo, VerifiedWorktree,
 };
 use crate::transport::{self, ConfigEntry, LaneRoots, TransportError};
-use provenant_core::{CancelToken, GitOid};
+use provenant_core::{CancelToken, DurationMicros, GitOid, Pause, ThreadPause};
 use provenant_os::{
     exec::{ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination},
     fs::{Directory, FileKind, FsError, Metadata, canonicalize, effective_uid},
@@ -24,8 +24,12 @@ const MAX_UTILITY_TIMEOUT: Duration = Duration::from_secs(provenant_core::MAX_LA
 const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 const MAX_GIT_LOG: u64 = 1000;
 const MAX_LANE_CONFIG_FILES: usize = 32;
-/// The longest fetch stderr excerpt, in characters.
+/// The longest bounded Git stderr excerpt, in characters.
 const MAX_FETCH_STDERR: usize = 1024;
+/// The most attempts for one lane upstream key write. Worktrees share the
+/// repository's `.git/config`, so concurrent writers contend for its lock.
+const CONFIG_LOCK_RETRIES: usize = 5;
+const CONFIG_LOCK_BACKOFF_START: Duration = Duration::from_millis(50);
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 const GIT_COMMON: &[&str] = &[
@@ -85,6 +89,8 @@ pub enum UtilityError {
     Incomplete,
     #[error("fetching remote branch failed with exit status {status}: {stderr}")]
     FetchFailed { status: i64, stderr: String },
+    #[error("setting branch configuration failed with exit status {status}: {stderr}")]
+    ConfigFailed { status: i64, stderr: String },
     #[error(transparent)]
     Transport(#[from] TransportError),
     #[error(transparent)]
@@ -895,18 +901,19 @@ pub(crate) fn fetch_missing_remote_branch(
             };
             return Err(UtilityError::FetchFailed {
                 status,
-                stderr: fetch_stderr_excerpt(&outcome.stderr.bytes),
+                stderr: git_stderr_excerpt(&outcome.stderr.bytes),
             });
         }
         _ => {}
     }
     Err(UtilityError::FetchFailed {
         status: fetch_status,
-        stderr: fetch_stderr_excerpt(&fetched.stderr.bytes),
+        stderr: git_stderr_excerpt(&fetched.stderr.bytes),
     })
 }
 
-fn fetch_stderr_excerpt(bytes: &[u8]) -> String {
+/// Bounded, sanitised Git stderr, shared by fetches and mutations.
+fn git_stderr_excerpt(bytes: &[u8]) -> String {
     crate::redact::bounded_line(&String::from_utf8_lossy(bytes), MAX_FETCH_STDERR)
 }
 
@@ -1489,7 +1496,9 @@ pub(crate) fn execute_git_mutation(
 }
 
 /// Set one lane upstream key. Reopen the repository after each call because
-/// Git replaces the common config file.
+/// Git replaces the common config file. Every worktree shares the common
+/// `.git/config`, so concurrent writers contend for its lock file; that
+/// specific failure is retried briefly with a bounded backoff.
 pub fn set_lane_upstream_key(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
@@ -1507,22 +1516,42 @@ pub fn set_lane_upstream_key(
     } else {
         ("remote", "origin".to_owned())
     };
-    let result = execute_git_mutation(
-        executor,
-        repo,
-        runtime,
-        GitMutation::SetBranchConfig {
-            branch: branch.clone(),
-            key,
-            value,
-        },
-        budget,
-        cancel,
-    )?;
-    if result.termination != Termination::Exit(0) {
-        return Err(UtilityError::InvalidOperationValue);
+    let mutation = GitMutation::SetBranchConfig {
+        branch: branch.clone(),
+        key,
+        value,
+    };
+    let mut backoff = CONFIG_LOCK_BACKOFF_START;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let result =
+            execute_git_mutation(executor, repo, runtime, mutation.clone(), budget, cancel)?;
+        // Anything unexpected is already rejected by `validate_outcome`.
+        let status = match result.termination {
+            Termination::Exit(0) => return Ok(()),
+            Termination::Exit(status) => status,
+            Termination::Signal(signal) => return Err(UtilityError::Signalled { signal }),
+        };
+        let stderr = git_stderr_excerpt(&result.stderr.bytes);
+        // Any failure other than config lock contention is permanent.
+        if attempt == CONFIG_LOCK_RETRIES
+            || !stderr
+                .to_ascii_lowercase()
+                .contains("could not lock config file")
+        {
+            return Err(UtilityError::ConfigFailed { status, stderr });
+        }
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        Pause::wait(
+            &ThreadPause,
+            DurationMicros::from_micros(backoff.as_micros() as u64),
+            cancel,
+        );
+        backoff = backoff.saturating_mul(2);
     }
-    Ok(())
 }
 
 /// What the effective configuration of one repository or worktree contains
@@ -1991,9 +2020,11 @@ pub(crate) mod tests {
     use crate::repo::{VerifiedWorktree, verify_worktree};
     use crate::test_support::{Fixture, add_poisoned_gitlink, assert_raw_git_runs_poison_filter};
     use provenant_os::exec::{ExecError, ExecOptions, Executor, SystemExecutor};
+    use std::collections::VecDeque;
     use std::error::Error;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     fn executable(path: &Path, mode: u32) -> Result<(), Box<dyn Error>> {
@@ -2521,7 +2552,7 @@ pub(crate) mod tests {
         assert!(!stderr.chars().any(char::is_control));
         assert!(!stderr.contains('\u{202e}'));
         let long_secret = format!("{}https://user:secret@example.invalid/", "x".repeat(990));
-        let excerpt = fetch_stderr_excerpt(long_secret.as_bytes());
+        let excerpt = git_stderr_excerpt(long_secret.as_bytes());
         assert!(!excerpt.contains("secret"));
         assert!(excerpt.contains("[REDACTED]"));
         assert!(excerpt.chars().count() <= MAX_FETCH_STDERR);
@@ -2602,6 +2633,197 @@ pub(crate) mod tests {
         )
         .expect_err("probe success must not hide fetch failure");
         assert!(matches!(error, UtilityError::FetchFailed { status: 1, .. }));
+        Ok(())
+    }
+
+    const LOCK_CONTENTION_STDERR: &str = "warning: unable to access '.git/config': \
+File exists\nfatal: could not lock config file .git/config: File exists\n";
+
+    /// Synthetic outcome for one scripted config spawn.
+    fn exit_outcome(exit: i64, stderr: &str) -> ExecOutcome {
+        let mut outcome = ExecOutcome {
+            termination: Termination::Exit(exit),
+            stdout: Default::default(),
+            stderr: Default::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 1,
+        };
+        outcome.stderr.bytes = stderr.as_bytes().to_vec();
+        outcome.stderr.total_bytes = stderr.len() as u64;
+        outcome
+    }
+
+    /// Answers every config spawn with the next scripted outcome instead of
+    /// starting a process, records the argv of each call and may cancel the
+    /// token after the first. Real Git is never launched for the tested path.
+    struct ScriptedConfig {
+        outcomes: Mutex<VecDeque<ExecOutcome>>,
+        argvs: Mutex<Vec<Vec<OsString>>>,
+        calls: AtomicUsize,
+        cancel_on_first_call: Option<CancelToken>,
+    }
+
+    impl ScriptedConfig {
+        fn new(outcomes: Vec<ExecOutcome>, cancel_on_first_call: Option<CancelToken>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into()),
+                argvs: Default::default(),
+                calls: AtomicUsize::default(),
+                cancel_on_first_call,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn argvs(&self) -> Result<Vec<Vec<OsString>>, Box<dyn Error>> {
+            Ok(self.argvs.lock().map_err(|_| "argvs poisoned")?.clone())
+        }
+    }
+
+    impl Executor for ScriptedConfig {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert!(
+                options.argv.iter().any(|arg| arg == "config"),
+                "unexpected spawn: {:?}",
+                options.argv
+            );
+            self.argvs
+                .lock()
+                .map_err(|_| ExecError::Busy)?
+                .push(options.argv.to_vec());
+            let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            if first && let Some(cancel) = &self.cancel_on_first_call {
+                cancel.cancel();
+            }
+            self.outcomes
+                .lock()
+                .map_err(|_| ExecError::Busy)?
+                .pop_front()
+                .ok_or_else(|| ExecError::Io {
+                    operation: "scripted config",
+                    source: std::io::Error::other("config script exhausted"),
+                })
+        }
+    }
+
+    fn branch_name() -> Result<GitRefName, Box<dyn Error>> {
+        GitRefName::branch("lane/writer").map_err(|error| error.into())
+    }
+
+    #[test]
+    fn lane_upstream_nonzero_exit_reports_config_stderr() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let fake =
+            ScriptedConfig::new(vec![exit_outcome(1, "fatal: invalid config value\n")], None);
+        let error = set_lane_upstream_key(
+            &fake,
+            &fixture.repo,
+            &fixture.runtime,
+            &branch_name()?,
+            true,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )
+        .expect_err("a failed config write must be reported as ConfigFailed");
+        let UtilityError::ConfigFailed { status, stderr } = error else {
+            return Err(format!("unexpected error: {error}").into());
+        };
+        assert_eq!(status, 1);
+        assert!(stderr.contains("invalid config value"));
+        assert_eq!(fake.calls(), 1, "a non-contention failure must not retry");
+        let argvs = fake.argvs()?;
+        let argv = argvs.first().ok_or("no config call recorded")?;
+        for wanted in [
+            "config",
+            "--local",
+            "--replace-all",
+            "branch.lane/writer.merge",
+            "refs/heads/lane/writer",
+        ] {
+            assert!(argv.contains(&OsString::from(wanted)), "{wanted}: {argv:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lane_upstream_config_lock_contention_retries_until_success() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let outcomes = vec![
+            exit_outcome(255, LOCK_CONTENTION_STDERR),
+            exit_outcome(255, LOCK_CONTENTION_STDERR),
+            exit_outcome(0, ""),
+        ];
+        let fake = ScriptedConfig::new(outcomes, None);
+        set_lane_upstream_key(
+            &fake,
+            &fixture.repo,
+            &fixture.runtime,
+            &branch_name()?,
+            false,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(fake.calls(), 3, "success must arrive after the retries");
+        Ok(())
+    }
+
+    #[test]
+    fn lane_upstream_config_lock_contention_fails_after_the_retry_limit()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let outcomes = (0..CONFIG_LOCK_RETRIES)
+            .map(|_| exit_outcome(255, LOCK_CONTENTION_STDERR))
+            .collect();
+        let fake = ScriptedConfig::new(outcomes, None);
+        let error = set_lane_upstream_key(
+            &fake,
+            &fixture.repo,
+            &fixture.runtime,
+            &branch_name()?,
+            false,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )
+        .expect_err("eternal contention must fail with the captured stderr");
+        let UtilityError::ConfigFailed { status, stderr } = error else {
+            return Err(format!("unexpected error: {error}").into());
+        };
+        assert_eq!(status, 255);
+        assert!(stderr.contains("could not lock config file"));
+        assert!(stderr.chars().count() <= MAX_FETCH_STDERR);
+        assert_eq!(
+            fake.calls(),
+            CONFIG_LOCK_RETRIES,
+            "retries must be bounded by CONFIG_LOCK_RETRIES"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lane_upstream_retry_stops_when_cancelled() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let cancel = CancelToken::new();
+        let fake = ScriptedConfig::new(
+            vec![exit_outcome(255, LOCK_CONTENTION_STDERR)],
+            Some(cancel.clone()),
+        );
+        let error = set_lane_upstream_key(
+            &fake,
+            &fixture.repo,
+            &fixture.runtime,
+            &branch_name()?,
+            true,
+            fixture.budget()?,
+            &cancel,
+        )
+        .expect_err("cancellation must stop the retry loop");
+        assert!(matches!(error, UtilityError::Cancelled), "{error}");
+        assert_eq!(fake.calls(), 1, "a cancelled run must not retry");
         Ok(())
     }
 
