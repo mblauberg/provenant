@@ -1,0 +1,186 @@
+{
+ "schema_version": 1,
+ "command": "inbox",
+ "status": "ok",
+ "data": {
+  "result": "listed",
+  "items": [
+   {
+    "schema_version": 1,
+    "id": "11111111111111111111111111111111",
+    "revision": 3,
+    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-10-30T01:00:00Z",
+    "updated_at": "2026-10-30T01:05:00Z",
+    "project_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "project_key": "alpha",
+    "owner_host": "cccccccccccccccccccccccccccccccc",
+    "chair_session_id": "3f9c2a10d4e84b7f",
+    "chair_actor": "dddddddddddddddddddddddddddddddd",
+    "request": {
+     "kind": "decision",
+     "title": "Pick the storage layer",
+     "body": "Use **sqlite** for the local cache.\n\n- fast\n- one file",
+     "blocking": true,
+     "options": [
+      {
+       "id": "sqlite",
+       "label": "Sqlite",
+       "description": "Choose sqlite"
+      },
+      {
+       "id": "files",
+       "label": "Files",
+       "description": "Choose files"
+      }
+     ],
+     "recommended_option_id": "sqlite",
+     "proceeding_with": null,
+     "deadline": null,
+     "work": null,
+     "supersedes": null
+    },
+    "state": "open",
+    "answer_id": null,
+    "closure_reason": null
+   },
+   {
+    "schema_version": 1,
+    "id": "22222222222222222222222222222222",
+    "revision": 1,
+    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-10-30T01:58:00Z",
+    "updated_at": "2026-10-30T01:59:00Z",
+    "project_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "project_key": "alpha",
+    "owner_host": "cccccccccccccccccccccccccccccccc",
+    "chair_session_id": "8a1b2c3d4e5f6071",
+    "chair_actor": "dddddddddddddddddddddddddddddddd",
+    "request": {
+     "kind": "question",
+     "title": "Which name?",
+     "body": "The migration needs a name.",
+     "blocking": false,
+     "options": [],
+     "recommended_option_id": null,
+     "proceeding_with": null,
+     "deadline": null,
+     "work": null,
+     "supersedes": null
+    },
+    "state": "open",
+    "answer_id": null,
+    "closure_reason": null
+   },
+   {
+    "schema_version": 1,
+    "id": "33333333333333333333333333333333",
+    "revision": 2,
+    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-10-30T00:30:00Z",
+    "updated_at": "2026-10-30T00:45:00Z",
+    "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "project_key": "beta",
+    "owner_host": "cccccccccccccccccccccccccccccccc",
+    "chair_session_id": "9f8e7d6c5b4a3928",
+    "chair_actor": "dddddddddddddddddddddddddddddddd",
+    "request": {
+     "kind": "assumption",
+     "title": "Assume UTC timestamps",
+     "body": "All recorded times will be UTC.",
+     "blocking": false,
+     "options": [],
+     "recommended_option_id": null,
+     "proceeding_with": "UTC",
+     "deadline": null,
+     "work": null,
+     "supersedes": null
+    },
+    "state": "open",
+    "answer_id": null,
+    "closure_reason": null
+   },
+   {
+    "schema_version": 1,
+    "id": "44444444444444444444444444444444",
+    "revision": 1,
+    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-10-30T01:20:00Z",
+    "updated_at": "2026-10-30T01:25:00Z",
+    "project_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "project_key": "beta",
+    "owner_host": "cccccccccccccccccccccccccccccccc",
+    "chair_session_id": "9f8e7d6c5b4a3928",
+    "chair_actor": "dddddddddddddddddddddddddddddddd",
+    "request": {
+     "kind": "decision",
+     "title": "Choose a release day",
+     "body": "Pick the day the release goes out.",
+     "blocking": true,
+     "options": [
+      {
+       "id": "monday",
+       "label": "Monday",
+       "description": "Release on Monday"
+      },
+      {
+       "id": "tuesday",
+       "label": "Tuesday",
+       "description": "Release on Tuesday"
+      }
+     ],
+     "recommended_option_id": "monday",
+     "proceeding_with": null,
+     "deadline": null,
+     "work": null,
+     "supersedes": null
+    },
+    "state": "open",
+    "answer_id": null,
+    "closure_reason": null
+   },
+   {
+    "schema_version": 1,
+    "id": "55555555555555555555555555555555",
+    "revision": 1,
+    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-10-30T01:55:00Z",
+    "updated_at": "2026-10-30T01:56:00Z",
+    "project_id": null,
+    "project_key": null,
+    "owner_host": "cccccccccccccccccccccccccccccccc",
+    "chair_session_id": "1122334455667788",
+    "chair_actor": "dddddddddddddddddddddddddddddddd",
+    "request": {
+     "kind": "question",
+     "title": "Should the queue retry?",
+     "body": "A failed hook left work queued.",
+     "blocking": true,
+     "options": [],
+     "recommended_option_id": null,
+     "proceeding_with": null,
+     "deadline": null,
+     "work": null,
+     "supersedes": null
+    },
+    "state": "open",
+    "answer_id": null,
+    "closure_reason": null
+   }
+  ],
+  "next_cursor": null,
+  "truncated": false,
+  "coverage": "local_only; every project on this host; peer inboxes are unknown",
+  "projects": {
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+    "label": "Alpha",
+    "path": "/Users/me/Repos/alpha/.git"
+   },
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+    "label": "Beta",
+    "path": "/Users/me/Repos/beta/.git"
+   }
+  }
+ },
+ "error": null
+}
