@@ -2860,7 +2860,7 @@ mod tests {
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
         let call = crate::tests::call(&clock, &cancel);
-        let registry = temp.path().join("registry");
+        let registry = std::fs::canonicalize(temp.path())?.join("registry");
         // claim() also uses this as the private admission-ledger root.
         // Its mode must not depend on the test runner's umask.
         std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
