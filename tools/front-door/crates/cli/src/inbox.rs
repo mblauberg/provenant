@@ -402,6 +402,8 @@ enum Error {
     Time(#[from] provenant_core::TimeError),
     #[error("{0}")]
     Input(&'static str),
+    #[error("{0}")]
+    NoProject(String),
     #[error("{message}")]
     Remote {
         code: String,
@@ -446,6 +448,7 @@ impl Error {
                 error.code(),
             ),
             Self::Input(_) => (Outcome::Invalid, "invalid_input"),
+            Self::NoProject(_) => (Outcome::Error, "no_project"),
             _ => (Outcome::Error, "inbox_unavailable"),
         }
     }
@@ -558,6 +561,140 @@ fn remote_error(code: String, message: String, operation_id: Option<OperationId>
     }
 }
 
+/// Operations that make sense without a working project: listing, and acting on
+/// one request by ID.
+fn host_wide_input(input: &InboxInput) -> bool {
+    matches!(
+        input,
+        InboxInput::List { .. } | InboxInput::Answer { .. } | InboxInput::Close { .. }
+    )
+}
+
+/// Failures that mean there is no project to open here: none resolves from
+/// the directory, or the state root does not exist yet.
+fn no_project_cause(error: &crate::fabric::EdgeError) -> bool {
+    use crate::fabric::EdgeError;
+    match error {
+        EdgeError::Invalid | EdgeError::Utility(_) => true,
+        EdgeError::Fs(error) => error.is_not_found(),
+        _ => false,
+    }
+}
+
+enum HostWide {
+    Done(InboxResult),
+    /// The owning project's context, with the input to run in it.
+    Project(Box<Context>, InboxInput),
+}
+
+fn no_project(cwd: &Path, cause: impl std::fmt::Display) -> Error {
+    Error::NoProject(format!(
+        "{} is not inside a registered project and the host-wide inbox could not be read: {cause}",
+        cwd.display()
+    ))
+}
+
+fn project_label(common_dir: &Path) -> Option<String> {
+    common_dir
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+}
+
+/// Serve an inbox call whose working directory is in no project. A list reads
+/// the open requests of every project on this host, each tagged with its
+/// project in `projects`; an action by request ID runs in the owning project.
+fn host_wide(
+    input: InboxInput,
+    roots: provenant_core::Roots,
+    home: &Path,
+    cwd: &Path,
+    cause: &crate::fabric::EdgeError,
+) -> Result<HostWide, Error> {
+    use provenant_fabric_runtime::inbox::{InboxFilter, host_open_requests, locate_request};
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let bindings = provenant_config::registered_projects(&roots)
+        .map_err(|error| no_project(cwd, format!("{error}")))?;
+    match input {
+        InboxInput::List {
+            id: None,
+            session,
+            state,
+            limit,
+            cursor,
+            ..
+        } => {
+            if state != InboxFilter::Open {
+                return Err(Error::Input(
+                    "outside a project only open requests are listed; run in a project for --state all",
+                ));
+            }
+            if cursor.is_some() {
+                return Err(Error::Input(
+                    "--cursor needs a project directory; list without it",
+                ));
+            }
+            let (mut items, truncated) =
+                host_open_requests(&roots.state, &clock, &cancel, limit).map_err(|error| {
+                    no_project(
+                        cwd,
+                        format!("{error}; no Provenant state was found or it is incompatible (project lookup: {cause})"),
+                    )
+                })?;
+            if let Some(session) = &session {
+                items.retain(|item| &item.chair_session_id == session);
+            }
+            let projects: serde_json::Map<_, _> = items
+                .iter()
+                .map(|item| item.project_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|project| {
+                    let binding = bindings.iter().find(|b| b.project_id() == project);
+                    (
+                        project.to_string(),
+                        serde_json::json!({
+                            "label": binding.and_then(|b| project_label(b.common_dir())),
+                            "path": binding.map(|b| b.common_dir().display().to_string()),
+                        }),
+                    )
+                })
+                .collect();
+            let mut extra = provenant_records::ExtraFields::default();
+            extra.insert("projects".into(), projects.into());
+            Ok(HostWide::Done(InboxResult::Listed {
+                extra,
+                items,
+                next_cursor: None,
+                truncated,
+                coverage: "local_only; every project on this host; peer inboxes are unknown".into(),
+            }))
+        }
+        input => {
+            let id = match &input {
+                InboxInput::List { id: Some(id), .. }
+                | InboxInput::Answer { id, .. }
+                | InboxInput::Close { id, .. } => *id,
+                _ => return Err(no_project(cwd, cause)),
+            };
+            let projects: Vec<_> = bindings.iter().map(|b| b.project_id()).collect();
+            let owner = locate_request(&roots.state, &projects, id, &clock, &cancel)
+                .map_err(|error| no_project(cwd, error))?
+                .ok_or(InboxError::Store(
+                    provenant_fabric_runtime::StoreError::NotFound,
+                ))?;
+            let binding = bindings
+                .iter()
+                .find(|b| b.project_id() == owner)
+                .ok_or_else(|| no_project(cwd, "owning project is not registered"))?;
+            let context = Context::open_for_project(roots, home, binding)?;
+            Ok(HostWide::Project(Box::new(context), input))
+        }
+    }
+}
+
 fn execute(
     command: HumanCommand,
     roots: provenant_core::Roots,
@@ -587,15 +724,35 @@ fn execute(
         return Err(InboxError::LaneMutation.into());
     }
     input.validate()?;
-    let own = provenant_config::lookup_host(&roots).map_err(crate::fabric::EdgeError::from)?;
+    // Without host state nothing is remote; opening the context reports it.
+    let own = match provenant_config::lookup_host(&roots) {
+        Ok(own) => own,
+        Err(_) if host.is_none() && qualified.is_none() && host_wide_input(&input) => None,
+        Err(error) => return Err(crate::fabric::EdgeError::from(error).into()),
+    };
     let selected = host.clone().or_else(|| qualified.map(|id| id.to_string()));
-    let context = if selected
+    let remote_owner = selected
         .as_deref()
-        .is_some_and(|name| !is_local_host(name, own))
-    {
-        Context::open_read_only(roots, home, cwd)?
+        .is_some_and(|name| !is_local_host(name, own));
+    let opened = if remote_owner {
+        Context::open_read_only(roots.clone(), home, cwd)
     } else {
-        Context::open(roots, home, cwd)?
+        Context::open(roots.clone(), home, cwd)
+    };
+    let context = match opened {
+        Ok(context) => context,
+        // No project resolves from here (a Finder launch has cwd `/`): serve
+        // the host's own requests instead of a project's.
+        Err(error) if !remote_owner && host_wide_input(&input) && no_project_cause(&error) => {
+            match host_wide(input, roots, home, cwd, &error)? {
+                HostWide::Done(result) => return Ok(result),
+                HostWide::Project(context, next) => {
+                    input = next;
+                    *context
+                }
+            }
+        }
+        Err(error) => return Err(error.into()),
     };
     if let (Some(name), Some(qualified)) = (&host, qualified) {
         let selected = if is_local_host(name, Some(context.identity.host)) {
@@ -752,6 +909,7 @@ pub fn run(
                     )),
                     Error::Inbox(error) if matches!(error.code(),"conflict"|"operation_conflict")=>Some("Inspect `provenant inbox --state all --json` before submitting another operation; preserve the authoritative answer and its revision.".into()),
                     Error::Inbox(error) if error.code() == "work_mismatch" => Some("Correct the work repository or head to match the selected run before retrying.".into()),
+                    Error::NoProject(_) => Some("Run the command from inside a project directory, or check this host has Provenant state with `provenant console projects --json`.".into()),
                     Error::Inbox(InboxError::CursorExpired) => {
                         Some("Restart the list without --cursor.".into())
                     }

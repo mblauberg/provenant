@@ -83,6 +83,59 @@ pub fn overview(
     })
 }
 
+/// Open requests of every project in this host's state, whatever the caller's
+/// project. Read-only: absent state is an error, never created.
+pub fn host_open_requests(
+    root: &StateRoot,
+    clock: &dyn Clock,
+    cancel: &CancelToken,
+    limit: u64,
+) -> Result<(Vec<HumanRequest>, bool), InboxError> {
+    let page = overview(root, clock, cancel, 1_048_576).map_err(|error| match error {
+        OverviewError::Incompatible => InboxError::Store(provenant_fabric_store::Error::Invalid(
+            "inbox store version",
+        )),
+        OverviewError::Unavailable => InboxError::OwnerUnavailable,
+    })?;
+    let call = Request { clock, cancel };
+    let store = Store::open_existing(root, &call)?;
+    let mut truncated = page.truncated;
+    let mut items = Vec::new();
+    for item in page.items {
+        if items.len() as u64 == limit {
+            truncated = true;
+            break;
+        }
+        let project = item
+            .project_id
+            .parse()
+            .map_err(|_| InboxError::Invalid("project"))?;
+        let id = HumanRequestId::parse(&item.id).map_err(|_| InboxError::Invalid("id"))?;
+        items.push(store.human_request(project, id, &call)?);
+    }
+    Ok((items, truncated))
+}
+
+/// The project among `projects` that owns request `id`, if any.
+pub fn locate_request(
+    root: &StateRoot,
+    projects: &[provenant_core::ProjectId],
+    id: HumanRequestId,
+    clock: &dyn Clock,
+    cancel: &CancelToken,
+) -> Result<Option<provenant_core::ProjectId>, InboxError> {
+    let call = Request { clock, cancel };
+    let store = Store::open_existing(root, &call)?;
+    for project in projects {
+        match store.human_request(*project, id, &call) {
+            Ok(_) => return Ok(Some(*project)),
+            Err(provenant_fabric_store::Error::NotFound) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(None)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum InboxInput {

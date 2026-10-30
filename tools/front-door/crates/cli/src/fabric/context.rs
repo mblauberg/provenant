@@ -195,6 +195,43 @@ impl Context {
             cwd: cwd.to_path_buf(),
         })
     }
+    /// Context for an already registered project, found without a working
+    /// directory inside it. Reads existing identity only and creates no state.
+    pub fn open_for_project(
+        roots: Roots,
+        home: &Path,
+        binding: &provenant_config::ProjectBinding,
+    ) -> Result<Self, EdgeError> {
+        // Its working directory is the project's, as if started there.
+        let cwd = binding.common_dir().parent().ok_or(EdgeError::Invalid)?;
+        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
+            .domains
+            .fabric;
+        let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
+        let key = match CrossHostProjectKey::from_home(home, binding.common_dir()) {
+            Ok(key) => Some(key),
+            Err(IdentityError::OutsideHome) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let identity = Identity::bind(
+            binding,
+            host,
+            cwd,
+            &config,
+            std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+            None,
+            key,
+        )?;
+        Ok(Self {
+            roots,
+            identity,
+            config,
+            in_lane: in_lane(),
+            executor: SystemExecutor::new(1)?,
+            home: home.to_path_buf(),
+            cwd: cwd.to_path_buf(),
+        })
+    }
     /// A configured remote home is the sole coordination owner.
     pub fn remote_home(&self) -> bool {
         self.identity.federation.as_ref().is_some_and(|project| {

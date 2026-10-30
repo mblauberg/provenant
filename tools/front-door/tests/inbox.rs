@@ -995,3 +995,101 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
     );
     Ok(())
 }
+
+/// Run the installed command from `cwd`, which need not be a project.
+fn call_in(rig: &TestRig, cwd: &std::path::Path, args: &[&str], expected: i64) -> Result<Value> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
+    use std::{ffi::OsString, time::Duration};
+    let mut argv: Vec<OsString> = vec![env!("CARGO_BIN_EXE_provenant").into()];
+    argv.extend(["--state-dir".into(), rig.state.clone().into_os_string()]);
+    argv.push("--json".into());
+    argv.extend(args.iter().map(OsString::from));
+    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(10));
+    options.env = Some(&rig.env);
+    options.stdout = StreamPolicy::Capture { limit: 1 << 20 };
+    options.stderr = StreamPolicy::Capture { limit: 1 << 16 };
+    let output = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(
+        code(&output),
+        expected,
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    Ok(serde_json::from_slice(&output.stdout.bytes)?)
+}
+
+#[test]
+fn inbox_outside_a_project_lists_and_answers_host_requests() -> Result {
+    let rig = TestRig::new()?;
+    let file = draft(&rig, "decision")?;
+    let created = call(
+        &rig,
+        &["ask", "--file", &file, "--session", "chair-a"],
+        None,
+        0,
+    )?;
+    let id = created["data"]["request_id"].as_str().ok_or("request ID")?;
+    // A Finder launch has cwd `/`, where no project resolves.
+    let outside = std::path::Path::new("/");
+
+    let listed = call_in(&rig, outside, &["inbox", "--state", "open"], 0)?;
+    let items = listed["data"]["items"].as_array().ok_or("items")?;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], id);
+    let project = items[0]["project_id"].as_str().ok_or("project ID")?;
+    assert_eq!(listed["data"]["projects"][project]["label"], "project");
+
+    let refused = call_in(&rig, outside, &["inbox", "--state", "all"], 2)?;
+    assert_eq!(refused["error"]["code"], "invalid_input");
+
+    let answered = call_in(
+        &rig,
+        outside,
+        &[
+            "answer",
+            id,
+            "--action",
+            "choose",
+            "--option",
+            "repair",
+            "--expect-revision",
+            "1",
+            "--channel",
+            "console",
+        ],
+        0,
+    )?;
+    assert_eq!(answered["data"]["request_id"], id);
+    let after = call(&rig, &["inbox", "--state", "all"], None, 0)?;
+    assert_eq!(after["data"]["items"][0]["state"], "answered");
+    let outside_open = call_in(&rig, outside, &["inbox", "--state", "open"], 0)?;
+    assert_eq!(outside_open["data"]["items"], json!([]));
+
+    let missing = call_in(&rig, outside, &["inbox", &"0".repeat(32)], 2)?;
+    assert_eq!(missing["error"]["code"], "not_found");
+    Ok(())
+}
+
+#[test]
+fn inbox_outside_a_project_without_state_names_cause_and_repair() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    // A Finder launch has cwd `/`, where no project resolves.
+    let outside = std::path::Path::new("/");
+    let failed = call_in(&rig, outside, &["inbox"], 3)?;
+    let error = &failed["error"];
+    assert_eq!(error["code"], "no_project");
+    assert!(
+        error["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("not inside a registered project")
+    );
+    assert!(
+        error["repair"]
+            .as_str()
+            .ok_or("repair")?
+            .contains("inside a project")
+    );
+    Ok(())
+}
