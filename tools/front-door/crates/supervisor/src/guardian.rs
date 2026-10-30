@@ -22,10 +22,28 @@ use std::time::{Duration, Instant};
 
 // Match Run's persisted claim backoff so transient contention cannot spend
 // every guardian callback before a replacement driver is eligible.
-fn retry_terminal(mut terminal: impl FnMut() -> bool, mut wait: impl FnMut(Duration)) -> bool {
-    for delay in [0, 5, 30, 120] {
+// Fixture builds keep the production value only for its schedule test.
+#[cfg_attr(feature = "fixture", allow(dead_code))]
+const PRODUCTION_TERMINAL_RETRY_MS: [u64; 4] = [0, 5_000, 30_000, 120_000];
+// Fixture builds prove the retry path without spending five seconds on the
+// forged-row recovery case; production keeps the schedule above.
+#[cfg(feature = "fixture")]
+const TERMINAL_RETRY_MS: [u64; 4] = [0, 10, 20, 40];
+#[cfg(not(feature = "fixture"))]
+const TERMINAL_RETRY_MS: [u64; 4] = PRODUCTION_TERMINAL_RETRY_MS;
+
+fn retry_terminal(terminal: impl FnMut() -> bool, wait: impl FnMut(Duration)) -> bool {
+    retry_terminal_with(TERMINAL_RETRY_MS, terminal, wait)
+}
+
+fn retry_terminal_with(
+    schedule: [u64; 4],
+    mut terminal: impl FnMut() -> bool,
+    mut wait: impl FnMut(Duration),
+) -> bool {
+    for delay in schedule {
         if delay != 0 {
-            wait(Duration::from_secs(delay));
+            wait(Duration::from_millis(delay));
         }
         if terminal() {
             return true;
