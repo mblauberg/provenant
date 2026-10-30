@@ -691,10 +691,14 @@ a bounded stderr cause on refusal.
 `check` exits 1 on findings, 2 on malformed input and 3 on unreadable
 evidence. `check release` reads Git with redirects, replacements,
 fsmonitor, textconv and lazy fetch off, and a missing object never yields a
-clean result. No check fetches or rewrites.
+clean result. No check fetches or rewrites. The exact paths in
+`crates/cli/src/check/release-fixtures.txt` are reviewed fixture and example
+content whose byte-pattern findings are suppressed; path, symlink and commit
+metadata checks still apply to them. Changes to that allowlist require review.
 - Why: a release scan that passes on missing evidence would publish secrets.
 - Test: `tests/checks.rs::release_ignores_grafts_and_rejects_missing_ancestry_evidence`;
-  `::release_scans_added_then_deleted_blobs_and_commit_identity_bytes`
+  `::release_scans_added_then_deleted_blobs_and_commit_identity_bytes`;
+  `crates/cli/src/check/release.rs::tests::reviewed_fixture_paths_suppress_content_hits_only_at_exact_paths`
 - Owner: `crates/cli/src/check/`, `src/checks.rs`
 
 ## Not provided

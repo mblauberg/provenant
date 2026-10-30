@@ -16,6 +16,14 @@ const PUBLIC: &[&str] = &[
     "docs/worktrees.md",
 ];
 const LEGAL: &[&str] = &["LICENSE"];
+const FIXTURE_PATHS: &str = include_str!("release-fixtures.txt");
+
+fn fixture_path(path: &str) -> bool {
+    FIXTURE_PATHS
+        .lines()
+        .map(str::trim)
+        .any(|candidate| !candidate.is_empty() && !candidate.starts_with('#') && candidate == path)
+}
 
 pub(super) fn inspect(
     git: &GitContext<'_>,
@@ -97,12 +105,12 @@ pub(super) fn inspect(
         match read_file(git.repo.root_dir(), Path::new(&path), MAX_FILE)? {
             WorkingFile::Bytes(bytes) => {
                 scan.note(format!("release:working:{path}"), &bytes);
-                emit_matches(&mut scan, &path, &byte_matches(&bytes)?)?;
+                emit_path_matches(&mut scan, &path, &byte_matches(&bytes)?)?;
             }
             WorkingFile::Symlink(target) => {
                 symlink = true;
                 scan.note(format!("release:working-symlink:{path}"), &target);
-                emit_matches(&mut scan, &path, &byte_matches(&target)?)?;
+                emit_path_matches(&mut scan, &path, &byte_matches(&target)?)?;
             }
             WorkingFile::Missing => {
                 let Some((rule, message)) = required_file(&path) else {
@@ -196,7 +204,7 @@ pub(super) fn inspect(
                 slot.insert(byte_matches(&raw)?);
             }
             if let Some(matches) = blobs.get(&entry.oid) {
-                emit_matches(&mut scan, &entry.path, matches)?;
+                emit_path_matches(&mut scan, &entry.path, matches)?;
             }
         }
     }
@@ -419,6 +427,12 @@ fn emit_matches(scan: &mut Scan, path: &str, matches: &[Match]) -> Result<(), Ch
     }
     Ok(())
 }
+fn emit_path_matches(scan: &mut Scan, path: &str, matches: &[Match]) -> Result<(), CheckError> {
+    if fixture_path(path) {
+        return Ok(());
+    }
+    emit_matches(scan, path, matches)
+}
 fn contains(bytes: &[u8], needle: &[u8]) -> bool {
     bytes.windows(needle.len()).any(|part| part == needle)
 }
@@ -487,6 +501,22 @@ fn aws_key(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reviewed_fixture_paths_suppress_content_hits_only_at_exact_paths() {
+        let fixture = "tools/front-door/crates/confinement/src/redact.rs";
+        let hit = [("release.github-token", 1, "possible GitHub token")];
+        let mut scan = Scan {
+            findings: Vec::new(),
+            evidence: Vec::new(),
+        };
+        emit_path_matches(&mut scan, fixture, &hit).unwrap();
+        assert!(scan.findings.is_empty());
+        emit_path_matches(&mut scan, "tools/front-door/crates/confinement/src/redact.rs.bak", &hit)
+            .unwrap();
+        assert_eq!(scan.findings.len(), 1);
+        assert!(!fixture_path("tools/front-door/crates/cli/src/check/release.rs"));
+    }
+
     #[test]
     fn registry_checks_the_same_raw_bytes_for_every_source() {
         let input = [
