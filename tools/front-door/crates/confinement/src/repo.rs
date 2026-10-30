@@ -587,20 +587,19 @@ pub fn verify_worktree(
         .common_identity
         .same_identity(&repo.common_identity)
     {
-        let project = worktree
-            .common_git_dir()
+        // Only the common Git directory names the other project. Its parent
+        // is the checkout for a `.git` directory; a separate Git directory is
+        // named as it is.
+        let common = worktree.common_git_dir();
+        let project = common
             .parent()
-            .unwrap_or(worktree.common_git_dir())
-            .to_path_buf();
-        let selected = repo
-            .common_git_dir()
-            .parent()
-            .unwrap_or(repo.common_git_dir())
+            .filter(|_| common.file_name() == Some(std::ffi::OsStr::new(".git")))
+            .unwrap_or(common)
             .to_path_buf();
         return Err(RepoError::ForeignProject {
             worktree: worktree.root_path().to_path_buf(),
             project,
-            selected,
+            selected: repo.root_path().to_path_buf(),
         });
     }
     if worktree
