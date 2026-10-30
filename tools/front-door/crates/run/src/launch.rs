@@ -427,6 +427,13 @@ pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read
     (read && release) || (!root.starts_with(state) && !state.starts_with(root))
 }
 
+/// The rule compile and entry share: a credential root is refused unless it
+/// is a Codex standalone package granted for reads. Writes stay strict.
+fn credential_root_refused(canonical: &std::path::Path, read: bool) -> bool {
+    provenant_confinement::is_credential_root(canonical)
+        && !(read && provenant_confinement::is_codex_standalone_package(canonical))
+}
+
 /// A child's network reach may not exceed its parent's, each write root must
 /// sit inside a parent write root and each read root inside any parent root.
 /// The host repeats submission checks: roots must be existing canonical
@@ -457,17 +464,21 @@ fn child_access_within(
                     && access_root_allowed(canonical, &state, read)
             })
     };
-    for root in child
+    for (root, read) in child
         .access
         .read_roots
         .iter()
-        .chain(&child.access.write_roots)
+        .map(|root| (root, true))
+        .chain(child.access.write_roots.iter().map(|root| (root, false)))
     {
+        // Entry agrees with the compile-time read/exec grant check
+        // (`credential_root_refused`); writes keep the plain refusal.
         if provenant_os::fs::canonicalize(root)
-            .is_ok_and(|path| provenant_confinement::is_credential_root(&path))
+            .ok()
+            .is_some_and(|canonical| credential_root_refused(&canonical, read))
         {
-            return Err(RunError::Validation(
-                "credential root requires a selected fixture-backed mechanism",
+            return Err(RunError::Confinement(
+                provenant_confinement::permissions::PermissionError::CredentialRoot,
             ));
         }
     }
@@ -501,6 +512,49 @@ fn child_access_within(
 #[cfg(test)]
 mod release_root_tests {
     use super::*;
+
+    /// A read root in a Codex standalone release passes the shared entry
+    /// exception; a write root there stays refused.
+    #[test]
+    fn child_allows_codex_standalone_read_roots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // The rule is lexical, so check it without the filesystem first.
+        let shape = std::path::Path::new(
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin/bin",
+        );
+        assert!(!credential_root_refused(shape, true), "reads pass entry");
+        assert!(credential_root_refused(shape, false), "writes stay strict");
+        // Against a machine's real home: build a temp release and walk it
+        // through `child_access_within`. A lane can seal `~/.codex`; then the
+        // fixture cannot exist and the filesystem part is skipped silently.
+        let Some(home) = std::env::var_os("HOME") else {
+            return Ok(());
+        };
+        let releases = std::path::Path::new(&home).join(".codex/packages/standalone/releases");
+        if std::fs::create_dir_all(&releases).is_err() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir_in(&releases)?;
+        let release = std::fs::canonicalize(temp.path())?;
+        let state_dir = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(state_dir.path())?.join("state");
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.read_roots = vec![release.clone()];
+        let mut child = parent.clone();
+        child.access.read_roots = vec![release.clone()];
+        child.access.write_roots = vec![];
+        assert!(
+            child_access_within(&parent, &child, &state).is_ok(),
+            "reads in a standalone release pass entry"
+        );
+        child.access.write_roots = vec![release.clone()];
+        child.access.read_roots = vec![];
+        let error = child_access_within(&parent, &child, &state).unwrap_err();
+        assert!(error.to_string().contains(
+            &provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
+        ));
+        Ok(())
+    }
 
     #[test]
     fn child_refuses_credential_roots() -> std::result::Result<(), Box<dyn std::error::Error>> {
