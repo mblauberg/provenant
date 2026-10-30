@@ -517,7 +517,16 @@ pub fn attempt_evidence(
 /// Test for this attempt's retained reservation without interpreting shared-slot records.
 pub fn reservation_present(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<bool> {
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
-        Ok(_) => return Ok(true),
+        // Legacy writers kept one reservation at the slot root; it fences only
+        // the attempt it names. An unreadable or undecodable record fails
+        // safe as retained.
+        Ok(_) => {
+            let legacy: Result<Reservation> =
+                read_record(directory, "reservation.json", RECORD_LIMIT);
+            return Ok(legacy
+                .map(|record| record.scope.attempt == scope.attempt)
+                .unwrap_or(true));
+        }
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error),
     }
