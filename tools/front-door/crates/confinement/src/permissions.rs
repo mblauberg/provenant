@@ -2150,16 +2150,16 @@ pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), Perm
 /// Whether a lane root at `path` must be refused because it is credential
 /// named or encloses a nested credential root. Read and exec roots allow the
 /// Codex standalone package, which is credential named but holds no
-/// credentials. Entry checks and the compiler share this predicate so they
-/// cannot drift.
-pub fn refuses_lane_root(path: &Path, read: bool) -> bool {
-    refuses_credential_grant(
-        &PathGrant {
-            path: path.to_owned(),
-            scope: PathScope::Subtree,
-        },
-        read,
-    )
+/// credentials. `home` is the host's canonical home, wherever it lives; a root
+/// that holds it or its nested credential roots is refused too. Entry checks
+/// and the compiler share this predicate so they cannot drift.
+pub fn refuses_lane_root(path: &Path, read: bool, home: Option<&Path>) -> bool {
+    let grant = PathGrant {
+        path: path.to_owned(),
+        scope: PathScope::Subtree,
+    };
+    refuses_credential_grant(&grant, read)
+        || home.is_some_and(|home| encloses_home_credentials(&grant, home))
 }
 
 /// The grant-level form of [`refuses_lane_root`], honouring an exact grant's
@@ -2173,8 +2173,8 @@ fn refuses_credential_grant(grant: &PathGrant, read: bool) -> bool {
 
 /// A subtree of `/Users/<name>` or `/home/<name>` that holds a nested
 /// credential root (`~/.config`, `~/Library`, `~/Archives`) would expose it.
-/// The home itself is a broad root; `compile_sbpl` repeats this check against
-/// the host's actual home, wherever it lives.
+/// The home itself is a broad root; [`refuses_lane_root`] and `compile_sbpl`
+/// repeat this check against the host's actual home, wherever it lives.
 fn encloses_credential_root(grant: &PathGrant) -> bool {
     grant.scope == PathScope::Subtree && encloses_credential_root_path(&grant.path)
 }
@@ -2193,7 +2193,6 @@ fn encloses_credential_root_path(path: &Path) -> bool {
 }
 
 /// A subtree that holds `home` itself or one of its nested credential roots.
-#[cfg(any(target_os = "macos", test))]
 fn encloses_home_credentials(grant: &PathGrant, home: &Path) -> bool {
     grant.scope == PathScope::Subtree && encloses_home_credentials_path(&grant.path, home)
 }
@@ -3109,6 +3108,7 @@ mod tests {
     fn lane_root_table_agrees_with_compiler_checks() {
         let standalone =
             "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
+        let home = Path::new("/fixture/host-home");
         for (path, read_allowed, write_allowed) in [
             ("/Users/alice/.ssh", false, false),
             ("/Users/alice/.config", false, false),
@@ -3130,12 +3130,32 @@ mod tests {
                 "write {path}"
             );
             assert_eq!(
-                !refuses_lane_root(Path::new(path), true),
+                !refuses_lane_root(Path::new(path), true, Some(home)),
                 read_allowed,
                 "entry read {path}"
             );
             assert_eq!(
-                !refuses_lane_root(Path::new(path), false),
+                !refuses_lane_root(Path::new(path), false, Some(home)),
+                write_allowed,
+                "entry write {path}"
+            );
+        }
+        // An injected nonconventional home is refused at entry exactly as the
+        // compiler refuses it, without consulting this host's HOME.
+        let home = Path::new("/srv/team/alice");
+        for (path, read_allowed, write_allowed) in [
+            ("/srv/team", false, false),
+            ("/srv/team/alice", false, false),
+            ("/srv/team/alice/.config", false, false),
+            ("/srv/team/alice/project", true, true),
+        ] {
+            assert_eq!(
+                !refuses_lane_root(Path::new(path), true, Some(home)),
+                read_allowed,
+                "entry read {path}"
+            );
+            assert_eq!(
+                !refuses_lane_root(Path::new(path), false, Some(home)),
                 write_allowed,
                 "entry write {path}"
             );

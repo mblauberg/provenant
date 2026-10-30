@@ -1454,8 +1454,12 @@ fn network_access(switch: Option<Switch>, postgres: bool) -> Option<run::Network
 /// Resolve dispatch access flags into the sealed record. Roots must be
 /// existing directories, stored canonically, and clear of credential and state
 /// roots; the confinement compiler also checks broad and Git roots.
-pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
-    lane_access_checked(access, state_root)
+pub fn lane_access(
+    access: &crate::Access,
+    state_root: &Path,
+    home: &Path,
+) -> Result<run::LaneAccess, Fail> {
+    lane_access_checked(access, state_root, home)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
 }
 
@@ -1477,18 +1481,24 @@ enum AccessError {
 
 /// Refuse a resolved root by the same rule the confinement compiler applies,
 /// naming the flag and the path in the message.
-fn refused_root(flag: &'static str, given: &Path, canonical: &Path) -> Option<AccessError> {
-    provenant_confinement::refuses_lane_root(canonical, flag == "--read-root").then(|| {
-        AccessError::CredentialRoot {
+fn refused_root(
+    flag: &'static str,
+    given: &Path,
+    canonical: &Path,
+    home: &Path,
+) -> Option<AccessError> {
+    provenant_confinement::refuses_lane_root(canonical, flag == "--read-root", Some(home)).then(
+        || AccessError::CredentialRoot {
             flag,
             path: given.to_path_buf(),
-        }
-    })
+        },
+    )
 }
 
 fn lane_access_checked(
     access: &crate::Access,
     state_root: &Path,
+    home: &Path,
 ) -> Result<run::LaneAccess, AccessError> {
     let mut postgres = false;
     for name in &access.capability {
@@ -1514,7 +1524,7 @@ fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
-                if let Some(error) = refused_root(flag, path, &canonical) {
+                if let Some(error) = refused_root(flag, path, &canonical, home) {
                     return Err(error);
                 }
                 if !run::access_root_allowed(&canonical, &state, flag == "--read-root") {
@@ -2804,7 +2814,7 @@ fn dispatch_inner(
         ));
     }
     // Validate roots before checking the capabilities they request.
-    let mut lane_access = lane_access(&command.access, edge.roots.state.as_path())?;
+    let mut lane_access = lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
     let has_writes = run::Service::has_writes(
         matches!(command.access.mode(), Mode::WorktreeWrite),
         &lane_access.write_roots,
@@ -3153,7 +3163,7 @@ fn dispatch_inner(
         )?;
         pinned_base = Some(base);
         command.access.worktree = Some(info.path.clone());
-        lane_access = self::lane_access(&command.access, edge.roots.state.as_path())?;
+        lane_access = self::lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
         Some(json!({"path": info.path, "branch": owned.branch, "owned": true}))
     } else if let Some(path) = &command.access.worktree {
         let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
@@ -3522,7 +3532,7 @@ fn replay_owned_dispatch(
         || task.head != command.head
         || task.base_ref != command.base
         || task.deliver != delivery
-        || task.access != lane_access(&command.access, edge.roots.state.as_path())?
+        || task.access != lane_access(&command.access, edge.roots.state.as_path(), edge.home)?
         || task.profile != profile
         || task.provider_timeout_seconds != command.provider_timeout
         || task.delivery_id != command.delivery_id
@@ -12433,8 +12443,12 @@ mod tests {
             }
         };
         let command = parse("--route", "command/fmt");
-        let access =
-            lane_access(&command.access, &temp.path().join("state")).map_err(|e| e.message)?;
+        let access = lane_access(
+            &command.access,
+            &temp.path().join("state"),
+            Path::new("/fixture/host-home"),
+        )
+        .map_err(|e| e.message)?;
         assert_eq!(access.write_roots, vec![root.clone()]);
         let fail = check_flag_capabilities(&command, None).unwrap_err();
         assert_eq!(fail.kind.code(), "UNSUPPORTED");
@@ -12465,15 +12479,19 @@ mod tests {
         let mut roots = vec![std::fs::canonicalize(&credential)?];
         // The home itself and its `.config` are enclosing roots; use the host's
         // real directories so the check sees a conventional home.
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
-            && home.is_dir()
-        {
+        let host_home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_dir());
+        if let Some(home) = &host_home {
             if home.join(".config").is_dir() {
                 roots.push(home.join(".config"));
             }
-            roots.push(home);
+            roots.push(home.clone());
         }
         assert!(roots.len() >= 2);
+        let home = host_home
+            .as_deref()
+            .unwrap_or(Path::new("/fixture/host-home"));
         for root in roots {
             for (flag, read) in [("--read-root", true), ("--write-root", false)] {
                 let access = crate::Access {
@@ -12484,7 +12502,7 @@ mod tests {
                     network: None,
                     capability: vec![],
                 };
-                let fail = lane_access(&access, &temp.path().join("state")).unwrap_err();
+                let fail = lane_access(&access, &temp.path().join("state"), home).unwrap_err();
                 assert!(fail.message.contains(flag), "{}", fail.message);
                 assert!(
                     fail.message.contains(&root.display().to_string()),
@@ -12493,6 +12511,59 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let team = temp.path().join("srv/team");
+        let home = team.join("alice");
+        let project = home.join("project");
+        let config = home.join(".config");
+        std::fs::create_dir_all(&project)?;
+        std::fs::create_dir_all(&config)?;
+        let team = std::fs::canonicalize(team)?;
+        let home = std::fs::canonicalize(home)?;
+        let project = std::fs::canonicalize(project)?;
+        let config = std::fs::canonicalize(config)?;
+        let state = temp.path().join("state");
+        let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+            mode: Some(Mode::ReadOnly),
+            worktree: None,
+            read_root,
+            write_root,
+            network: None,
+            capability: vec![],
+        };
+        for root in [&team, &home, &config] {
+            for (flag, read) in [("--read-root", true), ("--write-root", false)] {
+                let fail = lane_access(
+                    &access(
+                        if read { vec![root.clone()] } else { vec![] },
+                        if read { vec![] } else { vec![root.clone()] },
+                    ),
+                    &state,
+                    &home,
+                )
+                .unwrap_err();
+                assert!(fail.message.contains(flag), "{}", fail.message);
+                assert!(
+                    fail.message.contains(&root.display().to_string()),
+                    "{}",
+                    fail.message
+                );
+            }
+        }
+        let granted = lane_access(
+            &access(vec![project.clone()], vec![project.clone()]),
+            &state,
+            &home,
+        )
+        .map_err(|fail| fail.message)?;
+        assert_eq!(granted.read_roots, vec![project.clone()]);
+        assert_eq!(granted.write_roots, vec![project]);
         Ok(())
     }
 
@@ -12506,11 +12577,11 @@ mod tests {
             "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin/bin",
         );
         assert!(
-            !provenant_confinement::refuses_lane_root(shape, true),
+            !provenant_confinement::refuses_lane_root(shape, true, None),
             "reads pass entry"
         );
         assert!(
-            provenant_confinement::refuses_lane_root(shape, false),
+            provenant_confinement::refuses_lane_root(shape, false, None),
             "writes stay strict"
         );
         // Against a machine's real home: build a temp release and walk it
@@ -12523,7 +12594,9 @@ mod tests {
         if std::fs::create_dir_all(&releases).is_err() {
             return Ok(());
         }
-        let temp = tempfile::tempdir_in(&releases)?;
+        let Ok(temp) = tempfile::tempdir_in(&releases) else {
+            return Ok(());
+        };
         let release = std::fs::canonicalize(temp.path())?;
         let state = tempfile::tempdir()?;
         let state = std::fs::canonicalize(state.path())?;
@@ -12538,12 +12611,14 @@ mod tests {
         let granted = lane_access(
             &access(vec![release.clone()], vec![]),
             &state.join("grants"),
+            Path::new(&home),
         )
         .map_err(|fail| fail.message)?;
         assert_eq!(granted.read_roots, vec![release.clone()]);
         let fail = lane_access(
             &access(vec![], vec![release.clone()]),
             &state.join("writes"),
+            Path::new(&home),
         )
         .unwrap_err();
         assert_eq!(
@@ -12560,6 +12635,7 @@ mod tests {
     fn entry_root_table_matches_confinement() {
         let standalone =
             "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
+        let home = Path::new("/fixture/host-home");
         for (path, read_allowed, write_allowed) in [
             ("/Users/alice/.ssh", false, false),
             ("/Users/alice/.config", false, false),
@@ -12570,7 +12646,7 @@ mod tests {
                 ("--read-root", read_allowed),
                 ("--write-root", write_allowed),
             ] {
-                let refused = refused_root(flag, Path::new(path), Path::new(path));
+                let refused = refused_root(flag, Path::new(path), Path::new(path), home);
                 assert_eq!(refused.is_none(), allowed, "{flag} {path}");
                 if let Some(AccessError::CredentialRoot {
                     flag: named,
@@ -12580,6 +12656,23 @@ mod tests {
                     assert_eq!(named, flag);
                     assert_eq!(named_path, Path::new(path));
                 }
+            }
+        }
+        // A host home outside /Users and /home is refused at entry, so entry
+        // and compile agree without this test depending on the host's HOME.
+        let home = Path::new("/srv/team/alice");
+        for (path, read_allowed, write_allowed) in [
+            ("/srv/team", false, false),
+            ("/srv/team/alice", false, false),
+            ("/srv/team/alice/.config", false, false),
+            ("/srv/team/alice/project", true, true),
+        ] {
+            for (flag, allowed) in [
+                ("--read-root", read_allowed),
+                ("--write-root", write_allowed),
+            ] {
+                let refused = refused_root(flag, Path::new(path), Path::new(path), home);
+                assert_eq!(refused.is_none(), allowed, "{flag} {path}");
             }
         }
     }
@@ -12600,9 +12693,13 @@ mod tests {
             capability: capability.iter().map(|name| name.to_string()).collect(),
         };
         let network = |mode, switch, capability: &[&str]| {
-            lane_access(&access(mode, switch, capability, Vec::new()), &state)
-                .map(|access| access.network)
-                .map_err(|fail| fail.message)
+            lane_access(
+                &access(mode, switch, capability, Vec::new()),
+                &state,
+                Path::new("/fixture/host-home"),
+            )
+            .map(|access| access.network)
+            .map_err(|fail| fail.message)
         };
         assert_eq!(network(Mode::WorktreeWrite, None, &[]), Ok(None));
         assert_eq!(network(Mode::ReadOnly, None, &["postgres"]), Ok(None));
@@ -12619,12 +12716,17 @@ mod tests {
             Ok(Some(run::NetworkAccess::Open))
         );
         assert!(matches!(
-            lane_access_checked(&access(Mode::ReadOnly, None, &["rust"], Vec::new()), &state),
+            lane_access_checked(
+                &access(Mode::ReadOnly, None, &["rust"], Vec::new()),
+                &state,
+                Path::new("/fixture/host-home"),
+            ),
             Err(AccessError::UnknownCapability(name)) if name == "rust"
         ));
         let granted = lane_access(
             &access(Mode::WorktreeWrite, None, &[], vec![project.clone()]),
             &state,
+            Path::new("/fixture/host-home"),
         )
         .map_err(|fail| fail.message)?;
         assert_eq!(
@@ -12640,7 +12742,8 @@ mod tests {
             assert!(
                 lane_access(
                     &access(Mode::WorktreeWrite, None, &[], vec![refused]),
-                    &state
+                    &state,
+                    Path::new("/fixture/host-home"),
                 )
                 .is_err()
             );
@@ -12667,12 +12770,23 @@ mod tests {
         for overlapping in [worktree.clone(), temp.path().join("work")] {
             let expected = provenant_os::fs::canonicalize(&overlapping)?;
             assert!(matches!(
-                lane_access_checked(&access(Vec::new(), vec![overlapping]), &state),
+                lane_access_checked(
+                    &access(Vec::new(), vec![overlapping]),
+                    &state,
+                    Path::new("/fixture/host-home"),
+                ),
                 Err(AccessError::WorktreeOverlap(path)) if path == expected
             ));
         }
         // A read root on the worktree and a write root beneath it stay valid.
-        assert!(lane_access(&access(vec![worktree.clone()], vec![inside]), &state).is_ok());
+        assert!(
+            lane_access(
+                &access(vec![worktree.clone()], vec![inside]),
+                &state,
+                Path::new("/fixture/host-home"),
+            )
+            .is_ok()
+        );
         Ok(())
     }
     #[test]
@@ -12694,18 +12808,33 @@ mod tests {
             capability: Vec::new(),
         };
         // Preset roles read bundled skills from the installed release.
-        let granted = lane_access(&access(vec![skills.clone()], Vec::new()), &state)
-            .map_err(|fail| fail.message)?;
+        let granted = lane_access(
+            &access(vec![skills.clone()], Vec::new()),
+            &state,
+            Path::new("/fixture/host-home"),
+        )
+        .map_err(|fail| fail.message)?;
         assert_eq!(
             granted.read_roots,
             [provenant_os::fs::canonicalize(&skills)?]
         );
-        assert!(lane_access(&access(vec![release.clone()], Vec::new()), &state).is_ok());
+        assert!(
+            lane_access(
+                &access(vec![release.clone()], Vec::new()),
+                &state,
+                Path::new("/fixture/host-home"),
+            )
+            .is_ok()
+        );
         for invalid in ["not-a-digest", "sha256:abc", ".provenant-staging.fixture"] {
             let root = releases.join(invalid).join("skills");
             std::fs::create_dir_all(&root)?;
             assert!(matches!(
-                lane_access_checked(&access(vec![root], Vec::new()), &state),
+                lane_access_checked(
+                    &access(vec![root], Vec::new()),
+                    &state,
+                    Path::new("/fixture/host-home"),
+                ),
                 Err(AccessError::StateOverlap { .. })
             ));
         }
@@ -12716,7 +12845,7 @@ mod tests {
             access(Vec::new(), vec![skills.clone()]),
         ] {
             assert!(matches!(
-                lane_access_checked(&refused, &state),
+                lane_access_checked(&refused, &state, Path::new("/fixture/host-home"),),
                 Err(AccessError::StateOverlap { .. })
             ));
         }

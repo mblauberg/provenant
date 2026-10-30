@@ -237,6 +237,8 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
         )
         .map_err(|error| error.to_string())?
         .with_writer_registry(roots.state.as_path())
+        // The child entry check needs the host home compile will check against.
+        .with_host_home(&context.roots.home)
         // Launch, ownership and cancellation of children use the requester
         // sealed in this attempt's host-built context, never the lane's actor.
         .with_sealed_requester(context.actor_id)
