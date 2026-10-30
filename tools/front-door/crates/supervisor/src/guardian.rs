@@ -1231,12 +1231,12 @@ impl Driver<'_> {
             warnings: warnings.clone(),
             omitted_warnings,
         };
-        self.publish_until_durable(&record, &mut state)?;
-        if cleanup_complete {
+        let published = self.publish_until_durable(&record, &mut state)?;
+        if cleanup_complete && published {
             self.release(&record)?;
         }
         if !cleanup_complete {
-            // The unresolved exit is durable. Keep the guardian (and the unreaped
+            // Keep the guardian (and the unreaped
             // leader) alive while group members remain: poll for cancellation
             // and for the group emptying, and republish a settled exit.
             let mut cancelled = false;
@@ -1250,7 +1250,9 @@ impl Driver<'_> {
                     &mut warnings,
                     &mut omitted_warnings,
                 ) {
-                    self.republish_settled(record, cancelled)?;
+                    if published {
+                        self.republish_settled(record, cancelled)?;
+                    }
                     break;
                 }
                 match self.reactor.wait(&[], Duration::from_millis(100)) {
@@ -1263,7 +1265,8 @@ impl Driver<'_> {
                             cancelled,
                             &mut warnings,
                             &mut omitted_warnings,
-                        ) {
+                        ) && published
+                        {
                             self.republish_settled(record, cancelled)?;
                         }
                         break;
@@ -1381,8 +1384,10 @@ impl Driver<'_> {
             PublishMode::Replace,
         )?)?;
         let record = ProcessExit::never_spawned(self.reservation.scope, None, vec![warning.into()]);
-        self.publish_until_durable(&record, &mut State::never_spawned())?;
-        self.release(&record)
+        if self.publish_until_durable(&record, &mut State::never_spawned())? {
+            self.release(&record)?;
+        }
+        Ok(())
     }
     /// Hand the durable exit to the holder while retaining writer.lock through
     /// import, publication and verified terminal settlement.
@@ -1451,9 +1456,9 @@ impl Driver<'_> {
         }
         Ok(())
     }
-    /// Retry without a time limit: custody survives ENOSPC and signals until
-    /// the immutable exit is durable. process.json exposes publication_pending.
-    fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<()> {
+    /// Retry until the exit is durable or the attempt is gone. Custody survives
+    /// ENOSPC and signals; process.json exposes publication_pending.
+    fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<bool> {
         let bytes = record.bounded_bytes()?;
         if bytes.len() as u64 > EXIT_LIMIT {
             return Err(CustodyError::InvalidRecord);
@@ -1471,6 +1476,14 @@ impl Driver<'_> {
             } else {
                 exit_publisher.publish(&self.attempt, &bytes)
             };
+            if result
+                .as_ref()
+                .err()
+                .and_then(filesystem_error)
+                .is_some_and(provenant_os::fs::FsError::is_not_found)
+            {
+                return Ok(false);
+            }
             let mut tick = Tick::at(0);
             tick.publication = Some(match &result {
                 Ok(Publication::Durable) => machine::PublicationOutcome::Durable,
@@ -1491,7 +1504,7 @@ impl Driver<'_> {
             let (next, effects) = machine::step(state.clone(), Event::Silence, tick);
             *state = next;
             if state.phase() == Phase::Published {
-                return Ok(());
+                return Ok(true);
             }
             if effects.contains(&Effect::RetryPublishedDirectorySync) {
                 visible = true;
