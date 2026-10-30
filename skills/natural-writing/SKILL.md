@@ -1,6 +1,6 @@
 ---
 name: natural-writing
-description: "Use to rewrite, tighten or diagnose general, mixed, correspondence or academic/thesis prose without losing facts, citations or numbers; owns Australian English and the AI-prose mechanisms. Not for READMEs, commits or docs (engineering-writing) or Australian legal drafting (legal-writing)."
+description: "Use to write, rewrite, tighten or diagnose emails and general, mixed, correspondence or academic/thesis prose without losing facts, citations or numbers; owns Australian English and the AI-prose mechanisms. Not for READMEs, commits or docs (engineering-writing) or Australian legal drafting (legal-writing)."
 ---
 
 # Natural writing
@@ -15,7 +15,8 @@ A direct claim, a plain verb, an anchor from the source (number, name, path,
 date, honest negative), one calibrated qualifier, and an ending on the
 decision, risk or next action. Formal prose is not proof of AI authorship, so
 edit for reader value, never for a detector score, and never add fake
-messiness or invented detail.
+messiness or invented detail. The default voice is plain and mildly casual
+([voice.md](references/voice.md)); a formal register is the exception.
 
 ## Workflow
 
@@ -31,7 +32,11 @@ messiness or invented detail.
 4. **Audit independently.** A style pass is where facts drift. Compare the
    locked list against the result and revert any sentence that lost or
    strengthened a claim. For high-stakes prose, run the audit as a separate
-   clean-context reviewer given the before and after texts only.
+   clean-context reviewer given the before and after texts only. For
+   number-heavy text, script the comparison
+   ([claim-discipline.md](references/claim-discipline.md#mechanised-audit)).
+   For long documents, split reviewers by lens (redundancy, register) and
+   triage their findings yourself.
 5. **Report** the final text first, with notes only for material flags.
 
 If the draft already reads well, edit lightly and say so. Choose the least
@@ -40,6 +45,8 @@ diagnose (findings only, no edit).
 
 ## Load when needed
 
+- [voice.md](references/voice.md): the default register, its rules, an
+  example and the formal exceptions. Load before any write or rewrite.
 - [mechanisms.md](references/mechanisms.md): the defects, each with a reason
   and a before/after pair.
 - [tells-2026.md](references/tells-2026.md): what current models still do and
@@ -56,8 +63,7 @@ diagnose (findings only, no edit).
 ## Bounds
 
 - Never style-pass gates, ADR decisions or process runbooks.
-- Use the punctuation the sentence needs. Run `provenant check writing` if the
-  provenant CLI is available; it flags em-dashes and lexical hints, and its
-  silence is necessary, not sufficient, and its word rules are advisory prompts
-  for a human read.
+- Use the punctuation the sentence needs, without em-dashes. Run `provenant
+  check writing` when available; it flags em-dashes and lexical hints, its
+  silence is necessary but not sufficient, and its word rules are advisory.
 - Do not fabricate experience or sources. Flag a missing source.

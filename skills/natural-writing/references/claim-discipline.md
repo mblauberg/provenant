@@ -85,6 +85,15 @@ plainly, reserve hedges for genuine uncertainty, and avoid stacked
 qualifiers. Future work should be bounded and concrete, not `explore more
 advanced approaches`.
 
+## Mechanised audit
+
+For a number-heavy document, a style pass is where a figure drifts or a claim
+loses its qualifier, and a reread misses it. Keep a script that holds each
+number-bearing sentence as a literal, recomputes its values from the source
+data and fails when either no longer matches. Rerun it after every pass. A
+failure on reworded text is the audit working: update the literal only after
+confirming the number and claim survived.
+
 ## Claim audit checklist
 
 - Is the claim observed, inferred, designed/protocol-bound, limited,

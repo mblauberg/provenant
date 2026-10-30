@@ -15,8 +15,10 @@ in scope, the policy is not.
 
 ## Register
 
-Formal enough for examination, direct enough to read: calm, exact, authored. It
-should not sound like marketing, a tutorial or a chatbot.
+Coursework and reports take the skill's default voice: plain,
+mildly casual, anchored. This formal register is for examination-grade theses,
+journal submissions and venues that ask for it: calm, exact, authored, with no
+contractions. Neither should sound like marketing, a tutorial or a chatbot.
 
 - Prefer: The evaluation uses records from two sites. The findings therefore do
   not establish performance at unobserved sites.
