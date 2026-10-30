@@ -881,13 +881,14 @@ fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
+    -w) format=$2; shift 2 ;;
     *) url=$1; shift ;;
   esac
 done
 case "$url" in
-  *.sha256) cp '{}/checksum' "$out" ;;
-  *.tar.gz) cp '{}/package.tar.gz' "$out" ;;
-  *) exit 99 ;;
+  */provenant-aarch64-apple-darwin.tar.gz.sha256) cp '{}/checksum' "$out"; [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 200 ;;
+  */provenant-aarch64-apple-darwin.tar.gz) cp '{}/package.tar.gz' "$out"; [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 200 ;;
+  *) [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 404 ;;
 esac
 "#,
             fixtures.display(),
@@ -978,7 +979,10 @@ esac
         "{}",
         String::from_utf8_lossy(&rerun.stderr.bytes)
     );
-    assert!(rerun.stderr.bytes.is_empty());
+    assert_eq!(
+        rerun.stderr.bytes,
+        b"This release has no bundled app archive; upgrading Provenant without refreshing the app.\n"
+    );
     assert!(!fs::read_to_string(&recorded)?.contains("--harness"));
     fs::remove_file(&recorded)?;
     fs::remove_file(rig.state.join("install/receipt.json"))?;
@@ -1343,6 +1347,7 @@ esac
     assert!(installed_app.join("Contents/MacOS/quota-menubar").is_file());
     if cfg!(target_os = "macos") {
         let plist = fs::read_to_string(&agent)?;
+        let agent_path = agent.to_str().ok_or("agent")?;
         assert!(
             plist.contains(
                 installed_app
@@ -1355,9 +1360,15 @@ esac
         let launches = fs::read_to_string(&launch_log)?;
         assert!(launches.contains("bootout gui/"));
         assert!(launches.contains("bootstrap gui/"));
-        assert_eq!(launches.matches("bootstrap gui/").count(), 2);
-        assert!(launches.contains("kickstart gui/"));
-        assert!(launches.contains(agent.to_str().ok_or("agent")?));
+        assert!(
+            launches
+                .lines()
+                .filter(|line| line.starts_with("bootstrap gui/") && line.contains(agent_path))
+                .count()
+                >= 2
+        );
+        assert!(launches.contains("kickstart -k gui/"));
+        assert!(launches.contains(agent_path));
     }
     rig.env
         .push(("PROVENANT_TEST_MISSING_APPS".into(), "1".into()));
