@@ -116,6 +116,7 @@ impl From<run::RunError> for Fail {
             ErrorKind::WorktreeUnregistered
             | ErrorKind::Refused
             | ErrorKind::WriterScope
+            | ErrorKind::WriterProjectMismatch
             | ErrorKind::Confinement
             | ErrorKind::DiskFloor
             | ErrorKind::MemoryPressure

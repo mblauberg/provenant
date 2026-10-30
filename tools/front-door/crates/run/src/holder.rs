@@ -742,9 +742,11 @@ impl RunStore {
             };
             let check = match check {
                 Err(error) if crate::writer::worktree_removed(writer) || archived => Err(error),
-                Err(RunError::Writer(_)) => Err(RunError::ObjectImportLimit(
-                    "writer preconditions refused; private Git retained for host recovery",
-                )),
+                Err(RunError::Writer(_) | RunError::WriterProjectMismatch { .. }) => {
+                    Err(RunError::ObjectImportLimit(
+                        "writer preconditions refused; private Git retained for host recovery",
+                    ))
+                }
                 Err(error) if !matches!(error, RunError::ObjectImportLimit(_)) => {
                     if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
                         .is_some()

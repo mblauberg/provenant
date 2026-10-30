@@ -590,6 +590,7 @@ error_kinds! {
     Timeout => "TIMEOUT", "The wait budget expired.";
     Peer => "PEER", "The peer host returned an error.";
     WriterScope => "WRITER_SCOPE", "The writer worktree scope was refused.";
+    WriterProjectMismatch => "WRITER_PROJECT_MISMATCH", "The writer worktree belongs to a different project than the selected one.";
     Confinement => "CONFINEMENT", "Confinement refused the requested access.";
     DiskFloor => "DISK_FLOOR", "Free disk space is below gc.free_floor; run `provenant gc --apply`.";
     Processes => "HOST_PROCESSES", "The user process limit has insufficient headroom.";
@@ -608,6 +609,7 @@ impl From<&RunError> for ErrorKind {
             RunError::InvalidTaskTitle(_) | RunError::AttemptReservationRetained => Self::Invalid,
             RunError::WorktreeMissing(_) => Self::WorktreeMissing,
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,
+            RunError::WriterProjectMismatch { .. } => Self::WriterProjectMismatch,
             RunError::Writer(_) => Self::WriterScope,
             RunError::Confinement(_) => Self::Confinement,
             RunError::Refused => Self::Refused,

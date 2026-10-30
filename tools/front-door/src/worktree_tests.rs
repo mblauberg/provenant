@@ -207,6 +207,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root",
             "dispatch_into_git_worktree_without_prior_state",
             "dispatch_into_git_worktree_beside_managed_tree",
+            "cross_project_writer_names_both_projects",
             "git_created_and_recreated_worktrees_are_dispatchable",
             "pr_land_merges_then_fetches_fast_forwards_and_prunes",
             "pr_land_prunes_the_selected_merged_worktree",
@@ -352,6 +353,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "dispatch_into_git_worktree_beside_managed_tree" => {
                     dispatch_into_git_worktree_beside_managed_tree()
+                }
+                "cross_project_writer_names_both_projects" => {
+                    cross_project_writer_names_both_projects()
                 }
                 "git_created_and_recreated_worktrees_are_dispatchable" => {
                     git_created_and_recreated_worktrees_are_dispatchable()
@@ -2581,6 +2585,46 @@ fn git_worktree_dispatch_is_accepted(register_sibling: bool) -> Result {
     )?;
     provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
 
+    Ok(())
+}
+
+fn cross_project_writer_names_both_projects() -> Result {
+    let selected = repository()?;
+    let foreign = repository()?;
+    ok(
+        &foreign,
+        &["worktree", "create", "foreign", "--base", "HEAD", "--json"],
+    )?;
+    let worktree = foreign.project.join(".worktrees/foreign");
+    assert!(worktree.exists());
+    let prompt = selected.root.join("prompt.txt");
+    fs::write(&prompt, "hello")?;
+    let output = command(
+        &selected,
+        &[
+            "dispatch",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--model",
+            "codex/gpt-6-luna",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            worktree.to_str().ok_or("foreign worktree")?,
+            "--operation-id",
+            "cross-project-writer",
+            "--json",
+        ],
+    )?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 1, "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert_eq!(value["error"]["code"], "WRITER_PROJECT_MISMATCH", "{value}");
+    let message = value["error"]["message"].as_str().ok_or("message")?;
+    for project in [&selected.project, &foreign.project] {
+        let name = project.to_str().ok_or("project path")?;
+        assert!(message.contains(name), "{message} does not name {name}");
+    }
     Ok(())
 }
 

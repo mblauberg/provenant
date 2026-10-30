@@ -317,7 +317,18 @@ pub enum RunError {
     #[error("confinement refused: {0}")]
     Confinement(#[from] provenant_confinement::permissions::PermissionError),
     #[error("writer scope refused: {}", .0.with_repair())]
-    Writer(#[from] provenant_confinement::worktrees::WorktreeError),
+    Writer(provenant_confinement::worktrees::WorktreeError),
+    #[error(
+        "worktree {} belongs to project {}, not the selected project {}",
+        worktree.display(),
+        project.display(),
+        selected.display()
+    )]
+    WriterProjectMismatch {
+        worktree: std::path::PathBuf,
+        project: std::path::PathBuf,
+        selected: std::path::PathBuf,
+    },
     #[error("local worktree {0} does not exist; create it with `provenant worktree create <name>`")]
     WorktreeMissing(std::path::PathBuf),
     #[error("worktree {0} is not listed by Git; run `git worktree list --porcelain`")]
@@ -400,6 +411,24 @@ pub enum RunError {
     },
     #[error("run record path is invalid")]
     Path(#[from] provenant_records::PathWireError),
+}
+impl From<provenant_confinement::worktrees::WorktreeError> for RunError {
+    fn from(error: provenant_confinement::worktrees::WorktreeError) -> Self {
+        use provenant_confinement::repo::RepoError;
+        use provenant_confinement::worktrees::WorktreeError;
+        match error {
+            WorktreeError::Repository(RepoError::ForeignProject {
+                worktree,
+                project,
+                selected,
+            }) => Self::WriterProjectMismatch {
+                worktree,
+                project,
+                selected,
+            },
+            other => Self::Writer(other),
+        }
+    }
 }
 pub type Result<T> = std::result::Result<T, RunError>;
 impl RunError {

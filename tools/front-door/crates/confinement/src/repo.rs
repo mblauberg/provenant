@@ -25,6 +25,17 @@ pub enum RepoError {
     InvalidGitMarker,
     #[error("Git private directory is not registered to this worktree")]
     InvalidRegistration,
+    #[error(
+        "worktree {} belongs to project {}, not the selected project {}",
+        worktree.display(),
+        project.display(),
+        selected.display()
+    )]
+    ForeignProject {
+        worktree: PathBuf,
+        project: PathBuf,
+        selected: PathBuf,
+    },
     #[error("Git common or private directory is unsafe")]
     InvalidGitDirectory,
     #[error("alternate Git object stores are not accepted for protected history")]
@@ -576,7 +587,20 @@ pub fn verify_worktree(
         .common_identity
         .same_identity(&repo.common_identity)
     {
-        return Err(RepoError::InvalidRegistration);
+        // Only the common Git directory names the other project. Its parent
+        // is the checkout for a `.git` directory; a separate Git directory is
+        // named as it is.
+        let common = worktree.common_git_dir();
+        let project = common
+            .parent()
+            .filter(|_| common.file_name() == Some(std::ffi::OsStr::new(".git")))
+            .unwrap_or(common)
+            .to_path_buf();
+        return Err(RepoError::ForeignProject {
+            worktree: worktree.root_path().to_path_buf(),
+            project,
+            selected: repo.root_path().to_path_buf(),
+        });
     }
     if worktree
         .private_identity

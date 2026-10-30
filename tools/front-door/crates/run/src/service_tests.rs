@@ -596,6 +596,14 @@ fn each_refusal_has_its_own_stable_code() {
             "WRITER_SCOPE",
         ),
         (
+            RunError::WriterProjectMismatch {
+                worktree: "/project/.worktrees/writer".into(),
+                project: "/other".into(),
+                selected: "/project".into(),
+            },
+            "WRITER_PROJECT_MISMATCH",
+        ),
+        (
             RunError::Confinement(PermissionError::BroadRoot),
             "CONFINEMENT",
         ),
