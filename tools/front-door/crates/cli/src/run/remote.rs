@@ -1912,7 +1912,7 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_that_cannot_say_leaves_a_lane_without_a_wait_and_running_lanes_are_not_asked()
+    fn a_peer_that_cannot_say_leaves_a_lane_without_a_wait()
     -> Result {
         let host = HostId::from_bytes([9; 16]);
         let (running, starting) = (lane(3, "running")?, lane(4, "starting")?);
@@ -1927,7 +1927,8 @@ mod tests {
             Err(corrupt())
         });
         assert!(waits.is_empty());
-        assert_eq!(asked, vec![starting.attempt_id]);
+        // Running lanes are asked too, for provider-silence suppression.
+        assert_eq!(asked, vec![running.attempt_id, starting.attempt_id]);
         let (data, _) =
             render_with_waits(&lanes, &waits, &selected, std::path::Path::new("/state"));
         assert_eq!(data["lanes"][1]["lane_class"], Value::Null);
