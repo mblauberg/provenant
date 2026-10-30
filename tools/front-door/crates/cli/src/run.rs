@@ -193,6 +193,30 @@ pub struct Registry<'a> {
     pub cancel: Option<&'a CancelToken>,
 }
 impl Registry<'_> {
+    fn prepare_with_wait(
+        &self,
+        task: &run::TaskRequest,
+        prompt: &str,
+        paths: &run::LaunchPaths,
+        resume: Option<&run::AttemptRecord>,
+        wait: Option<u64>,
+    ) -> Result<run::PreparedLaunch, String> {
+        let prepared = provider::prepare(self, task, prompt, paths, resume, wait)?;
+        #[cfg(feature = "fixture")]
+        let prepared = {
+            let mut prepared = prepared;
+            if self.host.is_some_and(|host| host.fixture_state_write)
+                && let Some(confinement) = &mut prepared.confinement
+            {
+                confinement.profile.observations.insert(
+                    provenant_confinement::permissions::FixtureOperation::StateWrite,
+                    provenant_confinement::permissions::FixtureOutcome::Allowed,
+                );
+            }
+            prepared
+        };
+        Ok(prepared)
+    }
     /// Whether any registered adapter can continue a recorded session.
     pub fn continues_sessions(&self) -> bool {
         REGISTRY.iter().any(|entry| {
@@ -424,21 +448,7 @@ impl run::Providers for Registry<'_> {
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
     ) -> Result<run::PreparedLaunch, String> {
-        let prepared = provider::prepare(self, task, prompt, paths, resume)?;
-        #[cfg(feature = "fixture")]
-        let prepared = {
-            let mut prepared = prepared;
-            if self.host.is_some_and(|host| host.fixture_state_write)
-                && let Some(confinement) = &mut prepared.confinement
-            {
-                confinement.profile.observations.insert(
-                    provenant_confinement::permissions::FixtureOperation::StateWrite,
-                    provenant_confinement::permissions::FixtureOutcome::Allowed,
-                );
-            }
-            prepared
-        };
-        Ok(prepared)
+        self.prepare_with_wait(task, prompt, paths, resume, None)
     }
 
     fn decode(
@@ -1709,6 +1719,17 @@ pub fn submit_with_host(
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    submit_with_host_and_wait(session, edge, submission, call, host, None)
+}
+
+fn submit_with_host_and_wait(
+    session: &Session,
+    edge: &Edge<'_>,
+    submission: Submission,
+    call: &run::Request<'_>,
+    host: Option<&run::HostLaunchContext>,
+    provider_lease_wait: Option<u64>,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
@@ -1832,9 +1853,25 @@ pub fn submit_with_host(
     let started = if parent_attempt.is_some() {
         Vec::new()
     } else if let Some(host) = host {
-        launch_on_host(session, record.run_id, edge, call, Some(host), None, None)?
+        launch_on_host_with_wait(
+            session,
+            record.run_id,
+            edge,
+            call,
+            Some(host),
+            None,
+            None,
+            provider_lease_wait,
+        )?
     } else {
-        launch(session, record.run_id, edge, call)?
+        launch_prepared_with_wait(
+            session,
+            record.run_id,
+            edge,
+            call,
+            None,
+            provider_lease_wait,
+        )?
     };
     Ok((record, started))
 }
@@ -3151,7 +3188,7 @@ fn dispatch_inner(
             },
         )
         .collect();
-    let (record, started) = submit(
+    let (record, started) = submit_with_host_and_wait(
         &session,
         edge,
         Submission {
@@ -3162,6 +3199,8 @@ fn dispatch_inner(
             knobs: command.knobs,
         },
         &call,
+        None,
+        command.wait,
     )?;
     let (mut data, human, timed_out) =
         report(&session, &record, &started, command.wait, edge, &call)?;
@@ -3611,17 +3650,37 @@ fn launch_prepared(
     call: &run::Request<'_>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
+    launch_prepared_with_wait(session, run, edge, call, ready, None)
+}
+fn launch_prepared_with_wait(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    ready: Option<&run::PreparedStart>,
+    provider_lease_wait: Option<u64>,
+) -> Result<Vec<run::Started>, Fail> {
     // Every lane-facing launch path is submission-only. Only its host holder
     // prepares providers, including credentials and the child's OS profile.
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
         return Ok(Vec::new());
     }
-    launch_on_host(session, run, edge, call, None, None, ready)
+    launch_on_host_with_wait(
+        session,
+        run,
+        edge,
+        call,
+        None,
+        None,
+        ready,
+        provider_lease_wait,
+    )
 }
 
 struct PreparedProvider<'a> {
-    fallback: &'a dyn run::Providers,
+    fallback: &'a Registry<'a>,
     ready: Option<&'a run::PreparedStart>,
+    provider_lease_wait: Option<u64>,
 }
 impl run::Providers for PreparedProvider<'_> {
     fn runtime_cap(&self, provider: &str) -> Option<u64> {
@@ -3656,7 +3715,8 @@ impl run::Providers for PreparedProvider<'_> {
                 .take()
                 .ok_or_else(|| "prepared continuation consumed".into());
         }
-        self.fallback.prepare(task, prompt, paths, resume)
+        self.fallback
+            .prepare_with_wait(task, prompt, paths, resume, self.provider_lease_wait)
     }
     fn decode(
         &self,
@@ -3916,6 +3976,20 @@ fn launch_on_host(
     validated: Option<&run::ValidatedChild>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
+    launch_on_host_with_wait(session, run, edge, call, host, validated, ready, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_on_host_with_wait(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    host: Option<&run::HostLaunchContext>,
+    validated: Option<&run::ValidatedChild>,
+    ready: Option<&run::PreparedStart>,
+    provider_lease_wait: Option<u64>,
+) -> Result<Vec<run::Started>, Fail> {
     let inherited_host = host.is_some();
     let host = match host {
         Some(host) => host.clone(),
@@ -4114,6 +4188,7 @@ fn launch_on_host(
     let providers = PreparedProvider {
         fallback: &registry,
         ready,
+        provider_lease_wait,
     };
     // Fixture guardians observe a recorded boot key, so the reservation must be
     // taken against the same key as on the lane-launch path of the test host.

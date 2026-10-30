@@ -20,8 +20,9 @@ pub(super) fn prepare(
     prompt_text: &str,
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
+    wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, String> {
-    prepare_with(
+    prepare_with_wait(
         registry,
         task,
         prompt_text,
@@ -41,6 +42,7 @@ pub(super) fn prepare(
             None => resolve_executable(name),
         },
         None,
+        wait,
     )
     .map_err(|error| error.to_string())
 }
@@ -49,8 +51,6 @@ pub(super) fn prepare(
 enum ProviderLeaseError {
     #[error("provider lease wait cancelled")]
     Cancelled,
-    #[error("all candidate providers are updating; retry the lane")]
-    AllUpdating,
     #[error("{0}")]
     Other(String),
 }
@@ -60,10 +60,12 @@ enum ProviderLeaseError {
 fn available_provider_leases(
     state: &Path,
     providers: &[&str],
-    budget: provenant_core::WaitBudget,
+    wait: Option<u64>,
     clock: &dyn provenant_core::Clock,
     cancel: &provenant_core::CancelToken,
 ) -> Result<std::collections::BTreeMap<String, provenant_os::fs::LockGuard>, ProviderLeaseError> {
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), wait.unwrap_or(30).min(30))
+        .map_err(|error| ProviderLeaseError::Other(error.to_string()))?;
     loop {
         if cancel.is_cancelled() {
             return Err(ProviderLeaseError::Cancelled);
@@ -91,7 +93,7 @@ fn available_provider_leases(
         let now = clock.mono_now();
         let remaining = budget.remaining(now).as_micros();
         if remaining == 0 {
-            return Err(ProviderLeaseError::AllUpdating);
+            return Ok(leases);
         }
         let next = now
             .checked_add(provenant_core::DurationMicros::from_micros(
@@ -137,6 +139,7 @@ enum PlanCheckError {
     Other(String),
 }
 
+#[cfg(any(test, feature = "fixture"))]
 fn prepare_with(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
@@ -145,6 +148,29 @@ fn prepare_with(
     resume: Option<&run::AttemptRecord>,
     locate: impl Fn(&str) -> Result<PathBuf, String>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
+) -> Result<run::PreparedLaunch, PrepareError> {
+    prepare_with_wait(
+        registry,
+        task,
+        prompt_text,
+        paths,
+        resume,
+        locate,
+        fixture_token,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_with_wait(
+    registry: &Registry<'_>,
+    task: &run::TaskRequest,
+    prompt_text: &str,
+    paths: &run::LaunchPaths,
+    resume: Option<&run::AttemptRecord>,
+    locate: impl Fn(&str) -> Result<PathBuf, String>,
+    fixture_token: Option<&provenant_providers::claude::OauthToken>,
+    wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
         && provider == "host-native"
@@ -186,6 +212,7 @@ fn prepare_with(
             &locate,
             fixture_token,
             false,
+            wait,
         )?;
         if launch.route.model.as_deref() != Some(model) {
             return Err("host-native requires its configured model; use graph routes for non-native fallback".into());
@@ -213,6 +240,7 @@ fn prepare_with(
         &locate,
         fixture_token,
         false,
+        wait,
     )
 }
 
@@ -226,6 +254,7 @@ fn prepare_candidates(
     locate: &dyn Fn(&str) -> Result<PathBuf, String>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     redirected: bool,
+    wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(registry, task, paths, resume, locate, provider, name)
@@ -315,21 +344,20 @@ fn prepare_candidates(
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let eligible = provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing)
         .map_err(|e| e.to_string())?;
-    // Resolve and probe only while updates are excluded. Keep the selected
-    // lease through handoff, including for fallback and prepared continuations.
+    // Exclude updates during preparation when the bounded wait succeeds.
     let clock = provenant_os::clock::SystemClock::new();
     use provenant_core::Clock;
     let fallback_cancel = provenant_core::CancelToken::new();
     let cancel = registry.cancel.unwrap_or(&fallback_cancel);
-    let mut provider_leases = available_provider_leases(
+    let provider_leases = available_provider_leases(
         roots.state.as_path(),
         &eligible.iter().map(|spec| spec.name).collect::<Vec<_>>(),
-        provenant_core::WaitBudget::cli(clock.mono_now(), 30).map_err(|e| e.to_string())?,
+        wait,
         &clock,
         cancel,
     )
     .map_err(|error| error.to_string())?;
-    let eligible = |name: &str| provider_leases.contains_key(name);
+    let eligible = |name: &str| provider_leases.is_empty() || provider_leases.contains_key(name);
     let settings = config.domains.accounts.with_derived_accounts();
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
@@ -593,6 +621,7 @@ fn prepare_candidates(
                 locate,
                 fixture_token,
                 true,
+                wait,
             )?;
             prepared.skipped_routes.insert(
                 0,
@@ -993,7 +1022,6 @@ fn prepare_candidates(
             Stdin::Null => Vec::new(),
         };
         return Ok(run::PreparedLaunch {
-            provider_lease: provider_leases.remove(adapter.id()),
             skipped_routes: reasons,
             argv: spec.argv,
             environment: spec.env,
@@ -1201,7 +1229,6 @@ fn prepare_command(
     );
     apply_setup(&spec.setup, &[&scratch, &paths.provider_state], None)?;
     Ok(run::PreparedLaunch {
-        provider_lease: None,
         skipped_routes: Vec::new(),
         argv: spec.argv,
         environment: spec.env,
@@ -3380,7 +3407,7 @@ mod tests {
     #[test]
     fn candidate_leases_skip_busy_providers_and_share_one_deadline()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::{Clock, WaitBudget};
+        use provenant_core::Clock;
         use provenant_os::fs::LockMode;
         let temp = tempfile::tempdir()?;
         let _a = provenant_os::provider_fence::acquire(temp.path(), "codex", LockMode::Exclusive)?;
@@ -3391,7 +3418,7 @@ mod tests {
         let leases = available_provider_leases(
             temp.path(),
             &["codex", "cursor"],
-            WaitBudget::cli(clock.mono_now(), 30)?,
+            None,
             &clock,
             &provenant_core::CancelToken::new(),
         )?;
@@ -3400,25 +3427,30 @@ mod tests {
         assert_eq!(clock.mono_now().as_micros(), 0);
         drop(leases);
         let _b = provenant_os::provider_fence::acquire(temp.path(), "cursor", LockMode::Exclusive)?;
-        let error = available_provider_leases(
+        let leases = available_provider_leases(
             temp.path(),
             &["codex", "cursor"],
-            WaitBudget::cli(clock.mono_now(), 30)?,
+            Some(1),
             &clock,
             &provenant_core::CancelToken::new(),
-        )
-        .err()
-        .ok_or("busy providers admitted")?;
-        assert!(matches!(error, ProviderLeaseError::AllUpdating));
-        assert_eq!(clock.mono_now().as_micros(), 30_000_000);
+        )?;
+        assert!(leases.is_empty());
+        assert_eq!(clock.mono_now().as_micros(), 1_000_000);
+        let leases = available_provider_leases(
+            temp.path(),
+            &["codex", "cursor"],
+            None,
+            &clock,
+            &provenant_core::CancelToken::new(),
+        )?;
+        assert!(leases.is_empty());
+        assert_eq!(clock.mono_now().as_micros(), 31_000_000);
         Ok(())
     }
 
     #[test]
     fn candidate_lease_wait_honours_cancellation() -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::{
-            CancelToken, Clock, MonoTime, TestClock, TimeError, WaitBudget, WallTime,
-        };
+        use provenant_core::{CancelToken, Clock, MonoTime, TestClock, TimeError, WallTime};
         use provenant_os::fs::LockMode;
         struct CancelOnWait<'a> {
             clock: TestClock,
@@ -3445,28 +3477,15 @@ mod tests {
             clock: TestClock::new(WallTime::from_micros(0)?, MonoTime::from_micros(0)),
             cancel: &cancel,
         };
-        let error = available_provider_leases(
-            temp.path(),
-            &["codex"],
-            WaitBudget::cli(clock.mono_now(), 30)?,
-            &clock,
-            &cancel,
-        )
-        .err()
-        .ok_or("cancelled lease wait admitted")?;
+        let error = available_provider_leases(temp.path(), &["codex"], None, &clock, &cancel)
+            .err()
+            .ok_or("cancelled lease wait admitted")?;
         assert!(matches!(error, ProviderLeaseError::Cancelled));
         assert_eq!(clock.mono_now().as_micros(), 50_000);
         // Cancellation is also checked when the provider becomes available.
         drop(updating);
         assert!(
-            available_provider_leases(
-                temp.path(),
-                &["codex"],
-                WaitBudget::cli(clock.mono_now(), 30)?,
-                &clock,
-                &cancel,
-            )
-            .is_err()
+            available_provider_leases(temp.path(), &["codex"], None, &clock, &cancel,).is_err()
         );
         Ok(())
     }
@@ -3474,7 +3493,7 @@ mod tests {
     #[test]
     fn executable_discovery_after_wait_observes_the_completed_update()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::{Clock, DurationMicros, WaitBudget};
+        use provenant_core::{Clock, DurationMicros};
         use provenant_os::fs::LockMode;
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
@@ -3515,7 +3534,7 @@ mod tests {
             let leases = available_provider_leases(
                 temp.path(),
                 &["cursor"],
-                WaitBudget::cli(clock.mono_now(), 2)?,
+                Some(2),
                 clock,
                 &provenant_core::CancelToken::new(),
             )?;
@@ -4186,7 +4205,12 @@ mod tests {
             Duration::from_secs(2),
         ))?;
         assert_eq!(executed.termination, Termination::Exit(0));
-        assert!(launch.provider_lease.is_some());
+        let update = provenant_os::provider_fence::acquire(
+            roots.state.as_path(),
+            "cursor",
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        drop(update);
         assert_eq!(launch.route.provider.as_deref(), Some("cursor"));
         assert_eq!(
             launch.route.model.as_deref(),

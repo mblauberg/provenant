@@ -636,7 +636,6 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
         OwnedLaunch {
             command: ProviderCommand {
                 priority: 0,
-                provider_lease: None,
                 lane_ports: None,
                 resolved_route: "fixture/provider".into(),
                 permission_plan_digest: Digest::from_bytes([0; 32]),

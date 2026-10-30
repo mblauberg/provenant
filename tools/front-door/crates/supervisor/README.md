@@ -27,6 +27,8 @@ generation-scoped records, reservation fencing, recovery and release. `internal 
 private descriptor handoff, not a raw launch API. Run composes provider decoding
 and its children journal through `GuardianHooks` in its same-binary entry point.
 The hidden invocation carries five validated descriptor numbers in argv.
+Provider-update locks are held only during preparation and are never passed to
+the guardian or provider. Writer and lane-port locks retain their lifecycle roles.
 Its private socket carries the bounded launch message; provider arguments, prompt and environment values never enter the
 guardian argv.
 

@@ -267,6 +267,17 @@ pub(crate) struct AdoptedDelivery {
 /// The child cannot exec until the observer has captured its native identity.
 /// Command::spawn waits for exec, so a short-lived helper handles the parent end
 /// of the handshake. It is joined on every path before custody is returned.
+fn lease_descriptors<'a>(
+    writer: &'a provenant_os::fs::LockGuard,
+    ports: Option<&'a provenant_os::fs::LockGuard>,
+) -> Vec<std::os::fd::BorrowedFd<'a>> {
+    let mut pass = vec![writer.handoff_file().as_fd()];
+    if let Some(ports) = ports {
+        pass.push(ports.handoff_file().as_fd());
+    }
+    pass
+}
+
 fn spawn_identified(
     mut command: Command,
     lease: &provenant_os::fs::LockGuard,
@@ -274,7 +285,7 @@ fn spawn_identified(
     boot: &str,
     permit: Permit,
     secret: Option<&child::SecretPipe>,
-    provider_lease: [Option<&provenant_os::fs::LockGuard>; 2],
+    ports: Option<&provenant_os::fs::LockGuard>,
 ) -> io::Result<(Child, ProcessIdentity, Permit)> {
     let observer =
         super::census::NativeProcessObserver::for_boot(boot).map_err(io::Error::other)?;
@@ -287,10 +298,7 @@ fn spawn_identified(
     unsafe {
         command.pre_exec(move || identity_gate(channel.as_raw_fd()));
     }
-    let mut pass = vec![lease.handoff_file().as_fd()];
-    for lease in provider_lease.into_iter().flatten() {
-        pass.push(lease.handoff_file().as_fd());
-    }
+    let mut pass = lease_descriptors(lease, ports);
     if let Some(pipe) = secret {
         pass.push(pipe.fd());
     }
@@ -526,7 +534,7 @@ impl ProviderGroup {
             boot,
             permit,
             secret.as_ref(),
-            [spec.inherited_lease, spec.inherited_ports],
+            spec.inherited_ports,
         )?;
         drop(secret);
         drop(priority_writer);
@@ -1102,6 +1110,40 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn provider_lease_descriptors_contain_only_writer_and_ports()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = provenant_os::fs::Directory::open_anchor(root.path())?;
+        let writer = directory.try_lock(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let ports = directory.try_lock(
+            std::ffi::OsStr::new("ports.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let update = provenant_os::provider_fence::acquire(
+            root.path(),
+            "agy",
+            provenant_os::fs::LockMode::Shared,
+        )?;
+        let pass = lease_descriptors(&writer, Some(&ports));
+        assert_eq!(
+            pass.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>(),
+            vec![
+                writer.handoff_file().as_raw_fd(),
+                ports.handoff_file().as_raw_fd()
+            ]
+        );
+        assert!(
+            !pass
+                .iter()
+                .any(|fd| fd.as_raw_fd() == update.handoff_file().as_raw_fd())
+        );
+        Ok(())
+    }
 
     #[test]
     fn provider_descendant_keeps_writer_flock_after_parent_handles_close()
