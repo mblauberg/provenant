@@ -34,7 +34,7 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     }
     struct Missing(Arc<AtomicBool>, PathBuf);
     impl ExitPublisher for Missing {
-        fn publish(&self, _: &Directory, bytes: &[u8]) -> Result<Publication> {
+        fn publish(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
             let exit: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             assert_eq!(
                 exit["unresolved_cleanup"], true,
@@ -50,6 +50,13 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
                 "group member must still be live at publication"
             );
             self.0.store(true, Ordering::SeqCst);
+            // The fixture models removal, not an error against a live copy.
+            let path = directory.current_path()?;
+            std::fs::remove_dir_all(&path).map_err(|source| provenant_os::fs::FsError::Io {
+                operation: "remove fixture attempt directory",
+                path: path.clone(),
+                source,
+            })?;
             Err(provenant_os::fs::FsError::Io {
                 operation: "publish fixture exit",
                 path: "process-exit.json".into(),
@@ -313,6 +320,116 @@ impl ExitPublisher for UnconfirmedAfterAttemptRemoval {
 }
 
 #[cfg(all(feature = "fixture", target_os = "macos"))]
+struct ReplaceAttemptPath {
+    as_symlink: bool,
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+impl ExitPublisher for ReplaceAttemptPath {
+    fn publish(&self, directory: &Directory, _: &[u8]) -> Result<Publication> {
+        let path = directory.current_path()?;
+        std::fs::remove_dir_all(&path).map_err(|source| provenant_os::fs::FsError::Io {
+            operation: "remove fixture attempt directory",
+            path: path.clone(),
+            source,
+        })?;
+        if self.as_symlink {
+            std::os::unix::fs::symlink("replacement-target", &path).map_err(|source| {
+                provenant_os::fs::FsError::Io {
+                    operation: "replace fixture attempt directory",
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+        } else {
+            std::fs::create_dir(&path).map_err(|source| provenant_os::fs::FsError::Io {
+                operation: "replace fixture attempt directory",
+                path: path.clone(),
+                source,
+            })?;
+        }
+        Ok(Publication::VisibleDurabilityUnconfirmed {
+            sync_error: provenant_os::fs::FsError::Io {
+                operation: "fixture post-link directory sync",
+                path: PathBuf::from("process-exit.json"),
+                source: io::Error::from_raw_os_error(libc::EIO),
+            },
+        })
+    }
+    fn sync_visible(&self, _: &Directory) -> Result<()> {
+        Err(provenant_os::fs::FsError::Io {
+            operation: "fixture visible exit sync",
+            path: PathBuf::from("process-exit.json"),
+            source: io::Error::from_raw_os_error(libc::EIO),
+        }
+        .into())
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[derive(Clone, Copy)]
+enum RenameTarget {
+    Attempt,
+    Ancestor,
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+struct RenameBeforePublish(RenameTarget);
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+impl ExitPublisher for RenameBeforePublish {
+    fn publish(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
+        let path = directory.current_path()?;
+        let (source, destination) = match self.0 {
+            RenameTarget::Attempt => (path.clone(), path.with_file_name("attempt-renamed")),
+            RenameTarget::Ancestor => {
+                let ancestor = path
+                    .parent()
+                    .ok_or(CustodyError::InvalidRecord)?
+                    .to_path_buf();
+                let destination = ancestor.with_file_name("outer-renamed");
+                (ancestor, destination)
+            }
+        };
+        std::fs::rename(&source, &destination).map_err(|error| provenant_os::fs::FsError::Io {
+            operation: "rename fixture attempt directory",
+            path: source.clone(),
+            source: error,
+        })?;
+        Ok(directory.atomic_write(
+            OsStr::new("process-exit.json"),
+            ".exit-",
+            bytes,
+            PublishMode::NoReplace,
+        )?)
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+struct UnconfirmedThenDurable(std::cell::Cell<bool>);
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+impl ExitPublisher for UnconfirmedThenDurable {
+    fn publish(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
+        assert!(!self.0.replace(true), "publish must run once");
+        directory.atomic_write(
+            OsStr::new("process-exit.json"),
+            ".exit-",
+            bytes,
+            PublishMode::NoReplace,
+        )?;
+        // The directory is present; only this first sync reports ENOENT.
+        Ok(Publication::VisibleDurabilityUnconfirmed {
+            sync_error: provenant_os::fs::FsError::Io {
+                operation: "fixture post-link directory sync",
+                path: PathBuf::from("process-exit.json"),
+                source: io::Error::from_raw_os_error(libc::ENOENT),
+            },
+        })
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
 struct MissingAfterAttemptRemoval;
 
 #[cfg(all(feature = "fixture", target_os = "macos"))]
@@ -353,6 +470,45 @@ impl Holder for TerminalMustNotRun {
 }
 
 #[cfg(all(feature = "fixture", target_os = "macos"))]
+struct SettlingHolder;
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+impl Holder for SettlingHolder {
+    fn admit(&self, _: &[u8], _: &Directory) -> Result<()> {
+        Ok(())
+    }
+    fn terminal(
+        &self,
+        _: &[u8],
+        attempt: &Directory,
+        exit: &ExitObservation,
+        _: &Recovery,
+    ) -> Result<()> {
+        match attempt.mkdir(OsStr::new("quarantine"), 0o700) {
+            Ok(()) => attempt.sync()?,
+            Err(error) if error.is_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let quarantine = attempt.open_verified_directory(OsStr::new("quarantine"))?;
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "scope": exit.scope,
+            "kind": "quarantine_manifest",
+        }))
+        .map_err(|_| CustodyError::InvalidRecord)?;
+        quarantine
+            .atomic_write(
+                OsStr::new("manifest.json"),
+                ".test-",
+                &manifest,
+                PublishMode::NoReplace,
+            )?
+            .require_durable()?;
+        publish_release(attempt, exit.scope)
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
 fn child_descriptors(name: &str) -> Option<Vec<OsString>> {
     let args = std::env::var_os(name)?;
     Some(
@@ -383,8 +539,10 @@ fn spawn_missing_attempt_guardian(
 
     let root = tempfile::tempdir().unwrap();
     let writer_path = root.path().join("writer");
-    let attempt_path = root.path().join("attempt");
+    let outer = root.path().join("outer");
+    let attempt_path = outer.join("attempt");
     std::fs::create_dir(&writer_path).unwrap();
+    std::fs::create_dir(&outer).unwrap();
     std::fs::create_dir(&attempt_path).unwrap();
     let clock = SystemClock::new();
     let scope = Scope {
@@ -570,6 +728,240 @@ fn guardian_never_spawned_missing_attempt_skips_release() {
     let reservation: Reservation =
         read_record(&evidence, "reservation.json", RECORD_LIMIT).unwrap();
     assert_eq!(reservation.launch_state, LaunchState::NeverSpawned);
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn guardian_replaced_attempt_directory_is_treated_as_removed() {
+    const CHILD_ARGS: &str = "PROVENANT_TEST_GUARDIAN_REPLACED_DIR_FDS";
+    if let Some(args) = child_descriptors(CHILD_ARGS) {
+        let observer = crate::fixture::RecordedBootObserver;
+        let publisher = ReplaceAttemptPath { as_symlink: false };
+        let holder = TerminalMustNotRun {
+            refuse_admission: false,
+        };
+        supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&publisher),
+                holder: Some(&holder),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        return;
+    }
+    let (_root, mut guardian, _, attempt_path, _) = spawn_missing_attempt_guardian(
+        "guardian::tests::guardian_replaced_attempt_directory_is_treated_as_removed",
+        CHILD_ARGS,
+        vec![b"/usr/bin/true".to_vec()],
+    );
+    let status = wait_for_guardian(&mut guardian);
+    assert!(status.success(), "supervise fixture failed: {status}");
+    assert!(
+        attempt_path.is_dir(),
+        "the fixture must recreate the pathname as a directory"
+    );
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn guardian_replaced_attempt_symlink_is_treated_as_removed() {
+    const CHILD_ARGS: &str = "PROVENANT_TEST_GUARDIAN_REPLACED_LINK_FDS";
+    if let Some(args) = child_descriptors(CHILD_ARGS) {
+        let observer = crate::fixture::RecordedBootObserver;
+        let publisher = ReplaceAttemptPath { as_symlink: true };
+        let holder = TerminalMustNotRun {
+            refuse_admission: false,
+        };
+        supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&publisher),
+                holder: Some(&holder),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        return;
+    }
+    let (_root, mut guardian, _, attempt_path, _) = spawn_missing_attempt_guardian(
+        "guardian::tests::guardian_replaced_attempt_symlink_is_treated_as_removed",
+        CHILD_ARGS,
+        vec![b"/usr/bin/true".to_vec()],
+    );
+    let status = wait_for_guardian(&mut guardian);
+    assert!(status.success(), "supervise fixture failed: {status}");
+    assert!(
+        std::fs::symlink_metadata(&attempt_path)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the fixture must recreate the pathname as a symlink"
+    );
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn guardian_renamed_attempt_still_settles() {
+    const CHILD_ARGS: &str = "PROVENANT_TEST_GUARDIAN_RENAMED_ATTEMPT_FDS";
+    if let Some(args) = child_descriptors(CHILD_ARGS) {
+        let observer = crate::fixture::RecordedBootObserver;
+        let publisher = RenameBeforePublish(RenameTarget::Attempt);
+        let holder = SettlingHolder;
+        supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&publisher),
+                holder: Some(&holder),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        return;
+    }
+    let (_root, mut guardian, _, attempt_path, _) = spawn_missing_attempt_guardian(
+        "guardian::tests::guardian_renamed_attempt_still_settles",
+        CHILD_ARGS,
+        vec![b"/usr/bin/true".to_vec()],
+    );
+    let status = wait_for_guardian(&mut guardian);
+    assert!(status.success(), "supervise fixture failed: {status}");
+    let renamed = attempt_path.with_file_name("attempt-renamed");
+    assert!(!attempt_path.exists(), "the attempt pathname must be gone");
+    assert!(
+        renamed.join("release.json").exists(),
+        "the renamed attempt must still receive terminal settlement"
+    );
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn guardian_renamed_attempt_ancestor_still_settles() {
+    const CHILD_ARGS: &str = "PROVENANT_TEST_GUARDIAN_RENAMED_ANCESTOR_FDS";
+    if let Some(args) = child_descriptors(CHILD_ARGS) {
+        let observer = crate::fixture::RecordedBootObserver;
+        let publisher = RenameBeforePublish(RenameTarget::Ancestor);
+        let holder = SettlingHolder;
+        supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&publisher),
+                holder: Some(&holder),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        return;
+    }
+    let (_root, mut guardian, _, attempt_path, _) = spawn_missing_attempt_guardian(
+        "guardian::tests::guardian_renamed_attempt_ancestor_still_settles",
+        CHILD_ARGS,
+        vec![b"/usr/bin/true".to_vec()],
+    );
+    let status = wait_for_guardian(&mut guardian);
+    assert!(status.success(), "supervise fixture failed: {status}");
+    let renamed = attempt_path
+        .parent()
+        .unwrap()
+        .with_file_name("outer-renamed")
+        .join("attempt");
+    assert!(
+        !attempt_path.exists(),
+        "the old attempt pathname must be gone"
+    );
+    assert!(
+        renamed.join("release.json").exists(),
+        "the attempt under the renamed ancestor must still receive settlement"
+    );
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn guardian_present_attempt_with_enoent_sync_still_settles() {
+    const CHILD_ARGS: &str = "PROVENANT_TEST_GUARDIAN_PRESENT_ENOENT_FDS";
+    if let Some(args) = child_descriptors(CHILD_ARGS) {
+        let observer = crate::fixture::RecordedBootObserver;
+        let publisher = UnconfirmedThenDurable(std::cell::Cell::new(false));
+        let holder = SettlingHolder;
+        supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&publisher),
+                holder: Some(&holder),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        return;
+    }
+    let (_root, mut guardian, _, attempt_path, _) = spawn_missing_attempt_guardian(
+        "guardian::tests::guardian_present_attempt_with_enoent_sync_still_settles",
+        CHILD_ARGS,
+        vec![b"/usr/bin/true".to_vec()],
+    );
+    let status = wait_for_guardian(&mut guardian);
+    assert!(status.success(), "supervise fixture failed: {status}");
+    assert!(
+        attempt_path.join("process-exit.json").exists(),
+        "the present attempt keeps its published exit"
+    );
+    assert!(
+        attempt_path.join("release.json").exists(),
+        "a sync ENOENT alone must not skip terminal settlement"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn descriptor_identity_distinguishes_removal_replacement_and_rename() {
+    let root = tempfile::tempdir().unwrap();
+    let outer = root.path().join("outer");
+    let attempt = outer.join("attempt");
+    std::fs::create_dir_all(&attempt).unwrap();
+    let directory = Directory::open_anchor(&attempt).unwrap();
+    let identity = DirectoryIdentity::of(&directory).unwrap();
+    let path = directory.current_path().unwrap();
+    assert_eq!(
+        descriptor_link(&directory, identity),
+        DescriptorLink::Linked
+    );
+    assert!(!attempt_removed(&directory, Some(&path), identity));
+
+    let renamed = outer.join("renamed");
+    std::fs::rename(&attempt, &renamed).unwrap();
+    assert_eq!(
+        descriptor_link(&directory, identity),
+        DescriptorLink::Linked,
+        "a rename keeps the held directory linked at its new path"
+    );
+    assert!(!attempt_removed(&directory, Some(&path), identity));
+
+    std::fs::remove_dir(&renamed).unwrap();
+    assert_eq!(
+        descriptor_link(&directory, identity),
+        DescriptorLink::Unlinked,
+        "APFS keeps the link count, so the descriptor path proves removal"
+    );
+    assert!(attempt_removed(&directory, Some(&path), identity));
+
+    // Recreating the old name does not resurrect the removed directory.
+    std::fs::create_dir(&attempt).unwrap();
+    assert_eq!(
+        descriptor_link(&directory, identity),
+        DescriptorLink::Unlinked
+    );
+    assert!(attempt_removed(&directory, Some(&path), identity));
 }
 
 #[test]
