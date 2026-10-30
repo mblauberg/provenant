@@ -195,15 +195,29 @@ fn user_process_count() -> io::Result<u64> {
     const PROC_UID_ONLY: u32 = 4;
     // SAFETY: getuid has no arguments and cannot fail.
     let uid = unsafe { libc::getuid() };
-    // SAFETY: a null buffer with size 0 asks only for the byte count the
-    // kernel would return; no memory is written.
-    let bytes = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
-    if bytes < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let bytes = u64::try_from(bytes).map_err(|_| io::Error::other("invalid process list size"))?;
-    Ok(bytes / std::mem::size_of::<libc::pid_t>() as u64)
+    // A null buffer returns a size for every process on the host, not just
+    // this uid's, so fill a buffer and count the entries the kernel writes.
+    // SAFETY: a null buffer with size 0 asks only for a byte count; no memory
+    // is written.
+    let estimate = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
+    let estimate = usize::try_from(estimate).map_err(|_| io::Error::last_os_error())? / PID_BYTES;
+    // Room for processes started between the two calls.
+    let mut pids = vec![0 as libc::pid_t; estimate + 64];
+    let capacity = i32::try_from(pids.len() * PID_BYTES)
+        .map_err(|_| io::Error::other("invalid process list size"))?;
+    // SAFETY: pids is a live, writable buffer of `capacity` bytes, and the
+    // kernel writes at most that many.
+    let bytes =
+        unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity) };
+    let bytes = usize::try_from(bytes).map_err(|_| io::Error::last_os_error())?;
+    Ok(pids[..(bytes / PID_BYTES).min(pids.len())]
+        .iter()
+        .filter(|pid| **pid != 0)
+        .count() as u64)
 }
+
+#[cfg(target_os = "macos")]
+const PID_BYTES: usize = std::mem::size_of::<libc::pid_t>();
 
 /// Linux counts tasks, because `RLIMIT_NPROC` does: every thread of a process
 /// the user owns uses an entry.
@@ -320,6 +334,14 @@ mod tests {
         let budget = super::process_budget().unwrap();
         assert!(budget.used > 0, "this test process is in the count");
         assert!(budget.limit >= budget.used);
+        // Only this uid's processes count, never the whole host's.
+        #[cfg(target_os = "macos")]
+        {
+            // `PROC_ALL_PIDS` is 1. SAFETY: a null buffer with size 0 only asks
+            // for a byte count.
+            let host = unsafe { libc::proc_listpids(1, 0, std::ptr::null_mut(), 0) };
+            assert!(budget.used < u64::try_from(host).unwrap() / 4);
+        }
         assert!(super::ProcessBudget::UNLIMITED.has_room());
     }
 
