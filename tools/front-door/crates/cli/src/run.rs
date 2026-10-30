@@ -9394,6 +9394,26 @@ mod tests {
             Some("thread"),
             "provider capacity: Selected model is at capacity",
         );
+        // Recovery has no holder context; the worker's registry must supply
+        // the real roots so settlement honors the user's retry limit.
+        let root = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[domains.routing]\nsettlement_retries=0\n",
+        )?;
+        let rooted = Registry {
+            roots: Some(&roots),
+            ..Default::default()
+        };
+        let assess_recovered = |registry: &Registry<'_>| {
+            run::Providers::assess_result(registry, &task, &record, &capacity, None, None, 1)
+        };
+        assert!(assess_recovered(&rooted)?.retry.is_none());
+        assert!(assess_recovered(&Registry::default())?.retry.is_some());
         const NOW: i64 = 1_800_000_000;
         let assess_at = |record: &run::AttemptRecord,
                          task: &run::TaskRequest,

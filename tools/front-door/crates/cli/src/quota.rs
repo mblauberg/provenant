@@ -470,6 +470,11 @@ pub(crate) fn persist_provider_success(
             AccountRecord::empty(account)
         }
     };
+    // A lane launched before a mismatch is not evidence of the current
+    // signed-in identity, and must not supersede the verifying probe.
+    if next.last_error == Some(ProbeFailure::AccountMismatch) {
+        return Ok(());
+    }
     next.auth_verified_unix_seconds = Some(now);
     next.auth_retry_pending = false;
     // A probe started before this lane may not overwrite newer evidence.
@@ -1979,7 +1984,7 @@ mod tests {
         let root = private(temp.path())?;
         let dir = child(&root, OsStr::new("quota"))?;
         let mut records = Vec::new();
-        for key in ["first", "second"] {
+        for key in ["first", "second", "mismatch"] {
             let account = AccountScope {
                 adapter: "claude".into(),
                 account_key: key.into(),
@@ -1988,7 +1993,11 @@ mod tests {
             let mut record = AccountRecord::empty(account.clone());
             record.revision = 1;
             record.last_attempt_unix_seconds = Some(100);
-            record.last_error = Some(ProbeFailure::Auth);
+            record.last_error = Some(if key == "mismatch" {
+                ProbeFailure::AccountMismatch
+            } else {
+                ProbeFailure::Auth
+            });
             record.failures = 1;
             record.claim = Some(RefreshClaim {
                 token: "old".into(),
@@ -2036,6 +2045,10 @@ mod tests {
             pool_selection: None,
         };
         persist_provider_success(temp.path(), &route, 120)?;
+        let mut mismatch_route = route.clone();
+        mismatch_route.account_key = Some("mismatch".into());
+        mismatch_route.account_label = Some("mismatch".into());
+        persist_provider_success(temp.path(), &mismatch_route, 120)?;
         let found = read_records(&dir)?;
         let first = found
             .iter()
@@ -2050,6 +2063,13 @@ mod tests {
         assert!(first.claim.is_none());
         assert!(schedule::complete(first, "old", 121, Err(ProbeFailure::Auth), None).is_err());
         assert_eq!(second.last_error, Some(ProbeFailure::Auth));
+        let mismatch = found
+            .iter()
+            .find(|r| r.account.account_key == "mismatch")
+            .unwrap();
+        assert_eq!(mismatch.last_error, Some(ProbeFailure::AccountMismatch));
+        assert_eq!(mismatch.auth_verified_unix_seconds, None);
+        assert!(mismatch.claim.is_some());
         let report: QuotaReport =
             serde_json::from_slice(&std::fs::read(temp.path().join("quota/report.json"))?)?;
         assert_eq!(

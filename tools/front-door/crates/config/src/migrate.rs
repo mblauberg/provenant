@@ -56,6 +56,18 @@ where
             reason: "clock unavailable",
         })?
         .as_timestamp();
+    // Avoid creating the state directory or lock for a no-op. A real edit is
+    // re-evaluated while holding the editor lock.
+    if !dry_run {
+        let preview = migrate(roots, sections, true)?;
+        if preview.migrations.is_empty() {
+            return Ok(MigrateReport {
+                dry_run: false,
+                after_revision: preview.before_revision.clone(),
+                ..preview
+            });
+        }
+    }
     let mut migrations = Vec::new();
     let mut backup = None;
     let options = EditOptions {
@@ -206,6 +218,14 @@ fn migrate_row(
             keys: vec!["expires_unix_seconds".into()],
         }));
     }
+    let decorations = |key: &str| {
+        row.get_key_value(key).and_then(|(key, item)| {
+            item.as_value()
+                .map(|value| (key.leaf_decor().clone(), value.decor().clone()))
+        })
+    };
+    let starts_decor = decorations("starts_unix_seconds");
+    let expires_decor = decorations("expires_unix_seconds");
     let schedule = row.entry("schedule").or_insert_with(|| {
         if inline {
             Item::Value(Value::InlineTable(toml_edit::InlineTable::new()))
@@ -217,14 +237,25 @@ fn migrate_row(
         return Err(refused(location, "schedule is not a table"));
     };
     let mut keys = Vec::new();
-    let mut place = |schedule: &mut dyn TableLike, old: &str, new: &str, item: Item| {
+    let mut place = |schedule: &mut dyn TableLike,
+                     old: &str,
+                     new: &str,
+                     mut value: Value,
+                     decor: Option<(toml_edit::Decor, toml_edit::Decor)>| {
         if schedule.contains_key(new) {
             return Err(refused(
                 location,
                 &format!("both {old} and schedule.{new} are set; remove one and rerun"),
             ));
         }
-        schedule.insert(new, item);
+        if let Some((key_decor, value_decor)) = decor {
+            *value.decor_mut() = value_decor;
+            let mut key = toml_edit::Key::new(new);
+            *key.leaf_decor_mut() = key_decor;
+            schedule.entry_format(&key).or_insert(Item::Value(value));
+        } else {
+            schedule.insert(new, Item::Value(value));
+        }
         keys.push(old.to_owned());
         Ok(())
     };
@@ -233,7 +264,8 @@ fn migrate_row(
             schedule,
             "starts_unix_seconds",
             "starts",
-            toml_edit::value(text),
+            Value::from(text),
+            starts_decor,
         )?;
     }
     if let Some(text) = expires {
@@ -241,7 +273,8 @@ fn migrate_row(
             schedule,
             "expires_unix_seconds",
             "expires",
-            toml_edit::value(text),
+            Value::from(text),
+            expires_decor,
         )?;
     }
     // Remove the retired keys only after every placement succeeded.
@@ -267,4 +300,47 @@ fn migrate_row(
         action: "moved",
         keys,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timestamp_comments_follow_migrated_keys() {
+        let source = "[domains.routing]\n[[domains.routing.model_policy.rules]]\n# begin\nstarts_unix_seconds = 1700000000 # start\n# end\nexpires_unix_seconds = 1800000000 # expiry\n";
+        let mut document: DocumentMut = source.parse().unwrap();
+        rewrite(&mut document, 0).unwrap();
+        let result = document.to_string();
+        assert!(
+            result.contains("# begin\nstarts = \"2023-11-14T22:13:20Z\" # start"),
+            "{result}"
+        );
+        assert!(
+            result.contains("# end\nexpires = \"2027-01-15T08:00:00Z\" # expiry"),
+            "{result}"
+        );
+    }
+
+    #[test]
+    fn missing_config_migration_writes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let roots = crate::tests::state_roots(&state);
+        let report = migrate(&roots, &crate::domains::NO_DOMAINS, false).unwrap();
+        assert!(report.migrations.is_empty());
+        assert_eq!(report.before_revision, report.after_revision);
+        assert!(!state.exists());
+        std::fs::create_dir(&state).unwrap();
+        let original = "schema_version = 1\n# unchanged\n";
+        std::fs::write(state.join("config.toml"), original).unwrap();
+        let report = migrate(&roots, &crate::domains::NO_DOMAINS, false).unwrap();
+        assert!(report.migrations.is_empty());
+        assert_eq!(report.before_revision, report.after_revision);
+        assert_eq!(
+            std::fs::read_to_string(state.join("config.toml")).unwrap(),
+            original
+        );
+        assert_eq!(std::fs::read_dir(&state).unwrap().count(), 1);
+    }
 }

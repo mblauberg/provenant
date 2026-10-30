@@ -799,26 +799,35 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::Settle { request }) => {
             // Recovery commits terminal state without a live guardian, so it
             // drains the settlement reactions itself.
-            let drained = provenant_run::settlement::ResumeRequest::parse(&request).map(|parsed| {
-                settlement::Subject {
+            let result = (|| -> Result<(), String> {
+                let parsed = provenant_run::settlement::ResumeRequest::parse(&request)
+                    .map_err(|error| error.to_string())?;
+                let mut inputs = provenant_core::RootInputs::new(
+                    parsed.roots().home.clone(),
+                    parsed.roots().checkout.clone(),
+                );
+                inputs.state_dir = Some(parsed.roots().state_root.clone());
+                let roots = inputs
+                    .resolve(&provenant_os::fs::SystemPathResolver)
+                    .map_err(|error| error.to_string())?;
+                let subject = settlement::Subject {
                     home: parsed.roots().home.clone(),
                     checkout: parsed.roots().checkout.clone(),
                     state_root: parsed.roots().state_root.clone(),
                     project: parsed.project(),
                     actor: parsed.actor(),
                     run: parsed.run(),
-                }
-            });
-            match provenant_run::settlement::resume(
-                &request,
-                &provenant_cli::run::Registry::default(),
-            )
-            .map_err(|error| error.to_string())
-            .and_then(|()| {
-                let subject = drained.map_err(|error| error.to_string())?;
+                };
+                let registry = provenant_cli::run::Registry {
+                    roots: Some(&roots),
+                    ..Default::default()
+                };
+                provenant_run::settlement::resume(&request, &registry)
+                    .map_err(|error| error.to_string())?;
                 fabric::settlement_reactions(&subject, None, process.workers())
                     .map_err(|error| error.to_string())
-            }) {
+            })();
+            match result {
                 Ok(()) => 0,
                 Err(error) => fail(&inv.leaf, Outcome::Error, "SETTLEMENT", &error, globals),
             }

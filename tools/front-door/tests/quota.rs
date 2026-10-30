@@ -571,7 +571,7 @@ cat "$HOME/agy-usage"
         0
     );
     let refused: serde_json::Value = serde_json::from_slice(&fs::read(&record_path)?)?;
-    assert_eq!(refused["last_error"], "auth");
+    assert_eq!(refused["last_error"], "account_mismatch");
     assert_eq!(refused["snapshot"], record["snapshot"]);
 
     // Missing identity cannot silently register a label-based account.

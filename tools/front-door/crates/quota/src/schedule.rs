@@ -210,7 +210,11 @@ pub fn complete(
                 next.auth_verified_unix_seconds = None;
             }
             next.failures = next.failures.saturating_add(1);
-            next.last_error = Some(failure);
+            // A later failed probe cannot establish that the registered
+            // identity matches again.
+            if current.last_error != Some(ProbeFailure::AccountMismatch) {
+                next.last_error = Some(failure);
+            }
             next.backoff_until_unix_seconds = Some(add(
                 now,
                 backoff(failure, next.failures, retry_after_seconds),
@@ -954,7 +958,7 @@ mod tests {
         .unwrap();
         let row = report(
             crate::source::TEST_POLICIES,
-            &[failed],
+            std::slice::from_ref(&failed),
             &[],
             &QuotaQuery { adapter: None },
             420,
@@ -966,6 +970,42 @@ mod tests {
         assert_eq!(row.status, QuotaStatus::AuthRequired);
         assert_eq!(row.error, Some(ProbeFailure::AccountMismatch));
         assert_eq!(serde_json::to_value(row.error).unwrap(), "account_mismatch");
+        let claimed = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&failed),
+            &a,
+            2000,
+            "next",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let failed_again = complete(&claimed, "next", 2010, Err(ProbeFailure::Network), None)
+            .unwrap()
+            .replacement
+            .unwrap();
+        assert_eq!(failed_again.last_error, Some(ProbeFailure::AccountMismatch));
+        let claimed = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&failed_again),
+            &a,
+            4000,
+            "verified",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let mut snapshot = claimed.snapshot.clone().unwrap();
+        snapshot.observed_unix_seconds = 4000;
+        let verified = complete(&claimed, "verified", 4010, Ok(snapshot), None)
+            .unwrap()
+            .replacement
+            .unwrap();
+        assert_eq!(verified.last_error, None);
     }
 }
 
