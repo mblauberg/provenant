@@ -25,7 +25,7 @@ pub use git_evidence::Git;
 pub use output_custody::OutputCustody;
 pub use permissions::{
     ConfinementBackend, MAX_WRITE_GRANTS, WriteGrant, WriteSource, is_codex_standalone_package,
-    is_credential_root, write_grants,
+    is_credential_root, refuses_lane_root, write_grants,
 };
 pub use plan::{
     CodexPolicy, ConfinedPlan, ExtensionPolicy, MAX_READ_ONLY_WRITABLE, PlanError, PlanRequest,

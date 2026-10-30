@@ -427,13 +427,6 @@ pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read
     (read && release) || (!root.starts_with(state) && !state.starts_with(root))
 }
 
-/// The rule compile and entry share: a credential root is refused unless it
-/// is a Codex standalone package granted for reads. Writes stay strict.
-fn credential_root_refused(canonical: &std::path::Path, read: bool) -> bool {
-    provenant_confinement::is_credential_root(canonical)
-        && !(read && provenant_confinement::is_codex_standalone_package(canonical))
-}
-
 /// A child's network reach may not exceed its parent's, each write root must
 /// sit inside a parent write root and each read root inside any parent root.
 /// The host repeats submission checks: roots must be existing canonical
@@ -471,11 +464,10 @@ fn child_access_within(
         .map(|root| (root, true))
         .chain(child.access.write_roots.iter().map(|root| (root, false)))
     {
-        // Entry agrees with the compile-time read/exec grant check
-        // (`credential_root_refused`); writes keep the plain refusal.
+        // Apply the same subtree rule as the confinement compiler.
         if provenant_os::fs::canonicalize(root)
             .ok()
-            .is_some_and(|canonical| credential_root_refused(&canonical, read))
+            .is_some_and(|canonical| provenant_confinement::refuses_lane_root(&canonical, read))
         {
             return Err(RunError::Confinement(
                 provenant_confinement::permissions::PermissionError::CredentialRoot,
@@ -512,6 +504,7 @@ fn child_access_within(
 #[cfg(test)]
 mod release_root_tests {
     use super::*;
+    use std::path::Path;
 
     /// A read root in a Codex standalone release passes the shared entry
     /// exception; a write root there stays refused.
@@ -522,8 +515,14 @@ mod release_root_tests {
         let shape = std::path::Path::new(
             "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin/bin",
         );
-        assert!(!credential_root_refused(shape, true), "reads pass entry");
-        assert!(credential_root_refused(shape, false), "writes stay strict");
+        assert!(
+            !provenant_confinement::refuses_lane_root(shape, true),
+            "reads pass entry"
+        );
+        assert!(
+            provenant_confinement::refuses_lane_root(shape, false),
+            "writes stay strict"
+        );
         // Against a machine's real home: build a temp release and walk it
         // through `child_access_within`. A lane can seal `~/.codex`; then the
         // fixture cannot exist and the filesystem part is skipped silently.
@@ -557,25 +556,62 @@ mod release_root_tests {
     }
 
     #[test]
-    fn child_refuses_credential_roots() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn child_refuses_credential_and_enclosing_roots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        let root = temp.path().join(".ssh").join("nested");
-        std::fs::create_dir_all(&root)?;
-        let root = std::fs::canonicalize(root)?;
-        let mut parent = crate::tests::input().request.tasks.remove(0);
-        parent.access.read_roots = vec![root.clone()];
-        parent.access.write_roots = vec![root.clone()];
-        for read in [true, false] {
-            let mut child = parent.clone();
-            child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
-            child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
-            let error =
-                child_access_within(&parent, &child, &temp.path().join("state")).unwrap_err();
-            assert!(error.to_string().contains(
-                &provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
-            ));
+        let credential = temp.path().join(".ssh").join("nested");
+        std::fs::create_dir_all(&credential)?;
+        let mut roots = vec![std::fs::canonicalize(credential)?];
+        // The home itself is an enclosing root; use the host's real directory
+        // so the check sees a conventional home.
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+            && home.is_dir()
+        {
+            roots.push(home);
+        }
+        assert!(roots.len() >= 2);
+        for root in roots {
+            let mut parent = crate::tests::input().request.tasks.remove(0);
+            parent.access.read_roots = vec![root.clone()];
+            parent.access.write_roots = vec![root.clone()];
+            for read in [true, false] {
+                let mut child = parent.clone();
+                child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
+                child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
+                let error =
+                    child_access_within(&parent, &child, &temp.path().join("state")).unwrap_err();
+                assert!(matches!(
+                    error,
+                    RunError::Confinement(
+                        provenant_confinement::permissions::PermissionError::CredentialRoot
+                    )
+                ));
+            }
         }
         Ok(())
+    }
+
+    #[test]
+    fn child_root_table_matches_confinement() {
+        let standalone =
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
+        for (path, read_allowed, write_allowed) in [
+            ("/Users/alice/.ssh", false, false),
+            ("/Users/alice/.config", false, false),
+            (standalone, true, false),
+            ("/Users/alice/project", true, true),
+        ] {
+            for (flag, read, allowed) in [
+                ("--read-root", true, read_allowed),
+                ("--write-root", false, write_allowed),
+            ] {
+                assert_eq!(
+                    !provenant_confinement::refuses_lane_root(Path::new(path), read),
+                    allowed,
+                    "{flag} {path}"
+                );
+            }
+        }
     }
 
     #[test]

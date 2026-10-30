@@ -13,6 +13,10 @@ docs/runbooks/fabric-hosts.md release.home-path e2af7abfbdb20bbc
 tools/front-door/crates/cli/src/run.rs release.github-token 16f71fd8d2683d39
 tools/front-door/crates/cli/src/run.rs release.github-token fd4ac28293da79a0
 tools/front-door/crates/cli/src/run.rs release.home-path 06788c17a1dd80b8
+tools/front-door/crates/cli/src/run.rs release.home-path 1b33c5fcf2e3f8d8
+tools/front-door/crates/cli/src/run.rs release.home-path 32dfa2b7dac4116f
+tools/front-door/crates/cli/src/run.rs release.home-path 9011d081761b5af1
+tools/front-door/crates/cli/src/run.rs release.home-path eff16c4e6584baca
 tools/front-door/crates/cli/src/run.rs release.openai-key d5e3587b17410e5a
 tools/front-door/crates/cli/src/run/provider.rs release.home-path 06f085153f2a1c62
 tools/front-door/crates/config/src/managed_tests.rs release.home-path 43063523d3b4f3c2
@@ -21,9 +25,11 @@ tools/front-door/crates/confinement/src/permissions.rs release.home-path 111a0e8
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 144460c88c4d4bce
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 15597ade3e0c0d61
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 1a87cae3c522e16d
+tools/front-door/crates/confinement/src/permissions.rs release.home-path 1b33c5fcf2e3f8d8
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 1e2b4358871b8a50
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 28df4b59a6e6f0c7
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 29c0dc9aedc5c0f2
+tools/front-door/crates/confinement/src/permissions.rs release.home-path 32dfa2b7dac4116f
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 3ef93d09a59fdf24
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 41aa62a0cc12e424
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 498d95e15ea4e64b
@@ -48,6 +54,7 @@ tools/front-door/crates/confinement/src/permissions.rs release.home-path 7b22316
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 82be84d911c604d4
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 8c565be77aa44f2f
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 8fd14300b58519d7
+tools/front-door/crates/confinement/src/permissions.rs release.home-path 9011d081761b5af1
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 96d390baab3a9551
 tools/front-door/crates/confinement/src/permissions.rs release.home-path 9d85a431e0af0f0b
 tools/front-door/crates/confinement/src/permissions.rs release.home-path a403bc3a29ed7951

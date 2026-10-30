@@ -1468,21 +1468,21 @@ enum AccessError {
     MissingDirectory { flag: &'static str, path: PathBuf },
     #[error("{flag} {} overlaps the Provenant state root", path.display())]
     StateOverlap { flag: &'static str, path: PathBuf },
-    #[error(
-        "{flag} {} is a credential root: {}",
-        path.display(),
-        provenant_confinement::permissions::PermissionError::CredentialRoot
-    )]
+    #[error("{flag} {} is or encloses a credential root", path.display())]
     CredentialRoot { flag: &'static str, path: PathBuf },
     #[error("--write-root {} overlaps the --worktree; worktree-write already grants the worktree", .0.display())]
     WorktreeOverlap(PathBuf),
 }
 
-/// The rule compile and entry share: a credential root is refused unless it
-/// is a Codex standalone package granted for reads. Writes stay strict.
-fn credential_root_refused(canonical: &Path, read: bool) -> bool {
-    provenant_confinement::is_credential_root(canonical)
-        && !(read && provenant_confinement::is_codex_standalone_package(canonical))
+/// Refuse a resolved root by the same rule the confinement compiler applies,
+/// naming the flag and the path in the message.
+fn refused_root(flag: &'static str, given: &Path, canonical: &Path) -> Option<AccessError> {
+    provenant_confinement::refuses_lane_root(canonical, flag == "--read-root").then(|| {
+        AccessError::CredentialRoot {
+            flag,
+            path: given.to_path_buf(),
+        }
+    })
 }
 
 fn lane_access_checked(
@@ -1503,7 +1503,6 @@ fn lane_access_checked(
     let state =
         provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
     let resolve = |paths: &[PathBuf], flag: &'static str| {
-        let read = flag == "--read-root";
         paths
             .iter()
             .map(|path| {
@@ -1514,14 +1513,8 @@ fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
-                // Entry agrees with the compile-time read/exec grant check
-                // (`credential_root_refused`); writes keep the plain
-                // credential-root refusal.
-                if credential_root_refused(&canonical, read) {
-                    return Err(AccessError::CredentialRoot {
-                        flag,
-                        path: path.clone(),
-                    });
+                if let Some(error) = refused_root(flag, path, &canonical) {
+                    return Err(error);
                 }
                 if !run::access_root_allowed(&canonical, &state, flag == "--read-root") {
                     return Err(AccessError::StateOverlap {
@@ -12463,28 +12456,41 @@ mod tests {
     }
 
     #[test]
-    fn lane_access_refuses_credential_roots() -> Result<(), Box<dyn std::error::Error>> {
+    fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn std::error::Error>>
+    {
         let temp = tempfile::tempdir()?;
-        let root = temp.path().join(".ssh").join("nested");
-        std::fs::create_dir_all(&root)?;
-        let root = std::fs::canonicalize(root)?;
-        let message =
-            provenant_confinement::permissions::PermissionError::CredentialRoot.to_string();
-        for read in [true, false] {
-            let flag = if read { "--read-root" } else { "--write-root" };
-            let access = crate::Access {
-                mode: Some(Mode::ReadOnly),
-                worktree: None,
-                read_root: if read { vec![root.clone()] } else { vec![] },
-                write_root: if read { vec![] } else { vec![root.clone()] },
-                network: None,
-                capability: vec![],
-            };
-            let fail = lane_access(&access, &temp.path().join("state")).unwrap_err();
-            assert_eq!(
-                fail.message,
-                format!("{flag} {} is a credential root: {message}", root.display())
-            );
+        let credential = temp.path().join(".ssh").join("nested");
+        std::fs::create_dir_all(&credential)?;
+        let mut roots = vec![std::fs::canonicalize(&credential)?];
+        // The home itself and its `.config` are enclosing roots; use the host's
+        // real directories so the check sees a conventional home.
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+            && home.is_dir()
+        {
+            if home.join(".config").is_dir() {
+                roots.push(home.join(".config"));
+            }
+            roots.push(home);
+        }
+        assert!(roots.len() >= 2);
+        for root in roots {
+            for (flag, read) in [("--read-root", true), ("--write-root", false)] {
+                let access = crate::Access {
+                    mode: Some(Mode::ReadOnly),
+                    worktree: None,
+                    read_root: if read { vec![root.clone()] } else { vec![] },
+                    write_root: if read { vec![] } else { vec![root.clone()] },
+                    network: None,
+                    capability: vec![],
+                };
+                let fail = lane_access(&access, &temp.path().join("state")).unwrap_err();
+                assert!(fail.message.contains(flag), "{}", fail.message);
+                assert!(
+                    fail.message.contains(&root.display().to_string()),
+                    "{}",
+                    fail.message
+                );
+            }
         }
         Ok(())
     }
@@ -12498,8 +12504,14 @@ mod tests {
         let shape = Path::new(
             "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin/bin",
         );
-        assert!(!credential_root_refused(shape, true), "reads pass entry");
-        assert!(credential_root_refused(shape, false), "writes stay strict");
+        assert!(
+            !provenant_confinement::refuses_lane_root(shape, true),
+            "reads pass entry"
+        );
+        assert!(
+            provenant_confinement::refuses_lane_root(shape, false),
+            "writes stay strict"
+        );
         // Against a machine's real home: build a temp release and walk it
         // through `lane_access`. A lane can seal `~/.codex`; then the fixture
         // cannot exist and the filesystem part is skipped silently.
@@ -12533,16 +12545,42 @@ mod tests {
             &state.join("writes"),
         )
         .unwrap_err();
-        let message =
-            provenant_confinement::permissions::PermissionError::CredentialRoot.to_string();
         assert_eq!(
             fail.message,
             format!(
-                "--write-root {} is a credential root: {message}",
+                "--write-root {} is or encloses a credential root",
                 release.display()
             )
         );
         Ok(())
+    }
+
+    #[test]
+    fn entry_root_table_matches_confinement() {
+        let standalone =
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
+        for (path, read_allowed, write_allowed) in [
+            ("/Users/alice/.ssh", false, false),
+            ("/Users/alice/.config", false, false),
+            (standalone, true, false),
+            ("/Users/alice/project", true, true),
+        ] {
+            for (flag, allowed) in [
+                ("--read-root", read_allowed),
+                ("--write-root", write_allowed),
+            ] {
+                let refused = refused_root(flag, Path::new(path), Path::new(path));
+                assert_eq!(refused.is_none(), allowed, "{flag} {path}");
+                if let Some(AccessError::CredentialRoot {
+                    flag: named,
+                    path: named_path,
+                }) = refused
+                {
+                    assert_eq!(named, flag);
+                    assert_eq!(named_path, Path::new(path));
+                }
+            }
+        }
     }
 
     #[test]
