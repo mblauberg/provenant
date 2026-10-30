@@ -1123,6 +1123,14 @@ pub enum JournalError {
 }
 
 impl JournalError {
+    /// Whether the checkpoint cannot be interpreted by this release.
+    pub fn is_unreadable(&self) -> bool {
+        matches!(
+            self,
+            Self::Decode(_) | Self::BadEnvelope | Self::BadDigest | Self::Canonical(_)
+        )
+    }
+
     /// Stable identifier independent of the displayed explanation.
     pub fn code(&self) -> &'static str {
         match self {
@@ -1139,6 +1147,11 @@ impl JournalError {
         }
     }
 }
+
+/// A tick notice already recorded in the dedicated unreadable marker.
+#[derive(Debug, Error)]
+#[error("graph checkpoint is unreadable; inspect it or cancel it to retire the record: {0}")]
+pub struct UnreadableCheckpointNotice(pub JournalError);
 
 /// Safe, atomic checkpoint file journal. The held owner lock fences concurrent
 /// graph writers; all filesystem access after open is descriptor-relative.
@@ -1359,6 +1372,93 @@ impl FileJournal {
         }
     }
 
+    /// Report each unreadable byte snapshot once, independently of advance errors.
+    pub fn read_checkpoint_for_tick(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Option<GraphCheckpoint>, Box<dyn Error>> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId.into());
+        }
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let bytes = match read_checkpoint_bytes(&directory, graph_id)? {
+            Some(bytes) => bytes,
+            None => {
+                let _ = directory.unlink(&unreadable_marker_name(graph_id));
+                return Ok(None);
+            }
+        };
+        match decode_checkpoint(&bytes, graph_id) {
+            Ok(stored) => {
+                let _ = directory.unlink(&unreadable_marker_name(graph_id));
+                Ok(Some(stored.checkpoint))
+            }
+            Err(error) if error.is_unreadable() => {
+                let digest = CanonicalV1::file_digest(&bytes).to_string();
+                let name = unreadable_marker_name(graph_id);
+                let mut previous = String::new();
+                if let Ok(mut file) = directory.open_read(&name) {
+                    let _ = file.by_ref().take(72).read_to_string(&mut previous);
+                }
+                if previous == digest {
+                    return Ok(None);
+                }
+                let _ = directory.atomic_write(
+                    &name,
+                    ".graph-unreadable.",
+                    digest.as_bytes(),
+                    PublishMode::Replace,
+                );
+                Err(UnreadableCheckpointNotice(error).into())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Retire an unreadable record under its graph lock without releasing other fences.
+    pub fn retire_unreadable(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<bool, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let lock_name = format!("graph-{graph_id}.lock");
+        let _lock = directory.lock(
+            OsStr::new(&lock_name),
+            LockMode::Exclusive,
+            budget,
+            cancel,
+            clock,
+        )?;
+        match load_checkpoint(&directory, graph_id) {
+            Err(error) if error.is_unreadable() => {
+                directory.unlink(OsStr::new(&format!("graph-{graph_id}.json")))?;
+                directory
+                    .sync()
+                    .map_err(JournalError::DurabilityUnconfirmed)?;
+                let _ = directory.unlink(&unreadable_marker_name(graph_id));
+                Ok(true)
+            }
+            Err(error) => Err(error),
+            Ok(_) => Ok(false),
+        }
+    }
+
     /// Record why an automatic advance failed, or clear the record with
     /// `None`. It takes no graph lock, because the failure may be that lock.
     pub fn set_advance_error(
@@ -1464,6 +1564,10 @@ impl GraphJournal for FileJournal {
     }
 }
 
+fn unreadable_marker_name(graph_id: &str) -> OsString {
+    format!("graph-{graph_id}.unreadable").into()
+}
+
 fn advance_error_name(graph_id: &str) -> OsString {
     format!("graph-{graph_id}.advance-error").into()
 }
@@ -1479,6 +1583,15 @@ fn load_checkpoint(
     directory: &Directory,
     graph_id: &str,
 ) -> Result<Option<StoredCheckpoint>, JournalError> {
+    read_checkpoint_bytes(directory, graph_id)?
+        .map(|bytes| decode_checkpoint(&bytes, graph_id))
+        .transpose()
+}
+
+fn read_checkpoint_bytes(
+    directory: &Directory,
+    graph_id: &str,
+) -> Result<Option<Vec<u8>>, JournalError> {
     let file = match directory.open_read(OsStr::new(&format!("graph-{graph_id}.json"))) {
         Ok(file) => file,
         Err(error) if error.is_not_found() => return Ok(None),
@@ -1490,8 +1603,12 @@ fn load_checkpoint(
     if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
         return Err(JournalError::TooLarge);
     }
+    Ok(Some(bytes))
+}
+
+fn decode_checkpoint(bytes: &[u8], graph_id: &str) -> Result<StoredCheckpoint, JournalError> {
     let stored: StoredCheckpoint = decode_v1(
-        bytes.as_slice(),
+        bytes,
         Limits {
             max_bytes: MAX_CHECKPOINT_BYTES,
             max_depth: 64,
@@ -1528,7 +1645,7 @@ fn load_checkpoint(
     {
         return Err(JournalError::GraphMismatch);
     }
-    Ok(Some(stored))
+    Ok(stored)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -8308,6 +8425,73 @@ mod file_tests {
                 .expect("pending graph")
                 .is_some()
         );
+    }
+    #[test]
+    fn tick_reports_undecodable_checkpoint_once_and_recovers() {
+        let temp = crate::test_support::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.join("state"));
+        std::fs::create_dir(base.join("state")).unwrap();
+        std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+        let project = ProjectId::from_bytes([1; 16]);
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        let fixture: StoredCheckpoint =
+            serde_json::from_str(include_str!("fixtures/legacy-graph-checkpoint.json")).unwrap();
+        let mut journal =
+            FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+        journal.bind(fixture.execution).unwrap();
+        journal.save(&fixture.checkpoint).unwrap();
+        drop(journal);
+        let path = base
+            .join("state/fabric/graphs")
+            .join(project.to_string())
+            .join("graph-g-test.json");
+        let valid = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"{} ").unwrap();
+        // The ordinary read reproduces the same error on every tick.
+        assert!(FileJournal::read_checkpoint(&root, project, "g-test").is_err());
+        let first = FileJournal::read_checkpoint_for_tick(&root, project, "g-test").unwrap_err();
+        assert!(first.to_string().contains("cancel it"));
+        assert!(
+            FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+                .unwrap()
+                .is_none()
+        );
+        FileJournal::set_advance_error(&root, project, "g-test", Some("another error")).unwrap();
+        FileJournal::set_advance_error(&root, project, "g-test", None).unwrap();
+        assert!(
+            FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(&path, &valid).unwrap();
+        assert!(
+            FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+                .unwrap()
+                .is_some()
+        );
+        assert!(!path.with_file_name("graph-g-test.unreadable").exists());
+        let mut bad_digest: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+        bad_digest["digest"] = "sha256:bad".into();
+        std::fs::write(&path, serde_json::to_vec(&bad_digest).unwrap()).unwrap();
+        assert!(matches!(
+            FileJournal::read_checkpoint(&root, project, "g-test"),
+            Err(JournalError::BadDigest)
+        ));
+        assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
+        assert!(
+            FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(&path, b"{} ").unwrap();
+        assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
     }
     #[test]
     fn advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory() {
