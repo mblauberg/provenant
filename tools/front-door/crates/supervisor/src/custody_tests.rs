@@ -217,6 +217,12 @@ fn slot_root_reservation_only_fences_its_attempt() -> TestResult {
     let mut successor = scope();
     successor.attempt = AttemptId::from_bytes([9; 16]);
     assert!(!reservation_present(&slot, successor)?);
+    // The successor's own reservation still counts beside the legacy record.
+    let own = root.path().join(successor.attempt.to_string());
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(&own)?;
+    std::fs::write(own.join("reservation.json"), b"{}")?;
+    assert!(reservation_present(&slot, successor)?);
+    std::fs::remove_file(own.join("reservation.json"))?;
     // A record the reader cannot decode stays fenced: fail safe.
     std::fs::write(root.path().join("reservation.json"), b"{}")?;
     assert!(reservation_present(&slot, successor)?);
