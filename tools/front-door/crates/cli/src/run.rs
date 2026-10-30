@@ -12545,12 +12545,10 @@ mod tests {
             &state.join("writes"),
         )
         .unwrap_err();
-        let message =
-            provenant_confinement::permissions::PermissionError::CredentialRoot.to_string();
         assert_eq!(
             fail.message,
             format!(
-                "--write-root {} is a credential root: {message}",
+                "--write-root {} is or encloses a credential root",
                 release.display()
             )
         );
