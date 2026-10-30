@@ -3294,8 +3294,9 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         }))?,
     )?;
     std::fs::write(&calls, "")?;
-    let expected =
-        format!("peer workshop speaks protocol 1, this host speaks {PROTOCOL}; upgrade both");
+    let expected = format!(
+        "peer workshop speaks protocol 1, this host expects protocol {PROTOCOL}; upgrade both"
+    );
     let (status, output) = json_command(&rig, &["lanes", "--host", "workshop", "--json"])?;
     assert_eq!(status, 1, "{output}");
     assert_eq!(output["error"]["code"], "PEER_VERSION", "{output}");

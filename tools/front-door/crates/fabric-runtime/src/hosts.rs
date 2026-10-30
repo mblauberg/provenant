@@ -33,6 +33,12 @@ pub fn newest_feature_protocol() -> u64 {
         .max(CONSOLE_DETAIL_PROTOCOL)
 }
 
+/// Refusal frames from releases older than the mismatch prose may omit the
+/// requested protocol on a recorded mismatch; they answered at the base fence.
+pub fn recorded_expected_protocol() -> u64 {
+    PROTOCOL
+}
+
 pub fn discover_ssh_executable(
     override_path: Option<&Path>,
 ) -> Result<std::path::PathBuf, PeerError> {
@@ -56,8 +62,16 @@ pub fn discover_ssh_executable(
 pub enum PeerError {
     #[error("peer protocol version or identity mismatch")]
     Version,
-    #[error("peer {peer} speaks protocol {remote}, this host speaks {PROTOCOL}; upgrade both")]
-    ProtocolMismatch { peer: String, remote: u64 },
+    #[error(
+        "peer {peer} speaks protocol {remote}, this host expects protocol {expected}; upgrade both"
+    )]
+    ProtocolMismatch {
+        peer: String,
+        remote: u64,
+        /// The requested protocol level, which a feature action raises above
+        /// the base fence.
+        expected: u64,
+    },
     #[error("peer project is outside the selected home")]
     Project,
     #[error("peer source host must be a configured peer other than this host")]
@@ -449,6 +463,24 @@ pub struct PeerRequest<A = PeerAction> {
     #[serde(default)]
     pub trace: Trace,
 }
+/// The protocol fence an action negotiates. Feature actions carry their own
+/// fence above the base; everything else sits at `PROTOCOL`.
+fn action_fence(action: &PeerAction) -> u64 {
+    if matches!(action, PeerAction::ConsoleDetail { .. }) {
+        CONSOLE_DETAIL_PROTOCOL
+    } else if matches!(action, PeerAction::Inbox { .. }) {
+        INBOX_PROTOCOL
+    } else if matches!(
+        action,
+        PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
+    ) {
+        CONSOLE_PROTOCOL
+    } else if matches!(action, PeerAction::Doctor { .. }) {
+        DOCTOR_PROTOCOL
+    } else {
+        PROTOCOL
+    }
+}
 impl PeerRequest {
     /// A request from this host: the trace names the sending host, the acting
     /// agent and the operation the action carries, and nothing else.
@@ -462,20 +494,7 @@ impl PeerRequest {
         let mut request = Self {
             extra: Default::default(),
             version: 1,
-            protocol: if matches!(action, PeerAction::ConsoleDetail { .. }) {
-                CONSOLE_DETAIL_PROTOCOL
-            } else if matches!(action, PeerAction::Inbox { .. }) {
-                INBOX_PROTOCOL
-            } else if matches!(
-                action,
-                PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
-            ) {
-                CONSOLE_PROTOCOL
-            } else if matches!(action, PeerAction::Doctor { .. }) {
-                DOCTOR_PROTOCOL
-            } else {
-                PROTOCOL
-            },
+            protocol: action_fence(&action),
             target_host,
             source_host,
             agent,
@@ -924,6 +943,7 @@ impl SshTransport<'_> {
                     return Err(PeerError::ProtocolMismatch {
                         peer: peer.destination.clone(),
                         remote: 1,
+                        expected: request.protocol,
                     });
                 }
                 if code == 3
@@ -935,6 +955,7 @@ impl SshTransport<'_> {
                     return Err(PeerError::ProtocolMismatch {
                         peer: peer.destination.clone(),
                         remote: 1,
+                        expected: request.protocol,
                     });
                 }
                 if code == 3
@@ -1006,6 +1027,8 @@ impl SshTransport<'_> {
                             return Err(PeerError::ProtocolMismatch {
                                 peer: peer.destination.clone(),
                                 remote: response.protocol,
+                                // The probe speaks the base fence only.
+                                expected: PROTOCOL,
                             });
                         }
                     }
@@ -1035,6 +1058,7 @@ impl SshTransport<'_> {
             return Err(PeerError::ProtocolMismatch {
                 peer: peer.destination.clone(),
                 remote: response.protocol,
+                expected: request.protocol,
             });
         }
         let result = serde_json::from_value(response.result)
@@ -1439,17 +1463,8 @@ mod tests {
                 return Err(ExecError::Busy);
             }
             let request = decode_request(options.stdin.unwrap()).unwrap();
-            assert_eq!(
-                request.protocol,
-                if matches!(
-                    request.action,
-                    PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
-                ) {
-                    CONSOLE_PROTOCOL
-                } else {
-                    PROTOCOL
-                }
-            );
+            let expected = action_fence(&request.action);
+            assert_eq!(request.protocol, expected);
             self.0.lock().unwrap().take().unwrap()
         }
     }
@@ -1504,14 +1519,7 @@ mod tests {
         let request = PeerRequest {
             extra: Default::default(),
             version: 1,
-            protocol: if matches!(
-                action,
-                PeerAction::ConsoleBoard { .. } | PeerAction::ConsoleTree { .. }
-            ) {
-                CONSOLE_PROTOCOL
-            } else {
-                PROTOCOL
-            },
+            protocol: action_fence(&action),
             target_host: host,
             source_host: HostId::from_bytes([1; 16]),
             trace: Default::default(),
@@ -1918,23 +1926,37 @@ mod tests {
             .unwrap(),
             common_dir: "repo/.git".into(),
         };
-        for action in [
-            PeerAction::RunStatuses {
-                extra: Default::default(),
-                targets: vec![],
-            },
-            PeerAction::Coordination {
-                extra: Default::default(),
-                input: CoordinationInput::Events {
-                    input: EventsInput::Note {
+        for (requested, action) in [
+            (
+                PROTOCOL,
+                PeerAction::RunStatuses {
+                    extra: Default::default(),
+                    targets: vec![],
+                },
+            ),
+            (
+                PROTOCOL,
+                PeerAction::Coordination {
+                    extra: Default::default(),
+                    input: CoordinationInput::Events {
+                        input: EventsInput::Note {
+                            extra: Default::default(),
+                            note: "hello".into(),
+                            dedup_key: None,
+                        },
                         extra: Default::default(),
-                        note: "hello".into(),
-                        dedup_key: None,
                     },
+                    operation_id: Some(OperationId::parse("note").unwrap()),
+                },
+            ),
+            // A feature action raises both the requested fence and the prose
+            // beyond the base level.
+            (
+                DOCTOR_PROTOCOL,
+                PeerAction::Doctor {
                     extra: Default::default(),
                 },
-                operation_id: Some(OperationId::parse("note").unwrap()),
-            },
+            ),
         ] {
             for remote in [1, PROTOCOL + 1] {
                 let response = PeerResponse {
@@ -1959,7 +1981,7 @@ mod tests {
                 let request = PeerRequest {
                     extra: Default::default(),
                     version: 1,
-                    protocol: PROTOCOL,
+                    protocol: requested,
                     target_host: host,
                     source_host: HostId::from_bytes([1; 16]),
                     trace: Default::default(),
@@ -1985,7 +2007,7 @@ mod tests {
                 assert_eq!(
                     error.to_string(),
                     format!(
-                        "peer workshop speaks protocol {remote}, this host speaks {PROTOCOL}; upgrade both"
+                        "peer workshop speaks protocol {remote}, this host expects protocol {requested}; upgrade both"
                     )
                 );
                 assert!(executor.0.lock().unwrap().is_none());
