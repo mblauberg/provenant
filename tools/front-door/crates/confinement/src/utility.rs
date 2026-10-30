@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 const DEFAULT_STREAM_LIMIT: usize = 8 * 1024 * 1024;
@@ -91,6 +91,10 @@ pub enum UtilityError {
     FetchFailed { status: i64, stderr: String },
     #[error("setting branch configuration failed with exit status {status}: {stderr}")]
     ConfigFailed { status: i64, stderr: String },
+    #[error(
+        "setting branch configuration timed out after {attempts} attempts waiting out lock contention"
+    )]
+    ConfigLockTimedOut { attempts: usize },
     #[error(transparent)]
     Transport(#[from] TransportError),
     #[error(transparent)]
@@ -152,6 +156,20 @@ impl UtilityBudget {
             DEFAULT_STREAM_LIMIT,
             DEFAULT_STREAM_LIMIT,
         )
+    }
+
+    /// This attempt's share of a deadline the whole operation shares: the
+    /// timeout never exceeds the time still left. A share is refused when no
+    /// time remains, because a zero timeout would fail a spawn outright.
+    fn attempt_share(self, remaining: Duration) -> Option<Self> {
+        if remaining.is_zero() {
+            None
+        } else {
+            Some(Self {
+                timeout: self.timeout.min(remaining),
+                ..self
+            })
+        }
     }
 }
 
@@ -1495,10 +1513,27 @@ pub(crate) fn execute_git_mutation(
     )
 }
 
+/// Real time sets one upstream-key write's deadline: every retry share is
+/// measured against it at this single boundary.
+#[allow(clippy::disallowed_methods)]
+fn config_lock_deadline(timeout: Duration) -> Option<Instant> {
+    Instant::now().checked_add(timeout)
+}
+
+/// The time the shared deadline still leaves, sampled at that same boundary.
+#[allow(clippy::disallowed_methods)]
+fn config_lock_remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
 /// Set one lane upstream key. Reopen the repository after each call because
 /// Git replaces the common config file. Every worktree shares the common
 /// `.git/config`, so concurrent writers contend for its lock file; that
-/// specific failure is retried briefly with a bounded backoff.
+/// specific failure is retried briefly with a bounded backoff. The budget
+/// bounds the whole operation, not one attempt: the deadline is computed once,
+/// each attempt only gets the time still left, retries stop when that time
+/// cannot cover another backoff and attempt, and a timeout names the attempts
+/// it counted.
 pub fn set_lane_upstream_key(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
@@ -1521,12 +1556,34 @@ pub fn set_lane_upstream_key(
         key,
         value,
     };
+    let Some(deadline) = config_lock_deadline(budget.timeout) else {
+        return Err(UtilityError::InvalidBudget);
+    };
     let mut backoff = CONFIG_LOCK_BACKOFF_START;
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let result =
-            execute_git_mutation(executor, repo, runtime, mutation.clone(), budget, cancel)?;
+        let remaining = config_lock_remaining(deadline);
+        let attempt_budget =
+            budget
+                .attempt_share(remaining)
+                .ok_or(UtilityError::ConfigLockTimedOut {
+                    attempts: attempt - 1,
+                })?;
+        let result = execute_git_mutation(
+            executor,
+            repo,
+            runtime,
+            mutation.clone(),
+            attempt_budget,
+            cancel,
+        )
+        // An attempt spent its own share of the shared deadline; that
+        // exhaustion is the operation's, and it must name the attempts.
+        .map_err(|error| match error {
+            UtilityError::TimedOut => UtilityError::ConfigLockTimedOut { attempts: attempt },
+            error => error,
+        })?;
         // Anything unexpected is already rejected by `validate_outcome`.
         let status = match result.termination {
             Termination::Exit(0) => return Ok(()),
@@ -1544,6 +1601,11 @@ pub fn set_lane_upstream_key(
         }
         if cancel.is_cancelled() {
             return Err(UtilityError::Cancelled);
+        }
+        // Another attempt must fit in the deadline with room for its backoff;
+        // otherwise the operation's budget is spent, not just this attempt's.
+        if config_lock_remaining(deadline) <= backoff {
+            return Err(UtilityError::ConfigLockTimedOut { attempts: attempt });
         }
         Pause::wait(
             &ThreadPause,
@@ -2801,6 +2863,102 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
             CONFIG_LOCK_RETRIES,
             "retries must be bounded by CONFIG_LOCK_RETRIES"
         );
+        Ok(())
+    }
+
+    /// Answers every config spawn with lock contention instead of starting a
+    /// process, and records the timeout each attempt asked for. Real Git is
+    /// never launched for the tested path.
+    #[derive(Default)]
+    struct ContendingConfig {
+        calls: AtomicUsize,
+        timeouts: Mutex<Vec<Duration>>,
+    }
+
+    impl ContendingConfig {
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn timeouts(&self) -> Result<Vec<Duration>, Box<dyn Error>> {
+            Ok(self
+                .timeouts
+                .lock()
+                .map_err(|_| "timeouts poisoned")?
+                .drain(..)
+                .collect())
+        }
+    }
+
+    impl Executor for ContendingConfig {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert!(
+                options.argv.iter().any(|arg| arg == "config"),
+                "unexpected spawn: {:?}",
+                options.argv
+            );
+            self.timeouts
+                .lock()
+                .map_err(|_| ExecError::Busy)?
+                .push(options.timeout);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(exit_outcome(255, LOCK_CONTENTION_STDERR))
+        }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // The elapsed span is the assertion.
+    fn lane_upstream_config_lock_contention_stays_within_the_budget() -> Result<(), Box<dyn Error>>
+    {
+        let fixture = Fixture::new()?;
+        // A small budget keeps the test fast. Five full-timeout attempts plus
+        // their backoffs would run far past 200 ms, so the operation must stop
+        // at its shared deadline instead of feeding each retry the whole budget.
+        let budget = UtilityBudget::new(
+            Duration::from_millis(200),
+            Duration::from_millis(100),
+            Duration::from_secs(1),
+            1024,
+            1024,
+        )?;
+        let fake = ContendingConfig::default();
+        let started = Instant::now();
+        let error = set_lane_upstream_key(
+            &fake,
+            &fixture.repo,
+            &fixture.runtime,
+            &branch_name()?,
+            false,
+            budget,
+            &CancelToken::new(),
+        )
+        .expect_err("eternal contention must end at the shared deadline");
+        let UtilityError::ConfigLockTimedOut { attempts } = error else {
+            return Err(format!("unexpected error: {error}").into());
+        };
+        assert_eq!(
+            fake.calls(),
+            attempts,
+            "the timeout error must name the attempts it counted"
+        );
+        assert!(
+            (1..=CONFIG_LOCK_RETRIES).contains(&attempts),
+            "attempts must be bounded by CONFIG_LOCK_RETRIES: {attempts}"
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed <= Duration::from_millis(400),
+            "the operation ran {elapsed:?}, past its 200 ms budget plus backoff slack"
+        );
+        let timeouts = fake.timeouts()?;
+        assert_eq!(timeouts.len(), attempts);
+        for (before, after) in timeouts.iter().zip(timeouts[1..].iter()) {
+            assert!(before <= &Duration::from_millis(200), "{before:?}");
+            assert!(
+                after < before,
+                "shares must shrink: {before:?} then {after:?}"
+            );
+        }
         Ok(())
     }
 
