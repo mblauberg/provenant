@@ -381,6 +381,48 @@ mod tests {
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     #[test]
+    fn detached_process_budget_refusal_is_typed_and_clears_marker() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let result = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            Err(provenant_os::exec::ExecError::ProcessBudget {
+                used: 950,
+                limit: 1000,
+            })
+        });
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            RunError::Admission(AdmissionError::Processes {
+                used: 950,
+                limit: 1000
+            })
+        ));
+        assert_eq!(crate::ErrorKind::from(&error), crate::ErrorKind::Processes);
+        let mut retried = false;
+        store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            retried = true;
+            Ok(())
+        })?;
+        assert!(retried, "failed spawn must remove its queued marker");
+        Ok(())
+    }
+
+    #[test]
     fn preclaim_failures_report_the_cause_bound_background_spawns_and_allow_explicit_retry()
     -> TestResult {
         use crate::{AttemptState, Reconciled, RunStore};
@@ -916,7 +958,12 @@ impl crate::RunStore {
             drop(worker_lock);
             if let Err(error) = spawn(&argv, &checkout) {
                 queued.unlink(OsStr::new("settlement-queued.json"))?;
-                return Err(RunError::Io(std::io::Error::other(error)));
+                return Err(match error {
+                    provenant_os::exec::ExecError::ProcessBudget { used, limit } => {
+                        RunError::Admission(AdmissionError::Processes { used, limit })
+                    }
+                    other => RunError::Io(std::io::Error::other(other)),
+                });
             }
         }
         Ok(attempts

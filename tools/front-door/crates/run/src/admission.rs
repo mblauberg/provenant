@@ -224,7 +224,13 @@ impl RunStore {
                     self.disk_pause_wait(lane)
                         .or_else(|| self.build_slot_wait(lane, call))?
                 } else if matches!(lane.state, AttemptState::Queued { .. }) {
-                    "launch: not yet handed to a guardian".to_owned()
+                    match resources.process_budget() {
+                        Ok(budget) if !budget.has_room() => format!(
+                            "host capacity: user process count {} of {}",
+                            budget.used, budget.limit
+                        ),
+                        _ => "launch: not yet handed to a guardian".to_owned(),
+                    }
                 } else {
                     let active: i64 = self
                         .db
@@ -764,4 +770,44 @@ pub(crate) fn update_attempt(
         return Err(RunError::Conflict);
     }
     insert_event(tx, next)
+}
+
+#[cfg(test)]
+mod process_wait_tests {
+    use super::*;
+
+    struct Full;
+    impl Resources for Full {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            SystemResources.memory()
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+        fn process_budget(&self) -> std::io::Result<resources::ProcessBudget> {
+            Ok(resources::ProcessBudget {
+                used: 950,
+                limit: 1000,
+            })
+        }
+    }
+
+    #[test]
+    fn queued_lane_reports_process_capacity() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let lane = store.record(run.attempts[0].attempt_id, &call)?;
+        let waits = store.lane_waits_with_resources(&[lane], &call, &Full);
+        assert_eq!(
+            waits[0].waiting_for,
+            "host capacity: user process count 950 of 1000"
+        );
+        Ok(())
+    }
 }

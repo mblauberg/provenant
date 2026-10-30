@@ -285,12 +285,17 @@ pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
 /// Refuse a detached worker when the user's process table has no headroom. A
 /// failed probe does not block: the limit is unknown, and the spawn itself
 /// still fails if the table is full.
+#[allow(clippy::print_stderr)]
 fn check_process_budget(probe: io::Result<ProcessBudget>) -> Result<(), ExecError> {
     match probe {
         Ok(budget) if !budget.has_room() => Err(ExecError::ProcessBudget {
             used: budget.used,
             limit: budget.limit,
         }),
+        Err(error) => {
+            eprintln!("detached worker: process budget probe failed: {error}");
+            Ok(())
+        }
         _ => Ok(()),
     }
 }

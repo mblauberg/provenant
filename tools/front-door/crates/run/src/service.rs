@@ -587,6 +587,7 @@ error_kinds! {
     WriterScope => "WRITER_SCOPE", "The writer worktree scope was refused.";
     Confinement => "CONFINEMENT", "Confinement refused the requested access.";
     DiskFloor => "DISK_FLOOR", "Free disk space is below gc.free_floor; run `provenant gc --apply`.";
+    Processes => "HOST_PROCESSES", "The user process limit has insufficient headroom.";
     MemoryPressure => "MEMORY_PRESSURE", "Host memory pressure is too high to admit a lane.";
     LaneCap => "LANE_CAP", "The host or project writer lane cap is reached.";
     BuildSettings => "BUILD_SETTINGS", "The host lane build settings are invalid.";
@@ -607,6 +608,7 @@ impl From<&RunError> for ErrorKind {
             RunError::Refused => Self::Refused,
             RunError::Admission(AdmissionError::Disk { .. }) => Self::DiskFloor,
             RunError::Admission(AdmissionError::MemoryPressure { .. }) => Self::MemoryPressure,
+            RunError::Admission(AdmissionError::Processes { .. }) => Self::Processes,
             RunError::Admission(AdmissionError::LaneCap { .. }) => Self::LaneCap,
             RunError::Admission(AdmissionError::BuildSettings) => Self::BuildSettings,
             RunError::Admission(AdmissionError::GuardianIdentity) => Self::GuardianIdentity,

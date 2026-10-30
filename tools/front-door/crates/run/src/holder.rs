@@ -220,6 +220,9 @@ struct LaneResources<'a> {
     context: &'a HolderContext,
 }
 impl Resources for LaneResources<'_> {
+    fn process_budget(&self) -> std::io::Result<provenant_os::sys::resources::ProcessBudget> {
+        self.resources.process_budget()
+    }
     fn pressure(&self) -> std::io::Result<Option<provenant_os::sys::resources::MemoryPressure>> {
         self.resources.pressure()
     }
@@ -1312,6 +1315,30 @@ mod disk_admission_tests {
             }),
             sealed: None,
         };
+        struct Limited;
+        impl Resources for Limited {
+            fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
+                SystemResources.memory()
+            }
+            fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+                Ok(u64::MAX)
+            }
+            fn process_budget(
+                &self,
+            ) -> std::io::Result<provenant_os::sys::resources::ProcessBudget> {
+                Ok(provenant_os::sys::resources::ProcessBudget {
+                    used: 950,
+                    limit: 1000,
+                })
+            }
+        }
+        let budget = LaneResources {
+            resources: &Limited,
+            context: &context,
+        }
+        .process_budget()?;
+        assert_eq!(budget.used, 950);
+        assert!(!budget.has_room());
         let available = |context: &HolderContext| {
             LaneResources {
                 resources: &SystemResources,

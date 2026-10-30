@@ -201,19 +201,30 @@ fn user_process_count() -> io::Result<u64> {
     // is written.
     let estimate = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
     let estimate = usize::try_from(estimate).map_err(|_| io::Error::last_os_error())? / PID_BYTES;
-    // Room for processes started between the two calls.
-    let mut pids = vec![0 as libc::pid_t; estimate + 64];
-    let capacity = i32::try_from(pids.len() * PID_BYTES)
+    let mut slots = estimate.saturating_add(64);
+    for _ in 0..4 {
+        let mut pids = vec![0 as libc::pid_t; slots];
+        let capacity = i32::try_from(
+            pids.len()
+                .checked_mul(PID_BYTES)
+                .ok_or_else(|| io::Error::other("invalid process list size"))?,
+        )
         .map_err(|_| io::Error::other("invalid process list size"))?;
-    // SAFETY: pids is a live, writable buffer of `capacity` bytes, and the
-    // kernel writes at most that many.
-    let bytes =
-        unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity) };
-    let bytes = usize::try_from(bytes).map_err(|_| io::Error::last_os_error())?;
-    Ok(pids[..(bytes / PID_BYTES).min(pids.len())]
-        .iter()
-        .filter(|pid| **pid != 0)
-        .count() as u64)
+        // SAFETY: pids is writable for capacity bytes and the kernel retains no pointer.
+        let bytes =
+            unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity) };
+        let bytes = usize::try_from(bytes).map_err(|_| io::Error::last_os_error())?;
+        if bytes < capacity as usize {
+            return Ok(pids[..bytes / PID_BYTES]
+                .iter()
+                .filter(|pid| **pid != 0)
+                .count() as u64);
+        }
+        slots = slots
+            .checked_mul(2)
+            .ok_or_else(|| io::Error::other("invalid process list size"))?;
+    }
+    Err(io::Error::other("process list remained full after retries"))
 }
 
 #[cfg(target_os = "macos")]
@@ -223,7 +234,6 @@ const PID_BYTES: usize = std::mem::size_of::<libc::pid_t>();
 /// the user owns uses an entry.
 #[cfg(target_os = "linux")]
 fn user_process_count() -> io::Result<u64> {
-    use std::os::unix::fs::MetadataExt;
     // SAFETY: getuid has no arguments and cannot fail.
     let uid = unsafe { libc::getuid() };
     let mut tasks = 0_u64;
@@ -232,21 +242,43 @@ fn user_process_count() -> io::Result<u64> {
         let name = entry.file_name();
         if !name
             .to_str()
-            .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+            .is_some_and(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()))
         {
             continue;
         }
-        // A process can exit between the listing and these reads.
-        let Ok(metadata) = entry.metadata() else {
-            continue;
+        let status = match std::fs::read_to_string(entry.path().join("status")) {
+            Ok(status) => status,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         };
-        if metadata.uid() != uid {
+        let real_uid = status
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Uid:")
+                    .and_then(|value| value.split_whitespace().next())
+            })
+            .and_then(|value| value.parse::<libc::uid_t>().ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing real uid in process status",
+                )
+            })?;
+        if real_uid != uid {
             continue;
         }
-        let Ok(threads) = std::fs::read_dir(entry.path().join("task")) else {
-            continue;
+        let threads = match std::fs::read_dir(entry.path().join("task")) {
+            Ok(threads) => threads,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         };
-        tasks = tasks.saturating_add(threads.filter(Result::is_ok).count() as u64);
+        for thread in threads {
+            match thread {
+                Ok(_) => tasks = tasks.saturating_add(1),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
     Ok(tasks)
 }
