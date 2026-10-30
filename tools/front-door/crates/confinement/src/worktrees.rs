@@ -89,10 +89,8 @@ pub enum WorktreeError {
     LiveWriter,
     #[error("worktree writer is live: process {0} has its working directory inside the tree")]
     LiveProcess(ObservedProcess),
-    #[error(
-        "incomplete worker census; retry `provenant land` when process observation is complete"
-    )]
-    IncompleteCensus,
+    #[error("incomplete worker census: {detail}")]
+    IncompleteCensus { detail: String },
     #[error("worktree writer or registration is unknown")]
     UnknownWriter,
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
@@ -162,7 +160,7 @@ impl WorktreeError {
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
             }
-            Self::UnknownWriter | Self::IncompleteCensus => {
+            Self::UnknownWriter | Self::IncompleteCensus { .. } => {
                 "run `provenant worktree list` and retry when writer observation is available"
             }
             Self::Primary => {
@@ -414,6 +412,12 @@ pub trait WorkerObserver: Send + Sync {
     fn live_process_for_land(&self, root: &Path) -> Option<ObservedProcess> {
         self.live_process(root)
     }
+
+    /// A diagnostic for an incomplete census. It never affects custody; the
+    /// default is used by observers that cannot identify the observation.
+    fn incomplete_census_detail(&self) -> String {
+        "process census unavailable".into()
+    }
 }
 
 /// The refusal for a root observed live: it names the process when the
@@ -442,6 +446,10 @@ impl WorkerObserver for SystemWorkerObserver {
 
     fn live_process_for_land(&self, root: &Path) -> Option<ObservedProcess> {
         system_live_process(root, true)
+    }
+
+    fn incomplete_census_detail(&self) -> String {
+        system_census_refusal_detail()
     }
 }
 
@@ -476,6 +484,61 @@ fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> BTreeMap<PathBuf, 
         &current,
         ancestors,
     )
+}
+
+fn system_census_refusal_detail() -> String {
+    let observer = SystemProcessObserver;
+    let census = match observer.census(65_536) {
+        Ok(census) => census,
+        Err(provenant_supervisor::census::CensusError::ProcessList(_)) => {
+            return "process listing failed".into();
+        }
+        Err(_) => return "process census unavailable".into(),
+    };
+    if let Some((&pid, issue)) = census.unknown_pids().iter().next() {
+        return format!("process {pid}: {issue:?}");
+    }
+    let cwd = SystemCwdObserver;
+    for fact in census.facts() {
+        let pid = fact.identity.pid;
+        let issue = match observer.observe(pid) {
+            ProcessObservation::Present(current) if current.identity == fact.identity => {
+                match cwd.cwd(pid) {
+                    Ok(CwdObservation::Path(path)) if canonical_cwd(&path).is_some() => {
+                        match observer.observe(pid) {
+                            ProcessObservation::Present(current)
+                                if current.identity == fact.identity =>
+                            {
+                                None
+                            }
+                            ProcessObservation::Absent => None,
+                            _ => Some("identity race"),
+                        }
+                    }
+                    Ok(CwdObservation::Path(_)) => Some("cwd unreadable"),
+                    Ok(CwdObservation::Gone) => None,
+                    Ok(CwdObservation::PermissionDenied) => Some("cwd unreadable"),
+                    Ok(CwdObservation::Unsupported) | Err(_) => Some("cwd unreadable"),
+                }
+            }
+            ProcessObservation::Absent => None,
+            ProcessObservation::Unknown(issue) => Some(match issue {
+                ObservationIssue::PermissionDenied => "PermissionDenied",
+                ObservationIssue::Malformed => "Malformed",
+                ObservationIssue::Unsupported => "Unsupported",
+                ObservationIssue::Io => "Io",
+            }),
+            ProcessObservation::Present(_) => Some("identity race"),
+        };
+        if let Some(issue) = issue {
+            return format!("process {pid}: {issue}");
+        }
+    }
+    if !census.listing_is_complete() {
+        "process listing truncated or incomplete".into()
+    } else {
+        "process census incomplete".into()
+    }
 }
 
 fn observe_worker_roots(
@@ -1177,7 +1240,9 @@ fn lock_worktree(
         .unwrap_or(WorkerState::Unknown)
     {
         WorkerState::Unknown if context.workers.requires_complete_census() => {
-            Err(WorktreeError::IncompleteCensus)
+            Err(WorktreeError::IncompleteCensus {
+                detail: context.workers.incomplete_census_detail(),
+            })
         }
         WorkerState::Free | WorkerState::Unknown => Ok(LockedWorktree { verified, writer }),
         WorkerState::Live => Err(live_refusal(context.workers, &canonical)),
@@ -2054,7 +2119,9 @@ fn retain_reason(error: &WorktreeError) -> RetainReason {
         WorktreeError::GitOperationInProgress => RetainReason::GitOperationInProgress,
         WorktreeError::LiveWriter | WorktreeError::LiveProcess(_) => RetainReason::LiveWriter,
         WorktreeError::LockBusy => RetainReason::LockBusy,
-        WorktreeError::Cancelled | WorktreeError::IncompleteCensus => RetainReason::UnknownWriter,
+        WorktreeError::Cancelled | WorktreeError::IncompleteCensus { .. } => {
+            RetainReason::UnknownWriter
+        }
         error if error.is_custody_unknown() => RetainReason::UnknownWriter,
         WorktreeError::CheckedOut => RetainReason::CheckedOut,
         WorktreeError::IdentityChanged => RetainReason::Changed,
@@ -4360,6 +4427,14 @@ mod lifecycle_tests {
         fn requires_complete_census(&self) -> bool {
             true
         }
+        fn incomplete_census_detail(&self) -> String {
+            self.census
+                .unknown_pids()
+                .iter()
+                .next()
+                .map(|(pid, issue)| format!("process {pid}: {issue:?}"))
+                .unwrap_or_else(|| "process listing truncated or incomplete".into())
+        }
     }
 
     #[test]
@@ -4523,7 +4598,7 @@ mod lifecycle_tests {
         );
         assert!(matches!(
             remove_named(&unplaced, "landed"),
-            Err(WorktreeError::IncompleteCensus)
+            Err(WorktreeError::IncompleteCensus { ref detail }) if detail == "process 400: Io"
         ));
         // A readable process inside the tree still keeps it.
         let live = observer(ObservationIssue::PermissionDenied, Some(&created.path))?;

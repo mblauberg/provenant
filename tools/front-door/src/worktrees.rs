@@ -110,7 +110,7 @@ impl Error {
                 | WorktreeError::LiveProcess(_)
                 | WorktreeError::UnknownWriter
                 | WorktreeError::GitEntryHeld { .. }
-                | WorktreeError::IncompleteCensus
+                | WorktreeError::IncompleteCensus { .. }
                 | WorktreeError::Primary
                 | WorktreeError::IdentityChanged
                 | WorktreeError::PrimaryMoved,
@@ -768,7 +768,12 @@ pub(crate) fn land_cleanup(
                     return Ok(landed);
                 }
                 _ => {
-                    landed.kept = Some(WorktreeError::IncompleteCensus.to_string());
+                    landed.kept = Some(
+                        WorktreeError::IncompleteCensus {
+                            detail: workers.incomplete_census_detail(),
+                        }
+                        .to_string(),
+                    );
                     return Ok(landed);
                 }
             }

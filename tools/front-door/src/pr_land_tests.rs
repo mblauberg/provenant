@@ -1097,9 +1097,29 @@ pub(crate) fn pr_land_refuses_incomplete_worker_census() -> Result {
         assert_eq!(code(&output), 0, "{value}");
         assert_eq!(value["data"]["cleanup_pending"], true, "{value}");
         assert_eq!(status(&value, "worktree")?, "refused", "{value}");
+        assert_eq!(status(&value, "branch")?, "skipped", "{value}");
         let text = value.to_string();
+        assert!(text.contains("process census unavailable"), "{value}");
         assert!(
-            text.contains("incomplete") && text.contains("retry"),
+            text.contains("deletion skipped because its registered worktree was kept"),
+            "{value}"
+        );
+        assert!(!text.contains("is checked out"), "{value}");
+        let steps = value["data"]["steps"].as_array().ok_or("steps")?;
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| step["status"] == "refused")
+                .count(),
+            1,
+            "{value}"
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| step["status"] == "skipped")
+                .count(),
+            1,
             "{value}"
         );
         assert!(landing.worktree.is_dir());
