@@ -5,19 +5,21 @@
     {
       "id": "q1",
       "relation": "positive",
-      "prompt": "Review rust boundary behaviour.",
+      "prompt": "Cargo.toml has a feature that enables the wrong dependency set under --no-default-features; fix the feature wiring.",
       "tags": [
         "direct"
       ],
       "expected": {
         "primary_skill": "rust",
-        "companion_skills": []
+        "companion_skills": [
+          "implement"
+        ]
       }
     },
     {
       "id": "q2",
       "relation": "positive",
-      "prompt": "Update the rust integration for its installed version.",
+      "prompt": "Migrate this crate from edition 2021 to 2024 and work out what the new edition changes for us.",
       "tags": [
         "direct"
       ],
@@ -30,8 +32,20 @@
     },
     {
       "id": "q3",
+      "relation": "positive",
+      "prompt": "What does the unsafe_op_in_unsafe_fn lint do in our toolchain, and should the workspace lint table enable it?",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "rust",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q4",
       "relation": "negative",
-      "prompt": "Investigate the root cause of this rust failure without fixing it.",
+      "prompt": "Investigate why this Rust service panics under load, root cause only, no fix.",
       "tags": [
         "near-miss"
       ],
@@ -41,9 +55,9 @@
       }
     },
     {
-      "id": "q4",
+      "id": "q5",
       "relation": "negative",
-      "prompt": "Restructure this rust code without changing behaviour.",
+      "prompt": "Split this long Rust module into smaller ones without changing behaviour.",
       "tags": [
         "near-miss"
       ],
@@ -53,23 +67,9 @@
       }
     },
     {
-      "id": "q5",
-      "relation": "boundary",
-      "prompt": "Implement the approved change using rust.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "implement",
-        "companion_skills": [
-          "rust"
-        ]
-      }
-    },
-    {
       "id": "q6",
       "relation": "boundary",
-      "prompt": "Review the diff involving rust without edits.",
+      "prompt": "Review the diff that changes our Cargo workspace dependencies, read-only.",
       "tags": [
         "composition"
       ],
@@ -82,14 +82,16 @@
     },
     {
       "id": "q7",
-      "relation": "positive",
-      "prompt": "Check a subtle rust migration behaviour.",
+      "relation": "boundary",
+      "prompt": "Implement the approved edition migration for the crates in the workspace.",
       "tags": [
-        "direct"
+        "composition"
       ],
       "expected": {
-        "primary_skill": "rust",
-        "companion_skills": []
+        "primary_skill": "implement",
+        "companion_skills": [
+          "rust"
+        ]
       }
     },
     {

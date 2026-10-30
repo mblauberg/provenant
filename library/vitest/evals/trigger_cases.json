@@ -5,19 +5,7 @@
     {
       "id": "q1",
       "relation": "positive",
-      "prompt": "Review vitest boundary behaviour.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "vitest",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q2",
-      "relation": "positive",
-      "prompt": "Update the vitest integration for its installed version.",
+      "prompt": "This Vitest suite mocks a module with vi.mock but the mock is not hoisted as I expect; explain and fix.",
       "tags": [
         "direct"
       ],
@@ -29,47 +17,71 @@
       }
     },
     {
-      "id": "q3",
-      "relation": "negative",
-      "prompt": "Investigate the root cause of this vitest failure without fixing it.",
+      "id": "q2",
+      "relation": "positive",
+      "prompt": "Our Vitest tests hang with fake timers when a promise and setTimeout interleave; sort out the timer configuration.",
       "tags": [
-        "near-miss"
+        "direct"
       ],
       "expected": {
-        "primary_skill": "diagnose",
+        "primary_skill": "vitest",
         "companion_skills": []
       }
     },
     {
-      "id": "q4",
-      "relation": "negative",
-      "prompt": "Restructure this vitest code without changing behaviour.",
+      "id": "q3",
+      "relation": "positive",
+      "prompt": "Set up Vitest coverage thresholds and the v8 provider for this package, and migrate our Jest config to Vitest.",
       "tags": [
-        "near-miss"
+        "direct"
       ],
       "expected": {
-        "primary_skill": "refactor",
+        "primary_skill": "vitest",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q4",
+      "relation": "positive",
+      "prompt": "Run these component tests in Vitest browser mode instead of jsdom.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "vitest",
         "companion_skills": []
       }
     },
     {
       "id": "q5",
-      "relation": "boundary",
-      "prompt": "Implement the approved change using vitest.",
+      "relation": "negative",
+      "prompt": "Decide which behaviours of this module deserve tests and at what level.",
       "tags": [
-        "composition"
+        "near-miss"
       ],
       "expected": {
-        "primary_skill": "implement",
-        "companion_skills": [
-          "vitest"
-        ]
+        "primary_skill": "test-design",
+        "companion_skills": []
       }
     },
     {
       "id": "q6",
+      "relation": "negative",
+      "prompt": "This React list re-renders too often; find out why and cut the work.",
+      "tags": [
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "react-performance",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q7",
       "relation": "boundary",
-      "prompt": "Review the diff involving vitest without edits.",
+      "prompt": "Review the diff that migrates our test suite to Vitest, read-only.",
       "tags": [
         "composition"
       ],
@@ -81,27 +93,17 @@
       }
     },
     {
-      "id": "q7",
-      "relation": "positive",
-      "prompt": "Check a subtle vitest migration behaviour.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "vitest",
-        "companion_skills": []
-      }
-    },
-    {
       "id": "q8",
-      "relation": "negative",
-      "prompt": "Write visual design guidance for this page.",
+      "relation": "boundary",
+      "prompt": "Implement the approved change and update its Vitest mocks.",
       "tags": [
-        "adjacent"
+        "composition"
       ],
       "expected": {
-        "primary_skill": "ui-ux-design",
-        "companion_skills": []
+        "primary_skill": "implement",
+        "companion_skills": [
+          "vitest"
+        ]
       }
     }
   ]

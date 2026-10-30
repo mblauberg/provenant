@@ -19,9 +19,10 @@ read-only unless edits or exports are authorised.
 2. Draft stable identifiers on the left and short visible labels on the right.
    Plain nodes and edges; style only where a distinction carries meaning.
 3. Check with the installed CLI (verify with `d2 --version`; commands below are
-   as of 0.7.1). `d2 fmt file.d2` rewrites in place, so run it only when edits
-   are authorised. `d2 validate file.d2` is read-only. There is no check-only
-   flag, and `d2 --check` still renders. If `d2` or a converter is missing,
+   as of 0.7.1, checked 30 October 2026). `d2 fmt file.d2` rewrites in place, so
+   run it only when edits are authorised. `d2 fmt --check file.d2` is the
+   read-only format check and `d2 validate file.d2` the read-only syntax check;
+   `d2 --check` still renders. If `d2` or a converter is missing,
    report the skipped check; do not install it.
 4. Render SVG by default: `d2 file.d2 file.svg`. Use `--layout elk` for dense
    directed graphs, `dagre` otherwise. Use PNG only when raster is required.

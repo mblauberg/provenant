@@ -21,9 +21,12 @@ file. Flags can change between releases; consult the [dated notes](references/re
 
 ## Before the first command
 
-1. Run `command -v playwright-cli` once. If it is missing, don't go searching
-   caches, `node_modules` or the disk. Report it and use another authorised option above; if installation needs a
-   decision and no human is present, record the blocked action. `npx @playwright/cli@latest` downloads code, so it
+1. Run `command -v playwright-cli` once. If it is missing, try the
+   repository-installed CLI once with the no-download local invocation
+   `npx --no-install playwright-cli --version`, and use that form for later
+   commands. Don't search caches or the disk. If that also fails, report it and
+   use another authorised option above; if installation needs a decision and no
+   human is present, record the blocked action. `npx @playwright/cli@latest` downloads code, so it
    needs the same approval as an install.
 2. Never trust remembered flags. Check `playwright-cli --help`, and note the
    version next to any evidence.
