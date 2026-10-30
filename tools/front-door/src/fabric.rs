@@ -2068,6 +2068,14 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
     fail.detail.unwrap_or_else(|| kind_error(fail.kind))
 }
+/// Translate a submission's refusal at the facade edge. Dispatch access
+/// failures keep their own message; rendering it by kind would read as
+/// invalid input instead of a refusal.
+fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
+    FacadeError::DispatchRefused {
+        reason: fail.message,
+    }
+}
 /// Translate a typed run category at the MCP edge. `ErrorKind` is the one
 /// categorisation of run errors; this only renders it.
 fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
@@ -4896,9 +4904,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 },
                 self.factory.context.roots.state.as_path(),
             )
-            .map_err(|fail| FacadeError::DispatchRefused {
-                reason: fail.message,
-            })?;
+            .map_err(dispatch_refused)?;
             let legacy_input = prepared_without_request.then(|| {
                 let mut legacy = input.clone();
                 let SubmitInput::Submit { tasks, .. } = &mut legacy;
@@ -9336,6 +9342,33 @@ mod peer_tests {
             };
             assert_eq!(super::fail_error(fail), expected);
         }
+        Ok(())
+    }
+    #[test]
+    fn submit_lane_refusal_maps_to_dispatch_refused() -> Result<(), Box<dyn std::error::Error>> {
+        // Access resolution refuses before any state tree is touched, so an
+        // unknown capability is refused without reaching a spawn.
+        let fail = provenant_cli::run::lane_access(
+            &provenant_cli::Access {
+                mode: None,
+                worktree: None,
+                read_root: Vec::new(),
+                write_root: Vec::new(),
+                network: None,
+                capability: vec!["bogus".to_owned()],
+            },
+            Path::new("never-opened-state"),
+        )
+        .err()
+        .ok_or("unknown capability refuses")?;
+        let (kind, message) = (fail.kind, fail.message.clone());
+        match super::dispatch_refused(fail) {
+            FacadeError::DispatchRefused { reason } => assert_eq!(reason, message),
+            error => panic!("a refused submit kept no reason: {error:?}"),
+        }
+        // The kind alone renders as invalid input; the dispatch edge must not
+        // lose the refusal by rerendering it.
+        assert_eq!(super::kind_error(kind), FacadeError::InvalidInput);
         Ok(())
     }
     #[test]
