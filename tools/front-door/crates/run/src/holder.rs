@@ -146,17 +146,26 @@ impl HolderContext {
     // Transient database retries use real pauses between attempts.
     #[allow(clippy::disallowed_methods)]
     pub fn open(raw: &[u8]) -> Result<(Self, RunStore)> {
-        let mut delay = std::time::Duration::from_millis(100);
-        for _ in 0..10 {
+        use provenant_core::retry::{Backoff, RetryCause, is_transient};
+        const BACKOFF: Backoff = Backoff::new(
+            std::time::Duration::from_millis(100),
+            2,
+            std::time::Duration::from_secs(5),
+        );
+        for attempt in 0..10 {
             match Self::open_once(raw) {
-                Err(
-                    RunError::Contention
-                    | RunError::Sqlite(_)
-                    | RunError::Io(_)
-                    | RunError::OperationIo { .. },
-                ) => {
-                    std::thread::park_timeout(delay);
-                    delay = (delay * 2).min(std::time::Duration::from_secs(5));
+                Err(error) => {
+                    let cause = match error {
+                        RunError::Contention => RetryCause::Contention,
+                        RunError::Sqlite(_) | RunError::Io(_) | RunError::OperationIo { .. } => {
+                            RetryCause::Transport
+                        }
+                        _ => RetryCause::Permanent,
+                    };
+                    if !is_transient(cause) {
+                        return Err(error);
+                    }
+                    std::thread::park_timeout(BACKOFF.delay(attempt));
                 }
                 other => return other,
             }
@@ -544,13 +553,13 @@ impl RunStore {
         if read_sealed(attempt, "terminal-pending.json", RECORD_LIMIT)?.is_some() {
             return self.recover_terminal(id, exit, call);
         }
-        let (mut settlement, retry_limit) =
-            match crate::settlement::Guard::claim(attempt, exit.scope, call.clock) {
-                Ok(Some(driver)) => (Some(driver), false),
-                Ok(None) => return Err(RunError::Contention),
-                Err(RunError::ObjectImportLimit(_)) => (None, true),
-                Err(error) => return Err(error),
-            };
+        let mut settlement = match crate::settlement::Guard::claim(attempt, exit.scope, call.clock)
+        {
+            Ok(Some(driver)) => Some(driver),
+            Ok(None) => return Err(RunError::Contention),
+            Err(RunError::ObjectImportLimit(_)) => None,
+            Err(error) => return Err(error),
+        };
         // Recovery also frees admission when upgrading an older exited run.
         self.write(call, |db| {
             db.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
@@ -717,7 +726,7 @@ impl RunStore {
             let refused = refusal.is_some();
             let check = if cancelled {
                 Ok(false)
-            } else if retry_limit {
+            } else if settlement.is_none() {
                 Err(RunError::ObjectImportLimit(
                     "settlement exhausted three attempts; private Git retained for host recovery",
                 ))
@@ -771,7 +780,7 @@ impl RunStore {
                         Ok(false)
                     } else if settlement
                         .as_ref()
-                        .is_some_and(|driver| driver.attempts() >= 3)
+                        .is_some_and(crate::settlement::Driver::exhausted)
                     {
                         Err(RunError::ObjectImportLimit(
                             "settlement failed after three attempts; private Git retained for host recovery",

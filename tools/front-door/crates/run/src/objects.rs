@@ -800,7 +800,7 @@ pub(crate) fn restore_index(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
-    let git = provenant_os::git::git_executable().ok_or_else(invalid)?;
+    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
     let paths = execute(
         &git,
         repo.private_git_dir(),

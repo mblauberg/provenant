@@ -21,7 +21,7 @@ const SLICE_INDEX: &str = "index.txt";
 const SLICE_INDEX_LIMIT: u64 = 128 * 1024;
 
 pub fn continuation_history(cwd: &Path, base: &str) -> Result<String> {
-    let git = provenant_os::git::git_executable().ok_or(RunError::Validation("Git unavailable"))?;
+    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
     let executor = SystemExecutor::new(1).map_err(execution_error)?;
     continuation_history_with(&executor, &git, cwd, base)
 }

@@ -600,6 +600,7 @@ fn each_refusal_has_its_own_stable_code() {
             "CONFINEMENT",
         ),
         (RunError::Refused, "REFUSED"),
+        (RunError::GitUnavailable, "GIT"),
         (
             RunError::Admission(AdmissionError::Disk { free: 1, floor: 2 }),
             "DISK_FLOOR",

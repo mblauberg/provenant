@@ -1430,7 +1430,7 @@ impl RunStore {
             if let Some(writer) = &confinement.writer
                 && let Err(error) = crate::objects::prepare_bound(
                     &provenant_os::git::git_executable()
-                        .ok_or_else(|| local("Git", &"executable unavailable"))?,
+                        .ok_or_else(|| local("Git", &RunError::GitUnavailable))?,
                     writer.worktree.repo(),
                     &writer_attempt,
                     &confinement.plan.permissions().scratch.path,
