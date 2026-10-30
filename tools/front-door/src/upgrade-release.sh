@@ -17,7 +17,6 @@ archive=provenant-aarch64-apple-darwin.tar.gz
 apps_archive=provenant-apps-aarch64-apple-darwin.tar.gz
 verify_artefact() {
     artefact=$1
-    curl -fLsS --proto '=https' --tlsv1.2 "$base/$artefact" -o "$scratch/$artefact" </dev/null
     curl -fLsS --proto '=https' --tlsv1.2 "$base/$artefact.sha256" -o "$scratch/checksum" </dev/null
     expected=$(awk 'NR == 1 {print $1}' "$scratch/checksum")
     [ "${#expected}" -eq 64 ] || { printf '%s\n' 'Invalid checksum' >&2; exit 4; }
@@ -25,6 +24,9 @@ verify_artefact() {
     actual=$(shasum -a 256 "$scratch/$artefact" </dev/null)
     actual=${actual%% *}
     [ "$actual" = "$expected" ] || { printf '%s\n' 'Release checksum mismatch' >&2; exit 4; }
+}
+curl -fLsS --proto '=https' --tlsv1.2 "$base/$archive" -o "$scratch/$archive" </dev/null || {
+    printf '%s\n' 'Cannot download release package' >&2; exit 4;
 }
 verify_artefact "$archive"
 apps_available=false
@@ -55,32 +57,36 @@ if "$apps_available"; then
     app_stage=$(mktemp -d "$HOME/Applications/.provenant-upgrade.XXXXXX")
     cp -R "$scratch/apps/$app" "$app_stage/$app"
 fi
-sh "$scratch/package/scripts/install.sh" "$@" </dev/null
+PROVENANT_APP_REFRESHED_BY_UPGRADE=1 sh "$scratch/package/scripts/install.sh" "$@" </dev/null
 if "$apps_available"; then
     agent="$HOME/Library/LaunchAgents/dev.provenant.quota-menubar.plist"
     service="gui/$(id -u)/dev.provenant.quota-menubar"
     if [ -f "$agent" ]; then
         launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :
     fi
-    rm -rf "$HOME/Applications/$app"
-    mv "$app_stage/$app" "$HOME/Applications/$app"
+    app_backup=$app_stage/previous.app
+    if [ -e "$HOME/Applications/$app" ]; then mv "$HOME/Applications/$app" "$app_backup"; fi
+    if ! mv "$app_stage/$app" "$HOME/Applications/$app"; then
+        if [ -e "$app_backup" ]; then
+            mv "$app_backup" "$HOME/Applications/$app" || {
+                app_stage=
+                printf '%s\n' "Could not restore the previous Provenant app; backup remains at $app_backup" >&2; exit 4;
+            }
+        fi
+        printf '%s\n' 'Could not install the refreshed Provenant app' >&2; exit 4
+    fi
+    rm -rf "$app_backup"
+    rmdir "$app_stage"
     app_stage=
     if [ -f "$agent" ]; then
         plutil -replace ProgramArguments.0 -string "$HOME/Applications/$app/Contents/MacOS/quota-menubar" "$agent"
         attempts=0
         until launchctl bootstrap "gui/$(id -u)" "$agent" </dev/null; do
             attempts=$((attempts + 1))
-            [ "$attempts" -lt 5 ] || exit 4
+            [ "$attempts" -lt 5 ] || { printf '%s\n' 'Could not restart the Provenant menu bar app' >&2; exit 4; }
             sleep 0.3
         done
-        launchctl kickstart -k "$service" </dev/null
-        launchctl print "$service" </dev/null >/dev/null
-        grep -F "$HOME/Applications/$app/Contents/MacOS/quota-menubar" "$agent" >/dev/null || {
-            printf '%s\n' 'LaunchAgent does not point to the refreshed app' >&2; exit 4;
-        }
+        launchctl kickstart -k "$service" </dev/null || { printf '%s\n' 'Could not restart the Provenant menu bar app' >&2; exit 4; }
+        launchctl print "$service" </dev/null >/dev/null || { printf '%s\n' 'Could not verify the Provenant menu bar app' >&2; exit 4; }
     fi
-    [ -x "$HOME/Applications/$app/Contents/MacOS/provenant-console" ] &&
-        [ -x "$HOME/Applications/$app/Contents/MacOS/quota-menubar" ] || {
-            printf '%s\n' 'Refreshed app executables are missing' >&2; exit 4;
-        }
 fi

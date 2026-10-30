@@ -980,7 +980,7 @@ esac
         String::from_utf8_lossy(&rerun.stderr.bytes)
     );
     assert_eq!(
-        rerun.stderr.bytes,
+        rerun.stdout.bytes,
         b"This release has no bundled app archive; upgrading Provenant without refreshing the app.\n"
     );
     assert!(!fs::read_to_string(&recorded)?.contains("--harness"));
@@ -1201,6 +1201,57 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
         .next()
         .ok_or("apps digest")?
         .to_owned();
+    let invalid_apps_archive = rig.root.join("invalid-apps.tar.gz");
+    fs::write(&invalid_apps_archive, b"not a gzip archive")?;
+    let hash = rig.execute_os(
+        Path::new("/usr/bin/shasum"),
+        &[
+            "-a".into(),
+            "256".into(),
+            invalid_apps_archive.clone().into(),
+        ],
+        None,
+    )?;
+    let invalid_apps_digest = String::from_utf8(hash.stdout.bytes)?
+        .split_whitespace()
+        .next()
+        .ok_or("invalid archive digest")?
+        .to_owned();
+    let incomplete_apps = rig.root.join("incomplete-apps");
+    let incomplete_binary =
+        incomplete_apps.join("Provenant Console.app/Contents/MacOS/provenant-console");
+    fs::create_dir_all(incomplete_binary.parent().ok_or("incomplete app parent")?)?;
+    fs::write(&incomplete_binary, "#!/bin/sh\nexit 0\n")?;
+    fs::set_permissions(&incomplete_binary, fs::Permissions::from_mode(0o755))?;
+    let incomplete_apps_archive = rig.root.join("incomplete-apps.tar.gz");
+    let tar = rig.execute_os(
+        Path::new("/usr/bin/tar"),
+        &[
+            "-czf".into(),
+            incomplete_apps_archive.clone().into(),
+            "-C".into(),
+            incomplete_apps.into(),
+            ".".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&tar), 0);
+    let hash = rig.execute_os(
+        Path::new("/usr/bin/shasum"),
+        &[
+            "-a".into(),
+            "256".into(),
+            incomplete_apps_archive.clone().into(),
+        ],
+        None,
+    )?;
+    let incomplete_apps_digest = String::from_utf8(hash.stdout.bytes)?
+        .split_whitespace()
+        .next()
+        .ok_or("incomplete app digest")?
+        .to_owned();
+    let invalid_apps_archive_path = invalid_apps_archive.display().to_string();
+    let incomplete_apps_archive_path = incomplete_apps_archive.display().to_string();
     let home = rig
         .env
         .iter()
@@ -1251,6 +1302,7 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
         ),
     )?;
     let curl = fake_bin.join("curl");
+    let curl_log = rig.root.join("curl-log");
     fs::write(
         &curl,
         format!(
@@ -1262,11 +1314,20 @@ while [ "$#" -gt 0 ]; do
     *) url=$1; shift ;;
   esac
 done
+printf '%s\n' "$url" >> '{2}'
 case "$url" in
   */releases/latest) printf '%s\n' '{{"tag_name":"v9.8.7"}}' ;;
-  */download/v9.8.7/provenant-apps-aarch64-apple-darwin.tar.gz.sha256) printf '%s\n' "${{PROVENANT_TEST_APPS_CHECKSUM:-{apps_digest}}}" > "$out" ;;
+  */download/v9.8.7/provenant-apps-aarch64-apple-darwin.tar.gz.sha256)
+    [ "${{PROVENANT_TEST_APPS_CHECKSUM_FAIL:-}}" != 1 ] || exit 22
+    checksum=${{PROVENANT_TEST_APPS_CHECKSUM:-{apps_digest}}}
+    [ "${{PROVENANT_TEST_APPS_BAD_TAR:-}}" != 1 ] || checksum='{invalid_apps_digest}'
+    [ "${{PROVENANT_TEST_APPS_INCOMPLETE:-}}" != 1 ] || checksum='{incomplete_apps_digest}'
+    printf '%s\n' "$checksum" > "$out" ;;
   */download/v9.8.7/provenant-apps-aarch64-apple-darwin.tar.gz)
     if [ "${{PROVENANT_TEST_MISSING_APPS:-}}" = 1 ]; then printf '%s' 404; exit 0; fi
+    if [ -n "${{PROVENANT_TEST_APPS_STATUS:-}}" ]; then printf '%s' "$PROVENANT_TEST_APPS_STATUS"; exit 0; fi
+    [ "${{PROVENANT_TEST_APPS_BAD_TAR:-}}" != 1 ] || {{ cp '{invalid_apps_archive_path}' "$out"; printf '%s' 200; exit 0; }}
+    [ "${{PROVENANT_TEST_APPS_INCOMPLETE:-}}" != 1 ] || {{ cp '{incomplete_apps_archive_path}' "$out"; printf '%s' 200; exit 0; }}
     cp '{}' "$out"
     [ -z "${{format:-}}" ] || printf '%s' 200 ;;
   */download/v9.8.7/*.sha256) printf '%s  package.tar.gz\n' "${{PROVENANT_TEST_CHECKSUM:-{digest}}}" > "$out" ;;
@@ -1275,7 +1336,8 @@ case "$url" in
 esac
 "#,
             apps_archive.display(),
-            archive.display()
+            archive.display(),
+            curl_log.display()
         ),
     )?;
     fs::set_permissions(curl, fs::Permissions::from_mode(0o755))?;
@@ -1326,6 +1388,83 @@ esac
     assert!(!launch_log.exists());
     rig.env
         .retain(|(key, _)| key != "PROVENANT_TEST_APPS_CHECKSUM");
+    rig.env
+        .push(("PROVENANT_TEST_APPS_STATUS".into(), "503".into()));
+    let unavailable = rig.command(&["upgrade", "--json"])?;
+    let unavailable_value: serde_json::Value = serde_json::from_slice(&unavailable.stdout.bytes)?;
+    assert_eq!(unavailable_value["data"][0]["success"], false);
+    assert!(
+        unavailable_value["data"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("HTTP 503")
+    );
+    assert!(installed_app.join("old-build").exists());
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_STATUS");
+    rig.env
+        .push(("PROVENANT_TEST_APPS_CHECKSUM_FAIL".into(), "1".into()));
+    let checksum_failure = rig.command(&["upgrade", "--json"])?;
+    let checksum_failure_value: serde_json::Value =
+        serde_json::from_slice(&checksum_failure.stdout.bytes)?;
+    assert_eq!(checksum_failure_value["data"][0]["success"], false);
+    assert!(installed_app.join("old-build").exists());
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_CHECKSUM_FAIL");
+    rig.env
+        .push(("PROVENANT_TEST_APPS_BAD_TAR".into(), "1".into()));
+    let bad_tar = rig.command(&["upgrade", "--json"])?;
+    let bad_tar_value: serde_json::Value = serde_json::from_slice(&bad_tar.stdout.bytes)?;
+    assert_eq!(bad_tar_value["data"][0]["success"], false);
+    assert!(installed_app.join("old-build").exists());
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_BAD_TAR");
+    rig.env
+        .push(("PROVENANT_TEST_APPS_INCOMPLETE".into(), "1".into()));
+    let incomplete = rig.command(&["upgrade", "--json"])?;
+    let incomplete_value: serde_json::Value = serde_json::from_slice(&incomplete.stdout.bytes)?;
+    assert_eq!(incomplete_value["data"][0]["success"], false);
+    assert!(
+        incomplete_value["data"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("executable is missing")
+    );
+    assert!(installed_app.join("old-build").exists());
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_INCOMPLETE");
+    let mv = fake_bin.join("mv");
+    fs::write(
+        &mv,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in */.provenant-upgrade.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
+            rig.root.join("mv-failed-once").display()
+        ),
+    )?;
+    fs::set_permissions(&mv, fs::Permissions::from_mode(0o755))?;
+    let failed_swap = rig.command(&["upgrade", "--json"])?;
+    let failed_swap_value: serde_json::Value = serde_json::from_slice(&failed_swap.stdout.bytes)?;
+    assert_eq!(failed_swap_value["data"][0]["success"], false);
+    assert!(installed_app.join("old-build").exists());
+    let committed_after_app_failure: provenant_records::InstallReceipt =
+        provenant_records::decode_v1(
+            fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
+            provenant_records::Limits::CONFIG,
+        )?;
+    assert_ne!(
+        committed_after_app_failure.source_digest,
+        before.source_digest
+    );
+    assert!(fs::read_dir(home.join("Applications"))?.all(|entry| {
+        entry.is_ok_and(|entry| {
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-upgrade.")
+        })
+    }));
+    fs::remove_file(mv)?;
+    fs::write(&curl_log, "")?;
     let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
     assert_eq!(value["data"][0]["host"], "local", "{value}");
@@ -1338,6 +1477,19 @@ esac
     assert!(arguments.contains("'--tag' 'v9.8.7'"));
     assert!(arguments.contains("-oBatchMode=yes"));
     assert!(arguments.contains("provenant-apps-aarch64-apple-darwin.tar.gz"));
+    let downloads = fs::read_to_string(&curl_log)?;
+    assert_eq!(
+        downloads
+            .matches("provenant-apps-aarch64-apple-darwin.tar.gz\n")
+            .count(),
+        1
+    );
+    assert_eq!(
+        downloads
+            .matches("provenant-apps-aarch64-apple-darwin.tar.gz.sha256\n")
+            .count(),
+        1
+    );
     assert!(!installed_app.join("old-build").exists());
     assert!(
         installed_app
