@@ -929,7 +929,7 @@ pub(crate) fn tick_graphs(
         for id in ids {
             let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
                 let Some(checkpoint) =
-                    FileJournal::read_checkpoint(&resolved.roots.state, project, &id)?
+                    FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?
                 else {
                     return Ok(false);
                 };

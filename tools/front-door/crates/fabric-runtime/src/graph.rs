@@ -1359,6 +1359,36 @@ impl FileJournal {
         }
     }
 
+    /// Report an undecodable checkpoint once, until it becomes readable or is removed.
+    pub fn read_checkpoint_for_tick(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Option<GraphCheckpoint>, Box<dyn Error>> {
+        const NOTICE: &str = "graph checkpoint cannot be decoded; migrate or cancel it:";
+        match Self::read_checkpoint(root, project, graph_id) {
+            Err(JournalError::Decode(error)) => {
+                let reason = format!("{NOTICE} {error}");
+                if Self::read_advance_error(root, project, graph_id)?
+                    .is_some_and(|previous| previous.starts_with(NOTICE))
+                {
+                    return Ok(None);
+                }
+                Self::set_advance_error(root, project, graph_id, Some(&reason))?;
+                Err(std::io::Error::other(reason).into())
+            }
+            Ok(checkpoint) => {
+                if Self::read_advance_error(root, project, graph_id)?
+                    .is_some_and(|error| error.starts_with(NOTICE))
+                {
+                    Self::set_advance_error(root, project, graph_id, None)?;
+                }
+                Ok(checkpoint)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Record why an automatic advance failed, or clear the record with
     /// `None`. It takes no graph lock, because the failure may be that lock.
     pub fn set_advance_error(
@@ -8308,6 +8338,46 @@ mod file_tests {
                 .expect("pending graph")
                 .is_some()
         );
+    }
+    #[test]
+    fn tick_reports_undecodable_checkpoint_once_and_recovers() {
+        let temp = crate::test_support::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.join("state"));
+        std::fs::create_dir(base.join("state")).unwrap();
+        std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+        let project = ProjectId::from_bytes([1; 16]);
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        drop(FileJournal::open(&root, project, "broken", budget, &cancel, &clock).unwrap());
+        let path = base
+            .join("state/fabric/graphs")
+            .join(project.to_string())
+            .join("graph-broken.json");
+        std::fs::write(&path, b"{} ").unwrap();
+        // The ordinary read reproduces the same error on every tick.
+        assert!(FileJournal::read_checkpoint(&root, project, "broken").is_err());
+        assert!(FileJournal::read_checkpoint(&root, project, "broken").is_err());
+        let first = FileJournal::read_checkpoint_for_tick(&root, project, "broken").unwrap_err();
+        assert!(first.to_string().contains("migrate or cancel"));
+        assert!(
+            FileJournal::read_checkpoint_for_tick(&root, project, "broken")
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            FileJournal::read_checkpoint_for_tick(&root, project, "broken")
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(&path, b"{} ").unwrap();
+        assert!(FileJournal::read_checkpoint_for_tick(&root, project, "broken").is_err());
     }
     #[test]
     fn advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory() {
