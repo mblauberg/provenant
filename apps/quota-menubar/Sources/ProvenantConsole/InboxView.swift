@@ -244,7 +244,7 @@ struct InboxView: View {
                 Text("Not yet read")
             }
             if model.truncated {
-                Text("More requests exist than are shown. Narrow the list with search or a project.")
+                Text("Older requests were not loaded; search and projects cover only those shown. Run `provenant inbox --all-projects` to see them all.")
             }
             Spacer(minLength: 8)
             Text("j/k move · 1-9 choose · Return sends")
@@ -373,7 +373,6 @@ private struct RequestDetailView: View {
         }
         .onChange(of: replyFocused) { _, focused in model.isTypingReply = focused }
         .onDisappear { model.isTypingReply = false }
-        .toolbar { secondaryActions }
     }
 
     private var header: some View {
@@ -459,7 +458,7 @@ private struct RequestDetailView: View {
                 .accessibilityLabel("Reply text")
             }
             HStack(spacing: 10) {
-                primaryAction
+                actionButtons
                 if model.sending {
                     ProgressView().controlSize(.small).accessibilityLabel("Sending answer")
                 }
@@ -469,45 +468,43 @@ private struct RequestDetailView: View {
         .disabled(model.sending)
     }
 
-    @ViewBuilder private var primaryAction: some View {
-        if !options.isEmpty {
-            Button("Send Answer") { send(.choose) }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(option == nil || model.sending)
-                .help("Send the chosen option (Return)")
-                .accessibilityLabel("Send the chosen option")
-        } else if isAssumption {
-            Button("Confirm") { send(.confirm) }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(model.sending)
-                .help("Confirm the assumption (Return)")
-                .accessibilityLabel("Confirm the assumption")
-        } else {
-            Button("Send Reply") { send(.reply) }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(trimmed.isEmpty || model.sending)
-                .help("Send the reply (Return)")
-                .accessibilityLabel("Send the reply")
+    /// Every action the request's kind allows, as on the CLI: choose an option, confirm or override an assumption,
+    /// and reply. Return sends the first of choose, confirm, reply that applies.
+    @ViewBuilder private var actionButtons: some View {
+        let actions = InboxActions.available(for: request.request)
+        let primary = InboxActions.primary(for: request.request)
+        if actions.contains(.choose) {
+            actionButton("Send Answer", .choose, primary: primary, disabled: option == nil,
+                         help: "Send the chosen option", label: "Send the chosen option")
+        }
+        if actions.contains(.confirm) {
+            actionButton("Confirm", .confirm, primary: primary, disabled: false,
+                         help: "Confirm the assumption", label: "Confirm the assumption")
+        }
+        if actions.contains(.override) {
+            actionButton("Override", .override, primary: primary, disabled: trimmed.isEmpty,
+                         help: "Override the assumption with the reply text", label: "Override with the reply text")
+        }
+        if actions.contains(.reply) {
+            actionButton("Send Reply", .reply, primary: primary, disabled: trimmed.isEmpty,
+                         help: "Send the reply text", label: "Send the reply text")
         }
     }
 
-    @ToolbarContentBuilder private var secondaryActions: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            if isAssumption, request.isOpen, result?.kind != .saved {
-                Button("Override") { send(.override) }
-                    .disabled(trimmed.isEmpty || model.sending)
-                    .help("Override the assumption with the reply text")
-                    .accessibilityLabel("Override with the reply text")
-            }
-            if !options.isEmpty, !trimmed.isEmpty, request.isOpen, result?.kind != .saved {
-                Button("Send Reply Only") { send(.reply) }
-                    .disabled(model.sending)
-                    .help("Send the reply without choosing an option")
-                    .accessibilityLabel("Send the reply without an option")
-            }
+    @ViewBuilder private func actionButton(_ title: String, _ action: AnswerAction, primary: AnswerAction,
+                                           disabled: Bool, help: String, label: String) -> some View {
+        if action == primary {
+            Button(title) { send(action) }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(disabled || model.sending)
+                .help("\(help) (Return)")
+                .accessibilityLabel(label)
+        } else {
+            Button(title) { send(action) }
+                .disabled(disabled || model.sending)
+                .help(help)
+                .accessibilityLabel(label)
         }
     }
 

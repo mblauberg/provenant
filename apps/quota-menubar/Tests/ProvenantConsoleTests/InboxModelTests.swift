@@ -183,6 +183,32 @@ final class InboxModelTests: XCTestCase {
         XCTAssertEqual(model.draft(for: request).optionID, "files")
     }
 
+    func testEveryKindOffersTheFullActionSetWithAndWithoutOptions() throws {
+        func draft(kind: String, options: Bool, proceeding: Bool = false) throws -> HumanRequest.Draft {
+            let opts = options ? #"[{"id":"a","label":"A","description":"a"}]"# : "[]"
+            let json = """
+            {"kind":"\(kind)","title":"t","body":"b","blocking":true,"options":\(opts),
+             "recommended_option_id":null,"proceeding_with":\(proceeding ? #""x""# : "null"),"deadline":null}
+            """
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(HumanRequest.Draft.self, from: Data(json.utf8))
+        }
+        let cases: [(String, Bool, Bool, [AnswerAction], AnswerAction)] = [
+            ("decision", false, false, [.reply], .reply),
+            ("decision", true, false, [.choose, .reply], .choose),
+            ("assumption", false, false, [.confirm, .override, .reply], .confirm),
+            ("assumption", true, false, [.choose, .confirm, .override, .reply], .choose),
+            ("Assumption", false, false, [.confirm, .override, .reply], .confirm),
+            ("question", false, true, [.confirm, .override, .reply], .confirm),
+        ]
+        for (kind, options, proceeding, actions, primary) in cases {
+            let d = try draft(kind: kind, options: options, proceeding: proceeding)
+            XCTAssertEqual(InboxActions.available(for: d), actions, "\(kind) options=\(options)")
+            XCTAssertEqual(InboxActions.primary(for: d), primary, "\(kind) options=\(options)")
+        }
+    }
+
     func testReplyDraftsStayWithTheirRequest() async throws {
         let model = await InboxModel.consoleFixture()
         let first = try XCTUnwrap(model.requests.first)
