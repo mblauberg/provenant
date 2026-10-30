@@ -545,14 +545,16 @@ impl RunStore {
                         RECORD_LIMIT,
                     ),
                 };
-                match read_checkpoint {
-                    Ok(bytes) => (bytes, true),
-                    // This file is observational. A damaged or unreadable
-                    // checkpoint must not turn an attempt read into silence.
-                    Err(_) => (None, false),
+                match (read_checkpoint, read) {
+                    (Ok(bytes), _) => (bytes, true),
+                    // Settlement reads stay strict; a live observation must not
+                    // turn a damaged or unreadable checkpoint into silence.
+                    (Err(error), RecordRead::Durable) => return Err(error),
+                    (Err(_), RecordRead::Observed) => (None, false),
                 }
             }
             Err(RunError::Filesystem(error)) if error.is_not_found() => (None, true),
+            Err(error) if matches!(read, RecordRead::Durable) => return Err(error),
             Err(_) => (None, false),
         };
         record.process_observation_valid.0 = checkpoint_readable;
@@ -573,14 +575,26 @@ impl RunStore {
                 #[serde(default)]
                 silent_for_ms: Option<u64>,
             }
-            if let Ok(observation) = serde_json::from_slice::<ProcessCheckpoint>(&bytes)
-                && observation.schema_version == 1
-                && observation.scope
-                    == (provenant_supervisor::custody::Scope {
-                        run: record.run_id,
-                        attempt: record.attempt_id,
-                        generation: record.generation,
-                    })
+            let parsed = serde_json::from_slice::<ProcessCheckpoint>(&bytes);
+            let scoped = parsed.as_ref().is_ok_and(|observation| {
+                observation.schema_version == 1
+                    && observation.scope
+                        == (provenant_supervisor::custody::Scope {
+                            run: record.run_id,
+                            attempt: record.attempt_id,
+                            generation: record.generation,
+                        })
+            });
+            if matches!(read, RecordRead::Durable) {
+                parsed
+                    .as_ref()
+                    .map_err(|_| RunError::Validation("process observation"))?;
+                if !scoped {
+                    return Err(RunError::Validation("process observation scope"));
+                }
+            }
+            if let Ok(observation) = parsed
+                && scoped
             {
                 record.process_observation_valid.0 = true;
                 record.last_output_at = observation.last_output_at;

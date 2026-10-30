@@ -1282,13 +1282,18 @@ fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
             &serde_json::to_vec(&checkpoint)?,
             RECORD_LIMIT,
         )?;
+        let id = input.attempts[0].attempt_id;
         assert!(
             store
-                .record(input.attempts[0].attempt_id, &call)?
+                .record_observed(id, &call)?
                 .provider_silent_for_ms
                 .0
                 .is_none()
         );
+        // Recovery and mutation reads still refuse a checkpoint for another scope.
+        if checkpoint["observed_at"].is_null() {
+            assert!(store.record(id, &call).is_err());
+        }
     }
     Ok(())
 }
