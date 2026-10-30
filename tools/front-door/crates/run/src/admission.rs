@@ -230,6 +230,10 @@ impl RunStore {
                                 "host capacity: user process count {} of {}",
                                 budget.used, budget.limit
                             ),
+                            Err(error) => format!(
+                                "host capacity: process budget probe failed: {}",
+                                probe_error(&error)
+                            ),
                             _ => "launch: not yet handed to a guardian".to_owned(),
                         })
                 } else {
@@ -260,19 +264,37 @@ impl RunStore {
                             tenths(left),
                             tenths(spacing)
                         )
-                    } else if let Ok(Some(pressure)) = resources.pressure()
-                        && pressure_threshold.defers(pressure)
-                    {
-                        format!("host capacity: memory pressure {pressure:?}")
-                    } else if let Ok(budget) = resources.process_budget()
-                        && !budget.has_room()
-                    {
-                        format!(
-                            "host capacity: user process count {} of {}",
-                            budget.used, budget.limit
-                        )
                     } else {
-                        "host capacity: active lane caps and memory or disk floors".to_owned()
+                        match resources.pressure() {
+                            Ok(Some(pressure)) if pressure_threshold.defers(pressure) => {
+                                format!("host capacity: memory pressure {pressure:?}")
+                            }
+                            Err(pressure) => match resources.process_budget() {
+                                Err(budget) => format!(
+                                    "host capacity: memory pressure probe failed: {}; process budget probe failed: {}",
+                                    probe_error(&pressure),
+                                    probe_error(&budget)
+                                ),
+                                _ => format!(
+                                    "host capacity: memory pressure probe failed: {}",
+                                    probe_error(&pressure)
+                                ),
+                            },
+                            Ok(_) => match resources.process_budget() {
+                                Ok(budget) if !budget.has_room() => format!(
+                                    "host capacity: user process count {} of {}",
+                                    budget.used, budget.limit
+                                ),
+                                Err(budget) => format!(
+                                    "host capacity: process budget probe failed: {}",
+                                    probe_error(&budget)
+                                ),
+                                _ => {
+                                    "host capacity: active lane caps and memory or disk floors"
+                                        .to_owned()
+                                }
+                            },
+                        }
                     }
                 };
                 Some(LaneWait {
@@ -735,6 +757,32 @@ impl RunStore {
         })
     }
 }
+/// A failed resource probe as one bounded line. Control characters become
+/// spaces and long messages are cut, so a wait reason stays readable and
+/// cannot be inflated by the probe's error.
+fn probe_error(error: &std::io::Error) -> String {
+    const LIMIT: usize = 200;
+    let raw: String = error
+        .to_string()
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let mut text = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        text.push_str("unknown error");
+    }
+    if text.len() > LIMIT {
+        text.truncate(text.floor_char_boundary(LIMIT));
+        text.push_str("...");
+    }
+    text
+}
 fn class_name(class: LaneClass) -> &'static str {
     match class {
         LaneClass::Writer => "writer",
@@ -810,5 +858,156 @@ mod process_wait_tests {
             "host capacity: user process count 950 of 1000"
         );
         Ok(())
+    }
+
+    /// A probe source whose errors are the named failures under test.
+    struct Probes {
+        pressure: Option<&'static str>,
+        budget: Option<&'static str>,
+    }
+    impl Resources for Probes {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            SystemResources.memory()
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+        fn pressure(&self) -> std::io::Result<Option<resources::MemoryPressure>> {
+            match self.pressure {
+                Some(message) => Err(std::io::Error::other(message)),
+                None => Ok(None),
+            }
+        }
+        fn process_budget(&self) -> std::io::Result<resources::ProcessBudget> {
+            match self.budget {
+                Some(message) => Err(std::io::Error::other(message)),
+                None => Ok(resources::ProcessBudget::UNLIMITED),
+            }
+        }
+    }
+
+    fn starting_lane(
+        store: &RunStore,
+        call: &Request<'_>,
+    ) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
+        let run = crate::tests::input();
+        store.create(&run, call)?;
+        let queued = store.record(run.attempts[0].attempt_id, call)?;
+        Ok(store.mark_starting(
+            &queued,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            call,
+        )?)
+    }
+
+    #[test]
+    fn queued_lane_reports_failed_process_budget_probe()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let lane = store.record(run.attempts[0].attempt_id, &call)?;
+        let waits = store.lane_waits_with_resources(
+            &[lane],
+            &call,
+            &Probes {
+                pressure: None,
+                budget: Some("unavailable"),
+            },
+        );
+        assert_eq!(
+            waits[0].waiting_for,
+            "host capacity: process budget probe failed: unavailable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn starting_lane_reports_failed_process_budget_probe()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let lane = starting_lane(&store, &call)?;
+        let waits = store.lane_waits_with_resources(
+            &[lane],
+            &call,
+            &Probes {
+                pressure: None,
+                budget: Some("unavailable"),
+            },
+        );
+        assert_eq!(
+            waits[0].waiting_for,
+            "host capacity: process budget probe failed: unavailable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn starting_lane_reports_failed_memory_pressure_probe()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let lane = starting_lane(&store, &call)?;
+        let waits = store.lane_waits_with_resources(
+            &[lane],
+            &call,
+            &Probes {
+                pressure: Some("unavailable"),
+                budget: None,
+            },
+        );
+        assert_eq!(
+            waits[0].waiting_for,
+            "host capacity: memory pressure probe failed: unavailable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn starting_lane_names_both_failed_probes()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let lane = starting_lane(&store, &call)?;
+        let waits = store.lane_waits_with_resources(
+            &[lane],
+            &call,
+            &Probes {
+                pressure: Some("unreadable"),
+                budget: Some("exhausted"),
+            },
+        );
+        assert_eq!(
+            waits[0].waiting_for,
+            "host capacity: memory pressure probe failed: unreadable; \
+             process budget probe failed: exhausted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn probe_failure_reason_is_bounded_and_single_line() {
+        let error = std::io::Error::other(format!("first\nsecond {}", "x".repeat(500)));
+        let text = probe_error(&error);
+        assert!(!text.contains('\n'));
+        assert!(text.ends_with("..."));
+        assert!(text.len() <= 203);
     }
 }
