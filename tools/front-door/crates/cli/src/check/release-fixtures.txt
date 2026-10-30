@@ -10,12 +10,6 @@ bench/tasks/run-follow-dispatch.patch release.github-token 99c270f8f6f93d02
 docs/runbooks/configuration.md release.home-path 7740e31cae060f24
 docs/runbooks/configuration.md release.home-path ca4f050fa11812ca
 docs/runbooks/fabric-hosts.md release.home-path e2af7abfbdb20bbc
-tools/front-door/crates/cli/src/accounts.rs release.home-path 0b077ec188002d7f
-tools/front-door/crates/cli/src/accounts.rs release.home-path 3b402dbb9023c92b
-tools/front-door/crates/cli/src/accounts.rs release.home-path 841ada990812ae84
-tools/front-door/crates/cli/src/accounts.rs release.home-path b550f8f1a0aec0db
-tools/front-door/crates/cli/src/accounts.rs release.home-path d9ca17a1c1eebc61
-tools/front-door/crates/cli/src/accounts.rs release.home-path fe77cda1b58bd5e9
 tools/front-door/crates/cli/src/run.rs release.github-token 16f71fd8d2683d39
 tools/front-door/crates/cli/src/run.rs release.github-token fd4ac28293da79a0
 tools/front-door/crates/cli/src/run.rs release.openai-key d5e3587b17410e5a
@@ -116,6 +110,7 @@ tools/front-door/crates/fabric-runtime/src/peer_agent.rs release.home-path 70939
 tools/front-door/crates/fabric-runtime/src/peer_agent.rs release.home-path 8838e6665235f63d
 tools/front-door/crates/fabric-runtime/src/peer_agent.rs release.home-path a759997baf446a79
 tools/front-door/crates/fabric-runtime/src/peer_agent.rs release.home-path be63b9b97ce2a7ce
+tools/front-door/crates/os/src/exec/tests.rs release.home-path ddb0d20895a5cb32
 tools/front-door/crates/providers/src/lane.rs release.home-path 0c2b52cd041c2e04
 tools/front-door/crates/providers/src/lane.rs release.home-path 540e3654011526ea
 tools/front-door/crates/providers/src/lane.rs release.home-path 7a67a93f932b5efb

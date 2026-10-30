@@ -750,7 +750,31 @@ mod tests {
                 });
             }
         }
-        assert_eq!(listed.into_iter().collect::<BTreeSet<_>>(), generated);
+        // A reviewed edit to a listed path changes its digests; bless rewrites
+        // them. New paths still need a reviewed entry before blessing.
+        if std::env::var_os("PROVENANT_BLESS_RELEASE_FIXTURES").is_some() {
+            let mut text = FIXTURE_PATHS
+                .lines()
+                .take_while(|line| line.starts_with('#'))
+                .map(|line| format!("{line}\n"))
+                .collect::<String>();
+            for fixture in &generated {
+                let digest = fixture
+                    .digest
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                text.push_str(&format!("{} {} {digest}\n", fixture.path, fixture.rule));
+            }
+            let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/check/release-fixtures.txt");
+            std::fs::write(file, text).unwrap();
+            return;
+        }
+        assert_eq!(
+            listed.into_iter().collect::<BTreeSet<_>>(),
+            generated,
+            "after reviewing the change, rerun with PROVENANT_BLESS_RELEASE_FIXTURES=1"
+        );
     }
 
     #[test]

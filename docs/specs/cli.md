@@ -698,7 +698,9 @@ SHA-256 over the exact matched line bytes, excluding its newline. A finding
 is suppressed only when all three fields match, in both the working tree and
 history blobs. Every suppression is counted in scan evidence. An entry whose
 path is tracked but matches no finding in the current tree is reported as a
-stale fixture finding and must be removed or updated. Path and symlink checks remain active for
+stale fixture finding and must be removed or updated. After reviewing such a change, list any new
+path and rerun the fixture unit test with `PROVENANT_BLESS_RELEASE_FIXTURES=1`; it rewrites
+the digests for listed paths. Path and symlink checks remain active for
 listed paths, and commit metadata checks are unaffected. Changes to this
 allowlist require review.
 - Why: a release scan that passes on missing evidence would publish secrets.
