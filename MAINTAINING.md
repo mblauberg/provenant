@@ -47,7 +47,7 @@ cross-tracker routes, not a second current-work owner.
 - Release notes: each user-visible change adds a fragment under
   [`docs/release-notes/next.d/`](docs/release-notes/next.d/). Fragment authors
   and the release collator follow the
-  [release-notes reference](skills/engineering-writing/references/release-notes.md)
+  `engineering-writing` release-notes guidance
   and the fragment rules in the [release-notes index](docs/release-notes/README.md#writing-a-fragment).
   Each fragment's second line tags an area from the index; the collator decides whether to render it. The no-stability-promise policy lives only in that index. Before releasing,
   read the collated preview (`scripts/collate-release-notes`) end to end, merge
@@ -114,9 +114,10 @@ Harness asset checks enforce the machine-checkable subset.
    `config/` or `scripts/` paths, with one deliberate exception: the
    `AGENTS.md` link to `docs/runbooks/shell-pitfalls.md`. Runnable commands are
    PATH-resolved. Fabric identity derives from the working directory.
-5. `HARNESS.md` is the sole ambient skill resolver. It names the installed
-   Claude and Codex skill roots; `AGENTS.md` names neither an installed root
-   nor an instance skill directory. A named skill loads its `SKILL.md` and is
+5. `HARNESS.md` is the sole ambient skill resolver. It states that skills
+   install into each configured harness's skills directory and names no
+   harness root; `AGENTS.md` names neither an installed root nor an instance
+   skill directory. A named skill loads its `SKILL.md` and is
    binding, while provider-native discovery may implement resolution.
 6. Ambient files carry no dates. Git records revision provenance.
 7. `orchestrate` remains one skill. Skill changes use targeted,

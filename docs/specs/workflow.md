@@ -28,12 +28,15 @@ measured against all authors.
 
 ### Required coverage by risk
 
-| Risk | Counted independent passing reviews | Coverage |
+[HARNESS.md](../../HARNESS.md#review-ladder) owns the review ladder. This
+spec enforces its counts:
+
+| Risk | Counted independent passing reviews | Enforced beyond the count |
 |---|---:|---|
-| Routine | 0 | Chair plus objective checks |
-| Substantial | 1 | Other family if available; otherwise a recorded blocker and a same-family reviewer through a distinct lens |
-| Crucial | 2 | Distinct lenses and two other families if available; each unavailable leg has a recorded blocker and an independent same-family replacement |
-| Terminal | 2 | Crucial coverage plus an adversarial lens, which may be one of the two; explicit user acceptance |
+| Routine | 0 | None |
+| Substantial | 1 | Cross-family leg or a recorded blocker |
+| Crucial | 2 | Distinct lenses; each cross-family leg or a recorded blocker |
+| Terminal | 2 | Adversarial lens, which may be one of the two |
 
 A blocker needs source references and an expiry; a reason string alone never
 waives a leg.
