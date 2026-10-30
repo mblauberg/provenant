@@ -424,6 +424,13 @@ pub enum RefusalKind {
 /// The lane wrote the child's roots, so the host repeats the submission
 /// edge's checks against its own filesystem view: a root counts only while it
 /// is an existing directory, already canonical and clear of the state root.
+/// Check a canonical root against state, allowing installed releases for reads.
+pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read: bool) -> bool {
+    let releases = state.join("releases");
+    (read && root.starts_with(&releases) && root != releases)
+        || (!root.starts_with(state) && !state.starts_with(root))
+}
+
 fn child_access_within(
     parent: &TaskRequest,
     child: &TaskRequest,
@@ -441,38 +448,79 @@ fn child_access_within(
     }
     let state =
         provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
-    let resolve = |root: &PathBuf| {
+    let resolve = |root: &PathBuf, read: bool| {
         provenant_os::fs::canonicalize(root)
             .ok()
             .filter(|canonical| {
                 canonical == root
                     && canonical.is_dir()
-                    && !canonical.starts_with(&state)
-                    && !state.starts_with(canonical)
+                    && access_root_allowed(canonical, &state, read)
             })
     };
     let writes: Vec<PathBuf> = parent
         .access
         .write_roots
         .iter()
-        .filter_map(resolve)
+        .filter_map(|root| resolve(root, false))
         .collect();
     let reads: Vec<PathBuf> = parent
         .access
         .read_roots
         .iter()
-        .filter_map(resolve)
+        .filter_map(|root| resolve(root, true))
         .chain(writes.iter().cloned())
         .collect();
-    let within = |roots: &[PathBuf], granted: &[PathBuf]| {
+    let within = |roots: &[PathBuf], granted: &[PathBuf], read| {
         roots.iter().all(|root| {
-            resolve(root).is_some_and(|root| granted.iter().any(|parent| root.starts_with(parent)))
+            resolve(root, read)
+                .is_some_and(|root| granted.iter().any(|parent| root.starts_with(parent)))
         })
     };
-    if !within(&child.access.write_roots, &writes) || !within(&child.access.read_roots, &reads) {
+    if !within(&child.access.write_roots, &writes, false)
+        || !within(&child.access.read_roots, &reads, true)
+    {
         return Err(RunError::Validation("child root exceeds parent access"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod release_root_tests {
+    use super::*;
+
+    #[test]
+    fn child_inherits_only_release_read_roots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(temp.path())?.join("state");
+        let release = state.join("releases/digest");
+        let skills = release.join("skills");
+        std::fs::create_dir_all(&skills)?;
+        std::fs::create_dir_all(state.join("projects"))?;
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.read_roots = vec![release.clone()];
+        let mut child = parent.clone();
+        child.access.read_roots = vec![skills.clone()];
+        assert!(child_access_within(&parent, &child, &state).is_ok());
+        let other = state.join("releases/other");
+        std::fs::create_dir_all(&other)?;
+        child.access.read_roots = vec![other];
+        assert!(child_access_within(&parent, &child, &state).is_err());
+        for root in [
+            state.join("releases"),
+            state.join("projects"),
+            state.clone(),
+        ] {
+            parent.access.read_roots = vec![root.clone()];
+            child.access.read_roots = vec![root];
+            assert!(child_access_within(&parent, &child, &state).is_err());
+        }
+        parent.access.write_roots = vec![release];
+        child.access.read_roots.clear();
+        child.access.write_roots = vec![skills];
+        assert!(child_access_within(&parent, &child, &state).is_err());
+        Ok(())
+    }
 }
 
 #[derive(Default)]

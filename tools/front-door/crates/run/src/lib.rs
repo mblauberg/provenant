@@ -53,7 +53,7 @@ pub use git_context::{GitContext, continuation_history, resolve_git_base, review
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
     Decoded, LaunchPaths, PreparedLaunch, PreparedStart, Providers, RefusalKind, Started,
-    ValidatedChild, capture_plan, concurrency,
+    ValidatedChild, access_root_allowed, capture_plan, concurrency,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::read_only_plan;

@@ -2151,7 +2151,31 @@ impl RunStore {
             )?;
             rows.collect::<std::result::Result<_, _>>()?
         };
-        for fence in self.writer_fences()? {
+        let fences = match self.writer_fences() {
+            Ok(fences) => fences,
+            Err(error) => {
+                let mut found = Vec::new();
+                for id in ids {
+                    let id = AttemptId::parse(&id)
+                        .map_err(|_| RunError::Validation("attempt index ID"))?;
+                    let reason = UncertainReason::ReconcileFailed {
+                        error: error.to_string(),
+                    };
+                    crate::settlement::blocked(
+                        &self.attempt_dir(run, id, false)?,
+                        Self::scope(&self.record(id, call)?),
+                        &reason.to_string(),
+                        call.clock,
+                    )?;
+                    found.push((id, Reconciled::uncertain(reason)));
+                }
+                if found.is_empty() {
+                    return Err(error);
+                }
+                return Ok(found);
+            }
+        };
+        for fence in fences {
             if fence.scope.run == run && !ids.contains(&fence.scope.attempt.to_string()) {
                 ids.push(fence.scope.attempt.to_string());
             }

@@ -1369,6 +1369,8 @@ mod writer_recovery_tests {
             "never_spawned",
             "no_summary",
             "no_summary_terminal",
+            "no_summary_terminal_modern",
+            "no_summary_terminal_other_generation",
         ] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
@@ -1497,15 +1499,26 @@ mod writer_recovery_tests {
                 reservation["guardian"] = identity.clone();
                 reservation["provider"] = identity;
             }
-            std::fs::write(
-                slot_path.join("reservation.json"),
-                serde_json::to_vec(&reservation)?,
-            )?;
-            std::fs::rename(
-                modern.join("ownership.json"),
-                slot_path.join("ownership.json"),
-            )?;
-            std::fs::remove_dir_all(modern)?;
+            if mode == "no_summary_terminal_other_generation" {
+                reservation["scope"]["generation"] = (scope.generation + 1).into();
+                let anchor = provenant_os::fs::Directory::open_anchor(&modern)?.metadata()?;
+                reservation["reservation_device"] = anchor.device.into();
+                reservation["reservation_inode"] = anchor.inode.into();
+                std::fs::write(
+                    modern.join("reservation.json"),
+                    serde_json::to_vec(&reservation)?,
+                )?;
+            } else if mode != "no_summary_terminal_modern" {
+                std::fs::write(
+                    slot_path.join("reservation.json"),
+                    serde_json::to_vec(&reservation)?,
+                )?;
+                std::fs::rename(
+                    modern.join("ownership.json"),
+                    slot_path.join("ownership.json"),
+                )?;
+                std::fs::remove_dir_all(modern)?;
+            }
             if !mode.starts_with("no_summary") {
                 crate::artifacts::seal(
                     &attempt,
@@ -1523,12 +1536,22 @@ mod writer_recovery_tests {
                 }
                 crate::dispatch_tests::seal_exit(&store, &exit)?;
             }
-            if mode == "no_summary_terminal" {
+            if mode.starts_with("no_summary_terminal") {
                 store.commit_lost(
                     scope,
                     "launch interrupted: provider never spawned; private evidence retained",
                     &call,
                 )?;
+                store.reconcile(run.run_id, &crate::dispatch_tests::Fake::default(), &call)?;
+                let queued = store.run_dir(run.run_id, false)?;
+                assert!(
+                    crate::artifacts::read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
+                        .is_some(),
+                    "{mode}: public reconcile must queue recovery"
+                );
+                if mode == "no_summary_terminal_other_generation" {
+                    continue;
+                }
             }
             let found = store.reconcile_with_observer(
                 run.run_id,
@@ -1569,7 +1592,12 @@ mod writer_recovery_tests {
             assert!(store.writer_fences()?.is_empty());
             assert!(store.writer_fence_listing()?.issues.is_empty());
             assert!(!slot_path.join("reservation.json").exists());
-            assert!(slot_path.join("settlement.json").is_file());
+            let evidence = if mode == "no_summary_terminal_modern" {
+                slot_path.join(id.to_string())
+            } else {
+                slot_path.clone()
+            };
+            assert!(evidence.join("settlement.json").is_file());
             if mode.starts_with("no_summary") {
                 assert_eq!(
                     private_git(&["rev-parse", "HEAD"])?,

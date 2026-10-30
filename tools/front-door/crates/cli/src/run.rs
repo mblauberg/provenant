@@ -1464,9 +1464,6 @@ fn lane_access_checked(
     // A first dispatch can precede the state root's creation; compare lexically then.
     let state =
         provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
-    // Installed releases are immutable and hold the bundled skills that preset
-    // roles read, so a read root may sit inside one release directory.
-    let releases = state.join("releases");
     let resolve = |paths: &[PathBuf], flag: &'static str| {
         paths
             .iter()
@@ -1478,10 +1475,7 @@ fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
-                let release = flag == "--read-root"
-                    && canonical.starts_with(&releases)
-                    && canonical != releases;
-                if !release && (canonical.starts_with(&state) || state.starts_with(&canonical)) {
+                if !run::access_root_allowed(&canonical, &state, flag == "--read-root") {
                     return Err(AccessError::StateOverlap {
                         flag,
                         path: path.clone(),
@@ -11439,6 +11433,13 @@ mod tests {
         assert!(rendered.contains("permission denied"));
         assert!(rendered.contains("retry later"));
         assert!(!rendered.chars().any(char::is_control));
+
+        let state = run::Reconciled::Uncertain {
+            reason: run::UncertainReason::ReconcileFailed {
+                error: "writer fence listing failed".into(),
+            },
+        };
+        assert!(reconcile_summary(&state).contains("writer fence listing failed"));
 
         let data = json!({"writer_reservation_errors": [{"reason": "legacy reservation has invalid anchor"}]});
         let blocked = reconcile_reply(
