@@ -18,7 +18,7 @@ Use when writing or editing release notes, a changelog or release fragments (tow
 ## Template
 
 ```markdown
-# Provenant v1.4.0
+# Acme v1.4.0
 
 Released 4 March 2027.
 

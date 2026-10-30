@@ -1,6 +1,6 @@
 # Default homes
 
-Use these only with `setup-repo` write authority; advisory mode proposes paths.
+Use these after `setup-repo`'s approved Declare-the-process step; otherwise propose paths.
 Specs use independent semantic topic paths, indexed for discovery; no directory
 imposes load order or mirrored versions, and one owner holds each requirement.
 Keep a spec below 999 lines and 100 KiB, splitting at a real ownership boundary.

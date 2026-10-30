@@ -47,14 +47,12 @@ does not fix them without the grant.
 - **Front-load the description.** The first 250 characters carry the trigger
   terms and the nearest exclusion. The exclusion names the skill to use
   instead, because a bare negation does not route.
-- **Fixtures.** `evals/trigger_cases.json` holds 8 to 12 cases, with at least
-  two `near-miss` negatives: `relation: negative`, with the target absent from
-  both expected routes. `scripts/check-skill-negatives` inventories them.
-  Re-run them after any routing-text change.
+- **Fixtures.** Include near-miss negatives whose expected routes omit the
+  target skill. Re-run them after any routing-text change. Fixture size and
+  tooling follow the repository's `MAINTAINING.md`.
 - **Contract tests** only for invariants a script or CI gate enforces. Never
   assert wording.
-- **Dated versions.** Version facts go in a dated reference. Frontmatter holds
-  `name` and `description` only.
+- **Dated versions.** Version facts go in a dated reference.
 - **Hard rules in SKILL.md.** Load depth from references one hop away, and
   load it late.
 - **Write rules** as mechanism, reason and example, phrased positively.

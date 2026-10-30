@@ -1,8 +1,7 @@
 # Claim discipline and evidence
 
 `natural-writing` owns this evidence-classification schema for the writing
-family. `engineering-writing` links here and adds only its own domain
-extension (README feature-list scoping); the academic extension
+family. `engineering-writing` links here; the academic extension
 (reproducibility statements, small-sample statistics, results claims) is in
 [academic-prose.md](academic-prose.md). `legal-writing` uses a distinct,
 non-overlapping schema: the Legal Function Test owned by the `legal-writing`

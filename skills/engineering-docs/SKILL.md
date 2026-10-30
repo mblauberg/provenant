@@ -76,5 +76,5 @@ directory. Give each block `accTitle` and `accDescr`. Archive retired docs with
 owner authority and repair references; keep a tombstone only for an external
 link.
 
-See [placement](references/placement.md) for default homes (only with
-`setup-repo` write authority; otherwise propose paths).
+See [placement](references/placement.md) for default homes (they apply
+after `setup-repo`'s approved Declare-the-process step; otherwise propose paths).

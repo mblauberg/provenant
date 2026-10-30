@@ -19,13 +19,13 @@ authoring adds.
    shapes in `templates/`. Keep references one hop from `SKILL.md`.
 5. Match freedom to risk: principles for judgement, templates for repeatable
    structure, and tested scripts for fragile steps.
-6. Write fixtures and run `scripts/check-skill-negatives`.
+6. Write trigger fixtures, including near-miss negatives, where the target
+   repository keeps them.
 7. Run the baseline, then a forward test on a realistic task in a fresh
    context. Do not leak the intended answer or diagnosis. Repair what the test
    exposes, and keep only the lines that changed behaviour.
-8. Run the gates: `scripts/check-harness`, `scripts/check-skill-negatives`,
-   `scripts/check-writing` and `provenant check writing PATHS --rules general`
-   (add `--rules legal` for legal skills).
+8. Run the validation gates the target repository's `AGENTS.md`, `CONTRIBUTING`
+   and runbooks name. If it names none, say which checks were not run.
 
 ## Description
 
