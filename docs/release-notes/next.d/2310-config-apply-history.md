@@ -1,4 +1,0 @@
-## Additions
-### CLI and install
-
-- `provenant config schema --json` lists every editable field with its type, bounds, default, effective value, source layer and restart need. `config show --json` now returns a configuration `revision`. `config apply --file PATCH.json --expect-revision REV [--dry-run]` validates through the domain owners and commits all changes or none, refusing a stale revision with the current one. `config set`, `unset`, `route set`, `route pacing`, `accounts set` and `quota display` share the same edit lock and revision check. `config history [--since T] [--limit N]` lists a bounded, append-only record of applied changes with secret-looking values redacted; retention follows the `config.history_max_entries`, `config.history_max_age_days` and `config.history_max_bytes` knobs (#2310).
