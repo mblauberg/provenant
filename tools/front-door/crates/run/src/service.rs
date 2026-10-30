@@ -631,7 +631,7 @@ impl From<&RunError> for ErrorKind {
             RunError::Decode(provenant_records::DecodeError::UnsupportedVersion {
                 found, ..
             }) if *found > 1 => Self::UpgradeRequired,
-            RunError::Decode(_) | RunError::ArtifactMismatch => Self::StateCorrupt,
+            RunError::Decode(_) | RunError::ArtifactMismatch(_) => Self::StateCorrupt,
             _ => Self::Io,
         }
     }
