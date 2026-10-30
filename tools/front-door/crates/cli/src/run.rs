@@ -1464,6 +1464,9 @@ fn lane_access_checked(
     // A first dispatch can precede the state root's creation; compare lexically then.
     let state =
         provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
+    // Installed releases are immutable and hold the bundled skills that preset
+    // roles read, so a read root may sit inside one release directory.
+    let releases = state.join("releases");
     let resolve = |paths: &[PathBuf], flag: &'static str| {
         paths
             .iter()
@@ -1475,7 +1478,10 @@ fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
-                if canonical.starts_with(&state) || state.starts_with(&canonical) {
+                let release = flag == "--read-root"
+                    && canonical.starts_with(&releases)
+                    && canonical != releases;
+                if !release && (canonical.starts_with(&state) || state.starts_with(&canonical)) {
                     return Err(AccessError::StateOverlap {
                         flag,
                         path: path.clone(),
@@ -12254,6 +12260,41 @@ mod tests {
         }
         // A read root on the worktree and a write root beneath it stay valid.
         assert!(lane_access(&access(vec![worktree.clone()], vec![inside]), &state).is_ok());
+        Ok(())
+    }
+    #[test]
+    fn lane_access_reads_installed_release_skills_only() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let releases = state.join("releases");
+        let skills = releases.join("sha256:abc").join("skills");
+        std::fs::create_dir_all(&skills)?;
+        std::fs::create_dir_all(state.join("projects"))?;
+        let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+            mode: Some(Mode::ReadOnly),
+            worktree: None,
+            read_root,
+            write_root,
+            network: None,
+            capability: Vec::new(),
+        };
+        // Preset roles read bundled skills from the installed release.
+        let granted = lane_access(&access(vec![skills.clone()], Vec::new()), &state)
+            .map_err(|fail| fail.message)?;
+        assert_eq!(
+            granted.read_roots,
+            [provenant_os::fs::canonicalize(&skills)?]
+        );
+        for refused in [
+            access(vec![releases.clone()], Vec::new()),
+            access(vec![state.join("projects")], Vec::new()),
+            access(Vec::new(), vec![skills.clone()]),
+        ] {
+            assert!(matches!(
+                lane_access_checked(&refused, &state),
+                Err(AccessError::StateOverlap { .. })
+            ));
+        }
         Ok(())
     }
     #[test]

@@ -4889,7 +4889,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 },
                 self.factory.context.roots.state.as_path(),
             )
-            .map_err(fail_error)?;
+            .map_err(|fail| FacadeError::DispatchRefused {
+                reason: fail.message,
+            })?;
             let legacy_input = prepared_without_request.then(|| {
                 let mut legacy = input.clone();
                 let SubmitInput::Submit { tasks, .. } = &mut legacy;
