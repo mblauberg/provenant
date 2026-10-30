@@ -511,10 +511,16 @@ mod tests {
         };
         emit_path_matches(&mut scan, fixture, &hit).unwrap();
         assert!(scan.findings.is_empty());
-        emit_path_matches(&mut scan, "tools/front-door/crates/confinement/src/redact.rs.bak", &hit)
-            .unwrap();
+        emit_path_matches(
+            &mut scan,
+            "tools/front-door/crates/confinement/src/redact.rs.bak",
+            &hit,
+        )
+        .unwrap();
         assert_eq!(scan.findings.len(), 1);
-        assert!(!fixture_path("tools/front-door/crates/cli/src/check/release.rs"));
+        assert!(!fixture_path(
+            "tools/front-door/crates/cli/src/check/release.rs"
+        ));
     }
 
     #[test]
