@@ -1,4 +1,4 @@
-//! Rewrite retired routing timing keys to `schedule` in place. The edit goes
+//! Rewrite retired configuration keys in place. The edit goes
 //! through the shared editor, so it takes the edit lock, validates the whole
 //! result, records history and keeps comments and formatting. A timestamped
 //! backup of the previous file is written first.
@@ -15,11 +15,11 @@ const TARGETS: [(&[&str], bool); 2] = [
     (&["model_policy", "rules"], false),
 ];
 
-/// One rewritten or dropped record, located as `domains.routing.<path>.<index>`.
+/// One rewritten or dropped record, located by its configuration path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Migration {
     pub location: String,
-    /// `moved` lists the keys rewritten; `dropped` an override that had expired.
+    /// `moved` lists rewritten keys; `dropped` lists removed keys or records.
     pub action: &'static str,
     pub keys: Vec<String>,
 }
@@ -114,6 +114,21 @@ fn write_backup(
 /// Apply the rewrite to `document`; `now` is Unix seconds.
 fn rewrite(document: &mut DocumentMut, now: i64) -> Result<Vec<Migration>, ConfigError> {
     let mut migrations = Vec::new();
+    if let Some(limits) = document
+        .get_mut("domains")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|domains| domains.get_mut("fabric"))
+        .and_then(Item::as_table_like_mut)
+        .and_then(|fabric| fabric.get_mut("limits"))
+        .and_then(Item::as_table_like_mut)
+        && limits.remove("bundle_bytes").is_some()
+    {
+        migrations.push(Migration {
+            location: "domains.fabric.limits".into(),
+            action: "dropped",
+            keys: vec!["bundle_bytes".into()],
+        });
+    }
     let Some(routing) = document
         .get_mut("domains")
         .and_then(Item::as_table_like_mut)
@@ -305,6 +320,22 @@ fn migrate_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drops_retired_fabric_bundle_limit_without_routing() {
+        let mut document: DocumentMut =
+            "[domains.fabric.limits]\nbundle_bytes = 42\nbody_bytes = 12\n"
+                .parse()
+                .unwrap();
+        let migrations = rewrite(&mut document, 0).unwrap();
+        assert_eq!(migrations.len(), 1);
+        assert_eq!(migrations[0].location, "domains.fabric.limits");
+        assert_eq!(migrations[0].action, "dropped");
+        assert_eq!(migrations[0].keys, ["bundle_bytes"]);
+        assert!(!document.to_string().contains("bundle_bytes"));
+        assert!(document.to_string().contains("body_bytes = 12"));
+        assert!(rewrite(&mut document, 0).unwrap().is_empty());
+    }
 
     #[test]
     fn timestamp_comments_follow_migrated_keys() {
