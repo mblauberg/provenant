@@ -229,6 +229,349 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     );
 }
 
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+struct RemoveAttemptOnSync;
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+impl provenant_os::fs::AtomicWriteOperations for RemoveAttemptOnSync {
+    fn write(
+        &mut self,
+        file: &mut provenant_os::fs::FileHandle,
+        bytes: &[u8],
+        path: &Path,
+    ) -> provenant_os::fs::Result<()> {
+        file.write_all(bytes)
+            .map_err(|source| provenant_os::fs::FsError::Io {
+                operation: "write fixture staging file",
+                path: path.into(),
+                source,
+            })
+    }
+    fn sync_file(&mut self, file: &provenant_os::fs::FileHandle) -> provenant_os::fs::Result<()> {
+        file.sync()
+    }
+    fn rename(
+        &mut self,
+        directory: &Directory,
+        temporary: &OsStr,
+        name: &OsStr,
+        mode: PublishMode,
+    ) -> provenant_os::fs::Result<()> {
+        match mode {
+            PublishMode::NoReplace => directory.rename_noreplace(temporary, directory, name),
+            PublishMode::Replace => directory.replace(temporary, directory, name),
+        }
+    }
+    fn sync_directory(&mut self, directory: &Directory) -> provenant_os::fs::Result<()> {
+        // Remove the attempt between the rename and its directory sync, then
+        // report a durability failure that is not ENOENT: only re-checking the
+        // directory's existence can stop publication here.
+        let path = directory.current_path()?;
+        std::fs::remove_dir_all(&path).map_err(|source| provenant_os::fs::FsError::Io {
+            operation: "remove fixture attempt directory",
+            path: path.clone(),
+            source,
+        })?;
+        Err(provenant_os::fs::FsError::Io {
+            operation: "fixture post-link directory sync",
+            path: PathBuf::from("process-exit.json"),
+            source: io::Error::from_raw_os_error(libc::EIO),
+        })
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+struct UnconfirmedAfterAttemptRemoval;
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+impl ExitPublisher for UnconfirmedAfterAttemptRemoval {
+    fn publish(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
+        let exit: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(
+            exit["unresolved_cleanup"], false,
+            "publication requires settled cleanup"
+        );
+        Ok(directory.atomic_write_with_faults(
+            OsStr::new("process-exit.json"),
+            ".exit-",
+            bytes,
+            PublishMode::NoReplace,
+            &mut RemoveAttemptOnSync,
+        )?)
+    }
+    fn sync_visible(&self, _: &Directory) -> Result<()> {
+        // The directory is gone, so a real sync cannot confirm durability.
+        // Keeping this failing proves publication stops on existence rather
+        // than eventually succeeding against a removed directory.
+        Err(provenant_os::fs::FsError::Io {
+            operation: "fixture visible exit sync",
+            path: PathBuf::from("process-exit.json"),
+            source: io::Error::from_raw_os_error(libc::EIO),
+        }
+        .into())
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+struct MissingAfterAttemptRemoval;
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+impl ExitPublisher for MissingAfterAttemptRemoval {
+    fn publish(&self, directory: &Directory, _: &[u8]) -> Result<Publication> {
+        let path = directory.current_path()?;
+        std::fs::remove_dir_all(&path).map_err(|source| provenant_os::fs::FsError::Io {
+            operation: "remove fixture attempt directory",
+            path: path.clone(),
+            source,
+        })?;
+        Err(provenant_os::fs::FsError::Io {
+            operation: "fixture exit publication",
+            path: PathBuf::from("process-exit.json"),
+            source: io::Error::from_raw_os_error(libc::ENOENT),
+        }
+        .into())
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+struct TerminalMustNotRun {
+    refuse_admission: bool,
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+impl Holder for TerminalMustNotRun {
+    fn admit(&self, _: &[u8], _: &Directory) -> Result<()> {
+        if self.refuse_admission {
+            Err(CustodyError::Admission(AdmissionError::BuildSettings))
+        } else {
+            Ok(())
+        }
+    }
+    fn terminal(&self, _: &[u8], _: &Directory, _: &ExitObservation, _: &Recovery) -> Result<()> {
+        panic!("terminal settlement ran after the attempt directory was removed")
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+fn child_descriptors(name: &str) -> Option<Vec<OsString>> {
+    let args = std::env::var_os(name)?;
+    Some(
+        args.to_str()
+            .unwrap()
+            .split(',')
+            .map(OsString::from)
+            .collect(),
+    )
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[allow(clippy::disallowed_methods)]
+fn spawn_missing_attempt_guardian(
+    test_name: &str,
+    descriptor_env: &str,
+    argv: Vec<Vec<u8>>,
+) -> (
+    tempfile::TempDir,
+    crate::fixture::ChildGuard,
+    PathBuf,
+    PathBuf,
+    Scope,
+) {
+    use provenant_core::{AttemptId, RunId, WaitBudget};
+    use provenant_os::clock::SystemClock;
+    use std::os::fd::{AsFd, AsRawFd};
+
+    let root = tempfile::tempdir().unwrap();
+    let writer_path = root.path().join("writer");
+    let attempt_path = root.path().join("attempt");
+    std::fs::create_dir(&writer_path).unwrap();
+    std::fs::create_dir(&attempt_path).unwrap();
+    let clock = SystemClock::new();
+    let scope = Scope {
+        run: RunId::from_bytes([41; 16]),
+        attempt: AttemptId::from_bytes([42; 16]),
+        generation: 1,
+    };
+    let budget = WaitBudget::nonblocking(clock.mono_now());
+    let cancel = CancelToken::new();
+    let writer = crate::fixture::acquire_writer(
+        Directory::open_anchor(&writer_path).unwrap(),
+        scope,
+        budget,
+        &cancel,
+        &clock,
+    )
+    .unwrap();
+    let publication = PublicationReservation::prepare(
+        Directory::open_anchor(&attempt_path).unwrap(),
+        budget,
+        &cancel,
+        &clock,
+    )
+    .unwrap();
+    let executable_snapshot = snapshot_executable(OsStr::from_bytes(&argv[0])).unwrap();
+    let message = LaunchMessage {
+        schema_version: 1,
+        priority: 0,
+        scope,
+        resolved_route: "fixture/provider".into(),
+        permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
+        task: provenant_core::TaskId::from_bytes([43; 16]),
+        requester: provenant_core::ActorId::from_bytes([44; 16]),
+        binding: writer.reservation.binding.clone(),
+        executable_snapshot,
+        protected_commands: Vec::new(),
+        argv,
+        environment: Vec::new(),
+        lane_ports: None,
+        cwd: root.path().as_os_str().as_bytes().to_vec(),
+        stdin: Vec::new(),
+        secret_input: None,
+        holder_context: Vec::new(),
+        capture: CapturePlan {
+            root_flush_ms: 50,
+            descendant_grace_ms: 100,
+            wall_ms: 5_000,
+            ..CapturePlan::default()
+        },
+    };
+    let (mut parent, child) = std::os::unix::net::UnixStream::pair().unwrap();
+    let descriptors = [
+        child.as_fd(),
+        writer.lock_directory.handoff_file().as_fd(),
+        publication.directory.handoff_file().as_fd(),
+        writer.lease.as_ref().unwrap().handoff_file().as_fd(),
+        publication.custody.handoff_file().as_fd(),
+    ];
+    let args = descriptors
+        .iter()
+        .map(|fd| fd.as_raw_fd().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut environment: Vec<_> = std::env::vars_os().collect();
+    environment.push((descriptor_env.into(), args.into()));
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args(["--exact", test_name, "--nocapture"]);
+    command.envs(environment.iter().cloned());
+    provenant_os::sys::child::configure_command(
+        &mut command,
+        &descriptors,
+        Some(&environment),
+        true,
+    )
+    .unwrap();
+    let guardian = crate::fixture::ChildGuard::new(command.spawn().unwrap());
+    drop(child);
+    crate::process_os::handoff::send(
+        &mut parent,
+        &serde_json::to_vec(&message).unwrap(),
+        Duration::from_secs(5),
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::process_os::handoff::receive(&mut parent, Duration::from_secs(5)).unwrap(),
+        b"custody-accepted-v1"
+    );
+    drop(writer);
+    drop(publication);
+    (root, guardian, writer_path, attempt_path, scope)
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[allow(clippy::disallowed_methods)]
+fn wait_for_guardian(guardian: &mut crate::fixture::ChildGuard) -> std::process::ExitStatus {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = guardian.try_wait().unwrap() {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "supervise did not return after the attempt directory was removed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn guardian_missing_attempt_after_rename_stops_publication_and_settlement() {
+    const CHILD_ARGS: &str = "PROVENANT_TEST_GUARDIAN_UNCONFIRMED_FDS";
+    if let Some(args) = child_descriptors(CHILD_ARGS) {
+        let observer = crate::fixture::RecordedBootObserver;
+        let publisher = UnconfirmedAfterAttemptRemoval;
+        let holder = TerminalMustNotRun {
+            refuse_admission: false,
+        };
+        supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&publisher),
+                holder: Some(&holder),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        return;
+    }
+    let (_root, mut guardian, _, attempt_path, _) = spawn_missing_attempt_guardian(
+        "guardian::tests::guardian_missing_attempt_after_rename_stops_publication_and_settlement",
+        CHILD_ARGS,
+        vec![b"/usr/bin/true".to_vec()],
+    );
+    let status = wait_for_guardian(&mut guardian);
+    assert!(status.success(), "supervise fixture failed: {status}");
+    assert!(
+        !attempt_path.exists(),
+        "the fixture publisher must remove the attempt directory"
+    );
+}
+
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn guardian_never_spawned_missing_attempt_skips_release() {
+    const CHILD_ARGS: &str = "PROVENANT_TEST_GUARDIAN_NEVER_SPAWNED_FDS";
+    if let Some(args) = child_descriptors(CHILD_ARGS) {
+        let observer = crate::fixture::RecordedBootObserver;
+        let publisher = MissingAfterAttemptRemoval;
+        let holder = TerminalMustNotRun {
+            refuse_admission: true,
+        };
+        supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&publisher),
+                holder: Some(&holder),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        return;
+    }
+    let (_root, mut guardian, writer_path, attempt_path, scope) = spawn_missing_attempt_guardian(
+        "guardian::tests::guardian_never_spawned_missing_attempt_skips_release",
+        CHILD_ARGS,
+        vec![b"/usr/bin/true".to_vec()],
+    );
+    let status = wait_for_guardian(&mut guardian);
+    assert!(status.success(), "supervise fixture failed: {status}");
+    assert!(
+        !attempt_path.exists(),
+        "the fixture publisher must remove the attempt directory"
+    );
+    let evidence =
+        crate::custody::attempt_evidence(&Directory::open_anchor(&writer_path).unwrap(), scope)
+            .unwrap();
+    let reservation: Reservation =
+        read_record(&evidence, "reservation.json", RECORD_LIMIT).unwrap();
+    assert_eq!(reservation.launch_state, LaunchState::NeverSpawned);
+}
+
 #[test]
 fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() {
     use provenant_core::{AttemptId, Clock, RunId, WaitBudget};

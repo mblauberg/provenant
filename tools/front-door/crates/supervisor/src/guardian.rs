@@ -237,7 +237,9 @@ pub trait DiskPressure {
 ///
 /// `admit` runs first, after custody is accepted and before the provider
 /// spawns, so a queued attempt waits for host admission inside its own
-/// guardian. An error publishes a never-spawned exit and still calls `terminal`.
+/// guardian. An error publishes a never-spawned exit and still calls `terminal`,
+/// except when the attempt directory is already gone: there is nowhere to
+/// publish the exit or settle, so only the writer reservation remains.
 pub trait Holder {
     /// Hold a provider's shared launch lease until provider cleanup completes.
     /// The route comes from the host handoff, after fallback selection.
@@ -1232,6 +1234,10 @@ impl Driver<'_> {
             omitted_warnings,
         };
         let published = self.publish_until_durable(&record, &mut state)?;
+        // When the attempt directory is gone there is nowhere to publish the
+        // exit or the holder's terminal records, so settlement is deliberately
+        // skipped: `terminal` would only retry against a missing directory. The
+        // writer reservation remains as recovery evidence in the lock slot.
         if cleanup_complete && published {
             self.release(&record)?;
         }
@@ -1370,7 +1376,10 @@ impl Driver<'_> {
             )),
         }
     }
-    /// Publish a launch refusal while retaining the scoped custody proof.
+    /// Publish a launch refusal while retaining the scoped custody proof. If
+    /// the attempt directory is already gone there is no exit to publish and
+    /// no terminal settlement to attempt; the refusal stays in the writer
+    /// reservation for recovery.
     fn never_spawned(&mut self, warning: &str) -> Result<()> {
         self.reservation.launch_state = LaunchState::NeverSpawned;
         self.reservation.unresolved_cleanup = false;
@@ -1384,6 +1393,8 @@ impl Driver<'_> {
             PublishMode::Replace,
         )?)?;
         let record = ProcessExit::never_spawned(self.reservation.scope, None, vec![warning.into()]);
+        // A gone attempt has nowhere to publish the refusal, so skip release
+        // too: the durable reservation above is the surviving evidence.
         if self.publish_until_durable(&record, &mut State::never_spawned())? {
             self.release(&record)?;
         }
@@ -1457,7 +1468,9 @@ impl Driver<'_> {
         Ok(())
     }
     /// Retry until the exit is durable or the attempt is gone. Custody survives
-    /// ENOSPC and signals; process.json exposes publication_pending.
+    /// ENOSPC and signals; process.json exposes publication_pending. A removed
+    /// attempt keeps its held descriptor usable, so a failed write re-checks
+    /// the resolved pathname instead of trusting only the reported errno.
     fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<bool> {
         let bytes = record.bounded_bytes()?;
         if bytes.len() as u64 > EXIT_LIMIT {
@@ -1465,6 +1478,10 @@ impl Driver<'_> {
         }
         let mut released_reserve = false;
         let mut visible = false;
+        // A held attempt descriptor keeps working after the directory is
+        // removed, so resolve its pathname once while it is still linked and
+        // re-check that path on every failed publication.
+        let attempt_path = self.attempt.current_path().ok();
         let system_exit_publisher = SystemExitPublisher;
         let exit_publisher: &dyn ExitPublisher =
             self.exit_publisher.unwrap_or(&system_exit_publisher);
@@ -1476,12 +1493,20 @@ impl Driver<'_> {
             } else {
                 exit_publisher.publish(&self.attempt, &bytes)
             };
-            if result
-                .as_ref()
-                .err()
-                .and_then(filesystem_error)
-                .is_some_and(provenant_os::fs::FsError::is_not_found)
-            {
+            // A removed attempt is terminal for publication even when the
+            // operation's errno is not ENOENT: a post-rename directory sync can
+            // fail after `rmdir`, which is a visible but unconfirmable write.
+            let attempt_gone = attempt_path.as_deref().is_some_and(path_missing)
+                || match &result {
+                    Ok(Publication::Durable) => false,
+                    Ok(Publication::VisibleDurabilityUnconfirmed { sync_error }) => {
+                        sync_error.is_not_found()
+                    }
+                    Err(error) => {
+                        filesystem_error(error).is_some_and(provenant_os::fs::FsError::is_not_found)
+                    }
+                };
+            if attempt_gone {
                 return Ok(false);
             }
             let mut tick = Tick::at(0);
@@ -1574,6 +1599,16 @@ fn filesystem_error(error: &CustodyError) -> Option<&provenant_os::fs::FsError> 
         CustodyError::Filesystem(error) => Some(error),
         _ => None,
     }
+}
+
+/// Whether a previously resolved directory pathname is no longer present.
+/// Only a missing entry proves absence; any other observation stays unresolved
+/// so publication keeps retrying rather than stopping on a transient error.
+fn path_missing(path: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    )
 }
 
 fn push_warning(warnings: &mut Vec<String>, omitted: &mut u64, label: &str) {

@@ -211,7 +211,8 @@ impl TestRig {
         Ok(self)
     }
 
-    /// Keep this guard armed until the test's final successful assertion.
+    /// Hold this guard for the rest of the test's scope; it stays armed until
+    /// it drops, then terminates any recorded custodians and dependents.
     /// The rig root includes the local state, nested child stores and loopback peers.
     /// A separate local guard drops before the rig removes its temporary directory.
     pub fn process_cleanup(&self) -> provenant_supervisor::fixture::ProcessCleanupGuard {
