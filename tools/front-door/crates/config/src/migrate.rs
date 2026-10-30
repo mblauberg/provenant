@@ -114,15 +114,7 @@ fn write_backup(
 /// Apply the rewrite to `document`; `now` is Unix seconds.
 fn rewrite(document: &mut DocumentMut, now: i64) -> Result<Vec<Migration>, ConfigError> {
     let mut migrations = Vec::new();
-    if let Some(limits) = document
-        .get_mut("domains")
-        .and_then(Item::as_table_like_mut)
-        .and_then(|domains| domains.get_mut("fabric"))
-        .and_then(Item::as_table_like_mut)
-        .and_then(|fabric| fabric.get_mut("limits"))
-        .and_then(Item::as_table_like_mut)
-        && limits.remove("bundle_bytes").is_some()
-    {
+    if remove_retired_bundle_bytes(document) {
         migrations.push(Migration {
             location: "domains.fabric.limits".into(),
             action: "dropped",
@@ -183,6 +175,68 @@ fn rewrite(document: &mut DocumentMut, now: i64) -> Result<Vec<Migration>, Confi
         }
     }
     Ok(migrations)
+}
+
+fn raw_decor_text(raw: Option<&toml_edit::RawString>, source: &str) -> Option<String> {
+    let raw = raw?;
+    raw.as_str().map(str::to_owned).or_else(|| {
+        raw.span()
+            .and_then(|span| source.get(span).map(str::to_owned))
+    })
+}
+
+fn remove_retired_bundle_bytes(document: &mut DocumentMut) -> bool {
+    let source = document.to_string();
+    let prefix = document
+        .get("domains")
+        .and_then(Item::as_table_like)
+        .and_then(|domains| domains.get("fabric"))
+        .and_then(Item::as_table_like)
+        .and_then(|fabric| fabric.get("limits"))
+        .and_then(Item::as_table_like)
+        .and_then(|limits| limits.get_key_value("bundle_bytes"))
+        .and_then(|(key, _)| raw_decor_text(key.leaf_decor().prefix(), &source));
+    let trailing_comment = {
+        let Some(limits) = document
+            .get_mut("domains")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|domains| domains.get_mut("fabric"))
+            .and_then(Item::as_table_like_mut)
+            .and_then(|fabric| fabric.get_mut("limits"))
+            .and_then(Item::as_table_like_mut)
+        else {
+            return false;
+        };
+        if limits.remove("bundle_bytes").is_none() {
+            return false;
+        }
+        let Some(prefix) = prefix.filter(|prefix| prefix.contains('#')) else {
+            return true;
+        };
+        let prefix = prefix.trim_end_matches(['\r', '\n']);
+        let next_key = limits.iter().map(|(key, _)| key.to_owned()).next();
+        if let Some(next_key) = next_key {
+            let existing = limits
+                .get_key_value(&next_key)
+                .and_then(|(key, _)| raw_decor_text(key.leaf_decor().prefix(), &source))
+                .unwrap_or_default();
+            if let Some((mut key, _)) = limits.get_key_value_mut(&next_key) {
+                key.leaf_decor_mut()
+                    .set_prefix(format!("{prefix}{existing}"));
+                None
+            } else {
+                Some(prefix.to_owned())
+            }
+        } else {
+            Some(prefix.to_owned())
+        }
+    };
+    if let Some(comment) = trailing_comment {
+        let root = document.as_table_mut();
+        let suffix = raw_decor_text(root.decor().suffix(), &source).unwrap_or_default();
+        root.decor_mut().set_suffix(format!("{suffix}{comment}"));
+    }
+    true
 }
 
 fn rows_at<'a>(table: &'a mut dyn TableLike, path: &[&str]) -> Option<&'a mut Item> {
@@ -347,8 +401,8 @@ mod tests {
         "[limits]\nbody_bytes = 1024\n"
     }
 
-    fn fixture_boundary(error: &SectionError) -> bool {
-        error.code == "retired.bundle_bytes"
+    fn fixture_boundary(_: &SectionError) -> bool {
+        false
     }
 
     static FIXTURE_ENTRIES: [DomainSection; 1] =
@@ -384,6 +438,16 @@ mod tests {
         let original =
             "schema_version = 1\n[domains.fabric.limits]\n# retained comment\nbundle_bytes = 42\n";
         std::fs::write(&path, original).unwrap();
+        let loaded = crate::load_with_domains(
+            &roots,
+            Some(std::io::Cursor::new(original.as_bytes())),
+            &FIXTURE_SECTIONS,
+        )
+        .unwrap();
+        assert!(loaded.warnings.iter().any(|warning| {
+            warning.message.contains("retired.bundle_bytes")
+                && warning.message.contains("provenant config migrate")
+        }));
         let edit = || {
             crate::edit_config(
                 &roots,
@@ -406,6 +470,7 @@ mod tests {
 
         crate::migrate(&roots, &FIXTURE_SECTIONS, false).unwrap();
         let migrated = std::fs::read_to_string(&path).unwrap();
+        assert!(migrated.contains("# retained comment"), "{migrated}");
         assert!(!migrated.contains("bundle_bytes"), "{migrated}");
         assert!(
             crate::load_with_domains(

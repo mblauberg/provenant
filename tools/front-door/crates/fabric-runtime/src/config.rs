@@ -660,7 +660,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("home_hosts.{host}", "string"),
 ];
 fn boundary(error: &SectionError) -> bool {
-    error.code == "retired.bundle_bytes" || boundary_existing(error)
+    error.code != "retired.bundle_bytes" && boundary_existing(error)
 }
 
 pub const SECTION: DomainSection = DomainSection::new::<FabricConfig>("fabric", defaults)

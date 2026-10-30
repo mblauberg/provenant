@@ -1202,8 +1202,8 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
                         path: user_path()?,
                         line: issue.location.line,
                         message: format!(
-                            "{key}: ignored invalid configuration ({}: {}); run `provenant config migrate`",
-                            issue.rule, source.code
+                            "{key}: ignored invalid configuration ({}); run `provenant config migrate`",
+                            source.code
                         ),
                     });
                 }
@@ -1474,6 +1474,7 @@ impl Overrides<'_> {
     fn issue(&mut self, path: &[String], rule: &'static str) {
         let graph_policy =
             path.len() >= 4 && path[0] == "domains" && path[1] == "fabric" && path[2] == "graph";
+        let retired_key = rule == "retired.bundle_bytes";
         let rejected = if graph_policy {
             numeric_rejected(at(self.user, path))
         } else {
@@ -1484,11 +1485,15 @@ impl Overrides<'_> {
                 self.sites,
                 &path.join("."),
                 self.origin,
-                rule == "unknown_key",
+                rule == "unknown_key" || retired_key,
             ),
             rule,
-            source: graph_policy.then(|| SectionError {
-                field: path.join("."),
+            source: (graph_policy || retired_key).then(|| SectionError {
+                field: if retired_key {
+                    path[2..].join(".")
+                } else {
+                    path.join(".")
+                },
                 code: rule,
             }),
             rejected,
@@ -1525,7 +1530,12 @@ impl Overrides<'_> {
             }
             let mut key = path.to_vec();
             key.extend(relative);
-            self.issue(&key, "unknown_key");
+            let rule = if key == ["domains", "fabric", "limits", "bundle_bytes"] {
+                "retired.bundle_bytes"
+            } else {
+                "unknown_key"
+            };
+            self.issue(&key, rule);
         }
     }
     // Removing a field is safe only if serde supplies a default and the whole

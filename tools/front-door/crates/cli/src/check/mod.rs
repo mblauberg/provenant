@@ -446,21 +446,42 @@ pub fn config_page(
     };
     if let Some(error) = inspection.error {
         use provenant_config::ConfigError;
-        let (rule, line) = match error {
-            ConfigError::Syntax { location } => ("config.syntax", location.line),
+        let (rule, line, message) = match error {
+            ConfigError::Syntax { location } => (
+                "config.syntax",
+                location.line,
+                "configuration violates the typed TOML schema".to_owned(),
+            ),
             ConfigError::MissingVersion { location }
-            | ConfigError::UnsupportedVersion { location } => ("config.version", location.line),
-            ConfigError::Schema { location, .. }
-            | ConfigError::CollectionLimit { location }
-            | ConfigError::Domain { location, .. } => ("config.schema", location.line),
+            | ConfigError::UnsupportedVersion { location } => (
+                "config.version",
+                location.line,
+                "configuration violates the typed TOML schema".to_owned(),
+            ),
+            ConfigError::Schema { location, .. } | ConfigError::CollectionLimit { location } => (
+                "config.schema",
+                location.line,
+                "configuration violates the typed TOML schema".to_owned(),
+            ),
+            ConfigError::Domain {
+                location, source, ..
+            } => {
+                let repair = if source.code.starts_with("moved_to_schedule.")
+                    || source.code.starts_with("retired.")
+                {
+                    "; repair: run `provenant config migrate`"
+                } else {
+                    ""
+                };
+                (
+                    "config.schema",
+                    location.line,
+                    format!("{}: {}{repair}", source.field, source.code),
+                )
+            }
             _ => return Err(CheckError::Evidence("config inspection failed")),
         };
-        scan.finding(
-            rule,
-            Path::new("config.toml"),
-            line,
-            "configuration violates the typed TOML schema",
-        )?;
+        scan.finding(rule, Path::new("config.toml"), line, &message)?;
     }
     let mut result = paginate(scan, selector, page)?;
     result.warnings = warnings;
@@ -564,6 +585,52 @@ pub fn release_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_check_domain_errors_include_field_code_and_migration_repair()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = provenant_records::PathWire::from_relative(
+            &provenant_core::RelativePath::parse("config.toml")?,
+        )?;
+        let inspection = provenant_config::ConfigInspection {
+            check: provenant_config::ConfigCheck {
+                schema_version: 1,
+                profile: provenant_config::Profile::default(),
+                findings: Vec::new(),
+                count: 0,
+            },
+            error: Some(provenant_config::ConfigError::Domain {
+                location: provenant_config::Location {
+                    origin: provenant_config::Origin::User { path },
+                    key_path: "domains.fabric.limits.bundle_bytes".into(),
+                    line: 4,
+                    column: 1,
+                },
+                source: Box::new(provenant_config::SectionError {
+                    field: "limits.bundle_bytes".into(),
+                    code: "retired.bundle_bytes",
+                }),
+                rejected: Box::default(),
+            }),
+            input_digest: provenant_records::CanonicalV1::file_digest(b"config"),
+        };
+        let page = config_page(
+            inspection,
+            Vec::new(),
+            "config check",
+            &Page {
+                limit: 10,
+                cursor: None,
+            },
+        )?;
+        assert_eq!(page.findings.len(), 1);
+        let message = &page.findings[0].message;
+        assert!(message.contains("limits.bundle_bytes"), "{message}");
+        assert!(message.contains("retired.bundle_bytes"), "{message}");
+        assert!(message.contains("provenant config migrate"), "{message}");
+        Ok(())
+    }
+
     #[test]
     fn pages_fit_encoded_byte_bound_and_resume_at_the_delivered_offset()
     -> Result<(), Box<dyn std::error::Error>> {
