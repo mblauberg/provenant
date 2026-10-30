@@ -111,6 +111,31 @@ pub enum Reconciled {
     /// Custody cannot be proven either way; it stays fenced.
     Uncertain { reason: UncertainReason },
 }
+impl std::fmt::Display for Reconciled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Queued => f.write_str("queued"),
+            Self::Held => f.write_str("held"),
+            Self::DeadlineStop => f.write_str("deadline_stop"),
+            Self::Settling { phase } => write!(f, "settling ({phase})"),
+            Self::Finished => f.write_str("finished"),
+            Self::TemporaryRemoved => f.write_str("temporary_removed"),
+            Self::TemporaryRetained { path, reason } => {
+                write!(f, "temporary_retained {}: {reason}", path.display())
+            }
+            Self::Withdrawn => f.write_str("withdrawn"),
+            Self::Escaped { pids } => write!(
+                f,
+                "escaped: {}",
+                pids.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Uncertain { reason } => write!(f, "uncertain: {reason}"),
+        }
+    }
+}
 /// Stable reason for retaining terminal temporary data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemporaryReasonKind {
@@ -2093,17 +2118,31 @@ impl RunStore {
             let Ok(run) = RunId::parse(&run) else {
                 continue;
             };
-            let Ok(attempts) = self.pending_attempts(run, call) else {
-                continue;
+            let ids: Vec<String> = {
+                let mut query = self.db.prepare(
+                    "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0",
+                )?;
+                let rows = query.query_map(
+                    params![run.to_string(), self.context.project_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                rows.collect::<std::result::Result<_, _>>()?
             };
-            let reapable = attempts.iter().any(|attempt| match attempt.state {
-                AttemptState::Running { .. } => true,
-                AttemptState::Starting { .. } => self
-                    .attempt_dir(run, attempt.attempt_id, false)
-                    .and_then(|dir| read_sealed(&dir, "cancel.json", RECORD_LIMIT))
-                    .is_ok_and(|found| found.is_some()),
-                _ => false,
-            });
+            let reapable = ids
+                .iter()
+                .filter_map(|id| {
+                    AttemptId::parse(id)
+                        .ok()
+                        .and_then(|id| self.record(id, call).ok())
+                })
+                .any(|attempt| match attempt.state {
+                    AttemptState::Running { .. } => true,
+                    AttemptState::Starting { .. } => self
+                        .attempt_dir(run, attempt.attempt_id, false)
+                        .and_then(|dir| read_sealed(&dir, "cancel.json", RECORD_LIMIT))
+                        .is_ok_and(|found| found.is_some()),
+                    _ => false,
+                });
             if reapable && self.queue_reconcile_with(run, call, &spawn).is_ok() {
                 queued += 1;
             }
@@ -2151,8 +2190,8 @@ impl RunStore {
             )?;
             rows.collect::<std::result::Result<_, _>>()?
         };
-        let fences = match self.writer_fences() {
-            Ok(fences) => fences,
+        let (fences, listing_error) = match self.writer_fences() {
+            Ok(fences) => (fences, None),
             Err(error) => {
                 for id in self.pending_reactions(run, call)? {
                     let id = id.to_string();
@@ -2160,22 +2199,10 @@ impl RunStore {
                         ids.push(id);
                     }
                 }
-                let mut found = Vec::new();
-                for id in ids {
-                    let id = AttemptId::parse(&id)
-                        .map_err(|_| RunError::Validation("attempt index ID"))?;
-                    let reason = UncertainReason::ReconcileFailed {
-                        error: error.to_string(),
-                    };
-                    found.push((
-                        id,
-                        self.track_reconcile_progress(run, id, Reconciled::uncertain(reason), call),
-                    ));
-                }
-                if found.is_empty() {
+                if ids.is_empty() {
                     return Err(error);
                 }
-                return Ok(found);
+                (Vec::new(), Some(error.to_string()))
             }
         };
         for fence in fences {
@@ -2186,13 +2213,23 @@ impl RunStore {
         let mut found = Vec::new();
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            let state = self
+            let mut state = self
                 .reconcile_attempt(id, providers, call, observer)
                 .unwrap_or_else(|error| {
                     Some(Reconciled::uncertain(UncertainReason::ReconcileFailed {
                         error: error.to_string(),
                     }))
                 });
+            if let Some(error) = &listing_error
+                && let Some(
+                    uncertain @ (Reconciled::Uncertain { .. }
+                    | Reconciled::TemporaryRetained { .. }),
+                ) = &state
+            {
+                state = Some(Reconciled::uncertain(UncertainReason::ReconcileFailed {
+                    error: format!("{uncertain}; writer fence listing failed: {error}"),
+                }));
+            }
             if let Some(state) = state {
                 found.push((id, self.track_reconcile_progress(run, id, state, call)));
             }
@@ -2219,7 +2256,7 @@ impl RunStore {
         if let Err(error) = progress {
             let outcome = match &state {
                 Reconciled::Uncertain { reason } => reason.to_string(),
-                _ => format!("{state:?}"),
+                _ => state.to_string(),
             };
             return Reconciled::uncertain(UncertainReason::ReconcileFailed {
                 error: format!("{outcome}; settlement progress update failed: {error}"),
@@ -2751,18 +2788,10 @@ mod tests {
                 ),
                 "{failure}: {found:?}"
             );
-            if failure == "listing" {
-                assert!(matches!(&found[1], (id, Reconciled::Uncertain { .. }) if *id == good));
-                assert!(
-                    read_sealed(
-                        &store.attempt_dir(run.run_id, good, false)?,
-                        "settlement-progress.json",
-                        RECORD_LIMIT,
-                    )?
-                    .is_some()
-                );
-            } else {
-                assert_eq!(found[1], (good, Reconciled::Queued));
+            assert_eq!(found[1], (good, Reconciled::Queued));
+            if failure != "blocked" {
+                assert!(matches!(&found[0].1, Reconciled::Uncertain { reason }
+                    if reason.to_string().starts_with("queued; settlement progress")));
             }
         }
         Ok(())
@@ -2814,6 +2843,69 @@ mod tests {
         assert_eq!(found[0], (run.attempts[0].attempt_id, Reconciled::Queued));
         assert!(matches!(&found[1], (id, Reconciled::Uncertain { reason })
             if *id == orphan && reason.to_string().contains(&RunError::NotFound.to_string())));
+        let queued = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            panic!("queued work and an orphan fence need no recovery worker")
+        })?;
+        assert_eq!(queued[0], (run.attempts[0].attempt_id, Reconciled::Queued));
+        assert!(matches!(&queued[1], (id, Reconciled::Uncertain { .. }) if *id == orphan));
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_writer_listing_still_judges_known_attempts()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let registry = temp.path().join("registry");
+        std::fs::create_dir(&registry)?;
+        std::fs::write(registry.join("worktrees"), b"not a directory")?;
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?
+            .with_writer_registry(&registry);
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert_eq!(found, [(run.attempts[0].attempt_id, Reconciled::Queued)]);
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let running = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let directory = store.attempt_dir(run.run_id, id, false)?;
+        crate::artifacts::seal(&directory, "stdout.log", b"answer", RECORD_LIMIT)?;
+        let mut exit = crate::tests::exit();
+        exit.scope = RunStore::scope(&running);
+        crate::artifacts::seal(
+            &directory,
+            "launch.json",
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1, "scope": exit.scope, "requester": store.context.actor_id,
+            }))?,
+            RECORD_LIMIT,
+        )?;
+        crate::dispatch_tests::seal_exit(&store, &exit)?;
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert_eq!(found, [(id, Reconciled::Finished)]);
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal { .. }
+        ));
         Ok(())
     }
 
