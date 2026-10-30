@@ -1,6 +1,6 @@
 //! The real Rust command edge runs without Python, Node or ambient state.
 mod support;
-use provenant_fabric_runtime::hosts::{DOCTOR_PROTOCOL, PROTOCOL};
+use provenant_fabric_runtime::hosts::{CONSOLE_DETAIL_PROTOCOL, DOCTOR_PROTOCOL, PROTOCOL};
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -168,7 +168,9 @@ fn hosts_probe_only_the_requested_page() -> Result {
     assert_eq!(hosts.as_array().ok_or("host list")?.len(), 1);
     assert_eq!(hosts[0]["host"], first.to_string());
     assert_eq!(hosts[0]["available"], true, "{hosts}");
-    assert_eq!(hosts[0]["protocol"], PROTOCOL);
+    // A host reports the newest protocol level it speaks, not the level of
+    // the health action that observed it.
+    assert_eq!(hosts[0]["protocol"], CONSOLE_DETAIL_PROTOCOL, "{hosts}");
     assert!(hosts[0].get("reason").is_none());
     assert_eq!(
         replies
