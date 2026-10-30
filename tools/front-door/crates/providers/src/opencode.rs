@@ -67,8 +67,8 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
 }
 
 /// OpenCode uses the user's configuration and stored provider accounts.
-/// Inline permissions deny edits for read-only runs; the outer Seatbelt
-/// profile is the boundary for shell commands, as it is for Codex and Claude.
+/// Inline permissions deny edits and shell commands for read-only runs. Its
+/// built-in search tools still run ripgrep, which the profile grants by path.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -124,9 +124,7 @@ fn prepare(
     );
     let mut permission = serde_json::json!({
         "edit": edit,
-        // Both access modes may run shell commands. The Seatbelt profile
-        // denies writes in read-only lanes, matching Codex and Claude.
-        "bash": "allow",
+        "bash": edit,
         "webfetch": "deny",
     });
     if input.git_context {
@@ -144,13 +142,16 @@ fn prepare(
     let package = package_root(input.executable)?;
     // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
     let bin = plan.scratch.path.join("bin");
+    let shell = access == Access::WorktreeWrite;
     let cargo_bin = input.home.join(".cargo/bin");
-    let path_entries = [
-        bin.as_path(),
-        cargo_bin.as_path(),
+    let mut path_entries = vec![bin.as_path()];
+    if shell {
+        path_entries.push(cargo_bin.as_path());
+    }
+    path_entries.extend([
         std::path::Path::new("/usr/bin"),
         std::path::Path::new("/bin"),
-    ];
+    ]);
     let path = std::env::join_paths(path_entries).map_err(|_| ProviderError::InvalidPath)?;
     let mut env = base_env(
         input,
@@ -172,7 +173,9 @@ fn prepare(
             .into_iter()
             .map(exact),
     );
-    runtime_reads.extend(crate::launch::git_global_files(&config_home));
+    if access == Access::WorktreeWrite {
+        runtime_reads.extend(crate::launch::git_global_files(&config_home));
+    }
     let config_dir = config_home.join("opencode");
     if config_dir.is_dir() {
         runtime_reads.push(subtree(config_dir));
@@ -199,9 +202,19 @@ fn prepare(
     }
     // Writers' system roots do not cover a host-selected Homebrew Git.
     let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
-    // Both access modes may run shell commands; reads and writes are bounded
-    // by the outer profile. System roots do not cover a host-selected Git.
-    let mut tool_exec_roots = vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)];
+    let mut tool_exec_roots = if shell {
+        vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
+    } else {
+        Vec::new()
+    };
+    if access == Access::ReadOnly {
+        // OpenCode's grep, glob and list tools execute ripgrep. It resolves
+        // `rg` from PATH, then from its cache bin ($XDG_CACHE_HOME/opencode/bin),
+        // and installs it there when absent. The lane sets XDG_CACHE_HOME to
+        // its private state, whose grant already covers the read, so grant
+        // exactly that binary for execution. No shell is enabled.
+        tool_exec_roots.push(exact(private.join("cache/opencode/bin/rg")));
+    }
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
@@ -219,24 +232,25 @@ fn prepare(
             private.join("state").into_os_string(),
         ),
     ]);
-    // Both access modes allow bash, so both get the same toolchain setup.
-    // Read-only lanes use its offline, read-only form.
-    crate::launch::rust_tools(
-        input,
-        access,
-        &mut runtime_reads,
-        &mut tool_exec_roots,
-        &mut env,
-        &mut setup,
-    );
-    crate::launch::node_tools(
-        input.home,
-        access,
-        crate::launch::lane_cache(input),
-        &mut runtime_reads,
-        &mut tool_exec_roots,
-        &mut env,
-    );
+    // Only lanes whose permissions allow bash can run the toolchain.
+    if shell {
+        crate::launch::rust_tools(
+            input,
+            access,
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut env,
+            &mut setup,
+        );
+        crate::launch::node_tools(
+            input.home,
+            access,
+            crate::launch::lane_cache(input),
+            &mut runtime_reads,
+            &mut tool_exec_roots,
+            &mut env,
+        );
+    }
     env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
     // No repository configuration or plugins, and no Claude Code files.
     for key in [
@@ -858,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_lane_allows_shell_and_grants_no_repository_or_state_writes() {
+    fn read_only_search_grants_only_ripgrep_in_the_lane_cache() {
         use provenant_confinement::permissions::{PathGrant, PathScope};
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 
@@ -906,30 +920,23 @@ mod tests {
                 .to_string_lossy(),
         )
         .unwrap();
-        assert_eq!(config["permission"]["bash"], "allow");
+        assert_eq!(config["permission"]["bash"], "deny");
         assert_eq!(config["permission"]["edit"], "deny");
 
+        // OpenCode resolves ripgrep from PATH and then its cache bin, which is
+        // XDG_CACHE_HOME/opencode/bin under the lane's private state.
+        let rg = exact(std::path::Path::new(
+            "/fixture/provider-state/cache/opencode/bin/rg",
+        ));
+        assert_eq!(
+            spec.profile.spec.process_executables,
+            [exact(input.executable), exact(input.provenant.git)]
+        );
+        assert_eq!(spec.profile.spec.tool_exec_roots, std::slice::from_ref(&rg));
+        // No shell toolchain leaks into a read-only lane.
         let path: Vec<_> = std::env::split_paths(&env("PATH").expect("PATH")).collect();
-        for entry in ["/usr/bin", "/bin"] {
-            assert!(
-                path.iter().any(|dir| dir == std::path::Path::new(entry)),
-                "{entry}"
-            );
-        }
-        assert!(path.contains(&input.home.join(".cargo/bin")), "{path:?}");
-
-        let scratch = &plan.permissions().scratch.path;
-        let roots = &spec.profile.spec.tool_exec_roots;
-        for root in [
-            subtree("/bin"),
-            subtree("/usr/bin"),
-            subtree(package_root(input.executable).unwrap()),
-            subtree(input.home.join(".cargo/bin")),
-            subtree(input.home.join(".rustup/toolchains")),
-            subtree(scratch.join("target")),
-        ] {
-            assert!(roots.contains(&root), "{root:?}");
-        }
+        assert!(!path.contains(&input.home.join(".cargo/bin")), "{path:?}");
+        assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
 
         let profile = provenant_confinement::permissions::snapshot::render(
             plan.permissions(),
@@ -937,35 +944,14 @@ mod tests {
             input.home,
         )
         .unwrap();
-        for root in ["/bin", "/usr/bin", "/opt/homebrew/Cellar/provider/1.0"] {
-            assert!(
-                profile.contains(&format!("(allow process-exec (subpath \"{root}\"))")),
-                "{root}"
-            );
-        }
-        // Shell support must not make the worktree, repository or lane state
-        // writable; every write grant stays in the lane's own scratch or the
-        // provider's private data directory.
-        for line in profile
-            .lines()
-            .filter(|line| line.contains("(allow file-write"))
-        {
-            let path = line
-                .split_once('"')
-                .and_then(|(_, rest)| rest.split_once('"'))
-                .map(|(path, _)| std::path::Path::new(path))
-                .unwrap_or_else(|| panic!("unparsed write grant: {line}"));
-            for forbidden in ["/fixture/repo", "/fixture/state"] {
-                let forbidden = std::path::Path::new(forbidden);
-                assert!(
-                    !(path == forbidden
-                        || path.starts_with(forbidden)
-                        || forbidden.starts_with(path)),
-                    "write grant {line} covers {}",
-                    forbidden.display()
-                );
-            }
-        }
+        let exec = format!("(allow process-exec (literal \"{}\"))", rg.path.display());
+        assert!(profile.contains(&exec), "{exec}");
+        assert!(
+            !profile.contains("(allow process-exec (subpath"),
+            "read-only search must not grant an exec subtree"
+        );
+        // The private state grant is the read access ripgrep needs.
+        assert!(profile.contains("(allow file-read* (subpath \"/fixture/provider-state\"))"));
     }
 
     #[test]
@@ -1101,17 +1087,31 @@ mod tests {
                 link: bin.join("git"),
                 target: input.provenant.git.to_owned(),
             }));
-            // Both modes may run system commands; the toolchain roots follow
-            // the same system and package roots.
+            // Read-only discovery enables only OpenCode's search binary; a
+            // writer's toolchain roots follow the system and package roots.
             let roots = &spec.profile.spec.tool_exec_roots;
-            assert_eq!(
-                roots[..3],
-                [
-                    subtree("/bin"),
-                    subtree("/usr/bin"),
-                    subtree(package_root(input.executable).unwrap()),
-                ]
-            );
+            if access == Access::ReadOnly {
+                assert_eq!(
+                    roots,
+                    &[exact(
+                        plan.permissions()
+                            .private_state
+                            .as_ref()
+                            .unwrap()
+                            .path
+                            .join("cache/opencode/bin/rg")
+                    )]
+                );
+            } else {
+                assert_eq!(
+                    roots[..3],
+                    [
+                        subtree("/bin"),
+                        subtree("/usr/bin"),
+                        subtree(package_root(input.executable).unwrap()),
+                    ]
+                );
+            }
         }
     }
 
