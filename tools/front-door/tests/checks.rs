@@ -496,7 +496,7 @@ fn release_requires_tracked_public_files() -> Result {
     rig.assert_legacy_unchanged()
 }
 #[test]
-fn release_checks_legal_private_symlink_and_bounded_utf8_evidence() -> Result {
+fn release_checks_legal_private_symlink_binary_and_bounded_evidence() -> Result {
     use std::fs;
     let rig = check_rig()?;
     legal(&rig)?;
@@ -535,7 +535,7 @@ fn release_checks_legal_private_symlink_and_bounded_utf8_evidence() -> Result {
         2
     );
     fs::write(rig.project.join("LICENSE"), [0xff])?;
-    assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 3);
+    assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 1);
     fs::write(rig.project.join("LICENSE"), vec![b'a'; 5 * 1024 * 1024 + 1])?;
     assert_eq!(code(&rig.command(&["check", "release", "--json"])?), 3);
     rig.assert_legacy_unchanged()
