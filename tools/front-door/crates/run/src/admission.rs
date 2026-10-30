@@ -209,6 +209,7 @@ impl RunStore {
         let pressure_threshold = provenant_config::LaneBuildSettings::read(&self.writer_registry)
             .map(|settings| settings.memory_pressure_threshold)
             .unwrap_or_default();
+        let mut stalled_cache = std::collections::HashMap::new();
         lanes
             .iter()
             .filter(|lane| {
@@ -220,9 +221,13 @@ impl RunStore {
             .filter_map(|lane| {
                 let ticket = self.ticket(&self.db, lane.attempt_id).ok()?;
                 let class = ticket.lane_class;
-                let stalled = self
-                    .attempt_dir(lane.run_id, lane.attempt_id, false)
-                    .is_ok_and(|attempt| self.supervisor_stalled(&attempt, Self::scope(lane)));
+                let stalled = !matches!(lane.state, AttemptState::Queued { .. })
+                    && *stalled_cache.entry(lane.attempt_id).or_insert_with(|| {
+                        self.attempt_dir(lane.run_id, lane.attempt_id, false)
+                            .is_ok_and(|attempt| {
+                                self.supervisor_stalled(&attempt, Self::scope(lane))
+                            })
+                    });
                 let waiting_for = if stalled {
                     "host_stalled: supervisor is in uninterruptible sleep".to_owned()
                 } else if matches!(lane.state, AttemptState::Running { .. }) {

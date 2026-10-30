@@ -17,7 +17,7 @@ const CLAIM_BACKOFF: Backoff = Backoff::new(Duration::from_secs(5), 6, Duration:
 
 #[cfg(test)]
 thread_local! {
-    static TEST_PROCESS_STATE: std::cell::Cell<Option<provenant_os::pid::ProcessState>> = const { std::cell::Cell::new(None) };
+    static TEST_PROCESS_STATE: std::cell::Cell<Option<std::result::Result<provenant_os::pid::ProcessState, std::io::ErrorKind>>> = const { std::cell::Cell::new(None) };
 }
 
 fn process_state(
@@ -25,7 +25,10 @@ fn process_state(
 ) -> std::result::Result<provenant_os::pid::ProcessState, provenant_os::pid::PidError> {
     #[cfg(test)]
     if let Some(state) = TEST_PROCESS_STATE.with(|state| state.get()) {
-        return Ok(state);
+        return state.map_err(|kind| provenant_os::pid::PidError::Io {
+            pid: pid as i32,
+            source: std::io::Error::from(kind),
+        });
     }
     provenant_os::pid::process_state(pid)
 }
@@ -170,17 +173,27 @@ fn identity_stalled_with(
 pub(crate) fn host_stalled(attempt: &Directory, scope: Scope) -> bool {
     let observer = |pid| SystemProcessObserver.observe(pid);
     let probe = process_state;
-    if read(attempt, scope)
-        .ok()
+    // Probe observations need no durability barrier. Keep the same private-file
+    // checks as sealed reads while using the existing bounded stable read.
+    let observe = |name: &str| -> Option<Vec<u8>> {
+        let name = OsStr::new(name);
+        let before = attempt.metadata_at(name, false).ok()?;
+        if crate::PathCheck::file(before).is_some() {
+            return None;
+        }
+        let raw = attempt.read_stable(name, RECORD_LIMIT).ok()?;
+        let after = attempt.metadata_at(name, false).ok()?;
+        (before.unchanged(&after) && crate::PathCheck::file(after).is_none()).then_some(raw)
+    };
+    if observe(FILE)
+        .and_then(|raw| crate::db::decode::<Journal>(&raw).ok())
+        .filter(|journal| journal.scope == scope && journal.attempts <= LIMIT)
         .and_then(|journal| journal.owner)
         .is_some_and(|owner| identity_stalled_with(&owner, &observer, &probe))
     {
         return true;
     }
-    let Some(raw) = read_sealed(attempt, "process.json", RECORD_LIMIT)
-        .ok()
-        .flatten()
-    else {
+    let Some(raw) = observe("process.json") else {
         return false;
     };
     #[derive(Deserialize)]
@@ -531,6 +544,13 @@ mod tests {
         let run = crate::tests::input();
         store.create(&run, &call)?;
         let id = run.attempts[0].attempt_id;
+        store.queue_reconcile_mode_with_probe(
+            run.run_id,
+            &call,
+            |_, _| panic!("queued lane does not need a worker"),
+            false,
+            &|_, _| panic!("queued lane has no supervisor"),
+        )?;
         store.mark_starting(
             &store.record(id, &call)?,
             &crate::tests::route(),
@@ -542,13 +562,18 @@ mod tests {
         let attempt = store.attempt_dir(run.run_id, id, false)?;
         let scope = crate::RunStore::scope(&store.record(id, &call)?);
         for explicit in [false, true] {
+            let calls = std::cell::Cell::new(0);
             let found = store.queue_reconcile_mode_with_probe(
                 run.run_id,
                 &call,
                 |_, _| panic!("stalled worker must not spawn"),
                 explicit,
-                &|_, _| true,
+                &|_, _| {
+                    calls.set(calls.get() + 1);
+                    true
+                },
             )?;
+            assert_eq!(calls.get(), 1, "one observation per attempt per queue call");
             assert!(matches!(
                 found.as_slice(),
                 [(
@@ -616,7 +641,7 @@ mod tests {
             RECORD_LIMIT,
         )?;
         TEST_PROCESS_STATE
-            .with(|state| state.set(Some(provenant_os::pid::ProcessState::Uninterruptible)));
+            .with(|state| state.set(Some(Ok(provenant_os::pid::ProcessState::Uninterruptible))));
         assert!(
             host_stalled(&attempt, scope),
             "checkpoint identifies stalled guardian"
@@ -713,6 +738,17 @@ mod tests {
         assert!(provenant_supervisor::custody::reservation_present(
             &attempt, scope
         )?);
+        TEST_PROCESS_STATE.with(|state| state.set(Some(Err(std::io::ErrorKind::PermissionDenied))));
+        assert!(
+            !store.supervisor_stalled(&attempt, scope),
+            "an unreadable probe is unknown"
+        );
+        let mut spawned = false;
+        store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            spawned = true;
+            Ok(())
+        })?;
+        assert!(spawned, "unknown state follows ordinary recovery");
         TEST_PROCESS_STATE.with(|state| state.set(None));
         drop(lease);
         Ok(())
@@ -1231,6 +1267,22 @@ impl crate::RunStore {
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
         self.run(run, call)?;
         let attempts = self.pending_attempts(run, call)?;
+        let stalled_attempts: std::collections::HashMap<_, _> = attempts
+            .iter()
+            .filter(|attempt| {
+                !matches!(
+                    attempt.state,
+                    crate::AttemptState::Queued { .. } | crate::AttemptState::Terminal { .. }
+                )
+            })
+            .map(|attempt| {
+                (
+                    attempt.attempt_id,
+                    self.attempt_dir(run, attempt.attempt_id, false)
+                        .is_ok_and(|directory| stalled(&directory, Self::scope(attempt))),
+                )
+            })
+            .collect();
         let wall = call
             .clock
             .wall_now()
@@ -1248,7 +1300,11 @@ impl crate::RunStore {
             let directory = self.attempt_dir(run, attempt.attempt_id, false)?;
             let scope = Self::scope(attempt);
             let journal = read(&directory, scope)?;
-            if stalled(&directory, scope) {
+            if stalled_attempts
+                .get(&attempt.attempt_id)
+                .copied()
+                .unwrap_or(false)
+            {
                 continue;
             }
             if !explicit
@@ -1396,9 +1452,10 @@ impl crate::RunStore {
                         crate::AttemptState::Queued { .. } => crate::Reconciled::Queued,
                         crate::AttemptState::Terminal { .. } => crate::Reconciled::Finished,
                         _ => {
-                            if self
-                                .attempt_dir(run, attempt.attempt_id, false)
-                                .is_ok_and(|directory| stalled(&directory, Self::scope(&attempt)))
+                            if stalled_attempts
+                                .get(&attempt.attempt_id)
+                                .copied()
+                                .unwrap_or(false)
                             {
                                 return (
                                     attempt.attempt_id,

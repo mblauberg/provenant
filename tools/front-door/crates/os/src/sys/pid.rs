@@ -4,15 +4,21 @@ use std::io;
 const MAX_EINTR_RETRIES: u64 = 8;
 
 #[cfg(any(target_os = "macos", test))]
-fn darwin_thread_state(states: &[i32]) -> io::Result<ProcessState> {
+fn darwin_thread_state(states: &[Option<i32>]) -> io::Result<ProcessState> {
     // These values are from Darwin's mach/thread_info.h; 5 is HALTED.
+    // Missing a stall falls back to recovery; a false stall blocks recovery.
     const RUNNING: i32 = 1;
     const UNINTERRUPTIBLE: i32 = 4;
-    if states.is_empty() || states.iter().any(|state| !(1..=5).contains(state)) {
+    if !states.iter().any(Option::is_some)
+        || states
+            .iter()
+            .flatten()
+            .any(|state| !(1..=5).contains(state))
+    {
         return Err(io::Error::other("invalid thread states"));
     }
     Ok(
-        if states.contains(&UNINTERRUPTIBLE) && !states.contains(&RUNNING) {
+        if states.contains(&Some(UNINTERRUPTIBLE)) && !states.contains(&Some(RUNNING)) {
             ProcessState::Uninterruptible
         } else {
             ProcessState::Running
@@ -21,7 +27,7 @@ fn darwin_thread_state(states: &[i32]) -> io::Result<ProcessState> {
 }
 
 #[cfg(target_os = "macos")]
-fn darwin_thread_states(pid: i32) -> io::Result<ProcessState> {
+fn darwin_threads(pid: i32) -> io::Result<Vec<u64>> {
     // A full buffer may have been truncated. Do not infer a stall from an incomplete census.
     const MAX_THREADS: usize = 16_384;
     const PROC_PIDLISTTHREADS: i32 = 6;
@@ -42,7 +48,14 @@ fn darwin_thread_states(pid: i32) -> io::Result<ProcessState> {
         return Err(io::Error::other("thread list unavailable or incomplete"));
     }
     threads.truncate(count as usize / std::mem::size_of::<u64>());
+    Ok(threads)
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_thread_states(pid: i32) -> io::Result<ProcessState> {
+    let threads = darwin_threads(pid)?;
     let mut states = Vec::with_capacity(threads.len());
+    let mut refreshed = None;
     let requested = std::mem::size_of::<libc::proc_threadinfo>() as i32;
     for thread in threads {
         let mut info = std::mem::MaybeUninit::<libc::proc_threadinfo>::uninit();
@@ -57,10 +70,21 @@ fn darwin_thread_states(pid: i32) -> io::Result<ProcessState> {
             )
         };
         if returned != requested {
-            return Err(io::Error::other("thread state unavailable"));
+            // Ignore a failed query only if a fresh census proves the thread vanished.
+            if refreshed.is_none() {
+                refreshed = Some(darwin_threads(pid)?);
+            }
+            if refreshed
+                .as_ref()
+                .is_some_and(|current| current.contains(&thread))
+            {
+                return Err(io::Error::other("thread state unavailable"));
+            }
+            states.push(None);
+            continue;
         }
         // SAFETY: a full-size successful call initialised the record.
-        states.push(unsafe { info.assume_init() }.pth_run_state);
+        states.push(Some(unsafe { info.assume_init() }.pth_run_state));
     }
     darwin_thread_state(&states)
 }
@@ -144,13 +168,28 @@ pub(crate) fn process_state(pid: i32) -> io::Result<ProcessState> {
 #[test]
 fn classifies_darwin_thread_states() {
     assert_eq!(
-        darwin_thread_state(&[4, 3]).unwrap(),
+        darwin_thread_state(&[Some(4), Some(3)]).unwrap(),
         ProcessState::Uninterruptible
     );
-    assert_eq!(darwin_thread_state(&[4, 1]).unwrap(), ProcessState::Running);
-    assert_eq!(darwin_thread_state(&[5, 3]).unwrap(), ProcessState::Running);
+    assert_eq!(
+        darwin_thread_state(&[Some(4), Some(1)]).unwrap(),
+        ProcessState::Running
+    );
+    assert_eq!(
+        darwin_thread_state(&[Some(5), Some(3)]).unwrap(),
+        ProcessState::Running
+    );
+    assert_eq!(
+        darwin_thread_state(&[None, Some(4), Some(3)]).unwrap(),
+        ProcessState::Uninterruptible
+    );
+    assert_eq!(
+        darwin_thread_state(&[None, Some(4), Some(1)]).unwrap(),
+        ProcessState::Running
+    );
     assert!(darwin_thread_state(&[]).is_err());
-    assert!(darwin_thread_state(&[4, 99]).is_err());
+    assert!(darwin_thread_state(&[None, None]).is_err());
+    assert!(darwin_thread_state(&[Some(4), Some(99)]).is_err());
 }
 
 #[cfg(test)]

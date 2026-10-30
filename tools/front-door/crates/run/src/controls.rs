@@ -262,6 +262,44 @@ mod reboot_tests {
     use super::*;
 
     #[test]
+    fn missing_terminal_attempt_directory_does_not_abort_reconcile()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let record = store.record(id, &call)?;
+        store.commit_lost(RunStore::scope(&record), "fixture", &call)?;
+        store.set_temporary_retained(id, true, &call)?;
+        let path = context
+            .state_root
+            .as_path()
+            .join(format!("runs/{}/attempts/{id}", run.run_id));
+        std::fs::rename(path, temp.path().join("missing-attempt"))?;
+        store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn reader_refusal_published_before_recovery_exclusion_is_not_lost()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -1124,6 +1162,12 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         if matches!(record.state, AttemptState::Queued { .. }) {
+            return Ok(None);
+        }
+        if matches!(record.state, AttemptState::Terminal { .. })
+            && matches!(self.attempt_dir(record.run_id, record.attempt_id, false), Err(RunError::Filesystem(error)) if error.is_not_found())
+        {
+            // Terminal cleanup handles the missing directory and any writer fence.
             return Ok(None);
         }
         if Self::needs_lost_settlement(record)
@@ -2548,10 +2592,11 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         let record = self.record(id, call)?;
-        if self.supervisor_stalled(
-            &self.attempt_dir(record.run_id, id, false)?,
-            Self::scope(&record),
-        ) {
+        if !matches!(record.state, AttemptState::Queued { .. })
+            && self
+                .attempt_dir(record.run_id, id, false)
+                .is_ok_and(|attempt| self.supervisor_stalled(&attempt, Self::scope(&record)))
+        {
             return Ok(Some(Reconciled::uncertain(UncertainReason::HostStalled)));
         }
         if matches!(record.state, AttemptState::Terminal { .. }) {
