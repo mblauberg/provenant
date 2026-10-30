@@ -157,7 +157,7 @@ impl WorktreeError {
                 "run `git -C PATH status`, then commit or preserve the changes before retrying"
             }
             Self::IgnoredPaths(_) => {
-                "run `git -C PATH status --ignored`, then preserve the named files or declare regenerable output before retrying"
+                "run `git -C PATH status --ignored`, then preserve the named files or declare directory names in `gc.projects.<id>.regenerable` in the global config (find the project ID with `provenant fabric identity`) before retrying"
             }
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
@@ -3591,6 +3591,14 @@ mod lifecycle_tests {
             .into_iter()
             .find(|lane| lane.path == created.path)
             .ok_or_else(|| "missing GC fixture worktree".into())
+    }
+
+    #[test]
+    fn ignored_paths_refusal_names_regenerable_setting() {
+        let message = WorktreeError::IgnoredPaths("target, .build".into()).with_repair();
+        assert!(message.contains("target, .build"));
+        assert!(message.contains("gc.projects.<id>.regenerable"));
+        assert!(message.contains("provenant fabric identity"));
     }
 
     #[test]
