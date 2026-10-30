@@ -83,6 +83,118 @@ pub fn overview(
     })
 }
 
+/// Page requests of registered projects using the same lookup as item actions.
+pub fn host_open_requests(
+    root: &StateRoot,
+    projects: &[provenant_core::ProjectId],
+    session: Option<&str>,
+    state: InboxFilter,
+    limit: u64,
+    cursor: Option<InboxCursor>,
+    call: &Request<'_>,
+) -> Result<(Vec<HumanRequest>, Option<InboxCursor>), InboxError> {
+    let store = Store::open_existing(root, call)?;
+    let scope = CanonicalV1::record_digest(
+        "human_host_inbox_cursor",
+        1,
+        &(projects, session, state, limit),
+    )
+    .map_err(provenant_fabric_store::Error::from)?;
+    let generation = || -> Result<u64, InboxError> {
+        projects.iter().try_fold(0u64, |sum, project| {
+            sum.checked_add(store.human_generation(*project, call)?)
+                .ok_or(InboxError::Invalid("inbox generation"))
+        })
+    };
+    let snapshot = generation()?;
+    if cursor
+        .as_ref()
+        .is_some_and(|c| c.scope != scope || c.snapshot != snapshot)
+    {
+        return Err(InboxError::CursorExpired);
+    }
+    let mut items = Vec::new();
+    let mut truncated = false;
+    let mut boundary = None;
+    for (index, project) in projects.iter().enumerate() {
+        let page = store.human_requests(
+            *project,
+            session,
+            state == InboxFilter::All,
+            cursor.as_ref().map(|c| c.after),
+            limit,
+            call,
+        )?;
+        truncated |= page.truncated;
+        if page.truncated
+            && let Some(last) = page.items.last()
+        {
+            boundary = Some(boundary.map_or(last.id, |old: HumanRequestId| old.min(last.id)));
+        }
+        for item in page.items {
+            let mut shadowed = false;
+            for earlier in &projects[..index] {
+                match store.human_request(*earlier, item.id, call) {
+                    Ok(_) => {
+                        shadowed = true;
+                        break;
+                    }
+                    Err(provenant_fabric_store::Error::NotFound) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            if !shadowed {
+                items.push(item);
+            }
+        }
+    }
+    if generation()? != snapshot {
+        return Err(InboxError::CursorExpired);
+    }
+    items.sort_by_key(|item| item.id);
+    if let Some(boundary) = boundary {
+        items.retain(|item| item.id <= boundary);
+    }
+    if items.len() > limit as usize {
+        items.truncate(limit as usize);
+        truncated = true;
+    }
+    let next = if truncated {
+        items
+            .last()
+            .map(|item| item.id)
+            .or(boundary)
+            .map(|after| InboxCursor {
+                after,
+                scope,
+                snapshot,
+            })
+    } else {
+        None
+    };
+    Ok((items, next))
+}
+
+/// The project among `projects` that owns request `id`, if any.
+pub fn locate_request(
+    root: &StateRoot,
+    projects: &[provenant_core::ProjectId],
+    id: HumanRequestId,
+    clock: &dyn Clock,
+    cancel: &CancelToken,
+) -> Result<Option<provenant_core::ProjectId>, InboxError> {
+    let call = Request { clock, cancel };
+    let store = Store::open_existing(root, &call)?;
+    for project in projects {
+        match store.human_request(*project, id, &call) {
+            Ok(_) => return Ok(Some(*project)),
+            Err(provenant_fabric_store::Error::NotFound) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(None)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum InboxInput {

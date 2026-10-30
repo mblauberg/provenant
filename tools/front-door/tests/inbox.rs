@@ -995,3 +995,421 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
     );
     Ok(())
 }
+
+/// Run the installed command from `cwd`, which need not be a project.
+fn call_in(rig: &TestRig, cwd: &std::path::Path, args: &[&str], expected: i64) -> Result<Value> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
+    use std::{ffi::OsString, time::Duration};
+    let mut argv: Vec<OsString> = vec![env!("CARGO_BIN_EXE_provenant").into()];
+    argv.extend(["--state-dir".into(), rig.state.clone().into_os_string()]);
+    argv.push("--json".into());
+    argv.extend(args.iter().map(OsString::from));
+    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(10));
+    options.env = Some(&rig.env);
+    options.stdout = StreamPolicy::Capture { limit: 1 << 20 };
+    options.stderr = StreamPolicy::Capture { limit: 1 << 16 };
+    let output = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(
+        code(&output),
+        expected,
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    Ok(serde_json::from_slice(&output.stdout.bytes)?)
+}
+
+#[test]
+fn inbox_outside_a_project_lists_and_answers_host_requests() -> Result {
+    let rig = TestRig::new()?;
+    let file = draft(&rig, "decision")?;
+    let created = call(
+        &rig,
+        &["ask", "--file", &file, "--session", "chair-a"],
+        None,
+        0,
+    )?;
+    let id = created["data"]["request_id"].as_str().ok_or("request ID")?;
+    // A Finder launch has cwd `/`, where no project resolves.
+    let outside = std::path::Path::new("/");
+
+    let listed = call_in(
+        &rig,
+        outside,
+        &["inbox", "--all-projects", "--state", "open"],
+        0,
+    )?;
+    let items = listed["data"]["items"].as_array().ok_or("items")?;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], id);
+    let project = items[0]["project_id"].as_str().ok_or("project ID")?;
+    assert_eq!(listed["data"]["projects"][project]["label"], "project");
+
+    let all = call_in(
+        &rig,
+        outside,
+        &["inbox", "--all-projects", "--state", "all"],
+        0,
+    )?;
+    assert_eq!(all["data"]["items"].as_array().ok_or("items")?.len(), 1);
+
+    let answered = call_in(
+        &rig,
+        outside,
+        &[
+            "answer",
+            id,
+            "--all-projects",
+            "--action",
+            "choose",
+            "--option",
+            "repair",
+            "--expect-revision",
+            "1",
+            "--channel",
+            "console",
+        ],
+        0,
+    )?;
+    assert_eq!(answered["data"]["request_id"], id);
+    let after = call(&rig, &["inbox", "--state", "all"], None, 0)?;
+    assert_eq!(after["data"]["items"][0]["state"], "answered");
+    let outside_open = call_in(
+        &rig,
+        outside,
+        &["inbox", "--all-projects", "--state", "open"],
+        0,
+    )?;
+    assert_eq!(outside_open["data"]["items"], json!([]));
+
+    let missing = call_in(
+        &rig,
+        outside,
+        &["inbox", &"0".repeat(32), "--all-projects"],
+        2,
+    )?;
+    assert_eq!(missing["error"]["code"], "not_found");
+    Ok(())
+}
+
+#[test]
+fn inbox_outside_a_project_without_state_names_cause_and_repair() -> Result {
+    let rig = TestRig::new()?.without_state()?;
+    // A Finder launch has cwd `/`, where no project resolves.
+    let outside = std::path::Path::new("/");
+    let failed = call_in(&rig, outside, &["inbox"], 3)?;
+    let error = &failed["error"];
+    assert_eq!(error["code"], "no_project", "{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .ok_or("message")?
+            .contains("No project could be resolved")
+    );
+    assert!(error["cause"].as_str().is_some());
+    assert!(
+        error["repair"]
+            .as_str()
+            .ok_or("repair")?
+            .contains("--all-projects")
+    );
+    Ok(())
+}
+
+#[test]
+fn inbox_does_not_fall_back_when_project_discovery_fails() -> Result {
+    let rig = TestRig::new()?;
+    let file = draft(&rig, "decision")?;
+    call(
+        &rig,
+        &["ask", "--file", &file, "--session", "chair-a"],
+        None,
+        0,
+    )?;
+    let broken = rig.root.join("broken");
+    std::fs::create_dir(&broken)?;
+    std::fs::write(broken.join(".git"), "gitdir: /definitely/missing/gitdir\n")?;
+    let failed = call_in(&rig, &broken, &["inbox"], 3)?;
+    assert_ne!(failed["error"]["code"], "no_project");
+    Ok(())
+}
+
+#[test]
+fn inbox_all_projects_pages_filters_and_routes_only_registered_requests() -> Result {
+    let rig = TestRig::new()?;
+    let second = rig.root.join("second-project");
+    std::fs::create_dir(&second)?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let initialized = rig.execute(&git, &["init", "-q", second.to_str().ok_or("path")?], None)?;
+    assert_eq!(code(&initialized), 0);
+    let file = draft(&rig, "decision")?;
+    let mut ids = Vec::new();
+    for index in 0..8 {
+        let cwd = if index % 2 == 0 {
+            &rig.project
+        } else {
+            &second
+        };
+        let session = format!("session-{index}");
+        let created = call_in(
+            &rig,
+            cwd,
+            &["ask", "--file", &file, "--session", &session],
+            0,
+        )?;
+        ids.push(
+            created["data"]["request_id"]
+                .as_str()
+                .ok_or("request ID")?
+                .to_owned(),
+        );
+    }
+    let outside = rig.root.join("outside");
+    std::fs::create_dir(&outside)?;
+    let transient = call_in(
+        &rig,
+        &outside,
+        &["ask", "--file", &file, "--session", "transient"],
+        0,
+    )?;
+    let transient_id = transient["data"]["request_id"]
+        .as_str()
+        .ok_or("transient ID")?;
+    assert_eq!(
+        call_in(&rig, &outside, &["inbox"], 0)?["data"]["items"]
+            .as_array()
+            .ok_or("items")?
+            .len(),
+        1
+    );
+
+    // Expired open rows sort ahead of real requests and must not consume a
+    // fixed scan budget. Clone a valid record with unique IDs and a deadline
+    // in the past, avoiding a hundred separate command invocations.
+    let database = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
+    let (project, record): (String, Vec<u8>) = database.query_row(
+        "SELECT project, record FROM human_requests WHERE id = ?1",
+        [&ids[0]],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut record: Value = serde_json::from_slice(&record)?;
+    record["request"]["deadline"] = json!("2000-01-01T00:00:00Z");
+    for index in 0..110 {
+        let id = format!("{index:032x}");
+        record["id"] = json!(id);
+        database.execute(
+            "INSERT INTO human_requests (project,id,revision,session,state,record) VALUES (?1,?2,1,'expired','open',?3)",
+            rusqlite::params![project, id, serde_json::to_vec(&record)?],
+        )?;
+    }
+
+    let mut page = call_in(
+        &rig,
+        &outside,
+        &["inbox", "--all-projects", "--limit", "2"],
+        0,
+    )?;
+    let mut items = Vec::new();
+    let mut cursors = std::collections::BTreeSet::new();
+    loop {
+        items.extend(
+            page["data"]["items"]
+                .as_array()
+                .ok_or("items")?
+                .iter()
+                .cloned(),
+        );
+        match page["data"]["next_cursor"].as_str() {
+            Some(cursor) => {
+                assert!(cursors.insert(cursor.to_owned()), "cursor repeated");
+                page = call_in(
+                    &rig,
+                    &outside,
+                    &[
+                        "inbox",
+                        "--all-projects",
+                        "--limit",
+                        "2",
+                        "--cursor",
+                        cursor,
+                    ],
+                    0,
+                )?
+            }
+            None => break,
+        }
+    }
+    assert_eq!(items.len(), ids.len());
+    let projects: std::collections::BTreeSet<_> = items
+        .iter()
+        .map(|item| item["project_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(projects.len(), 2);
+    assert!(items.iter().all(|item| item["id"] != transient_id));
+    for item in &items {
+        let id = item["id"].as_str().ok_or("id")?;
+        assert!(ids.iter().any(|expected| expected == id));
+        call_in(&rig, &outside, &["inbox", id, "--all-projects"], 0)?;
+    }
+    // The selected match is known to fall beyond the first unfiltered page.
+    let target = &items[4];
+    let session = target["chair_session_id"].as_str().ok_or("session")?;
+    let filtered = call_in(
+        &rig,
+        &outside,
+        &[
+            "inbox",
+            "--all-projects",
+            "--limit",
+            "2",
+            "--session",
+            session,
+        ],
+        0,
+    )?;
+    assert_eq!(
+        filtered["data"]["items"].as_array().ok_or("items")?.len(),
+        1
+    );
+    assert_eq!(filtered["data"]["items"][0]["id"], target["id"]);
+    let answer_id = items[0]["id"].as_str().ok_or("id")?;
+    call_in(
+        &rig,
+        &outside,
+        &[
+            "answer",
+            answer_id,
+            "--all-projects",
+            "--action",
+            "choose",
+            "--option",
+            "repair",
+            "--expect-revision",
+            "1",
+            "--channel",
+            "console",
+        ],
+        0,
+    )?;
+    let close_id = items[1]["id"].as_str().ok_or("id")?;
+    call_in(
+        &rig,
+        &outside,
+        &[
+            "inbox",
+            "close",
+            close_id,
+            "--all-projects",
+            "--state",
+            "withdrawn",
+            "--reason",
+            "No longer needed",
+            "--expect-revision",
+            "1",
+        ],
+        0,
+    )?;
+    assert_eq!(
+        call_in(
+            &rig,
+            &outside,
+            &["inbox", transient_id, "--all-projects"],
+            2
+        )?["error"]["code"],
+        "not_found"
+    );
+    Ok(())
+}
+
+#[test]
+fn inbox_host_pages_past_duplicate_ids_owned_by_another_project() -> Result {
+    let rig = TestRig::new()?;
+    let second = rig.root.join("second-project");
+    std::fs::create_dir(&second)?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    assert_eq!(
+        code(&rig.execute(&git, &["init", "-q", second.to_str().ok_or("path")?], None)?),
+        0
+    );
+    let file = draft(&rig, "decision")?;
+    for cwd in [&rig.project, &second] {
+        call_in(
+            &rig,
+            cwd,
+            &["ask", "--file", &file, "--session", "target"],
+            0,
+        )?;
+    }
+    let db = rusqlite::Connection::open(rig.state.join("fabric/fabric.sqlite3"))?;
+    db.pragma_update(None, "foreign_keys", false)?;
+    let mut statement =
+        db.prepare("SELECT project, record FROM human_requests ORDER BY project")?;
+    let records = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    assert_eq!(records.len(), 2);
+    db.execute("DELETE FROM human_requests", [])?;
+    let duplicate = "1".repeat(32);
+    let trailing = "2".repeat(32);
+    for (project, bytes, id, session) in [
+        (&records[0].0, &records[0].1, &duplicate, "other"),
+        (&records[1].0, &records[1].1, &duplicate, "target"),
+        (&records[1].0, &records[1].1, &trailing, "target"),
+    ] {
+        let mut record: Value = serde_json::from_slice(bytes)?;
+        record["id"] = json!(id);
+        record["chair_session_id"] = json!(session);
+        db.execute("INSERT INTO human_requests (project,id,revision,session,state,record) VALUES (?1,?2,1,?3,'open',?4)", rusqlite::params![project, id, session, serde_json::to_vec(&record)?])?;
+    }
+    drop(db);
+    let outside = rig.root.join("outside-duplicate");
+    std::fs::create_dir(&outside)?;
+    let all = call_in(&rig, &outside, &["inbox", "--all-projects"], 0)?;
+    let items = all["data"]["items"].as_array().ok_or("items")?;
+    assert_eq!(items.len(), 2);
+    let owner = items
+        .iter()
+        .find(|item| item["id"] == duplicate)
+        .ok_or("owner")?;
+    assert_eq!(owner["project_id"], records[0].0);
+    let shown = call_in(&rig, &outside, &["inbox", &duplicate, "--all-projects"], 0)?;
+    assert_eq!(shown["data"]["item"]["request"]["project_id"], records[0].0);
+    let first = call_in(
+        &rig,
+        &outside,
+        &[
+            "inbox",
+            "--all-projects",
+            "--session",
+            "target",
+            "--limit",
+            "1",
+        ],
+        0,
+    )?;
+    assert!(first["data"]["items"].as_array().ok_or("items")?.is_empty());
+    let cursor = first["data"]["next_cursor"]
+        .as_str()
+        .ok_or("cursor past shadowed row")?;
+    let next = call_in(
+        &rig,
+        &outside,
+        &[
+            "inbox",
+            "--all-projects",
+            "--session",
+            "target",
+            "--limit",
+            "1",
+            "--cursor",
+            cursor,
+        ],
+        0,
+    )?;
+    assert_eq!(next["data"]["items"][0]["id"], trailing);
+    assert!(next["data"]["next_cursor"].is_null());
+    Ok(())
+}

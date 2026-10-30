@@ -5,6 +5,8 @@ extension HumanRequest {
     var kindTitle: String { request.kind.capitalized }
     /// The chair session that asked, shortened for the list.
     var sessionTitle: String { String(chairSessionId.prefix(8)) }
+    /// "Project · " before the session, or nothing when the project is unknown.
+    var projectPrefix: String { projectName.map { "\($0) · " } ?? "" }
 }
 
 @available(macOS 26, *)
@@ -70,11 +72,11 @@ private struct RequestRow: View {
             HStack(spacing: 6) {
                 Text(request.kindTitle)
                 if request.request.blocking { Text("Blocking").foregroundStyle(.orange) }
-                Text("Session \(request.sessionTitle)")
+                Text("\(request.projectPrefix)Session \(request.sessionTitle)")
             }.font(.caption).foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(request.kindTitle), \(request.request.blocking ? "blocking" : "not blocking"), session \(request.sessionTitle): \(request.request.title)")
+        .accessibilityLabel("\(request.kindTitle), \(request.request.blocking ? "blocking" : "not blocking"), \(request.projectName.map { "project \($0), " } ?? "")session \(request.sessionTitle): \(request.request.title)")
     }
 }
 
@@ -93,7 +95,7 @@ private struct DetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text(request.request.title).font(.title2).accessibilityAddTraits(.isHeader)
-                Text("\(request.kindTitle) · \(request.request.blocking ? "Blocking" : "Not blocking") · Session \(request.chairSessionId) · Revision \(request.revision) · \(request.state)")
+                Text("\(request.kindTitle) · \(request.request.blocking ? "Blocking" : "Not blocking") · \(request.projectPrefix)Session \(request.chairSessionId) · Revision \(request.revision) · \(request.state)")
                     .font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                 Text(request.request.body).textSelection(.enabled)
                 if let proceeding = request.request.proceedingWith {

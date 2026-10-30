@@ -41,8 +41,8 @@ final class InboxModelTests: XCTestCase {
     }
 
     func testStaleAnswerShowsCurrentStateAndSendsNothingElse() async throws {
-        let replay = FixtureReplay([(["answer"], "answer-conflict", 1), (["inbox", String(repeating: "1", count: 32)], "inbox-item-stale", 0),
-                             (["inbox", "--state"], "inbox-page2", 0)])
+        let replay = FixtureReplay([(["answer"], "answer-conflict", 1), (["inbox", "--all-projects", String(repeating: "1", count: 32)], "inbox-item-stale", 0),
+                             (["inbox", "--all-projects", "--state"], "inbox-page2", 0)])
         let model = InboxModel(client: replay.client)
         await model.refresh()
         let page = try FixtureReplay.page1Request()
@@ -57,8 +57,8 @@ final class InboxModelTests: XCTestCase {
     }
 
     func testSavedAnswerShowsDeliveryAsReturned() async throws {
-        let replay = FixtureReplay([(["answer"], "answer-saved", 0), (["inbox", String(repeating: "1", count: 32)], "inbox-item-answered", 0),
-                             (["inbox", "--state"], "inbox-page2", 0)])
+        let replay = FixtureReplay([(["answer"], "answer-saved", 0), (["inbox", "--all-projects", String(repeating: "1", count: 32)], "inbox-item-answered", 0),
+                             (["inbox", "--all-projects", "--state"], "inbox-page2", 0)])
         let model = InboxModel(client: replay.client)
         let request = try FixtureReplay.page1Request()
         await model.answer(request, action: .choose, option: "sqlite")
@@ -71,15 +71,15 @@ final class InboxModelTests: XCTestCase {
     }
 
     func testConfirmationAndDeliverySurviveAFailedItemReadAndARefresh() async throws {
-        let replay = FixtureReplay([(["inbox", "--state", "open", "--limit", "50", "--cursor", "CUR1"], "inbox-page2", 0),
-                                    (["inbox", "--state"], "inbox-page1", 0)])
+        let replay = FixtureReplay([(["inbox", "--all-projects", "--state", "open", "--limit", "50", "--cursor", "CUR1"], "inbox-page2", 0),
+                                    (["inbox", "--all-projects", "--state"], "inbox-page1", 0)])
         let model = InboxModel(client: replay.client)
         await model.refresh()
         let request = try XCTUnwrap(model.requests.first)
         XCTAssertEqual(model.selection, request.id)
         // The answer is saved, the read-back fails, and the list no longer holds the request.
-        replay.set([(["answer"], "answer-saved", 0), (["inbox", request.id], "answer-conflict", 1),
-                    (["inbox", "--state"], "inbox-page2", 0)])
+        replay.set([(["answer"], "answer-saved", 0), (["inbox", "--all-projects", request.id], "answer-conflict", 1),
+                    (["inbox", "--all-projects", "--state"], "inbox-page2", 0)])
         await model.answer(request, action: .choose, option: "sqlite")
         let result = try XCTUnwrap(model.results[request.id])
         XCTAssertEqual(result.kind, .saved)

@@ -10,7 +10,32 @@ rm -rf "$out"
 mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources"
 cp "$bin/provenant-console" "$bin/quota-menubar" "$out/Contents/MacOS/"
 [ -d "$bin/quota-menubar_QuotaMenuBar.bundle" ] && cp -R "$bin/quota-menubar_QuotaMenuBar.bundle" "$out/Contents/Resources/"
-cat > "$out/Contents/Info.plist" <<'PLIST'
+# The brand icon (Icon Composer format) is compiled by actool. Without Xcode the app is built with no icon.
+icon_name=Provenant
+icon_source="$PWD/../../assets/brand/$icon_name.icon"
+icon_keys=
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/provenant-bundle.XXXXXX")"
+trap 'rm -rf "$scratch"' EXIT
+if [ ! -d "$icon_source" ]; then
+  echo "warning: $icon_source is missing; building without an app icon" >&2
+elif ! xcrun --find actool >/dev/null 2>&1; then
+  echo "warning: actool not found (install Xcode); building without an app icon" >&2
+elif xcrun actool "$icon_source" --compile "$out/Contents/Resources" --platform macosx \
+  --target-device mac --minimum-deployment-target 26.0 --app-icon "$icon_name" \
+  --include-all-app-icons --output-partial-info-plist "$scratch/icon.plist" \
+  --output-format human-readable-text >"$scratch/actool.log" 2>&1 \
+  && [ -f "$out/Contents/Resources/Assets.car" ]; then
+  icon_keys="  <key>CFBundleIconName</key><string>$icon_name</string>"
+  # actool also writes an .icns for systems that do not read the asset catalogue.
+  if [ -f "$out/Contents/Resources/$icon_name.icns" ]; then
+    icon_keys="$icon_keys
+  <key>CFBundleIconFile</key><string>$icon_name</string>"
+  fi
+else
+  echo "warning: actool could not compile $icon_source; building without an app icon (see below)" >&2
+  cat "$scratch/actool.log" >&2
+fi
+cat > "$out/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -19,6 +44,7 @@ cat > "$out/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Provenant Console</string>
   <key>CFBundleDisplayName</key><string>Provenant Console</string>
   <key>CFBundleExecutable</key><string>provenant-console</string>
+$icon_keys
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0</string>
   <key>CFBundleVersion</key><string>1</string>
