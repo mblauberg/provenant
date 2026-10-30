@@ -1912,8 +1912,7 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_that_cannot_say_leaves_a_lane_without_a_wait()
-    -> Result {
+    fn a_peer_that_cannot_say_leaves_a_lane_without_a_wait() -> Result {
         let host = HostId::from_bytes([9; 16]);
         let (running, starting) = (lane(3, "running")?, lane(4, "starting")?);
         let lanes = [running.clone(), starting.clone()];
