@@ -465,25 +465,6 @@ struct LimitsConfig {
     graph_timeout_seconds: u64,
     #[serde(default = "default_store_busy_timeout_ms")]
     store_busy_timeout_ms: u64,
-    #[serde(
-        rename = "bundle_bytes",
-        default,
-        deserialize_with = "ignore_bundle_bytes"
-    )]
-    _bundle_bytes: Option<()>,
-}
-
-const BUNDLE_BYTES_WARNING: &str = "warning: domains.fabric.limits.bundle_bytes is deprecated and ignored; Git transport no longer uses bundle files";
-
-#[allow(clippy::print_stderr)]
-fn ignore_bundle_bytes<'de, D>(deserializer: D) -> Result<Option<()>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    serde::de::IgnoredAny::deserialize(deserializer)?;
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| eprintln!("{BUNDLE_BYTES_WARNING}"));
-    Ok(Some(()))
 }
 
 impl<'de> Deserialize<'de> for Limits {
@@ -945,17 +926,11 @@ mod tests {
     }
 
     #[test]
-    fn retired_bundle_bytes_config_still_loads_and_is_omitted() {
+    fn retired_bundle_bytes_config_is_rejected() {
         let mut value = serde_json::to_value(config()).unwrap();
         value["limits"]["bundle_bytes"] = 67_108_864.into();
-        let parsed: FabricConfig = serde_json::from_value(value).unwrap();
-        assert!(
-            !serde_json::to_value(parsed).unwrap()["limits"]
-                .as_object()
-                .unwrap()
-                .contains_key("bundle_bytes")
-        );
-        assert!(BUNDLE_BYTES_WARNING.contains("deprecated and ignored"));
+        let error = serde_json::from_value::<FabricConfig>(value).unwrap_err();
+        assert!(error.to_string().contains("bundle_bytes"));
     }
 
     #[test]

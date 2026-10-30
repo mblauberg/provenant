@@ -141,6 +141,19 @@
         "primary_skill": "legal-writing",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q176143",
+      "relation": "positive",
+      "prompt": "Rewrite this CLI README in a plainer, friendlier voice with contractions, keeping every command and flag exact.",
+      "tags": [
+        "direct",
+        "voice"
+      ],
+      "expected": {
+        "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
     }
   ]
 }

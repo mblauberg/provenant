@@ -3,6 +3,25 @@ use std::sync::Mutex;
 struct Decoder(Mutex<Vec<Vec<u8>>>);
 
 #[test]
+fn detached_worker_refuses_to_relaunch_a_test_harness() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let argv = [
+        std::env::current_exe()?.into_os_string(),
+        OsString::from("internal"),
+        OsString::from("settle"),
+    ];
+    assert!(matches!(
+        spawn_detached(&argv, temp.path()),
+        Err(ExecError::TestHarness)
+    ));
+    assert!(!is_test_harness(Path::new(
+        "/Users/me/.local/bin/provenant"
+    )));
+    assert!(!is_test_harness(Path::new("target/debug/provenant")));
+    Ok(())
+}
+
+#[test]
 fn detached_worker_returns_before_its_work_finishes() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{Clock, DurationMicros, WaitBudget};
     let temp = tempfile::tempdir()?;

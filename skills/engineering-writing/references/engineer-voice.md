@@ -40,6 +40,12 @@ Bullets for parallel items (steps, fields, flags), prose for rationale,
 headings only to navigate. Agent-written docs still sprawl into bold-lead
 bullets and a heading on every paragraph; collapse those.
 
+## Register
+
+Docs, READMEs and runbooks use the `natural-writing` default voice at a
+lighter dose: contractions and plain verbs are fine, and run-in labels replace
+stacked headings. Commits, error text and release notes stay terse.
+
 ## Not humanising
 
 No slang, jokes, anecdotes, rhetorical questions or invented personality, and

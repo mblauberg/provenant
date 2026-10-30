@@ -57,6 +57,8 @@ fn last_reading(
         Err(error) => return Err(error.into()),
     };
     let mut end = file.metadata()?.size.min(READ_LIMIT);
+    // Bytes of the current line, collected newest first, so each byte is
+    // visited once however many blocks the line spans.
     let mut pending = Vec::new();
     let mut torn = false;
     let mut first = true;
@@ -77,16 +79,20 @@ fn last_reading(
             torn = block.last().is_some_and(|b| *b != b'\n');
             first = false;
         }
-        block.extend_from_slice(&pending);
-        while let Some(index) = block.iter().rposition(|b| *b == b'\n') {
-            if let Some(record) = decode_lines(&block[index + 1..]).pop() {
+        for byte in block.into_iter().rev() {
+            if byte != b'\n' {
+                pending.push(byte);
+                continue;
+            }
+            pending.reverse();
+            if let Some(record) = decode_lines(&pending).pop() {
                 return Ok((Some(record), torn));
             }
-            block.truncate(index);
+            pending.clear();
         }
-        pending = block;
         end = start;
     }
+    pending.reverse();
     Ok((decode_lines(&pending).pop(), torn))
 }
 
@@ -404,6 +410,26 @@ mod tests {
         assert!(!record(&quota, &snapshot(200, None, 500, 900), cap)?);
         assert!(record(&quota, &snapshot(300, None, 600, 900), cap)?);
         assert_eq!(read(temp.path(), &Query::default())?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn a_long_unterminated_tail_is_scanned_in_linear_time() -> TestResult {
+        let (temp, quota) = state()?;
+        let cap = provenant_quota::DEFAULT_HISTORY_MAX_BYTES;
+        record(&quota, &snapshot(100, None, 500, 900), cap)?;
+        let path = temp.path().join("quota/history/k1.claude.jsonl");
+        let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+        // Spans many 4 KiB blocks with no newline. Re-searching the growing
+        // buffer per block took tens of seconds here; one pass takes well under
+        // a second.
+        file.write_all(&vec![b'x'; 4 << 20])?;
+        drop(file);
+        let clock = SystemClock::new();
+        let started = clock.mono_now().as_micros();
+        assert!(!record(&quota, &snapshot(200, None, 500, 900), cap)?);
+        let elapsed = clock.mono_now().as_micros().saturating_sub(started);
+        assert!(elapsed < 5_000_000, "{elapsed} us");
         Ok(())
     }
 
