@@ -417,11 +417,20 @@ pub enum RefusalKind {
     Handoff,
 }
 
+/// Check a canonical root against state, allowing installed releases for reads.
+pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read: bool) -> bool {
+    let releases = state.join("releases");
+    let release = root.strip_prefix(&releases).ok().is_some_and(|relative| {
+        matches!(relative.components().next(), Some(std::path::Component::Normal(digest))
+            if digest.to_str().is_some_and(|text| provenant_records::SourceDigest::parse(text).is_ok()))
+    });
+    (read && release) || (!root.starts_with(state) && !state.starts_with(root))
+}
+
 /// A child's network reach may not exceed its parent's, each write root must
 /// sit inside a parent write root and each read root inside any parent root.
-/// The lane wrote the child's roots, so the host repeats the submission
-/// edge's checks against its own filesystem view: a root counts only while it
-/// is an existing directory, already canonical and clear of the state root.
+/// The host repeats submission checks: roots must be existing canonical
+/// directories, clear of state except installed release roots granted for reads.
 fn child_access_within(
     parent: &TaskRequest,
     child: &TaskRequest,
@@ -439,38 +448,122 @@ fn child_access_within(
     }
     let state =
         provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
-    let resolve = |root: &PathBuf| {
+    let resolve = |root: &PathBuf, read: bool| {
         provenant_os::fs::canonicalize(root)
             .ok()
             .filter(|canonical| {
                 canonical == root
                     && canonical.is_dir()
-                    && !canonical.starts_with(&state)
-                    && !state.starts_with(canonical)
+                    && access_root_allowed(canonical, &state, read)
             })
     };
+    for root in child
+        .access
+        .read_roots
+        .iter()
+        .chain(&child.access.write_roots)
+    {
+        if provenant_os::fs::canonicalize(root)
+            .is_ok_and(|path| provenant_confinement::is_credential_root(&path))
+        {
+            return Err(RunError::Validation(
+                "credential root requires a selected fixture-backed mechanism",
+            ));
+        }
+    }
     let writes: Vec<PathBuf> = parent
         .access
         .write_roots
         .iter()
-        .filter_map(resolve)
+        .filter_map(|root| resolve(root, false))
         .collect();
     let reads: Vec<PathBuf> = parent
         .access
         .read_roots
         .iter()
-        .filter_map(resolve)
+        .filter_map(|root| resolve(root, true))
         .chain(writes.iter().cloned())
         .collect();
-    let within = |roots: &[PathBuf], granted: &[PathBuf]| {
+    let within = |roots: &[PathBuf], granted: &[PathBuf], read| {
         roots.iter().all(|root| {
-            resolve(root).is_some_and(|root| granted.iter().any(|parent| root.starts_with(parent)))
+            resolve(root, read)
+                .is_some_and(|root| granted.iter().any(|parent| root.starts_with(parent)))
         })
     };
-    if !within(&child.access.write_roots, &writes) || !within(&child.access.read_roots, &reads) {
+    if !within(&child.access.write_roots, &writes, false)
+        || !within(&child.access.read_roots, &reads, true)
+    {
         return Err(RunError::Validation("child root exceeds parent access"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod release_root_tests {
+    use super::*;
+
+    #[test]
+    fn child_refuses_credential_roots() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join(".ssh").join("nested");
+        std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(root)?;
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.read_roots = vec![root.clone()];
+        parent.access.write_roots = vec![root.clone()];
+        for read in [true, false] {
+            let mut child = parent.clone();
+            child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
+            child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
+            let error =
+                child_access_within(&parent, &child, &temp.path().join("state")).unwrap_err();
+            assert!(error.to_string().contains(
+                &provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn child_inherits_only_release_read_roots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(temp.path())?.join("state");
+        let release = state
+            .join("releases")
+            .join(provenant_records::SourceDigest::from_bytes([1; 32]).to_string());
+        let skills = release.join("skills");
+        std::fs::create_dir_all(&skills)?;
+        std::fs::create_dir_all(state.join("projects"))?;
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.read_roots = vec![release.clone()];
+        let mut child = parent.clone();
+        child.access.read_roots = vec![skills.clone()];
+        assert!(child_access_within(&parent, &child, &state).is_ok());
+        let other = state
+            .join("releases")
+            .join(provenant_records::SourceDigest::from_bytes([2; 32]).to_string());
+        std::fs::create_dir_all(&other)?;
+        child.access.read_roots = vec![other];
+        assert!(child_access_within(&parent, &child, &state).is_err());
+        for root in [
+            state.join("releases"),
+            state.join("projects"),
+            state.clone(),
+            state.join("releases/not-a-digest/skills"),
+            state.join("releases/.provenant-staging.fixture/skills"),
+        ] {
+            std::fs::create_dir_all(&root)?;
+            parent.access.read_roots = vec![root.clone()];
+            child.access.read_roots = vec![root];
+            assert!(child_access_within(&parent, &child, &state).is_err());
+        }
+        parent.access.write_roots = vec![release];
+        child.access.read_roots.clear();
+        child.access.write_roots = vec![skills];
+        assert!(child_access_within(&parent, &child, &state).is_err());
+        Ok(())
+    }
 }
 
 #[derive(Default)]

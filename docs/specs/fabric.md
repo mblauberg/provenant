@@ -1169,8 +1169,9 @@ before its next attempt is admitted with a per-node advance error. A failure
 before a fallback preserves the earlier attempt's outcome and creates no
 fallback attempt. An admitted attempt retains its admission cap on replay; a
 node without selected inputs replays its full admitted prompt even if the
-limit is lowered. Increase `node_prompt_bytes` within the host ceiling and start a new
-graph to retry a failed node. A document prompt exceeding a structural limit
+limit is lowered. Increase `node_prompt_bytes` within the host ceiling, cancel
+the graph, and rerun the document under a new `graph_id` to retry a failed
+node. A document prompt exceeding a structural limit
 instead pauses the graph; it may be resumed after extending that limit.
 Selected outputs appear in a delimited block labelled as untrusted data, with
 delimiter collisions escaped. Result digests and excerpts are passed instead

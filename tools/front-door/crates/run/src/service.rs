@@ -8,6 +8,11 @@ pub struct Service<'a> {
     store: &'a RunStore,
 }
 impl Service<'_> {
+    /// Whether the lane access grants any write authority.
+    pub fn has_writes(writer: bool, write_roots: &[std::path::PathBuf]) -> bool {
+        writer || !write_roots.is_empty()
+    }
+
     /// Resolve a bare ID, accepting runs only where the operation allows them.
     /// Run and attempt IDs share a wire format, so a collision is ambiguous.
     pub fn resolve_target(
@@ -684,7 +689,7 @@ fn fresh<T>(make: impl FnOnce([u8; 16]) -> T) -> Result<T> {
 /// before any writer is prepared or any run, reservation or receipt exists.
 /// Named routes resolve their adapter later, where routing checks effort.
 fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Result<()> {
-    let write = task.worktree.is_some() || !task.access.write_roots.is_empty();
+    let write = Service::has_writes(task.worktree.is_some(), &task.access.write_roots);
     let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
             return Ok(());

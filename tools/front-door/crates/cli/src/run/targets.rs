@@ -19,7 +19,7 @@ pub(super) fn local(
     let target = if let Some(selection) = &target.selection {
         resolved = choose(
             selection,
-            index(&session.context, selection)?
+            index(&session.context, selection, true)?
                 .into_iter()
                 .filter(|candidate| candidate.project == Some(session.context.project_id))
                 .collect(),
@@ -81,7 +81,16 @@ impl Candidate {
         }
     }
 }
-fn index(context: &run::ExecutionContext, selection: &str) -> Result<Vec<Candidate>, Fail> {
+/// Callers only need to know whether a selection is unique, ambiguous or
+/// missing, so the lane history is read no further once more than one
+/// distinct target of the requested kind is present: an ambiguity keeps
+/// holding over later pages, and the ambiguity report names a bounded prefix
+/// of the matches instead of every prefix collision.
+fn index(
+    context: &run::ExecutionContext,
+    selection: &str,
+    allow_run: bool,
+) -> Result<Vec<Candidate>, Fail> {
     let clock = super::SystemClock::new();
     let cancel = super::CancelToken::new();
     let call = super::request(&clock, &cancel)?;
@@ -136,9 +145,22 @@ fn index(context: &run::ExecutionContext, selection: &str) -> Result<Vec<Candida
         unseen_after: None,
     };
     let mut candidates = Vec::new();
+    // Judge ambiguity through `choose` itself so the stop rule cannot drift
+    // from the selection semantics it reports. The report renders five
+    // matches and a remainder, so stop the scan once that much is already
+    // on hand and `choose` proves the choice is ambiguous: no later page
+    // can turn it back into a unique match or a miss.
+    let ambiguous = |candidates: &[Candidate]| {
+        matches!(
+            choose(selection, candidates.to_owned(), allow_run),
+            Err(fail) if fail.kind == super::ErrorKind::Conflict
+        )
+    };
     loop {
         let page = store.lanes(&query, &call)?;
+        let before = candidates.len();
         for lane in page.lanes {
+            let matched = candidates.len();
             let run_matches = lane.run_id.to_string().starts_with(parts[0]);
             if parts.len() == 1 && run_matches {
                 candidates.push(Candidate {
@@ -166,6 +188,13 @@ fn index(context: &run::ExecutionContext, selection: &str) -> Result<Vec<Candida
                     host: None,
                 });
             }
+            // Only a new match can change the verdict.
+            if candidates.len() > matched && candidates.len() >= 6 && ambiguous(&candidates) {
+                return Ok(candidates);
+            }
+        }
+        if candidates.len() > before && ambiguous(&candidates) {
+            break;
         }
         match page.next {
             Some(after) => query.after = after,
@@ -276,7 +305,7 @@ pub(super) fn resolve(
     let context = super::execution_context(edge)?;
     let exact = selection.len() == 32 && !selection.contains('/');
     let peers = remote::target_candidates(edge.roots)?;
-    let mut candidates = index(&context, &selection)?;
+    let mut candidates = index(&context, &selection, allow_run)?;
     if exact
         && candidates
             .iter()
@@ -304,11 +333,21 @@ pub(super) fn resolve(
             project_id,
             ..context.clone()
         };
-        candidates.extend(index(&scoped, &selection)?);
+        candidates.extend(index(&scoped, &selection, allow_run)?);
         if exact
             && candidates
                 .iter()
                 .any(|candidate| allow_run || candidate.target.attempt.is_some())
+        {
+            break;
+        }
+        // Another project cannot make an ambiguous prefix unique again.
+        if !exact
+            && candidates.len() > 1
+            && matches!(
+                choose(&selection, candidates.clone(), allow_run),
+                Err(fail) if fail.kind == super::ErrorKind::Conflict
+            )
         {
             break;
         }
@@ -412,7 +451,7 @@ pub(super) fn cwd(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use provenant_core::{AttemptId, ProjectId, RunId, TaskId};
+    use provenant_core::{AttemptId, Clock, ProjectId, RunId, TaskId};
     fn candidate(run: u8, attempt: u8, project: u8) -> Candidate {
         Candidate {
             target: Target {
@@ -563,7 +602,7 @@ mod tests {
         let selection = format!("{}/{}", &run_id[..8], &attempt_id[..8]);
         let selected = choose(
             &selection,
-            index(&context, &selection).map_err(|fail| fail.message)?,
+            index(&context, &selection, false).map_err(|fail| fail.message)?,
             false,
         )
         .map_err(|fail| fail.message)?;
@@ -573,6 +612,234 @@ mod tests {
             Some(prepared.attempts[0].attempt_id)
         );
         assert_eq!(selected.project, Some(context.project_id));
+        Ok(())
+    }
+    /// Fixture for index scans: an isolated writer store plus the context the
+    /// scan runs under. No worker is spawned and no detached process launched.
+    struct ScanFixture {
+        _temp: tempfile::TempDir,
+        clock: super::super::SystemClock,
+        cancel: super::super::CancelToken,
+        context: run::ExecutionContext,
+        store: run::RunStore,
+    }
+    impl ScanFixture {
+        fn open() -> Result<Self, Box<dyn std::error::Error>> {
+            use provenant_core::{ActorId, RootInputs};
+            let temp = tempfile::tempdir()?;
+            let root = std::fs::canonicalize(temp.path())?;
+            let home = root.join("home");
+            let checkout = root.join("checkout");
+            std::fs::create_dir(&home)?;
+            std::fs::create_dir(&checkout)?;
+            let mut inputs = RootInputs::new(home, checkout);
+            inputs.state_dir = Some(root.join("state"));
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let context = run::ExecutionContext {
+                state_root: roots.state,
+                project_id: ProjectId::from_bytes([8; 16]),
+                actor_id: ActorId::from_bytes([9; 16]),
+                read_prompts: true,
+            };
+            let clock = super::super::SystemClock::new();
+            let cancel = super::super::CancelToken::new();
+            let store = run::RunStore::open(
+                &context,
+                &run::Request {
+                    clock: &clock,
+                    cancel: &cancel,
+                },
+            )?;
+            Ok(Self {
+                _temp: temp,
+                clock,
+                cancel,
+                context,
+                store,
+            })
+        }
+        fn call(&self) -> run::Request<'_> {
+            run::Request {
+                clock: &self.clock,
+                cancel: &self.cancel,
+            }
+        }
+    }
+    /// A prepared run under the shared run prefix `11111111`, its siblings
+    /// differing from it beyond the tenth hex character, with a unique attempt
+    /// ID per lane.
+    fn shared_prefix_run(
+        tail: u8,
+        attempt: u8,
+        clock: &super::super::SystemClock,
+    ) -> Result<run::PreparedRun, Box<dyn std::error::Error>> {
+        let (task_id, run_id) = (
+            TaskId::from_bytes([tail; 16]),
+            RunId::from_bytes({
+                let mut bytes = [0x11_u8; 16];
+                bytes[4] = tail;
+                bytes
+            }),
+        );
+        Ok(run::PreparedRun {
+            operation_id: provenant_core::OperationId::parse(&format!("prefix-scan-{tail}"))?,
+            run_id,
+            created_at: clock.wall_now()?,
+            request: run::CanonicalRequest {
+                extra: Default::default(),
+                child_attempt_id_version: None,
+                chair: None,
+                fresh_continuation: None,
+                schema_version: 1,
+                tasks: vec![run::TaskRequest {
+                    context: None,
+                    extra: Default::default(),
+                    build_heavy: false,
+                    title: None,
+                    base: None,
+                    head: None,
+                    base_ref: None,
+                    task_id,
+                    prompt_digest: provenant_records::CanonicalV1::file_digest(b"p"),
+                    route: run::RequestedRoute::Model {
+                        extra: Default::default(),
+                        provider: "fixture".into(),
+                        model: "fixture/model".into(),
+                        effort: None,
+                    },
+                    account: None,
+                    fallback: vec![],
+                    profile: Default::default(),
+                    authority_digest: provenant_core::Digest::from_bytes([5; 32]),
+                    provider_timeout_seconds: 3600,
+                    writer: None,
+                    delivery_id: None,
+                    deliver: None,
+                    access: Default::default(),
+                }],
+                concurrency: 1,
+                parent: None,
+                lane_depth: Some(1),
+                parent_attempt: Some(AttemptId::from_bytes([9; 16])),
+            },
+            attempts: vec![run::NewAttempt {
+                task_id,
+                attempt_id: AttemptId::from_bytes([attempt; 16]),
+                prompt: "p".into(),
+            }],
+        })
+    }
+    fn shared_prefix_run_id(tail: u8) -> RunId {
+        RunId::from_bytes({
+            let mut bytes = [0x11_u8; 16];
+            bytes[4] = tail;
+            bytes
+        })
+    }
+    #[test]
+    fn ambiguous_scan_stops_on_the_bounded_report() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = ScanFixture::open()?;
+        for tail in 1..=7 {
+            fixture.store.create(
+                &shared_prefix_run(tail, tail + 0x20, &fixture.clock)?,
+                &fixture.call(),
+            )?;
+        }
+        let selection = "11111111";
+        let scanned = index(&fixture.context, selection, true).map_err(|f| f.message)?;
+        let error = choose(selection, scanned, true).expect_err("ambiguous prefix");
+        assert_eq!(error.kind, super::super::ErrorKind::Conflict);
+        assert!(error.message.contains("ambiguous ID"), "{}", error.message);
+        // Six of the seven sibling lanes share the prefix and the store holds
+        // them all, but the scan stopped once the report carried five matches
+        // plus a proved remainder: runs six and seven never render.
+        let lanes = fixture
+            .store
+            .lanes(
+                &run::LaneQuery {
+                    targets: vec![],
+                    all: true,
+                    limit: 100,
+                    after: 0,
+                    newest_first: false,
+                    owner: None,
+                    unseen_after: None,
+                },
+                &fixture.call(),
+            )?
+            .lanes;
+        assert_eq!(lanes.len(), 7);
+        for tail in 1..=5 {
+            assert!(
+                error
+                    .message
+                    .contains(&shared_prefix_run_id(tail).to_string()),
+                "{}",
+                error.message
+            );
+        }
+        assert!(error.message.contains("and 1 more"), "{}", error.message);
+        assert!(
+            !error.message.contains(&shared_prefix_run_id(6).to_string()),
+            "{}",
+            error.message
+        );
+        assert!(
+            !error.message.contains(&shared_prefix_run_id(7).to_string()),
+            "{}",
+            error.message
+        );
+        Ok(())
+    }
+    #[test]
+    fn run_free_scan_still_reads_the_whole_history() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = ScanFixture::open()?;
+        for tail in 1..=7 {
+            fixture.store.create(
+                &shared_prefix_run(tail, tail + 0x20, &fixture.clock)?,
+                &fixture.call(),
+            )?;
+        }
+        let selection = "11111111";
+        // With runs refused as kinds, a run-only prefix needs the whole history
+        // to prove no lane attempt matches instead: the scan does not stop.
+        let scanned = index(&fixture.context, selection, false).map_err(|f| f.message)?;
+        assert_eq!(scanned.len(), 7);
+        let error = choose(selection, scanned, false).expect_err("no lane attempt");
+        assert_eq!(error.kind, super::super::ErrorKind::NotFound);
+        assert!(
+            error.message.contains("no lane matches"),
+            "{}",
+            error.message
+        );
+        Ok(())
+    }
+    #[test]
+    fn unique_prefix_still_resolves_one_target() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = ScanFixture::open()?;
+        for tail in [1u8, 9] {
+            fixture.store.create(
+                &shared_prefix_run(tail, tail + 0x20, &fixture.clock)?,
+                &fixture.call(),
+            )?;
+        }
+        // `11111111` alone is ambiguous; naming the sibling byte resolves.
+        let error = choose(
+            "11111111",
+            index(&fixture.context, "11111111", true).map_err(|f| f.message)?,
+            true,
+        )
+        .expect_err("ambiguous prefix");
+        assert_eq!(error.kind, super::super::ErrorKind::Conflict);
+        let selection = "1111111101";
+        let selected = choose(
+            selection,
+            index(&fixture.context, selection, true).map_err(|f| f.message)?,
+            true,
+        )
+        .map_err(|f| f.message)?;
+        assert_eq!(selected.target.run, Some(shared_prefix_run_id(1)));
+        assert_eq!(selected.project, Some(fixture.context.project_id));
         Ok(())
     }
 }
