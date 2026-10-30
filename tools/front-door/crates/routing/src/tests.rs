@@ -4098,3 +4098,59 @@ fn invalid_override_schedules_drop_their_override_at_load() -> Result<(), Box<dy
     }
     Ok(())
 }
+#[test]
+fn read_only_policy_model_stays_in_junior_and_senior_pools_for_read_only_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [AvailabilityRecord {
+        adapter: "agy".into(),
+        observed_models: vec!["gemini-3.8-flash".into()],
+        ..availability()
+    }];
+    let access = [AccessContext {
+        adapter: "agy",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let context = RoutingContext {
+        availability: &records,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    let gemini_exclusion = |pool: &str, writes: bool, workload| {
+        let request = RouteRequest {
+            intent: RouteIntent { workload, writes },
+            choice: RouteChoice::NamedRoute(RouteName::parse(pool)?),
+            effort: None,
+            confidential: false,
+            fallback: Fallback::None,
+        };
+        let route = resolve_with_seed(&request, &context, "agy-read-only", 0)?;
+        let receipt = route.pool_selection.ok_or("pool receipt")?;
+        let member = receipt
+            .candidates
+            .iter()
+            .find(|c| c.model == "agy/gemini-3.8-flash")
+            .ok_or("gemini candidate")?;
+        Ok::<_, Box<dyn std::error::Error>>(member.exclusion.clone())
+    };
+    for pool in ["junior", "senior"] {
+        for workload in [Workload::General, Workload::ReadHeavy, Workload::Review] {
+            assert_eq!(gemini_exclusion(pool, false, workload)?, None, "{pool}");
+        }
+        assert_eq!(
+            gemini_exclusion(pool, true, Workload::General)?.as_deref(),
+            Some("read-only model policy"),
+            "{pool}"
+        );
+    }
+    let mut query = request("agy/gemini-3.8-flash")?;
+    assert!(resolve(&query, &context).is_ok());
+    query.intent.writes = true;
+    assert!(matches!(
+        resolve(&query, &context),
+        Err(RoutingError::ReadOnlyPolicy)
+    ));
+    Ok(())
+}

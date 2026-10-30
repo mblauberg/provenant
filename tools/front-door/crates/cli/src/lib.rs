@@ -189,7 +189,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         {
             request.worktree_branch = Some(branch);
         }
+        // An explicit `--mode` is never rewritten: a read-only run naming a
+        // worktree is refused by validation, not silently promoted to a writer.
         if request.preset.is_none()
+            && request.access.mode.is_none()
             && (request.access.worktree.is_some()
                 || request.worktree_branch.is_some()
                 || request.branch.is_some())
@@ -1348,6 +1351,49 @@ mod tests {
             matches!(parsed(words), ParseOutcome::Invalid { .. }),
             "{words:?}"
         );
+    }
+    #[test]
+    fn explicit_read_only_mode_is_not_promoted_to_a_writer_by_a_target() {
+        // Regression: `--mode read-only --worktree` was rewritten to
+        // worktree-write, so a read-only-policy model was refused as a write.
+        invalid(&[
+            "run",
+            "--model",
+            "agy/gemini-3.8-flash",
+            "--mode",
+            "read-only",
+            "--worktree",
+            "/fixture/writer",
+            "--prompt-file",
+            "p.md",
+        ]);
+        let inv = valid(&[
+            "run",
+            "--model",
+            "agy/gemini-3.8-flash",
+            "--worktree",
+            "/fixture/writer",
+            "--prompt-file",
+            "p.md",
+        ]);
+        let Command::Run(request) = inv.command else {
+            panic!("run")
+        };
+        assert_eq!(request.access.mode(), Mode::WorktreeWrite);
+        let inv = valid(&[
+            "run",
+            "--model",
+            "agy/gemini-3.8-flash",
+            "--mode",
+            "read-only",
+            "--prompt-file",
+            "p.md",
+        ]);
+        let Command::Run(request) = inv.command else {
+            panic!("run")
+        };
+        assert_eq!(request.access.mode(), Mode::ReadOnly);
+        assert!(request.access.worktree.is_none());
     }
     #[test]
     fn writing_paths_and_private_descriptors_are_bounded() {
