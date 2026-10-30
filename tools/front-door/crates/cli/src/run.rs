@@ -1733,11 +1733,15 @@ pub fn submit_with_host(
                     let message = String::from(check);
                     let mut fail = Fail::new(status, kind, message.clone());
                     // Keep the volume, available bytes and floor for MCP callers.
-                    fail.detail = Some(
-                        provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
-                            reason: message,
-                        },
-                    );
+                    fail.detail = Some(if status == Status::Refused {
+                            provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
+                                reason: message.clone(),
+                            }
+                        } else {
+                            provenant_fabric_runtime::coordination::facade::FacadeError::DispatchUnobserved {
+                                reason: message,
+                            }
+                    });
                     fail
                 })?;
             }

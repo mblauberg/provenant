@@ -203,6 +203,8 @@ pub enum FacadeError {
     ConfinementRefused,
     #[error("{reason}")]
     DispatchRefused { reason: String },
+    #[error("{reason}")]
+    DispatchUnobserved { reason: String },
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
     WorktreeMissing,
     #[error(
@@ -263,6 +265,7 @@ impl FacadeError {
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused => "confinement_refused",
             Self::DispatchRefused { .. } => "dispatch_refused",
+            Self::DispatchUnobserved { .. } => "dispatch_unobserved",
             Self::WorktreeMissing => "worktree_missing",
             Self::WorktreeUnregistered { .. } => "worktree_unregistered",
             Self::BaseUnreachable => "base_unreachable",

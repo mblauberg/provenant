@@ -5952,6 +5952,19 @@ pub fn graph(
     })();
     match result {
         Ok(data) => {
+            if let Some(reason) = data.checkpoint.nodes.iter().find_map(|node| {
+                (node.advance_error_code.as_deref() == Some("launch_refused"))
+                    .then_some(node.advance_error.as_deref())
+                    .flatten()
+            }) {
+                return crate::fail(
+                    command,
+                    provenant_records::Outcome::Refused,
+                    "dispatch_refused",
+                    reason,
+                    globals,
+                );
+            }
             let human = graph_human(&data);
             crate::emit(
                 &provenant_records::CommandResult::new(
