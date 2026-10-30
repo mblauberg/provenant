@@ -188,6 +188,7 @@ fn reservation_listing_surfaces_a_legacy_slot_root_reservation() -> TestResult {
 fn slot_root_reservation_only_fences_its_attempt() -> TestResult {
     let root = tempfile::tempdir()?;
     let slot = Directory::open_anchor(root.path())?;
+    let anchor = slot.metadata()?;
     // A legacy writer published its reservation at the slot root instead of
     // its attempt directory; the record names one attempt only.
     write_record(
@@ -199,8 +200,8 @@ fn slot_root_reservation_only_fences_its_attempt() -> TestResult {
             launch_state: LaunchState::Prepared,
             attempt_device: None,
             attempt_inode: None,
-            reservation_device: 0,
-            reservation_inode: 0,
+            reservation_device: anchor.device,
+            reservation_inode: anchor.inode,
             binding: StoredWriterBinding::ReadOnly,
             boot: "fixture-recorded-boot-v1".to_owned(),
             guardian: None,
@@ -226,6 +227,190 @@ fn slot_root_reservation_only_fences_its_attempt() -> TestResult {
     // A record the reader cannot decode stays fenced: fail safe.
     std::fs::write(root.path().join("reservation.json"), b"{}")?;
     assert!(reservation_present(&slot, successor)?);
+    Ok(())
+}
+
+fn legacy_reservation(scope: Scope, anchor: &provenant_os::fs::Metadata) -> Reservation {
+    Reservation {
+        schema_version: 1,
+        scope,
+        launch_state: LaunchState::Prepared,
+        attempt_device: None,
+        attempt_inode: None,
+        reservation_device: anchor.device,
+        reservation_inode: anchor.inode,
+        binding: StoredWriterBinding::ReadOnly,
+        boot: "fixture-recorded-boot-v1".to_owned(),
+        guardian: None,
+        provider: None,
+        unresolved_cleanup: true,
+        descendants: Vec::new(),
+        census_incomplete: true,
+        omitted_descendants: 0,
+    }
+}
+fn publish_reservation(directory: &Directory, record: &Reservation) -> TestResult {
+    write_record(
+        directory,
+        "reservation.json",
+        record,
+        PublishMode::NoReplace,
+    )?
+    .require_durable()?;
+    Ok(())
+}
+
+#[test]
+fn legacy_slot_root_record_does_not_fence_recovery_for_another_attempt() -> TestResult {
+    let root = tempfile::tempdir()?;
+    // macOS TMPDIR is under /var, a symlink to /private/var.
+    let base = std::fs::canonicalize(root.path())?;
+    let path = base.join("writer");
+    std::fs::create_dir(&path)?;
+    let slot = Directory::open_anchor(&path)?;
+    publish_reservation(&slot, &legacy_reservation(scope(), &slot.metadata()?))?;
+    let mut successor = scope();
+    successor.attempt = AttemptId::from_bytes([9; 16]);
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let recover = |scope| {
+        acquire_recovery(
+            slot.try_clone()?,
+            scope,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )
+    };
+    // The legacy record names another attempt, so this successor has no
+    // reservation and is provably absent rather than fenced.
+    assert!(!reservation_present(&slot, successor)?);
+    assert!(matches!(
+        recover(successor),
+        Err(CustodyError::Filesystem(error)) if error.is_not_found()
+    ));
+    // The successor's own evidence still decides beside the legacy record.
+    let own = path.join(successor.attempt.to_string());
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(&own)?;
+    let child = Directory::open_anchor(&own)?;
+    publish_reservation(&child, &legacy_reservation(successor, &child.metadata()?))?;
+    let recovery = recover(successor)?;
+    assert_eq!(recovery.scope(), successor);
+    drop(recovery);
+    // The attempt the legacy record names still recovers it.
+    let recovery = recover(scope())?;
+    assert_eq!(recovery.scope(), scope());
+    Ok(())
+}
+
+#[test]
+fn renumbered_legacy_slot_root_record_does_not_fence_another_attempt() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(root.path())?;
+    let path = base.join("writer");
+    std::fs::create_dir(&path)?;
+    let slot = Directory::open_anchor(&path)?;
+    let anchor = slot.metadata()?;
+    let mut record = legacy_reservation(scope(), &anchor);
+    // A reboot renumbered the device: the recorded slot and attempt devices
+    // still agree with each other but differ from the current slot.
+    record.launch_state = LaunchState::HandingOff;
+    record.reservation_device = anchor.device + 1;
+    record.attempt_device = Some(anchor.device + 1);
+    record.attempt_inode = Some(anchor.inode + 1);
+    publish_reservation(&slot, &record)?;
+    let mut successor = scope();
+    successor.attempt = AttemptId::from_bytes([9; 16]);
+    // The record is still anchored after the renumber, so it names another
+    // attempt rather than fencing every attempt.
+    assert!(!reservation_present(&slot, successor)?);
+    assert!(reservation_present(&slot, scope())?);
+    // The successor's own evidence still decides ahead of the record.
+    let own = path.join(successor.attempt.to_string());
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(&own)?;
+    let child = Directory::open_anchor(&own)?;
+    publish_reservation(&child, &legacy_reservation(successor, &child.metadata()?))?;
+    assert!(reservation_present(&slot, successor)?);
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let recovery = acquire_recovery(
+        slot.try_clone()?,
+        successor,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    assert_eq!(recovery.scope(), successor);
+    Ok(())
+}
+
+#[test]
+fn legacy_slot_root_record_fences_a_successor_writer() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(root.path())?;
+    let path = base.join("writer");
+    std::fs::create_dir(&path)?;
+    let slot = Directory::open_anchor(&path)?;
+    publish_reservation(&slot, &legacy_reservation(scope(), &slot.metadata()?))?;
+    let mut successor = scope();
+    successor.attempt = AttemptId::from_bytes([9; 16]);
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let admit = |scope| {
+        crate::fixture::acquire_writer(
+            slot.try_clone()?,
+            scope,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )
+    };
+    // The slot lock does not prove exclusion on its own: a legacy provider can
+    // close its inherited descriptor and keep writing after its guardian dies.
+    // Any retained legacy record therefore refuses a successor writer.
+    assert!(matches!(admit(successor), Err(CustodyError::Fenced)));
+    // The attempt the record names is refused too, and the record is retained.
+    assert!(matches!(admit(scope()), Err(CustodyError::Fenced)));
+    assert!(path.join("reservation.json").is_file());
+    Ok(())
+}
+
+#[test]
+fn invalid_legacy_slot_root_record_still_counts_as_present() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(root.path())?;
+    let path = base.join("writer");
+    std::fs::create_dir(&path)?;
+    let slot = Directory::open_anchor(&path)?;
+    let mut record = legacy_reservation(scope(), &slot.metadata()?);
+    // Decodable but rejected by the record validation used by recovery.
+    record.schema_version = 2;
+    publish_reservation(&slot, &record)?;
+    let mut successor = scope();
+    successor.attempt = AttemptId::from_bytes([9; 16]);
+    assert!(reservation_present(&slot, successor)?);
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    assert!(matches!(
+        acquire_recovery(
+            slot.try_clone()?,
+            successor,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        ),
+        Err(CustodyError::InvalidRecord)
+    ));
+    assert!(matches!(
+        crate::fixture::acquire_writer(
+            slot.try_clone()?,
+            successor,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        ),
+        Err(CustodyError::Fenced)
+    ));
     Ok(())
 }
 
