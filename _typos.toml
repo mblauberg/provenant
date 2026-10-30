@@ -33,6 +33,10 @@ Modeling = "Modeling"
 "URE" = "URE"
 # Foundation's String.capitalized, used by the Swift console.
 "capitalized" = "capitalized"
+# Foundation's localized* string APIs and AppKit's Window menu (performMiniaturize, "Minimize").
+"localized" = "localized"
+"Miniaturize" = "Miniaturize"
+"Minimize" = "Minimize"
 # GitHub Actions event activity types.
 "labeled" = "labeled"
 "synchronize" = "synchronize"

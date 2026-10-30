@@ -90,6 +90,138 @@ final class InboxModelTests: XCTestCase {
         XCTAssertEqual(model.selected?.id, request.id)
         XCTAssertEqual(model.selected?.request.title, "Pick the storage layer")
     }
+
+    func testFiltersAndProjectGroupsCountTheOpenRequests() async {
+        let model = await InboxModel.consoleFixture()
+        XCTAssertEqual(model.requests.count, 5)
+        XCTAssertEqual(model.count(for: .all), 5)
+        XCTAssertEqual(model.count(for: .blocking), 3)
+        XCTAssertEqual(model.count(for: .decisions), 2)
+        XCTAssertEqual(model.count(for: .questions), 2)
+        XCTAssertEqual(model.count(for: .assumptions), 1)
+
+        XCTAssertEqual(model.projectGroups.map(\.name), ["Alpha", "Beta", "No project"])
+        XCTAssertEqual(model.projectGroups.map(\.count), [2, 2, 1])
+
+        XCTAssertEqual(model.selection, model.requests.first?.id)
+
+        model.show(.filter(.blocking))
+        XCTAssertEqual(model.visibleRequests.map(\.request.title),
+                       ["Pick the storage layer", "Choose a release day", "Should the queue retry?"])
+        XCTAssertEqual(model.selection, model.visibleRequests.first?.id)
+
+        model.show(.filter(.decisions))
+        XCTAssertEqual(model.visibleRequests.map(\.request.title), ["Pick the storage layer", "Choose a release day"])
+
+        model.show(.filter(.questions))
+        XCTAssertEqual(model.visibleRequests.map(\.request.title), ["Which name?", "Should the queue retry?"])
+
+        model.show(.filter(.assumptions))
+        XCTAssertEqual(model.visibleRequests.map(\.request.title), ["Assume UTC timestamps"])
+
+        let alpha = model.projectGroups.first { $0.name == "Alpha" }
+        XCTAssertNotNil(alpha)
+        model.show(.project(alpha?.id ?? ""))
+        XCTAssertEqual(model.visibleRequests.map(\.request.title), ["Pick the storage layer", "Which name?"])
+        XCTAssertEqual(model.selection, model.visibleRequests.first?.id)
+    }
+
+    func testSearchNarrowsTheCurrentScopeWithoutChangingTheCounts() async {
+        let model = await InboxModel.consoleFixture()
+        let counts = InboxModel.Filter.allCases.map { model.count(for: $0) }
+
+        model.searchText = "storage"
+        XCTAssertEqual(model.visibleRequests.map(\.request.title), ["Pick the storage layer"])
+
+        model.searchText = "beta"
+        XCTAssertEqual(model.visibleRequests.map(\.request.title),
+                       ["Assume UTC timestamps", "Choose a release day"])
+
+        model.show(.filter(.questions))
+        XCTAssertTrue(model.visibleRequests.isEmpty)
+        XCTAssertNil(model.selection)
+
+        model.searchText = ""
+        XCTAssertEqual(model.visibleRequests.map(\.request.title), ["Which name?", "Should the queue retry?"])
+        XCTAssertEqual(model.selection, model.visibleRequests.first?.id)
+        XCTAssertEqual(InboxModel.Filter.allCases.map { model.count(for: $0) }, counts)
+    }
+
+    func testKeyboardSelectionMovesThroughTheVisibleListAndStopsAtEachEnd() async {
+        let model = await InboxModel.consoleFixture()
+        let visible = model.visibleRequests
+        XCTAssertEqual(model.selection, visible.first?.id)
+
+        model.selectNext()
+        XCTAssertEqual(model.selection, visible[1].id)
+        model.selectNext()
+        XCTAssertEqual(model.selection, visible[2].id)
+        model.selectPrevious()
+        XCTAssertEqual(model.selection, visible[1].id)
+
+        for _ in 0..<10 { model.selectNext() }
+        XCTAssertEqual(model.selection, visible.last?.id)
+        for _ in 0..<10 { model.selectPrevious() }
+        XCTAssertEqual(model.selection, visible.first?.id)
+
+        model.show(.filter(.assumptions))
+        XCTAssertEqual(model.selection, "33333333333333333333333333333333")
+        model.show(.filter(.all))
+        XCTAssertEqual(model.selection, "33333333333333333333333333333333")
+    }
+
+    func testNumberKeysChooseAnOptionAndAnUnknownNumberDoesNothing() async throws {
+        let model = await InboxModel.consoleFixture()
+        let request = try XCTUnwrap(model.requests.first { $0.request.options.count == 2 })
+        XCTAssertEqual(model.draft(for: request).optionID, "sqlite")
+
+        XCTAssertTrue(model.chooseOption(number: 1, for: request))
+        XCTAssertEqual(model.draft(for: request).optionID, "sqlite")
+        XCTAssertTrue(model.chooseOption(number: 2, for: request))
+        XCTAssertEqual(model.draft(for: request).optionID, "files")
+        XCTAssertFalse(model.chooseOption(number: 9, for: request))
+        XCTAssertEqual(model.draft(for: request).optionID, "files")
+    }
+
+    func testEveryKindOffersTheFullActionSetWithAndWithoutOptions() throws {
+        func draft(kind: String, options: Bool, proceeding: Bool = false) throws -> HumanRequest.Draft {
+            let opts = options ? #"[{"id":"a","label":"A","description":"a"}]"# : "[]"
+            let json = """
+            {"kind":"\(kind)","title":"t","body":"b","blocking":true,"options":\(opts),
+             "recommended_option_id":null,"proceeding_with":\(proceeding ? #""x""# : "null"),"deadline":null}
+            """
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(HumanRequest.Draft.self, from: Data(json.utf8))
+        }
+        let cases: [(String, Bool, Bool, [AnswerAction], AnswerAction)] = [
+            ("decision", false, false, [.reply], .reply),
+            ("decision", true, false, [.choose, .reply], .choose),
+            ("assumption", false, false, [.confirm, .override, .reply], .confirm),
+            ("assumption", true, false, [.choose, .confirm, .override, .reply], .choose),
+            ("Assumption", false, false, [.confirm, .override, .reply], .confirm),
+            ("question", false, true, [.confirm, .override, .reply], .confirm),
+        ]
+        for (kind, options, proceeding, actions, primary) in cases {
+            let d = try draft(kind: kind, options: options, proceeding: proceeding)
+            XCTAssertEqual(InboxActions.available(for: d), actions, "\(kind) options=\(options)")
+            XCTAssertEqual(InboxActions.primary(for: d), primary, "\(kind) options=\(options)")
+        }
+    }
+
+    func testReplyDraftsStayWithTheirRequest() async throws {
+        let model = await InboxModel.consoleFixture()
+        let first = try XCTUnwrap(model.requests.first)
+        let second = try XCTUnwrap(model.requests.dropFirst().first)
+
+        model.setReply("Use the smaller file.", for: first)
+        XCTAssertEqual(model.reply(for: first), "Use the smaller file.")
+        XCTAssertEqual(model.reply(for: second), "")
+
+        model.setReply("Call it harbour.", for: second)
+        XCTAssertEqual(model.reply(for: first), "Use the smaller file.")
+        XCTAssertEqual(model.reply(for: second), "Call it harbour.")
+    }
 }
 
 private extension FixtureReplay {
@@ -100,5 +232,16 @@ private extension FixtureReplay {
         struct Page: Decodable { let items: [HumanRequest] }
         let envelope = try Envelope<Page>.decode(Data(contentsOf: url))
         return try XCTUnwrap(envelope.data?.items.first)
+    }
+}
+
+@MainActor
+private extension InboxModel {
+    /// A model replayed from `inbox-console.json` and refreshed once.
+    static func consoleFixture() async -> InboxModel {
+        let replay = FixtureReplay([(["inbox"], "inbox-console", 0)])
+        let model = InboxModel(client: replay.client)
+        await model.refresh()
+        return model
     }
 }
