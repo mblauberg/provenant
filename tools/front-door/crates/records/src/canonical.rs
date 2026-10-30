@@ -85,6 +85,16 @@ pub fn record_digest(
     schema_version: u64,
     canonical_bytes: &CanonicalBytes,
 ) -> Result<provenant_core::Digest, CanonicalError> {
+    stored_record_digest(kind, schema_version, canonical_bytes.as_bytes())
+}
+
+/// The record digest of bytes exactly as they were stored, for verifying a
+/// sealed record without reserialising it under a newer schema.
+pub fn stored_record_digest(
+    kind: &str,
+    schema_version: u64,
+    stored: &[u8],
+) -> Result<provenant_core::Digest, CanonicalError> {
     if kind.is_empty() || kind.as_bytes().contains(&0) {
         return Err(CanonicalError::InvalidKind);
     }
@@ -94,7 +104,7 @@ pub fn record_digest(
     digest.update(b"\0");
     digest.update(schema_version.to_string().as_bytes());
     digest.update(b"\0");
-    digest.update(canonical_bytes.as_bytes());
+    digest.update(stored);
     let bytes: [u8; 32] = digest.finalize().into();
     Ok(provenant_core::Digest::from_bytes(bytes))
 }

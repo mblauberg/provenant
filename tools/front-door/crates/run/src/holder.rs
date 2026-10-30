@@ -658,7 +658,7 @@ impl RunStore {
                 None => note,
             });
         }
-        let request = self.request(record.run_id, call)?;
+        let (request, digest) = self.request_with_digest(record.run_id, call)?;
         // The run store is writable by a parent lane, so a live terminal must
         // see the request the host launched before it acts on its writer or
         // delivery fields.
@@ -666,7 +666,7 @@ impl RunStore {
             sealed: Some(sealed),
             ..
         } = &completion
-            && request.digest()? != **sealed
+            && digest != **sealed
         {
             return Err(RunError::Validation("request changed after launch"));
         }

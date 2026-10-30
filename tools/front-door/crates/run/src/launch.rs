@@ -870,15 +870,19 @@ impl RunStore {
     }
 
     pub fn request(&self, run: RunId, call: &Request<'_>) -> Result<CanonicalRequest> {
+        Ok(self.request_with_digest(run, call)?.0)
+    }
+    /// The request and the digest of its stored bytes. Callers compare this
+    /// digest, never a reserialised request, because its schema may have
+    /// evolved since the run was written.
+    pub(crate) fn request_with_digest(
+        &self,
+        run: RunId,
+        call: &Request<'_>,
+    ) -> Result<(CanonicalRequest, provenant_core::Digest)> {
         let raw = read_sealed(&self.run_dir(run, false)?, "request.json", RECORD_LIMIT)?
             .ok_or(RunError::NotFound)?;
-        // The writer hashes these canonical bytes with the record domain. Do
-        // not reserialize a decoded request: its schema may have evolved.
-        use sha2::{Digest as _, Sha256};
-        let mut hash = Sha256::new();
-        hash.update(b"provenant-record\0run-request\x001\0");
-        hash.update(&raw);
-        let digest = provenant_core::Digest::from_bytes(hash.finalize().into());
+        let digest = provenant_records::stored_record_digest("run-request", 1, &raw)?;
         let stored = self.run(run, call)?.request_digest;
         if digest != stored {
             return Err(RunError::artifact_mismatch(
@@ -888,7 +892,7 @@ impl RunStore {
                 Some(ArtifactValue::digest(digest)),
             ));
         }
-        decode(&raw)
+        Ok((decode(&raw)?, digest))
     }
     /// Hand each queued attempt of `run` to its own guardian, which admits it
     /// and later commits its terminal record. `context` builds the opaque

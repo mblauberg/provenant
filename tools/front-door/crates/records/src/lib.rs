@@ -27,7 +27,9 @@ pub use attempt_fact::{
     TranscriptRef, Usage,
 };
 pub use attempt_file::{AttemptFile, AttemptFileClass};
-pub use canonical::{CanonicalBytes, CanonicalError, CanonicalV1, FileDigest, record_digest};
+pub use canonical::{
+    CanonicalBytes, CanonicalError, CanonicalV1, FileDigest, record_digest, stored_record_digest,
+};
 pub use finding::Finding;
 pub use input::{InputWarning, decode_input};
 pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};
