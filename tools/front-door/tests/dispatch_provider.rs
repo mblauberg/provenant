@@ -17,7 +17,7 @@ const HANDOFF_SECRET: &str = "sk-abcdefghijklmnopqrstuvwx";
 fn agy_lease_fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--version") {
-        println!("agy 1.0.0");
+        io::stdout().write_all(b"agy 1.0.0\n")?;
     } else if args.iter().any(|arg| arg == "/usage") {
         let log = args
             .windows(2)
@@ -27,7 +27,7 @@ fn agy_lease_fixture() -> Result {
             &log[1],
             "OAuth: authenticated successfully as fixture@example.test\n",
         )?;
-        println!("{{\"status\":\"SUCCESS\"}}");
+        io::stdout().write_all(b"{\"status\":\"SUCCESS\"}\n")?;
     } else {
         use std::os::unix::fs::MetadataExt;
         let prompt = args
@@ -54,10 +54,12 @@ fn agy_lease_fixture() -> Result {
             }
         }
         assert!(inspected > 0, "provider descriptors could not be inspected");
-        println!(
-            "{}",
-            json!({"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"lease-free provider started","error":null,"usage":{"input_tokens":0,"output_tokens":0}}})
-        );
+        io::stdout().write_all(
+            br#"{"event":"init","conversation_id":"fixture-session","init":{"model":"gemini-3.8-flash"}}"#,
+        )?;
+        io::stdout().write_all(b"\n")?;
+        let frame = json!({"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"## Findings\nlease-free provider started\n## Evidence\nNo descriptor matched the update lock.","error":null,"usage":{"input_tokens":0,"output_tokens":0}}});
+        io::stdout().write_all(format!("{frame}\n").as_bytes())?;
     }
     Ok(())
 }
