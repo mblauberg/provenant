@@ -200,7 +200,7 @@ fn command_task_feeds_an_attemptless_verdict_gate() -> Result {
     let rig = rig(
         json!({"gate-check":{"argv":["/bin/sh","-c","printf 'quoted verdict: FAIL\\n'; exit 0"]}}),
     )?;
-    let cleanup = rig.process_cleanup();
+    let _cleanup = rig.process_cleanup();
     fs::write(
         rig.project.join("graph.json"),
         serde_json::to_vec(&json!({
@@ -255,7 +255,6 @@ fn command_task_feeds_an_attemptless_verdict_gate() -> Result {
         assert!(std::time::Instant::now() < deadline, "{status}");
         std::thread::park_timeout(Duration::from_millis(50));
     }
-    cleanup.disarm();
     Ok(())
 }
 
@@ -277,7 +276,7 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         "tail":{"argv":["/bin/sh","-c","/usr/bin/yes x | /usr/bin/head -c 2000000; printf '\\nlast-output\\n'"]},
         "missing":{"argv":["/missing/command"]}
     }))?;
-    let cleanup = rig.process_cleanup();
+    let _cleanup = rig.process_cleanup();
     for (name, expected, verdict) in [
         ("pass", "succeeded", "PASS"),
         ("fail", "failed", "FAIL"),
@@ -310,7 +309,6 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         }
     }
     assert!(!rig.project.join("forbidden").exists());
-    cleanup.disarm();
     Ok(())
 }
 
@@ -320,7 +318,7 @@ fn command_dispatch_launches_when_the_store_fails_fast() -> Result {
         return Ok(());
     }
     let rig = rig(json!({"pass":{"argv":["/bin/sh","-c","printf 'hello\\n'"]}}))?;
-    let cleanup = rig.process_cleanup();
+    let _cleanup = rig.process_cleanup();
     let original = fs::read_to_string(rig.state.join("config.toml"))?;
     let mut config: toml_edit::DocumentMut = original.parse()?;
     config["domains"]["fabric"]["limits"]["store_busy_timeout_ms"] = toml_edit::value(0);
@@ -331,7 +329,6 @@ fn command_dispatch_launches_when_the_store_fails_fast() -> Result {
     fs::write(rig.state.join("config.toml"), original)?;
     let lane = settled(&rig, attempt_id(&submitted)?)?;
     assert_eq!(lane["state"], "succeeded", "{lane}");
-    cleanup.disarm();
     Ok(())
 }
 
@@ -343,7 +340,7 @@ fn command_custom_shebang_runtime_keeps_credentials_and_writes_denied() -> Resul
         return Ok(());
     }
     let rig = rig(json!({}))?;
-    let cleanup = rig.process_cleanup();
+    let _cleanup = rig.process_cleanup();
     let runtime = rig.root.join("custom-runtime/bin/interpreter");
     fs::create_dir_all(runtime.parent().ok_or("runtime parent")?)?;
     // A natively linked shim is signed by the linker; a copied platform
@@ -446,7 +443,6 @@ printf 'custom interpreter ran; credentials and writes denied\n'
     assert!(result.contains("VERDICT: PASS"), "{result}");
     assert!(!rig.project.join("forbidden").exists());
     assert!(!runtime.with_file_name("new-file").exists());
-    cleanup.disarm();
     Ok(())
 }
 
@@ -458,7 +454,7 @@ fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> 
     let rig = rig(
         json!({"slow":{"argv":["/bin/sh","-c","/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & child=$!; printf 'child=%s\\n' \"$child\"; wait"]}}),
     )?;
-    let cleanup = rig.process_cleanup();
+    let _cleanup = rig.process_cleanup();
     let first = dispatch(&rig, "slow", 2)?;
     let second = dispatch(&rig, "slow", 2)?;
     let id = attempt_id(&first)?;
@@ -506,7 +502,6 @@ fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> 
         0,
         "detached child {child} survived settlement"
     );
-    cleanup.disarm();
     Ok(())
 }
 
@@ -522,7 +517,7 @@ fn command_network_is_per_task_through_manifest_and_single_task_route() -> Resul
         "mf-off": reach, "mf-on": reach, "m-default": reach, "m-on": reach, "m-off": reach,
         "r-default": reach, "r-on": reach, "r-off": reach
     }))?;
-    let cleanup = rig.process_cleanup();
+    let _cleanup = rig.process_cleanup();
     for (name, via, network, state, reported) in [
         ("m-default", Via::Manifest(None), None, "succeeded", "open"),
         ("m-on", Via::Manifest(None), Some("on"), "succeeded", "open"),
@@ -559,6 +554,5 @@ fn command_network_is_per_task_through_manifest_and_single_task_route() -> Resul
             "{name}: {submitted}"
         );
     }
-    cleanup.disarm();
     Ok(())
 }
