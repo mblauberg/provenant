@@ -158,7 +158,9 @@ fn index(
     };
     loop {
         let page = store.lanes(&query, &call)?;
+        let before = candidates.len();
         for lane in page.lanes {
+            let matched = candidates.len();
             let run_matches = lane.run_id.to_string().starts_with(parts[0]);
             if parts.len() == 1 && run_matches {
                 candidates.push(Candidate {
@@ -186,11 +188,12 @@ fn index(
                     host: None,
                 });
             }
-            if candidates.len() >= 6 && ambiguous(&candidates) {
+            // Only a new match can change the verdict.
+            if candidates.len() > matched && candidates.len() >= 6 && ambiguous(&candidates) {
                 return Ok(candidates);
             }
         }
-        if ambiguous(&candidates) {
+        if candidates.len() > before && ambiguous(&candidates) {
             break;
         }
         match page.next {
@@ -335,6 +338,16 @@ pub(super) fn resolve(
             && candidates
                 .iter()
                 .any(|candidate| allow_run || candidate.target.attempt.is_some())
+        {
+            break;
+        }
+        // Another project cannot make an ambiguous prefix unique again.
+        if !exact
+            && candidates.len() > 1
+            && matches!(
+                choose(&selection, candidates.clone(), allow_run),
+                Err(fail) if fail.kind == super::ErrorKind::Conflict
+            )
         {
             break;
         }
