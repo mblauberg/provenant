@@ -2854,12 +2854,16 @@ mod tests {
     #[test]
     fn unreadable_writer_listing_still_judges_known_attempts()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::DirBuilderExt;
+
         let temp = tempfile::tempdir()?;
         let clock = crate::tests::clock();
         let cancel = provenant_core::CancelToken::new();
         let call = crate::tests::call(&clock, &cancel);
         let registry = temp.path().join("registry");
-        std::fs::create_dir(&registry)?;
+        // claim() also uses this as the private admission-ledger root.
+        // Its mode must not depend on the test runner's umask.
+        std::fs::DirBuilder::new().mode(0o700).create(&registry)?;
         std::fs::write(registry.join("worktrees"), b"not a directory")?;
         let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?
             .with_writer_registry(&registry);
