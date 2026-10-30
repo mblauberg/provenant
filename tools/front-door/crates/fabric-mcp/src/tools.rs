@@ -1201,7 +1201,14 @@ impl ToolCall {
                     | RunInput::Resume { operation_id, .. } => Some(operation_id.clone()),
                     _ => None,
                 };
-                let mut value = serde_json::to_value(service.facade.run(input, budget, cancel)?)?;
+                let wait = match &input {
+                    RunInput::Wait { condition, .. } => Some(*condition),
+                    _ => None,
+                };
+                let mut value = match service.facade.run(input, budget, cancel) {
+                    Ok(run) => serde_json::to_value(run)?,
+                    Err(error) => expired_wait(error, wait)?,
+                };
                 compact_run(&mut value)?;
                 if let Some(operation_id) = operation_id {
                     value["operation_id"] = serde_json::to_value(operation_id)?;
@@ -1214,7 +1221,14 @@ impl ToolCall {
                     | RunInput::Resume { operation_id, .. } => Some(operation_id.clone()),
                     _ => None,
                 };
-                let mut value = serde_json::to_value(service.facade.run(input, budget, cancel)?)?;
+                let wait = match &input {
+                    RunInput::Wait { condition, .. } => Some(*condition),
+                    _ => None,
+                };
+                let mut value = match service.facade.run(input, budget, cancel) {
+                    Ok(run) => serde_json::to_value(run)?,
+                    Err(error) => expired_wait(error, wait)?,
+                };
                 if let Some(operation_id) = operation_id {
                     value["operation_id"] = serde_json::to_value(operation_id)?;
                 }
@@ -1414,6 +1428,24 @@ fn compact_run(value: &mut Value) -> Result<(), ServiceError> {
         }
     }
     Ok(())
+}
+
+/// A wait whose budget expires before its first observation is still a
+/// timed-out wait, not a failed call. Report it as `SubmitWait` reports its own.
+fn expired_wait(
+    error: FacadeError,
+    condition: Option<WaitCondition>,
+) -> Result<Value, ServiceError> {
+    let Some(condition) = condition.filter(|_| matches!(error, FacadeError::Timeout)) else {
+        return Err(error.into());
+    };
+    Ok(serde_json::json!({
+        "result": "wait",
+        "condition": condition,
+        "satisfied": false,
+        "timed_out": true,
+        "observation_error": {"code": error.code(), "message": error.to_string(), "hint": "Repeat the wait with the same targets to keep observing the runs."}
+    }))
 }
 
 fn coverage_after_timeout(

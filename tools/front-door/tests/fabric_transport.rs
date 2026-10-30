@@ -1457,7 +1457,11 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     assert_eq!(status["attempt"]["attempt_id"], attempt.to_string());
     let wait_reply = replies.iter().find(|r| r["id"] == 2).ok_or("wait")?;
     assert!(wait_reply.get("error").is_none(), "{wait_reply}");
-    assert_ne!(wait_reply["result"]["isError"], true, "{wait_reply}");
+    // Success replies omit isError, which MCP defines as false.
+    assert!(
+        !wait_reply["result"]["isError"].as_bool().unwrap_or(false),
+        "{wait_reply}"
+    );
     let wait = &wait_reply["result"]["structuredContent"];
     assert_eq!(wait["timed_out"], true, "{wait_reply}");
     assert_eq!(wait["satisfied"], false, "{wait_reply}");
