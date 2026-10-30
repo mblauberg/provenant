@@ -82,10 +82,8 @@ impl Candidate {
     }
 }
 /// Callers only need to know whether a selection is unique, ambiguous or
-/// missing, so the lane history is read no further once the ambiguity report
-/// is provably complete: an ambiguity keeps holding over later pages, and
-/// the report names a bounded prefix of the matches instead of every prefix
-/// collision.
+/// missing, so stop reading lane history once two distinct targets match.
+/// Later pages cannot make an ambiguous selection unique.
 fn index(
     context: &run::ExecutionContext,
     selection: &str,
@@ -106,6 +104,16 @@ fn scan(
     selection: &str,
     allow_run: bool,
     page_limit: u64,
+) -> Result<Vec<Candidate>, Fail> {
+    scan_with(context, selection, allow_run, page_limit, || {})
+}
+
+fn scan_with(
+    context: &run::ExecutionContext,
+    selection: &str,
+    allow_run: bool,
+    page_limit: u64,
+    mut page_read: impl FnMut(),
 ) -> Result<Vec<Candidate>, Fail> {
     let clock = super::SystemClock::new();
     let cancel = super::CancelToken::new();
@@ -161,19 +169,11 @@ fn scan(
         unseen_after: None,
     };
     let mut candidates = Vec::new();
-    // Both stops judge through `choose` itself so the stop rule cannot drift
-    // from the selection semantics it reports, and both share one predicate:
-    // keep scanning until the matches `choose` would report already render as
-    // five names plus a proved remainder. Past that no later page can turn
-    // the prefix back into a unique match or a miss, and because the stops
-    // are the same test on the same list, where the page boundary falls
-    // cannot change what the conflict names.
-    let report_ready = |candidates: &[Candidate]| {
-        lane_matches(selection, candidates.to_owned(), allow_run).len() > 5
-    };
+    // Count the identities choose retains without repeatedly sorting candidates.
+    let mut distinct = std::collections::HashSet::new();
     loop {
+        page_read();
         let page = store.lanes(&query, &call)?;
-        let before = candidates.len();
         for lane in page.lanes {
             let matched = candidates.len();
             let run_matches = lane.run_id.to_string().starts_with(parts[0]);
@@ -204,12 +204,14 @@ fn scan(
                 });
             }
             // Only a new match can change the verdict.
-            if candidates.len() > matched && report_ready(&candidates) {
-                return Ok(candidates);
+            for candidate in &candidates[matched..] {
+                if let Some(selected) = match_candidate(&parts, candidate.clone(), allow_run)
+                    && distinct.insert((selected.name(), selected.project, selected.host))
+                    && distinct.len() > 1
+                {
+                    return Ok(candidates);
+                }
             }
-        }
-        if candidates.len() > before && report_ready(&candidates) {
-            break;
         }
         match page.next {
             Some(after) => query.after = after,
@@ -223,45 +225,46 @@ fn scan(
 /// scan's stop rule so it counts the names a conflict would actually report.
 fn lane_matches(selection: &str, candidates: Vec<Candidate>, allow_run: bool) -> Vec<Candidate> {
     let parts: Vec<_> = selection.split('/').collect();
-    let prefix = |id: Option<String>, part: &str| id.is_some_and(|id| id.starts_with(part));
-    let mut selected = Vec::new();
-    for mut candidate in candidates {
-        let target = &candidate.target;
-        let run_matches = prefix(target.run.map(|id| id.to_string()), parts[0])
-            || prefix(candidate.host.map(|id| id.to_string()), parts[0]);
-        let matched = match parts.as_slice() {
-            [id] => {
-                if target.attempt.is_some() {
-                    prefix(target.attempt.map(|id| id.to_string()), id)
-                } else {
-                    allow_run && prefix(target.run.map(|id| id.to_string()), id)
-                }
-            }
-            [_, id] if run_matches => {
-                if prefix(target.attempt.map(|id| id.to_string()), id) {
-                    true
-                } else if allow_run && prefix(target.task.map(|id| id.to_string()), id) {
-                    candidate.target.attempt = None;
-                    true
-                } else {
-                    false
-                }
-            }
-            [_, task, attempt] if run_matches => {
-                prefix(target.task.map(|id| id.to_string()), task)
-                    && prefix(target.attempt.map(|id| id.to_string()), attempt)
-            }
-            _ => false,
-        };
-        if matched {
-            selected.push(candidate);
-        }
-    }
+    let mut selected: Vec<_> = candidates
+        .into_iter()
+        .filter_map(|candidate| match_candidate(&parts, candidate, allow_run))
+        .collect();
     selected.sort_by_key(Candidate::name);
     selected.dedup_by(|left, right| {
         left.name() == right.name() && left.project == right.project && left.host == right.host
     });
     selected
+}
+fn match_candidate(parts: &[&str], mut candidate: Candidate, allow_run: bool) -> Option<Candidate> {
+    let prefix = |id: Option<String>, part: &str| id.is_some_and(|id| id.starts_with(part));
+    let target = &candidate.target;
+    let run_matches = prefix(target.run.map(|id| id.to_string()), parts[0])
+        || prefix(candidate.host.map(|id| id.to_string()), parts[0]);
+    let matched = match parts {
+        [id] => {
+            if target.attempt.is_some() {
+                prefix(target.attempt.map(|id| id.to_string()), id)
+            } else {
+                allow_run && prefix(target.run.map(|id| id.to_string()), id)
+            }
+        }
+        [_, id] if run_matches => {
+            if prefix(target.attempt.map(|id| id.to_string()), id) {
+                true
+            } else if allow_run && prefix(target.task.map(|id| id.to_string()), id) {
+                candidate.target.attempt = None;
+                true
+            } else {
+                false
+            }
+        }
+        [_, task, attempt] if run_matches => {
+            prefix(target.task.map(|id| id.to_string()), task)
+                && prefix(target.attempt.map(|id| id.to_string()), attempt)
+        }
+        _ => false,
+    };
+    matched.then_some(candidate)
 }
 pub(super) fn choose(
     selection: &str,
@@ -282,18 +285,13 @@ pub(super) fn choose(
             super::Status::Invalid,
             super::ErrorKind::Conflict,
             format!(
-                "ambiguous ID {selection}: {}{}; run `provenant help output` and retry with one full RUN/TASK/ATTEMPT ID",
+                "ambiguous ID {selection}: {} (list may be partial); run `provenant help output` and retry with one full RUN/TASK/ATTEMPT ID",
                 selected
                     .iter()
                     .take(5)
                     .map(Candidate::name)
                     .collect::<Vec<_>>()
-                    .join(", "),
-                if selected.len() > 5 {
-                    format!(", and {} more", selected.len() - 5)
-                } else {
-                    String::new()
-                }
+                    .join(", ")
             ),
         )),
     }
@@ -554,7 +552,11 @@ mod tests {
             false,
         )
         .expect_err("ambiguous attempt");
-        assert!(error.message.contains("and 3 more"), "{}", error.message);
+        assert!(
+            error.message.contains("list may be partial"),
+            "{}",
+            error.message
+        );
         assert!(
             error
                 .message
@@ -700,10 +702,8 @@ mod tests {
             }
         }
     }
-    /// Every retained lane in the fixture's store, read directly with the
-    /// production page size so full-history checks stay independent of the
-    /// scan's paging.
-    fn full_history_len(fixture: &ScanFixture) -> Result<usize, Box<dyn std::error::Error>> {
+    /// The first history page, read independently of the scan's paging.
+    fn first_page_len(fixture: &ScanFixture) -> Result<usize, Box<dyn std::error::Error>> {
         Ok(fixture
             .store
             .lanes(
@@ -818,11 +818,8 @@ mod tests {
         let error = choose(selection, scanned, true).expect_err("ambiguous prefix");
         assert_eq!(error.kind, super::super::ErrorKind::Conflict);
         assert!(error.message.contains("ambiguous ID"), "{}", error.message);
-        // Six of the seven sibling lanes share the prefix and the store holds
-        // them all, but the scan stopped once the report carried five matches
-        // plus a proved remainder: runs six and seven never render.
-        assert_eq!(full_history_len(&fixture)?, 7);
-        for tail in 1..=5 {
+        assert_eq!(first_page_len(&fixture)?, 7);
+        for tail in 1..=2 {
             assert!(
                 error
                     .message
@@ -831,9 +828,13 @@ mod tests {
                 error.message
             );
         }
-        assert!(error.message.contains("and 1 more"), "{}", error.message);
         assert!(
-            !error.message.contains(&shared_prefix_run_id(6).to_string()),
+            error.message.contains("list may be partial"),
+            "{}",
+            error.message
+        );
+        assert!(
+            !error.message.contains(&shared_prefix_run_id(3).to_string()),
             "{}",
             error.message
         );
@@ -898,8 +899,7 @@ mod tests {
     /// Eight runs under the shared run prefix `11111111`: run one with four
     /// attempt rows of its own (its tasks sit outside the sibling bytes) and
     /// seven single-attempt siblings, eleven lane rows in all, stored oldest
-    /// first. The sixth distinct run is therefore row nine, leaving rows ten
-    /// and eleven unread once the report is complete enough.
+    /// first. The second distinct run is therefore row five.
     fn prefix_scan_dataset(fixture: &ScanFixture) -> Result<(), Box<dyn std::error::Error>> {
         fixture.store.create(
             &shared_prefix_run(&[1, 0x0a, 0x0b, 0x0c], 0x40, &fixture.clock)?,
@@ -917,12 +917,10 @@ mod tests {
     fn conflict_report_matches_wherever_the_page_boundary_falls()
     -> Result<(), Box<dyn std::error::Error>> {
         let selection = "11111111";
-        // Paged at three, row nine ends the page holding it: the stop lands
-        // on a page boundary. Paged at two, row nine opens its page: the stop
-        // lands mid-page. Unpaged, the whole history sits on one page. One
-        // stop rule means the conflict report is the same in all three.
+        // Row five ends a five-row page and opens a two-row page.
+        // The production page size puts the stop mid-page too.
         let mut messages = Vec::new();
-        for limit in [2, 3, SCAN_PAGE] {
+        for limit in [2, 5, SCAN_PAGE] {
             let fixture = ScanFixture::open()?.with_page_limit(limit);
             prefix_scan_dataset(&fixture)?;
             let scanned = fixture.scan(selection, true).map_err(|f| f.message)?;
@@ -932,7 +930,7 @@ mod tests {
                 super::super::ErrorKind::Conflict,
                 "page limit {limit}"
             );
-            assert_eq!(full_history_len(&fixture)?, 11, "page limit {limit}");
+            assert_eq!(first_page_len(&fixture)?, 11, "page limit {limit}");
             messages.push(error.message);
         }
         assert!(
@@ -942,25 +940,50 @@ mod tests {
         );
         let message = &messages[0];
         assert!(message.contains("ambiguous ID"), "{}", message);
-        for tail in 1..=5 {
+        for tail in 1..=2 {
             assert!(
                 message.contains(&shared_prefix_run_id(tail).to_string()),
                 "{}",
                 message
             );
         }
-        assert!(message.contains("and 1 more"), "{}", message);
+        assert!(message.contains("list may be partial"), "{}", message);
         // Run one holds four of the eleven rows, but its four identical
         // candidates deduplicate into one reported run.
         let run_one = shared_prefix_run_id(1).to_string();
         assert_eq!(message.matches(&run_one).count(), 1, "{}", message);
-        for tail in 6..=8 {
+        for tail in 3..=8 {
             assert!(
                 !message.contains(&shared_prefix_run_id(tail).to_string()),
                 "{}",
                 message
             );
         }
+        Ok(())
+    }
+    #[test]
+    fn scan_stops_before_later_nonmatching_pages() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = ScanFixture::open()?;
+        for tail in (1..=2).chain(16..=45) {
+            fixture.store.create(
+                &shared_prefix_run(&[tail], tail + 0x20, &fixture.clock)?,
+                &fixture.call(),
+            )?;
+        }
+        assert_eq!(first_page_len(&fixture)?, 32);
+        let pages = std::cell::Cell::new(0);
+        let scanned = scan_with(&fixture.context, "111111110", true, 2, || {
+            pages.set(pages.get() + 1);
+        })
+        .map_err(|f| f.message)?;
+        assert_eq!(pages.get(), 1);
+        assert_eq!(scanned.len(), 2);
+        assert_eq!(
+            choose("111111110", scanned, true)
+                .expect_err("ambiguous")
+                .kind,
+            super::super::ErrorKind::Conflict
+        );
         Ok(())
     }
     #[test]
