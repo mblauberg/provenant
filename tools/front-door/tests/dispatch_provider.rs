@@ -338,10 +338,7 @@ fn settled_policy_lanes(
     output: provenant_os::exec::ExecOutcome,
     settled: i64,
 ) -> Result<Value> {
-    assert!(
-        code(&output) == settled || code(&output) == 0,
-        "{output:?}"
-    );
+    assert!(code(&output) == settled || code(&output) == 0, "{output:?}");
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
     let run_id = output["data"]["run_id"].as_str().ok_or("run ID")?;
     // Keep each command below the rig's ten-second watchdog while allowing
