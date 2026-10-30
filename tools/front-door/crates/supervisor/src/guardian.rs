@@ -26,9 +26,10 @@ use std::time::{Duration, Instant};
 #[cfg_attr(feature = "fixture", allow(dead_code))]
 const PRODUCTION_TERMINAL_RETRY_MS: [u64; 4] = [0, 5_000, 30_000, 120_000];
 // Fixture builds prove the retry path without spending five seconds on the
-// forged-row recovery case; production keeps the schedule above.
+// forged-row recovery case; production keeps the schedule above. The window
+// still has to outlast a test repairing the row on a slow CI host.
 #[cfg(feature = "fixture")]
-const TERMINAL_RETRY_MS: [u64; 4] = [0, 10, 20, 40];
+const TERMINAL_RETRY_MS: [u64; 4] = [0, 50, 250, 1_000];
 #[cfg(not(feature = "fixture"))]
 const TERMINAL_RETRY_MS: [u64; 4] = PRODUCTION_TERMINAL_RETRY_MS;
 

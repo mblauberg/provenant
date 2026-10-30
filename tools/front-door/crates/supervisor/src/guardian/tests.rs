@@ -1323,7 +1323,7 @@ fn production_terminal_retry_schedule_is_unchanged() {
 #[cfg(feature = "fixture")]
 #[test]
 fn fixture_terminal_retry_is_short_and_injected() {
-    assert_eq!(TERMINAL_RETRY_MS, [0, 10, 20, 40]);
+    assert_eq!(TERMINAL_RETRY_MS, [0, 50, 250, 1_000]);
     let mut attempts = 0;
     let mut waits = Vec::new();
     let settled = retry_terminal(
@@ -1337,7 +1337,7 @@ fn fixture_terminal_retry_is_short_and_injected() {
     assert_eq!(attempts, 2, "terminal is retried exactly once more");
     assert_eq!(
         waits,
-        [Duration::from_millis(10)],
+        [Duration::from_millis(50)],
         "fixture waits are injected, not slept"
     );
 }
