@@ -407,13 +407,15 @@ pub(crate) fn acquire_writer_with_observer(
             other => other.into(),
         })?;
     let lock_directory = directory;
-    // Old guardians kept their evidence in the slot itself. Another attempt's
-    // legacy record does not block a successor: the slot writer lock above
-    // already excludes a concurrent writer, and the successor's own evidence
-    // is inspected below. Its own legacy record, or one that cannot be trusted,
-    // still fences it before recovery has retained its writer head.
-    if legacy_record_fences(&lock_directory, scope)? {
-        return Err(CustodyError::Fenced);
+    // Old guardians kept their evidence in the slot itself. Do not admit a
+    // successor over that fence before recovery has retained its writer head.
+    // The slot lock alone does not prove exclusion: a legacy provider can close
+    // its inherited descriptor and keep writing while its guardian dies, so a
+    // valid record for any attempt keeps refusing admission.
+    match lock_directory.metadata_at(OsStr::new("reservation.json"), false) {
+        Ok(_) => return Err(CustodyError::Fenced),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
     }
     let directory = create_attempt_evidence(&lock_directory, scope)?;
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
@@ -529,12 +531,32 @@ fn legacy_record_fences(directory: &Directory, scope: Scope) -> provenant_os::fs
     }
     let fenced = match read_record::<Reservation>(directory, "reservation.json", RECORD_LIMIT) {
         Ok(record) => {
-            // Validation plus the slot anchor check used by recovery: a record
-            // whose anchor differs cannot be recovered and is not trusted to
-            // name a scope.
-            let anchored = directory.metadata().is_ok_and(|metadata| {
-                record.reservation_device == metadata.device
-                    && record.reservation_inode == metadata.inode
+            // Validation plus the anchor rule reboot recovery applies: the slot
+            // inode must match, and a device renumbering across a reboot still
+            // anchors the record while its recorded slot and attempt shared a
+            // device and the current slot and attempt still share one. Requiring
+            // an exact device would turn another attempt's renumbered record
+            // into an every-attempt fence ahead of this attempt's own evidence.
+            let anchored = directory.metadata().is_ok_and(|slot| {
+                if record.reservation_inode != slot.inode {
+                    return false;
+                }
+                if record.reservation_device == slot.device {
+                    return true;
+                }
+                let current_attempt = directory
+                    .open_verified_directory(OsStr::new(&scope.attempt.to_string()))
+                    .ok()
+                    .and_then(|attempt| attempt.metadata().ok())
+                    .map_or(slot.device, |attempt| attempt.device);
+                record.attempt_device.is_some_and(|recorded| {
+                    same_device_rebinding(
+                        record.reservation_device,
+                        recorded,
+                        slot.device,
+                        current_attempt,
+                    )
+                })
             });
             !anchored || record.validate().is_err() || record.scope.attempt == scope.attempt
         }

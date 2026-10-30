@@ -304,7 +304,48 @@ fn legacy_slot_root_record_does_not_fence_recovery_for_another_attempt() -> Test
 }
 
 #[test]
-fn legacy_slot_root_record_does_not_fence_a_successor_writer() -> TestResult {
+fn renumbered_legacy_slot_root_record_does_not_fence_another_attempt() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(root.path())?;
+    let path = base.join("writer");
+    std::fs::create_dir(&path)?;
+    let slot = Directory::open_anchor(&path)?;
+    let anchor = slot.metadata()?;
+    let mut record = legacy_reservation(scope(), &anchor);
+    // A reboot renumbered the device: the recorded slot and attempt devices
+    // still agree with each other but differ from the current slot.
+    record.launch_state = LaunchState::HandingOff;
+    record.reservation_device = anchor.device + 1;
+    record.attempt_device = Some(anchor.device + 1);
+    record.attempt_inode = Some(anchor.inode + 1);
+    publish_reservation(&slot, &record)?;
+    let mut successor = scope();
+    successor.attempt = AttemptId::from_bytes([9; 16]);
+    // The record is still anchored after the renumber, so it names another
+    // attempt rather than fencing every attempt.
+    assert!(!reservation_present(&slot, successor)?);
+    assert!(reservation_present(&slot, scope())?);
+    // The successor's own evidence still decides ahead of the record.
+    let own = path.join(successor.attempt.to_string());
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(&own)?;
+    let child = Directory::open_anchor(&own)?;
+    publish_reservation(&child, &legacy_reservation(successor, &child.metadata()?))?;
+    assert!(reservation_present(&slot, successor)?);
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let recovery = acquire_recovery(
+        slot.try_clone()?,
+        successor,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    assert_eq!(recovery.scope(), successor);
+    Ok(())
+}
+
+#[test]
+fn legacy_slot_root_record_fences_a_successor_writer() -> TestResult {
     let root = tempfile::tempdir()?;
     let base = std::fs::canonicalize(root.path())?;
     let path = base.join("writer");
@@ -324,14 +365,13 @@ fn legacy_slot_root_record_does_not_fence_a_successor_writer() -> TestResult {
             &clock,
         )
     };
-    let writer = admit(successor)?;
-    assert_eq!(writer.scope(), successor);
-    // The slot writer lock, not another attempt's legacy record, is what
-    // excludes a concurrent writer, so even the named attempt is busy.
-    assert!(matches!(admit(scope()), Err(CustodyError::Busy)));
-    writer.withdraw_unlaunched()?;
-    // With the lock released the named attempt's legacy record fences it.
+    // The slot lock does not prove exclusion on its own: a legacy provider can
+    // close its inherited descriptor and keep writing after its guardian dies.
+    // Any retained legacy record therefore refuses a successor writer.
+    assert!(matches!(admit(successor), Err(CustodyError::Fenced)));
+    // The attempt the record names is refused too, and the record is retained.
     assert!(matches!(admit(scope()), Err(CustodyError::Fenced)));
+    assert!(path.join("reservation.json").is_file());
     Ok(())
 }
 
