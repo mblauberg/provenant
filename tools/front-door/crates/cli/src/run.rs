@@ -12268,7 +12268,9 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
         let releases = state.join("releases");
-        let skills = releases.join("sha256:abc").join("skills");
+        let release =
+            releases.join(provenant_records::SourceDigest::from_bytes([1; 32]).to_string());
+        let skills = release.join("skills");
         std::fs::create_dir_all(&skills)?;
         std::fs::create_dir_all(state.join("projects"))?;
         let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
@@ -12286,9 +12288,19 @@ mod tests {
             granted.read_roots,
             [provenant_os::fs::canonicalize(&skills)?]
         );
+        assert!(lane_access(&access(vec![release.clone()], Vec::new()), &state).is_ok());
+        for invalid in ["not-a-digest", "sha256:abc", ".provenant-staging.fixture"] {
+            let root = releases.join(invalid).join("skills");
+            std::fs::create_dir_all(&root)?;
+            assert!(matches!(
+                lane_access_checked(&access(vec![root], Vec::new()), &state),
+                Err(AccessError::StateOverlap { .. })
+            ));
+        }
         for refused in [
             access(vec![releases.clone()], Vec::new()),
             access(vec![state.join("projects")], Vec::new()),
+            access(Vec::new(), vec![release]),
             access(Vec::new(), vec![skills.clone()]),
         ] {
             assert!(matches!(

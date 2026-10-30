@@ -2167,13 +2167,10 @@ impl RunStore {
                     let reason = UncertainReason::ReconcileFailed {
                         error: error.to_string(),
                     };
-                    crate::settlement::blocked(
-                        &self.attempt_dir(run, id, false)?,
-                        Self::scope(&self.record(id, call)?),
-                        &reason.to_string(),
-                        call.clock,
-                    )?;
-                    found.push((id, Reconciled::uncertain(reason)));
+                    found.push((
+                        id,
+                        self.track_reconcile_progress(run, id, Reconciled::uncertain(reason), call),
+                    ));
                 }
                 if found.is_empty() {
                     return Err(error);
@@ -2197,23 +2194,38 @@ impl RunStore {
                     }))
                 });
             if let Some(state) = state {
-                if let Reconciled::Uncertain { reason } = &state {
-                    crate::settlement::blocked(
-                        &self.attempt_dir(run, id, false)?,
-                        Self::scope(&self.record(id, call)?),
-                        &reason.to_string(),
-                        call.clock,
-                    )?;
-                } else {
-                    crate::settlement::clear_blocked(
-                        &self.attempt_dir(run, id, false)?,
-                        Self::scope(&self.record(id, call)?),
-                    )?;
-                }
-                found.push((id, state));
+                found.push((id, self.track_reconcile_progress(run, id, state, call)));
             }
         }
         Ok(found)
+    }
+    /// Progress is advisory: a broken attempt must not hide its peers' results.
+    fn track_reconcile_progress(
+        &self,
+        run: RunId,
+        id: AttemptId,
+        state: Reconciled,
+        call: &Request<'_>,
+    ) -> Reconciled {
+        let progress = (|| {
+            let scope = Self::scope(&self.record(id, call)?);
+            let directory = self.attempt_dir(run, id, false)?;
+            if let Reconciled::Uncertain { reason } = &state {
+                crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
+            } else {
+                crate::settlement::clear_blocked(&directory, scope)
+            }
+        })();
+        if let Err(error) = progress {
+            let outcome = match &state {
+                Reconciled::Uncertain { reason } => reason.to_string(),
+                _ => format!("{state:?}"),
+            };
+            return Reconciled::uncertain(UncertainReason::ReconcileFailed {
+                error: format!("{outcome}; settlement progress update failed: {error}"),
+            });
+        }
+        state
     }
     fn withdraw_prepared_writer(&self, fence: &WriterFence, call: &Request<'_>) -> Result<bool> {
         let directory = fence.custody_directory().ok_or_else(|| {
@@ -2675,6 +2687,135 @@ enum Held {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconcile_journal_errors_do_not_hide_other_attempts()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for failure in ["clear", "blocked", "listing"] {
+            let temp = tempfile::tempdir()?;
+            let clock = crate::tests::clock();
+            let cancel = provenant_core::CancelToken::new();
+            let call = crate::tests::call(&clock, &cancel);
+            let context = crate::tests::context(temp.path())?;
+            let registry = temp.path().join("registry");
+            std::fs::create_dir(&registry)?;
+            if failure == "listing" {
+                std::fs::write(registry.join("worktrees"), b"not a directory")?;
+            }
+            let store = RunStore::open(&context, &call)?.with_writer_registry(&registry);
+            let mut run = crate::tests::input();
+            let bad = run.attempts[0].attempt_id;
+            let good = AttemptId::from_bytes([7; 16]);
+            let mut task = run.request.tasks[0].clone();
+            task.task_id = provenant_core::TaskId::from_bytes([8; 16]);
+            run.attempts.push(crate::NewAttempt {
+                attempt_id: good,
+                task_id: task.task_id,
+                prompt: run.attempts[0].prompt.clone(),
+            });
+            run.request.tasks.push(task);
+            store.create(&run, &call)?;
+            if failure == "blocked" {
+                store.mark_starting(
+                    &store.record(bad, &call)?,
+                    &crate::tests::route(),
+                    &[],
+                    &Default::default(),
+                    None,
+                    &call,
+                )?;
+                crate::artifacts::seal(
+                    &store.attempt_dir(run.run_id, bad, false)?,
+                    "launch.json",
+                    b"{}",
+                    RECORD_LIMIT,
+                )?;
+            }
+            // Make journal I/O fail without relying on disk capacity or permissions.
+            std::fs::create_dir(context.state_root.as_path().join(format!(
+                "runs/{}/attempts/{bad}/settlement-progress.json",
+                run.run_id
+            )))?;
+            let found = store.reconcile_with_observer(
+                run.run_id,
+                &crate::dispatch_tests::Fake::default(),
+                &call,
+                &SystemProcessObserver,
+            )?;
+            assert_eq!(found.len(), 2, "{failure}: {found:?}");
+            assert!(
+                matches!(
+                    &found[0],
+                    (id, Reconciled::Uncertain { reason })
+                        if *id == bad && reason.to_string().contains("settlement progress")
+                ),
+                "{failure}: {found:?}"
+            );
+            if failure == "listing" {
+                assert!(matches!(&found[1], (id, Reconciled::Uncertain { .. }) if *id == good));
+                assert!(
+                    read_sealed(
+                        &store.attempt_dir(run.run_id, good, false)?,
+                        "settlement-progress.json",
+                        RECORD_LIMIT,
+                    )?
+                    .is_some()
+                );
+            } else {
+                assert_eq!(found[1], (good, Reconciled::Queued));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_reports_an_orphan_fence_without_losing_known_attempts()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let orphan = AttemptId::from_bytes([7; 16]);
+        let slot = context
+            .state_root
+            .as_path()
+            .join("worktrees")
+            .join(context.project_id.to_string())
+            .join("orphan");
+        std::fs::create_dir_all(&slot)?;
+        drop(custody::acquire_reader(
+            provenant_os::fs::Directory::open_anchor(&slot)?,
+            Scope {
+                run: run.run_id,
+                attempt: orphan,
+                generation: 1,
+            },
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?);
+        assert!(matches!(
+            store.record(orphan, &call),
+            Err(RunError::NotFound)
+        ));
+        store.attempt_dir(run.run_id, orphan, true)?;
+        assert_eq!(store.writer_fences()?.len(), 1);
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0], (run.attempts[0].attempt_id, Reconciled::Queued));
+        assert!(matches!(&found[1], (id, Reconciled::Uncertain { reason })
+            if *id == orphan && reason.to_string().contains(&RunError::NotFound.to_string())));
+        Ok(())
+    }
 
     #[test]
     fn uncertain_reasons_serialise_by_kind_and_keep_their_text() {

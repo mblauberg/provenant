@@ -419,18 +419,20 @@ pub enum RefusalKind {
     Handoff,
 }
 
-/// A child's network reach may not exceed its parent's, each write root must
-/// sit inside a parent write root and each read root inside any parent root.
-/// The lane wrote the child's roots, so the host repeats the submission
-/// edge's checks against its own filesystem view: a root counts only while it
-/// is an existing directory, already canonical and clear of the state root.
 /// Check a canonical root against state, allowing installed releases for reads.
 pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read: bool) -> bool {
     let releases = state.join("releases");
-    (read && root.starts_with(&releases) && root != releases)
-        || (!root.starts_with(state) && !state.starts_with(root))
+    let release = root.strip_prefix(&releases).ok().is_some_and(|relative| {
+        matches!(relative.components().next(), Some(std::path::Component::Normal(digest))
+            if digest.to_str().is_some_and(|text| provenant_records::SourceDigest::parse(text).is_ok()))
+    });
+    (read && release) || (!root.starts_with(state) && !state.starts_with(root))
 }
 
+/// A child's network reach may not exceed its parent's, each write root must
+/// sit inside a parent write root and each read root inside any parent root.
+/// The host repeats submission checks: roots must be existing canonical
+/// directories, clear of state except installed release roots granted for reads.
 fn child_access_within(
     parent: &TaskRequest,
     child: &TaskRequest,
@@ -493,7 +495,9 @@ mod release_root_tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let state = std::fs::canonicalize(temp.path())?.join("state");
-        let release = state.join("releases/digest");
+        let release = state
+            .join("releases")
+            .join(provenant_records::SourceDigest::from_bytes([1; 32]).to_string());
         let skills = release.join("skills");
         std::fs::create_dir_all(&skills)?;
         std::fs::create_dir_all(state.join("projects"))?;
@@ -502,7 +506,9 @@ mod release_root_tests {
         let mut child = parent.clone();
         child.access.read_roots = vec![skills.clone()];
         assert!(child_access_within(&parent, &child, &state).is_ok());
-        let other = state.join("releases/other");
+        let other = state
+            .join("releases")
+            .join(provenant_records::SourceDigest::from_bytes([2; 32]).to_string());
         std::fs::create_dir_all(&other)?;
         child.access.read_roots = vec![other];
         assert!(child_access_within(&parent, &child, &state).is_err());
@@ -510,7 +516,10 @@ mod release_root_tests {
             state.join("releases"),
             state.join("projects"),
             state.clone(),
+            state.join("releases/not-a-digest/skills"),
+            state.join("releases/.provenant-staging.fixture/skills"),
         ] {
+            std::fs::create_dir_all(&root)?;
             parent.access.read_roots = vec![root.clone()];
             child.access.read_roots = vec![root];
             assert!(child_access_within(&parent, &child, &state).is_err());
