@@ -692,8 +692,15 @@ impl RunStore {
         let raw = read_sealed(&self.run_dir(run, false)?, "request.json", RECORD_LIMIT)?
             .ok_or(RunError::NotFound)?;
         let request: CanonicalRequest = decode(&raw)?;
-        if request.digest()? != self.run(run, call)?.request_digest {
-            return Err(RunError::ArtifactMismatch);
+        let digest = request.digest()?;
+        let stored = self.run(run, call)?.request_digest;
+        if digest != stored {
+            return Err(RunError::artifact_mismatch(
+                ArtifactCheck::RequestDigest,
+                "request.json",
+                Some(ArtifactValue::digest(stored)),
+                Some(ArtifactValue::digest(digest)),
+            ));
         }
         Ok(request)
     }

@@ -3527,7 +3527,7 @@ fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> 
 
 fn graph_result_warning(error: &provenant_run::RunError) -> &'static str {
     match error {
-        provenant_run::RunError::ArtifactMismatch => {
+        provenant_run::RunError::ArtifactMismatch(_) => {
             "artifact digest or length does not match its record"
         }
         provenant_run::RunError::NotFound => "result artifact is missing",
@@ -6888,7 +6888,12 @@ mod result_tests {
         use provenant_run::RunError;
         for (error, warning) in [
             (
-                RunError::ArtifactMismatch,
+                RunError::ArtifactMismatch(provenant_run::ArtifactProvenance {
+                    check: provenant_run::ArtifactCheck::RecordedDigest,
+                    artifact: "result.md".into(),
+                    expected: None,
+                    actual: None,
+                }),
                 "artifact digest or length does not match its record",
             ),
             (RunError::NotFound, "result artifact is missing"),
@@ -9023,7 +9028,15 @@ mod peer_tests {
                 provenant_run::RunError::Validation("input"),
                 "invalid_input",
             ),
-            (provenant_run::RunError::ArtifactMismatch, "state_corrupt"),
+            (
+                provenant_run::RunError::ArtifactMismatch(provenant_run::ArtifactProvenance {
+                    check: provenant_run::ArtifactCheck::RecordedDigest,
+                    artifact: "result.md".into(),
+                    expected: None,
+                    actual: None,
+                }),
+                "state_corrupt",
+            ),
             (provenant_run::RunError::Refused, "confinement_refused"),
             (provenant_run::RunError::Capacity, "busy"),
         ] {

@@ -113,7 +113,12 @@ impl RunStore {
             return Err(RunError::unsafe_entry(&dir, OsStr::new("result.md"), check));
         }
         if before.size != artifact.bytes {
-            return Err(RunError::ArtifactMismatch);
+            return Err(RunError::artifact_mismatch(
+                ArtifactCheck::RecordedLength,
+                "result.md",
+                Some(ArtifactValue::Length(artifact.bytes)),
+                Some(ArtifactValue::Length(before.size)),
+            ));
         }
         let mut hash = Sha256::new();
         let mut redactor = provenant_confinement::redact::Redactor::new([])
@@ -128,7 +133,12 @@ impl RunStore {
             }
             total = total.saturating_add(count as u64);
             if total > artifact.bytes {
-                return Err(RunError::ArtifactMismatch);
+                return Err(RunError::artifact_mismatch(
+                    ArtifactCheck::Stream,
+                    "result.md",
+                    Some(ArtifactValue::Length(artifact.bytes)),
+                    Some(ArtifactValue::Length(total)),
+                ));
             }
             hash.update(&buffer[..count]);
             let safe = redactor
@@ -137,11 +147,29 @@ impl RunStore {
             capture.push(&safe);
         }
         let digest = provenant_records::FileDigest::from_bytes(hash.finalize().into());
-        if total != artifact.bytes
-            || digest != artifact.digest
-            || !before.unchanged(&file.metadata()?)
-        {
-            return Err(RunError::ArtifactMismatch);
+        if total != artifact.bytes {
+            return Err(RunError::artifact_mismatch(
+                ArtifactCheck::Stream,
+                "result.md",
+                Some(ArtifactValue::Length(artifact.bytes)),
+                Some(ArtifactValue::Length(total)),
+            ));
+        }
+        if digest != artifact.digest {
+            return Err(RunError::artifact_mismatch(
+                ArtifactCheck::RecordedDigest,
+                "result.md",
+                Some(ArtifactValue::digest(artifact.digest)),
+                Some(ArtifactValue::digest(digest)),
+            ));
+        }
+        if !before.unchanged(&file.metadata()?) {
+            return Err(RunError::artifact_mismatch(
+                ArtifactCheck::Stream,
+                "result.md",
+                None,
+                None,
+            ));
         }
         let safe = redactor
             .finish()
@@ -198,10 +226,23 @@ impl RunStore {
                     return Err(RunError::unsafe_entry(&dir, name, check));
                 }
                 let bytes = dir.read_bounded(name, limit)?;
-                if bytes.len() as u64 != artifact.bytes
-                    || CanonicalV1::file_digest(&bytes) != artifact.digest
-                {
-                    return Err(RunError::ArtifactMismatch);
+                let length = bytes.len() as u64;
+                if length != artifact.bytes {
+                    return Err(RunError::artifact_mismatch(
+                        ArtifactCheck::RecordedLength,
+                        path.as_path().display().to_string(),
+                        Some(ArtifactValue::Length(artifact.bytes)),
+                        Some(ArtifactValue::Length(length)),
+                    ));
+                }
+                let digest = CanonicalV1::file_digest(&bytes);
+                if digest != artifact.digest {
+                    return Err(RunError::artifact_mismatch(
+                        ArtifactCheck::RecordedDigest,
+                        path.as_path().display().to_string(),
+                        Some(ArtifactValue::digest(artifact.digest)),
+                        Some(ArtifactValue::digest(digest)),
+                    ));
                 }
                 return Ok(bytes);
             }
@@ -275,8 +316,14 @@ pub(crate) fn seal(dir: &Directory, name: &str, content: &[u8], limit: u64) -> R
     match dir.atomic_write(OsStr::new(name), ".run-", content, PublishMode::NoReplace) {
         Ok(publication) => publication.require_durable().map_err(RunError::Publication),
         Err(e) if e.is_exists() => {
-            if read_sealed(dir, name, limit)?.ok_or(RunError::Conflict)? != content {
-                return Err(RunError::ArtifactMismatch);
+            let sealed = read_sealed(dir, name, limit)?.ok_or(RunError::Conflict)?;
+            if sealed != content {
+                return Err(RunError::artifact_mismatch(
+                    ArtifactCheck::SealConflict,
+                    name,
+                    Some(ArtifactValue::digest(CanonicalV1::file_digest(&sealed))),
+                    Some(ArtifactValue::digest(CanonicalV1::file_digest(content))),
+                ));
             }
             Ok(())
         }
@@ -394,6 +441,90 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "run-store path process.json is not private or contained: mode"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn seal_conflict_names_the_sealed_and_proposed_digests() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let dir = Directory::open_anchor(temp.path())?;
+        seal(&dir, "result.md", b"hello", 1024)?;
+        seal(&dir, "result.md", b"hello", 1024)?;
+        assert_eq!(
+            crate::tests::artifact_provenance(seal(&dir, "result.md", b"hellp", 1024)),
+            ArtifactProvenance {
+                check: ArtifactCheck::SealConflict,
+                artifact: "result.md".into(),
+                expected: Some(crate::tests::digest_prefix(CanonicalV1::file_digest(
+                    b"hello"
+                ))),
+                actual: Some(crate::tests::digest_prefix(CanonicalV1::file_digest(
+                    b"hellp"
+                ))),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_read_names_the_recorded_length_or_digest_that_failed() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = crate::tests::context(temp.path())?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        seal(
+            &store.attempt_dir(run.run_id, id, false)?,
+            "result.md",
+            b"hello",
+            1024,
+        )?;
+        let path = artifact_path(id, "result.md")?;
+        let record = |bytes: u64, digest: provenant_records::FileDigest| ArtifactRecord {
+            extra: Default::default(),
+            path: path.clone(),
+            digest,
+            bytes,
+            complete: true,
+            redacted: false,
+        };
+        let honest = record(5, CanonicalV1::file_digest(b"hello"));
+        assert_eq!(store.artifact_bytes(run.run_id, &honest, 1024)?, b"hello");
+        let artifact = format!("attempts/{id}/result.md");
+        assert_eq!(
+            crate::tests::artifact_provenance(store.artifact_bytes(
+                run.run_id,
+                &record(6, CanonicalV1::file_digest(b"hello")),
+                1024
+            )),
+            ArtifactProvenance {
+                check: ArtifactCheck::RecordedLength,
+                artifact: artifact.clone(),
+                expected: Some(ArtifactValue::Length(6)),
+                actual: Some(ArtifactValue::Length(5)),
+            }
+        );
+        assert_eq!(
+            crate::tests::artifact_provenance(store.artifact_bytes(
+                run.run_id,
+                &record(5, CanonicalV1::file_digest(b"hellp")),
+                1024
+            )),
+            ArtifactProvenance {
+                check: ArtifactCheck::RecordedDigest,
+                artifact,
+                expected: Some(crate::tests::digest_prefix(CanonicalV1::file_digest(
+                    b"hellp"
+                ))),
+                actual: Some(crate::tests::digest_prefix(CanonicalV1::file_digest(
+                    b"hello"
+                ))),
+            }
         );
         Ok(())
     }
