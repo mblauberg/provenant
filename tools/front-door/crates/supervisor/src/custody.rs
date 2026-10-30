@@ -598,6 +598,20 @@ fn recovery_evidence(directory: &Directory, scope: Scope) -> provenant_os::fs::R
     child.metadata_at(OsStr::new("reservation.json"), false)?;
     Ok(child)
 }
+/// Observe a guardian identity from scoped, inode-validated reservation evidence.
+pub fn reservation_guardian(
+    directory: &Directory,
+    scope: Scope,
+) -> Result<Option<ProcessIdentity>> {
+    let evidence = recovery_evidence(directory, scope)?;
+    let reservation: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
+    validate_anchor(&evidence, &reservation)?;
+    if reservation.scope != scope {
+        return Err(CustodyError::InvalidRecord);
+    }
+    Ok(reservation.guardian)
+}
+
 fn create_attempt_evidence(directory: &Directory, scope: Scope) -> Result<Directory> {
     let name = scope.attempt.to_string();
     match directory.mkdir(OsStr::new(&name), 0o700) {

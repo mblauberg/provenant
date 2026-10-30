@@ -207,6 +207,8 @@ pub enum UncertainReason {
     ExitWithoutLaunchSummary,
     /// The guardian is neither alive nor finished as far as can be seen.
     GuardianNotObservable,
+    /// A recorded supervisor is stuck in uninterruptible sleep.
+    HostStalled,
     /// A launch was handed to a writer whose custody is unconfirmed.
     WriterCustodyUnconfirmed { reservation: std::path::PathBuf },
     /// A writer reservation outlived the attempt's terminal commit.
@@ -260,6 +262,9 @@ impl std::fmt::Display for UncertainReason {
             Self::CustodyNotProvablyAbsent => f.write_str("launch custody is not provably absent"),
             Self::ExitWithoutLaunchSummary => f.write_str("exit exists without a launch summary"),
             Self::GuardianNotObservable => f.write_str("guardian is not observable"),
+            Self::HostStalled => {
+                f.write_str("host_stalled: supervisor is in uninterruptible sleep")
+            }
             Self::WriterCustodyUnconfirmed { reservation } => write!(
                 f,
                 "writer custody is unconfirmed; reservation retained at {}; chair recovery required",
@@ -280,6 +285,44 @@ const ORPHAN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
 mod reboot_tests {
     use super::*;
+
+    #[test]
+    fn missing_terminal_attempt_directory_does_not_abort_reconcile()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let record = store.record(id, &call)?;
+        store.commit_lost(RunStore::scope(&record), "fixture", &call)?;
+        store.set_temporary_retained(id, true, &call)?;
+        let path = context
+            .state_root
+            .as_path()
+            .join(format!("runs/{}/attempts/{id}", run.run_id));
+        std::fs::rename(path, temp.path().join("missing-attempt"))?;
+        store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn reader_refusal_published_before_recovery_exclusion_is_not_lost()
@@ -1144,6 +1187,12 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         if matches!(record.state, AttemptState::Queued { .. }) {
+            return Ok(None);
+        }
+        if matches!(record.state, AttemptState::Terminal { .. })
+            && matches!(self.attempt_dir(record.run_id, record.attempt_id, false), Err(RunError::Filesystem(error)) if error.is_not_found())
+        {
+            // Terminal cleanup handles the missing directory and any writer fence.
             return Ok(None);
         }
         if Self::needs_lost_settlement(record)
@@ -2244,6 +2293,15 @@ impl RunStore {
         state: Reconciled,
         call: &Request<'_>,
     ) -> Reconciled {
+        if matches!(
+            &state,
+            Reconciled::Uncertain {
+                reason: UncertainReason::HostStalled
+            }
+        ) {
+            // A transient host stall must not consume recovery attempts.
+            return state;
+        }
         let progress = (|| {
             let scope = Self::scope(&self.record(id, call)?);
             let directory = self.attempt_dir(run, id, false)?;
@@ -2615,6 +2673,13 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         let record = self.record(id, call)?;
+        if !matches!(record.state, AttemptState::Queued { .. })
+            && self
+                .attempt_dir(record.run_id, id, false)
+                .is_ok_and(|attempt| self.supervisor_stalled(&attempt, Self::scope(&record)))
+        {
+            return Ok(Some(Reconciled::uncertain(UncertainReason::HostStalled)));
+        }
         if matches!(record.state, AttemptState::Terminal { .. }) {
             return self.reconcile_terminal_temporary(&record, call, observer);
         }
