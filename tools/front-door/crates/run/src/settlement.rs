@@ -38,6 +38,10 @@ struct Journal {
     owner_since_ms: u64,
     #[serde(default)]
     retry_after_ms: u64,
+    #[serde(default)]
+    recovery_failures: u32,
+    #[serde(default)]
+    blocking_reason: Option<String>,
 }
 
 fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
@@ -53,6 +57,8 @@ fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
             owner: None,
             owner_since_ms: 0,
             retry_after_ms: 0,
+            recovery_failures: 0,
+            blocking_reason: None,
         },
     };
     if journal.schema_version != 1 || journal.scope != scope || journal.attempts > LIMIT {
@@ -72,6 +78,40 @@ fn write(attempt: &Directory, journal: &Journal) -> Result<()> {
             PublishMode::Replace,
         )?
         .require_durable()?;
+    Ok(())
+}
+
+/// Custody can fail before the import driver exists. Retain those failures too,
+/// so readers report the cause and cannot repeatedly launch ineffective workers.
+pub(crate) fn blocked(
+    attempt: &Directory,
+    scope: Scope,
+    reason: &str,
+    clock: &dyn Clock,
+) -> Result<()> {
+    let _lock = journal_lock(attempt)?;
+    let mut journal = read(attempt, scope)?;
+    let now = now_ms(clock)?;
+    if journal
+        .owner
+        .as_ref()
+        .is_some_and(|owner| alive(owner, journal.owner_since_ms, now))
+    {
+        return Ok(());
+    }
+    journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
+    journal.blocking_reason = Some(provenant_confinement::redact::bounded_line(reason, 4096));
+    journal.retry_after_ms = now.saturating_add(backoff_ms(journal.recovery_failures));
+    write(attempt, &journal)
+}
+
+pub(crate) fn clear_blocked(attempt: &Directory, scope: Scope) -> Result<()> {
+    let _lock = journal_lock(attempt)?;
+    let mut journal = read(attempt, scope)?;
+    if journal.blocking_reason.take().is_some() {
+        journal.recovery_failures = 0;
+        write(attempt, &journal)?;
+    }
     Ok(())
 }
 
@@ -340,6 +380,124 @@ mod tests {
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
+    #[test]
+    fn preclaim_failures_report_the_cause_bound_background_spawns_and_allow_explicit_retry()
+    -> TestResult {
+        use crate::{AttemptState, Reconciled, RunStore};
+        let temp = tempfile::tempdir()?;
+        let mut clock = clock();
+        let cancel = CancelToken::new();
+        let store = RunStore::open(
+            &crate::tests::context(temp.path())?,
+            &crate::tests::call(&clock, &cancel),
+        )?;
+        let run = crate::tests::input();
+        let call = crate::tests::call(&clock, &cancel);
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        crate::artifacts::seal(&attempt, "launch.json", b"{}", RECORD_LIMIT)?;
+        let scope = RunStore::scope(&store.record(id, &call)?);
+        for index in 1..=LIMIT {
+            let call = crate::tests::call(&clock, &cancel);
+            let found = store.reconcile_with_observer(
+                run.run_id,
+                &crate::dispatch_tests::Fake::default(),
+                &call,
+                &SystemProcessObserver,
+            )?;
+            assert!(matches!(
+                found.as_slice(),
+                [(_, Reconciled::Uncertain { .. })]
+            ));
+            let journal = read(&attempt, scope)?;
+            assert_eq!(journal.attempts, 0, "failure precedes import claim");
+            assert_eq!(journal.recovery_failures, index);
+            assert!(journal.owner.is_none());
+            let queued = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+                panic!("cooldown must prevent another worker");
+            })?;
+            assert!(
+                matches!(queued.as_slice(), [(_, Reconciled::Uncertain { reason })] if reason.to_string().contains("invalid"))
+            );
+            advance_to(&mut clock, journal.retry_after_ms)?;
+        }
+        let call = crate::tests::call(&clock, &cancel);
+        for _ in 0..4 {
+            store.queue_reconcile_with(run.run_id, &call, |_, _| {
+                panic!("exhausted recovery must stay bounded after cooldown");
+            })?;
+        }
+        let mut spawned = false;
+        store.queue_reconcile_mode(
+            run.run_id,
+            &call,
+            |_, _| {
+                spawned = true;
+                Ok(())
+            },
+            true,
+        )?;
+        assert!(
+            spawned,
+            "an explicit reconcile permits another bounded recovery"
+        );
+        assert_eq!(read(&attempt, scope)?.recovery_failures, 0);
+        attempt.unlink(OsStr::new("launch.json"))?;
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "scope":scope, "requester": store.context.actor_id
+            }))?,
+            RECORD_LIMIT,
+        )?;
+        let ProcessObservation::Present(current) = provenant_supervisor::census::current_process()
+        else {
+            return Err("current process identity unavailable".into());
+        };
+        crate::artifacts::seal(
+            &attempt,
+            "process.json",
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "scope":scope, "guardian":current.identity
+            }))?,
+            RECORD_LIMIT,
+        )?;
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(found.as_slice(), [(_, Reconciled::Held)]));
+        assert!(
+            read(&attempt, scope)?.blocking_reason.is_none(),
+            "a live holder clears an obsolete failure"
+        );
+        attempt.unlink(OsStr::new("launch.json"))?;
+        attempt.unlink(OsStr::new("process.json"))?;
+        store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal { .. }
+        ));
+        Ok(())
+    }
+
     fn scope() -> Scope {
         Scope {
             run: RunId::from_bytes([1; 16]),
@@ -569,6 +727,8 @@ pub(crate) fn complete(attempt: &Directory, scope: Scope) -> Result<()> {
     let mut journal = read(attempt, scope)?;
     journal.phase = Phase::Complete;
     journal.owner = None;
+    journal.blocking_reason = None;
+    journal.recovery_failures = 0;
     write(attempt, &journal)
 }
 
@@ -608,7 +768,7 @@ impl crate::RunStore {
         run: provenant_core::RunId,
         call: &crate::Request<'_>,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
-        self.queue_reconcile_with(run, call, provenant_os::exec::spawn_detached)
+        self.queue_reconcile_mode(run, call, provenant_os::exec::spawn_detached, true)
     }
 
     pub(crate) fn queue_reconcile_with(
@@ -619,6 +779,19 @@ impl crate::RunStore {
             &[std::ffi::OsString],
             &std::path::Path,
         ) -> std::result::Result<(), provenant_os::exec::ExecError>,
+    ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
+        self.queue_reconcile_mode(run, call, spawn, false)
+    }
+
+    fn queue_reconcile_mode(
+        &self,
+        run: provenant_core::RunId,
+        call: &crate::Request<'_>,
+        spawn: impl FnOnce(
+            &[std::ffi::OsString],
+            &std::path::Path,
+        ) -> std::result::Result<(), provenant_os::exec::ExecError>,
+        explicit: bool,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
         self.run(run, call)?;
         let attempts = self.pending_attempts(run, call)?;
@@ -639,6 +812,12 @@ impl crate::RunStore {
             let directory = self.attempt_dir(run, attempt.attempt_id, false)?;
             let scope = Self::scope(attempt);
             let journal = read(&directory, scope)?;
+            if !explicit
+                && (journal.recovery_failures >= LIMIT
+                    || (journal.blocking_reason.is_some() && now < journal.retry_after_ms))
+            {
+                continue;
+            }
             if journal
                 .owner
                 .as_ref()
@@ -680,6 +859,16 @@ impl crate::RunStore {
             .transpose()?
             .is_some_and(|request| wall < request.expires);
         if needs_worker && spawn_lock.is_some() && worker_lock.is_some() && !pending {
+            if explicit {
+                for attempt in &attempts {
+                    let directory = self.attempt_dir(run, attempt.attempt_id, false)?;
+                    let _lock = journal_lock(&directory)?;
+                    let mut journal = read(&directory, Self::scope(attempt))?;
+                    // Keep the last reason visible until recovery succeeds.
+                    journal.recovery_failures = 0;
+                    write(&directory, &journal)?;
+                }
+            }
             let checkout = std::env::current_dir()?;
             let home = std::env::var_os("HOME")
                 .map(std::path::PathBuf::from)
@@ -739,14 +928,26 @@ impl crate::RunStore {
                         crate::AttemptState::Queued { .. } => crate::Reconciled::Queued,
                         crate::AttemptState::Terminal { .. } => crate::Reconciled::Finished,
                         _ => {
-                            let phase = self
-                                .attempt_dir(run, attempt.attempt_id, false)
-                                .and_then(|directory| {
-                                    read(&directory, crate::RunStore::scope(&attempt))
-                                })
-                                .map(|journal| format!("{:?}", journal.phase).to_ascii_lowercase())
-                                .unwrap_or_else(|_| "provider_exit".into());
-                            crate::Reconciled::Settling { phase }
+                            let journal =
+                                self.attempt_dir(run, attempt.attempt_id, false).and_then(
+                                    |directory| read(&directory, crate::RunStore::scope(&attempt)),
+                                );
+                            match journal {
+                                Ok(Journal {
+                                    blocking_reason: Some(error),
+                                    ..
+                                }) => crate::Reconciled::Uncertain {
+                                    reason: crate::UncertainReason::ReconcileFailed { error },
+                                },
+                                Ok(journal) => crate::Reconciled::Settling {
+                                    phase: format!("{:?}", journal.phase).to_ascii_lowercase(),
+                                },
+                                Err(error) => crate::Reconciled::Uncertain {
+                                    reason: crate::UncertainReason::ReconcileFailed {
+                                        error: error.to_string(),
+                                    },
+                                },
+                            }
                         }
                     },
                 )
@@ -823,7 +1024,7 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
     }
-    for delay_ms in std::iter::once(0).chain((1..=LIMIT).map(backoff_ms)) {
+    for delay_ms in std::iter::once(0).chain((1..LIMIT).map(backoff_ms)) {
         if delay_ms != 0 {
             let (_wake, sleep) = mpsc::channel::<()>();
             let _ = sleep.recv_timeout(Duration::from_millis(delay_ms));

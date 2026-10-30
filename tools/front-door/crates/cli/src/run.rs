@@ -6993,9 +6993,19 @@ fn resume_inner(command: Resume, edge: &Edge<'_>) -> Result<(Value, String, bool
 /// Uncertain custody stays fenced, is reported, and fails the command.
 pub fn reconcile(command: Reconcile, edge: &Edge<'_>) -> Reply {
     let mut fenced = false;
-    let mut out = reply("reconcile", reconcile_inner(command, edge, &mut fenced));
+    let outcome = reconcile_inner(command, edge, &mut fenced);
+    reconcile_reply(outcome, fenced)
+}
+fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bool) -> Reply {
+    let mut out = reply("reconcile", outcome);
     if fenced && out.result.status == Status::Ok {
         out.result.status = Status::Failed;
+        out.result.error = Some(CommandError {
+            code: "reconcile_incomplete".into(),
+            message: out.human.trim().to_owned(),
+            cause: None,
+            repair: Some("Inspect the reported custody or settlement reason, then retry `provenant reconcile --id <run>`.".into()),
+        });
     }
     out
 }
@@ -11423,6 +11433,23 @@ mod tests {
         assert!(rendered.contains("permission denied"));
         assert!(rendered.contains("retry later"));
         assert!(!rendered.chars().any(char::is_control));
+
+        let data = json!({"writer_reservation_errors": [{"reason": "legacy reservation has invalid anchor"}]});
+        let blocked = reconcile_reply(
+            Ok((
+                data.clone(),
+                "writer reservation: legacy reservation has invalid anchor\n".into(),
+            )),
+            true,
+        );
+        assert_eq!(blocked.result.status, Status::Failed);
+        assert_eq!(blocked.result.data, data);
+        let error = blocked
+            .result
+            .error
+            .expect("failed reconcile must explain its blocker");
+        assert_eq!(error.code, "reconcile_incomplete");
+        assert!(error.message.contains("invalid anchor"));
     }
 
     fn render_lanes_without_cooldowns(

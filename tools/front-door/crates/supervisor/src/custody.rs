@@ -403,6 +403,13 @@ pub(crate) fn acquire_writer_with_observer(
             other => other.into(),
         })?;
     let lock_directory = directory;
+    // Old guardians kept their evidence in the slot itself. Do not admit a
+    // successor over that fence before recovery has retained its writer head.
+    match lock_directory.metadata_at(OsStr::new("reservation.json"), false) {
+        Ok(_) => return Err(CustodyError::Fenced),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
+    }
     let directory = create_attempt_evidence(&lock_directory, scope)?;
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
         Ok(_) => {
@@ -505,6 +512,11 @@ pub fn attempt_evidence(
 }
 /// Test for this attempt's retained reservation without interpreting shared-slot records.
 pub fn reservation_present(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<bool> {
+    match directory.metadata_at(OsStr::new("reservation.json"), false) {
+        Ok(_) => return Ok(true),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error),
+    }
     let evidence = match attempt_evidence(directory, scope) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(false),
@@ -515,6 +527,21 @@ pub fn reservation_present(directory: &Directory, scope: Scope) -> provenant_os:
         Err(error) if error.is_not_found() => Ok(false),
         Err(error) => Err(error),
     }
+}
+/// Legacy evidence stays in place so its recorded slot inode remains valid.
+/// Callers must hold the slot's writer lock and validate the returned record.
+fn recovery_evidence(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<Directory> {
+    match attempt_evidence(directory, scope) {
+        Ok(child) => match child.metadata_at(OsStr::new("reservation.json"), false) {
+            Ok(_) => return Ok(child),
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error),
+        },
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error),
+    }
+    directory.metadata_at(OsStr::new("reservation.json"), false)?;
+    directory.try_clone()
 }
 fn create_attempt_evidence(directory: &Directory, scope: Scope) -> Result<Directory> {
     let name = scope.attempt.to_string();
@@ -1393,10 +1420,18 @@ pub fn acquire_recovery(
         clock,
     )?;
     let lock_directory = directory;
-    let directory = attempt_evidence(&lock_directory, scope)?;
+    let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     validate_anchor(&directory, &reservation)?;
-    if reservation.scope.run != scope.run || reservation.scope.attempt != scope.attempt {
+    // Per-attempt callers may inspect a retained generation before deciding
+    // whether to settle it. A shared legacy record must match the full scope.
+    if reservation.scope.run != scope.run
+        || reservation.scope.attempt != scope.attempt
+        || (directory
+            .metadata()?
+            .same_identity(&lock_directory.metadata()?)
+            && reservation.scope != scope)
+    {
         return Err(CustodyError::Fenced);
     }
     Ok(Recovery {
@@ -1450,7 +1485,7 @@ pub(crate) fn acquire_reboot_recovery_with(
         clock,
     )?;
     let lock_directory = directory;
-    let directory = attempt_evidence(&lock_directory, scope)?;
+    let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     reservation.validate()?;
     let slot = directory.metadata()?;
@@ -1533,6 +1568,17 @@ pub struct WriterReservation {
     pub scope: Scope,
     pub reservation: PathBuf,
 }
+impl WriterReservation {
+    /// The stable lock slot, for both historical and per-attempt journals.
+    pub fn custody_directory(&self) -> Option<&std::path::Path> {
+        let parent = self.reservation.parent()?;
+        if parent.file_name() == Some(OsStr::new(&self.scope.attempt.to_string())) {
+            parent.parent()
+        } else {
+            Some(parent)
+        }
+    }
+}
 #[derive(Debug, Serialize)]
 pub struct ReservationIssue {
     pub reservation: PathBuf,
@@ -1563,10 +1609,23 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
                 }
                 let attempt = attempt?;
                 if attempt == OsStr::new("reservation.json") {
-                    listing.issues.push(ReservationIssue {
-                        reservation: PathBuf::from(&name).join(&attempt),
-                        reason: "legacy slot-root writer reservation requires recovery".into(),
-                    });
+                    let path = PathBuf::from(&name).join(&attempt);
+                    let legacy = || -> Result<WriterReservation> {
+                        let reservation: Reservation =
+                            read_record(&slot, "reservation.json", RECORD_LIMIT)?;
+                        validate_anchor(&slot, &reservation)?;
+                        Ok(WriterReservation {
+                            scope: reservation.scope,
+                            reservation: path.clone(),
+                        })
+                    };
+                    match legacy() {
+                        Ok(reservation) => listing.reservations.push(reservation),
+                        Err(error) => listing.issues.push(ReservationIssue {
+                            reservation: path,
+                            reason: format!("legacy slot-root writer reservation: {error}"),
+                        }),
+                    }
                     continue;
                 }
                 let path = PathBuf::from(&name).join(&attempt).join("reservation.json");
@@ -1624,6 +1683,15 @@ pub enum RecoveryState {
 impl Recovery {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
+    }
+    /// Durable NeverSpawned evidence plus native absence permits Run to reject
+    /// an interrupted launch without inventing an exit or removing private Git.
+    pub fn never_spawned(&self, attempt: &Directory) -> Result<bool> {
+        let metadata = attempt.metadata()?;
+        Ok(self.reservation.launch_state == LaunchState::NeverSpawned
+            && self.reservation.attempt_device == Some(metadata.device)
+            && self.reservation.attempt_inode == Some(metadata.inode)
+            && self.observe() == RecoveryState::Absent)
     }
     /// Prove the provider absent before host settlement. Worktree exclusion
     /// spans import and publication: a reservation is recovery evidence, not

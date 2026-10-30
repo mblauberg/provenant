@@ -1130,13 +1130,9 @@ impl crate::RunStore {
                     .into_iter()
                     .find(|fence| fence.scope == scope)
                     .ok_or(failure)?;
-                let parent = fence
-                    .reservation
-                    .parent()
-                    .and_then(Path::parent)
-                    .ok_or_else(|| {
-                        RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
-                    })?;
+                let parent = fence.custody_directory().ok_or_else(|| {
+                    RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
+                })?;
                 Ok(Directory::open_anchor(parent)?)
             }
             Err(failure) => Err(failure),
