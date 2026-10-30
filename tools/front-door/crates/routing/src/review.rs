@@ -298,6 +298,21 @@ mod tests {
     use provenant_config::DomainConfig;
 
     #[test]
+    fn bundled_review_shapes_cover_all_risk_tiers() {
+        let review = ReviewConfig::default();
+        for (tier, expected) in [
+            ("routine", "quick"),
+            ("substantial", "standard"),
+            ("crucial", "deep"),
+            ("terminal", "deep"),
+        ] {
+            let selected = review.select_shape(None, Some(tier), None, &[]).unwrap();
+            assert_eq!(selected.name, expected, "risk tier {tier}");
+            assert_eq!(selected.source, "by_risk", "risk tier {tier}");
+        }
+    }
+
+    #[test]
     fn selection_precedence_and_path_globs() {
         let mut review = ReviewConfig::default();
         review

@@ -359,11 +359,10 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | Field | Value |
 |---|---|
 | `default` | `"prefer"` |
-| `effect` | `"prefer: a blocked cross-family leg is replaced by a same-family reviewer through another lens, as the ladder allows. require: wait for, or reroute to, another family instead."` |
+| `effect` | `"Not wired. Changing this value has no effect on review."` |
 | `project` | `"strengthen"` |
-| `reader` | `"tools/front-door/crates/config/src/knobs.rs"` |
-| `status` | `"wired"` |
-| `trade_off` | `"require keeps decorrelated review at the price of waiting on quota or outages."` |
+| `status` | `"not wired"` |
+| `trade_off` | `"None while unwired."` |
 | `type` | `"enum"` |
 | `values` | `["prefer", "require"]` |
 
@@ -372,13 +371,12 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | Field | Value |
 |---|---|
 | `default` | `0` |
-| `effect` | `"Independent reviews added on top of the HARNESS.md ladder minimum for the tier."` |
+| `effect` | `"Not wired. Changing this value has no effect on review."` |
 | `max` | `2` |
 | `min` | `0` |
 | `project` | `"strengthen"` |
-| `reader` | `"tools/front-door/crates/config/src/knobs.rs"` |
-| `status` | `"wired"` |
-| `trade_off` | `"Each extra review costs one reviewer lane and adjudication time for wider defect coverage."` |
+| `status` | `"not wired"` |
+| `trade_off` | `"None while unwired."` |
 | `type` | `"int"` |
 
 ## `review.polish`
@@ -386,11 +384,10 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | Field | Value |
 |---|---|
 | `default` | `"auto"` |
-| `effect` | `"auto: one behaviour-preserving polish lane before review when the diff exceeds about 300 lines or touches more than one crate or package. always: every change. off: never."` |
+| `effect` | `"Not wired. Changing this value has no effect on review."` |
 | `project` | `"strengthen"` |
-| `reader` | `"tools/front-door/crates/config/src/knobs.rs"` |
-| `status` | `"wired"` |
-| `trade_off` | `"Polish costs one writer lane per qualifying change for a simpler diff and shorter review."` |
+| `status` | `"not wired"` |
+| `trade_off` | `"None while unwired."` |
 | `type` | `"enum"` |
 | `values` | `["auto", "always", "off"]` |
 
@@ -399,11 +396,10 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | Field | Value |
 |---|---|
 | `default` | `"delta"` |
-| `effect` | `"After a repair, re-review only the repair delta, or the whole change again."` |
+| `effect` | `"Not wired. Changing this value has no effect on review."` |
 | `project` | `"strengthen"` |
-| `reader` | `"tools/front-door/crates/config/src/knobs.rs"` |
-| `status` | `"wired"` |
-| `trade_off` | `"full catches interactions between the repair and untouched code at roughly the cost of the first review."` |
+| `status` | `"not wired"` |
+| `trade_off` | `"None while unwired."` |
 | `type` | `"enum"` |
 | `values` | `["delta", "full"]` |
 
@@ -440,7 +436,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
       "knobs": {}
     },
     "economy": {
-      "description": "Less usage per task, accepting slower runs and no polish lane.",
+      "description": "Lower lane concurrency, accepting slower runs.",
       "knobs": {
         "lanes.max_concurrency": 4,
         "lanes.max_concurrency_read_only": 8,
@@ -448,7 +444,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
       }
     },
     "rigorous": {
-      "description": "Correctness first: more independent review, full re-review.",
+      "description": "Review settings are retained for configuration tests but are not wired.",
       "knobs": {
         "review.cross_family": "require",
         "review.extra_reviewers": 1,

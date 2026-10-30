@@ -276,19 +276,15 @@ sweep or an admission holds the host ledger is reported as an alert.
 `config/harness-knobs.json` owns the workflow knob registry and presets.
 Fabric's similarly named TOML assets supply only Fabric domain defaults; they
 are not a second source for the workflow knob values. The binary embeds the
-registry at build time and `config set` validates against it. The review
-knobs take effect when a skill reads `provenant config show`.
+registry at build time and `config set` validates against it. The four
+`review` knobs remain in the registry because configuration and transport tests
+use them, but are not wired: changing them has no effect.
 
-The registry holds only knobs that code or a skill reads: `chair.auto_switch`,
-`chair.switch_threshold`, `chair.switch_accounts`, `lanes.silence_seconds`,
-`lanes.max_concurrency`, `lanes.max_concurrency_read_only`, `lanes.max_depth`,
-`review.extra_reviewers`,
-`review.cross_family`, `review.rereview_scope`, `review.polish`,
-`fabric.accept_handoff` and `usage.project_attribution`. Effort, council size,
-repair cycles, summary size, pool spreading, prose polish, context ceilings and
-quota pace are chair judgement, described in the
-[orchestrate skill](../../skills/orchestrate/SKILL.md). Use `config show` to
-see each knob's value and source. Preview install registrations with
+For model effort, context ceilings and compaction, see
+[model policy](model-policy.md); for council selection, pool routing and quota
+pacing, see [model routing](model-routing.md). The
+[session skill](../../skills/session/SKILL.md) covers context hygiene. Use
+`config show` to see each knob's value and source. Preview install registrations with
 `provenant install --source /absolute/path/to/release --harness claude --dry-run`
 before applying an authorised install.
 

@@ -11,10 +11,9 @@ A skill is a reusable, triggerable procedure. Judge it on four pillars:
 a fresh agent would otherwise miss) and **pruning** (sediment, duplication,
 sprawl and no-ops).
 
-The repository's authoring rules (budgets, catalogue cap, fixture policy,
-contract tests, promotion and retirement) live in
-[MAINTAINING.md](../../MAINTAINING.md#change-a-skill). Apply them here; do not
-copy them into the skill.
+Follow the target repository's authoring rules in its `AGENTS.md`,
+`CONTRIBUTING` and runbooks, where present. Keep project policy there rather
+than copying it into this skill.
 
 ## Pick a branch
 
@@ -44,12 +43,12 @@ does not fix them without the grant.
   evidence. Scores are advisory.
 - **Name failures by mechanism:** premature completion, duplication, sediment,
   sprawl, no-op or negation-only.
-- **Front-load the description.** The first 250 characters carry the trigger
-  terms and the nearest exclusion. The exclusion names the skill to use
+- **Front-load the description.** Put the trigger terms and nearest exclusion
+  early. The exclusion names the skill to use
   instead, because a bare negation does not route.
 - **Fixtures.** Include near-miss negatives whose expected routes omit the
-  target skill. Re-run them after any routing-text change. Fixture size and
-  tooling follow the repository's `MAINTAINING.md`.
+  target skill. Re-run them after any routing-text change, using the target
+  repository's fixture policy and tooling where provided.
 - **Contract tests** only for invariants a script or CI gate enforces. Never
   assert wording.
 - **Dated versions.** Version facts go in a dated reference.

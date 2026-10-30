@@ -246,30 +246,26 @@
     },
     "review.extra_reviewers": {
       "project": "strengthen",
-      "type": "int", "min": 0, "max": 2, "default": 0, "status": "wired",
-      "reader": "tools/front-door/crates/config/src/knobs.rs",
-      "effect": "Independent reviews added on top of the HARNESS.md ladder minimum for the tier.",
-      "trade_off": "Each extra review costs one reviewer lane and adjudication time for wider defect coverage."
+      "type": "int", "min": 0, "max": 2, "default": 0, "status": "not wired",
+      "effect": "Not wired. Changing this value has no effect on review.",
+      "trade_off": "None while unwired."
     },
     "review.cross_family": {
       "project": "strengthen",
-      "type": "enum", "values": ["prefer", "require"], "default": "prefer", "status": "wired",
-      "reader": "tools/front-door/crates/config/src/knobs.rs",
-      "effect": "prefer: a blocked cross-family leg is replaced by a same-family reviewer through another lens, as the ladder allows. require: wait for, or reroute to, another family instead.",
-      "trade_off": "require keeps decorrelated review at the price of waiting on quota or outages."
+      "type": "enum", "values": ["prefer", "require"], "default": "prefer", "status": "not wired",
+      "effect": "Not wired. Changing this value has no effect on review.",
+      "trade_off": "None while unwired."
     },
     "review.rereview_scope": {
       "project": "strengthen",
-      "type": "enum", "values": ["delta", "full"], "default": "delta", "status": "wired",
-      "reader": "tools/front-door/crates/config/src/knobs.rs",
-      "effect": "After a repair, re-review only the repair delta, or the whole change again.",
-      "trade_off": "full catches interactions between the repair and untouched code at roughly the cost of the first review."
+      "type": "enum", "values": ["delta", "full"], "default": "delta", "status": "not wired",
+      "effect": "Not wired. Changing this value has no effect on review.",
+      "trade_off": "None while unwired."
     },
     "review.polish": {
-      "project": "strengthen", "type": "enum", "values": ["auto", "always", "off"], "default": "auto", "status": "wired",
-      "reader": "tools/front-door/crates/config/src/knobs.rs",
-      "effect": "auto: one behaviour-preserving polish lane before review when the diff exceeds about 300 lines or touches more than one crate or package. always: every change. off: never.",
-      "trade_off": "Polish costs one writer lane per qualifying change for a simpler diff and shorter review."
+      "project": "strengthen", "type": "enum", "values": ["auto", "always", "off"], "default": "auto", "status": "not wired",
+      "effect": "Not wired. Changing this value has no effect on review.",
+      "trade_off": "None while unwired."
     }
   },
   "presets": {
@@ -278,7 +274,7 @@
       "knobs": {}
     },
     "economy": {
-      "description": "Less usage per task, accepting slower runs and no polish lane.",
+      "description": "Lower lane concurrency, accepting slower runs.",
       "knobs": {
         "lanes.max_concurrency": 4,
         "lanes.max_concurrency_read_only": 8,
@@ -286,7 +282,7 @@
       }
     },
     "rigorous": {
-      "description": "Correctness first: more independent review, full re-review.",
+      "description": "Review settings are retained for configuration tests but are not wired.",
       "knobs": {
         "review.extra_reviewers": 1,
         "review.cross_family": "require",

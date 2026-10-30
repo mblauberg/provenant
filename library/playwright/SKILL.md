@@ -28,7 +28,8 @@ file. Flags can change between releases; consult the [dated notes](references/re
    use another authorised option above; if installation needs a decision and no
    human is present, record the blocked action. `npx @playwright/cli@latest` downloads code, so it
    needs the same approval as an install.
-2. Never trust remembered flags. Check `playwright-cli --help`, and note the
+2. Never trust remembered flags. Check `--help` through the invocation found
+   above (for example, `npx --no-install playwright-cli --help`), and note the
    version next to any evidence.
 3. Name a session for the task: `-s=<name>` on every command, or export
    `PLAYWRIGHT_CLI_SESSION`. Otherwise you share the default session with every

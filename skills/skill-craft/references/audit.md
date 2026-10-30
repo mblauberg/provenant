@@ -17,7 +17,7 @@ never zero.
 | Undertrigger | Balanced positives missed. Production undertrigger needs an opportunity denominator. |
 | Cross-skill conflict | Confusion pairs with overlapping triggers, contradictory authority or competing completion gates. |
 | Workflow completion | Checkpoint stages reached over required stages. |
-| Static quality | Frontmatter holds only `name` and `description`. The first 250 characters carry the trigger and exclusion. Critical rules come early. The body is near 500 words, with depth in references. No dated history in the body. |
+| Static quality | Follow the target repository's frontmatter, size and layout rules. Triggers and critical rules come early, with depth in references. No dated history in the body. |
 | Environment | Referenced paths, tools and CLIs exist, or are capability-gated. |
 | Token cost | Always-loaded metadata and triggered body, against evidenced use. |
 | Catalogue exposure | Catalogue characters, truncated skills and duplicate triggers. |
@@ -28,7 +28,8 @@ and environment stay qualitative unless a versioned dataset gives a
 denominator.
 
 Check static facts with the commands the skill names, not by reading alone.
-Confirm that `scripts/check-skill-negatives` passes for the skill.
+Use the target repository's fixture checker where its `AGENTS.md`,
+`CONTRIBUTING` or runbooks name one; otherwise report the missing check.
 
 ## Local histories
 
