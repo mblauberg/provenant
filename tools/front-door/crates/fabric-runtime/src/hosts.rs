@@ -24,8 +24,8 @@ pub const MAX_FRAME: usize = 1_048_576;
 /// The newest feature protocol level this release speaks. `PROTOCOL` is the
 /// base wire fence shared with every peer release; feature actions negotiate
 /// their own level per call, up to this ceiling. A release that adds a newer
-/// action family includes it here, and `hosts` reports the ceiling beside the
-/// base fence so that the base level cannot read as stale.
+/// action family includes it here, and the local `hosts` row reports the
+/// ceiling beside the base fence so that the base level cannot read as stale.
 pub fn newest_feature_protocol() -> u64 {
     CONSOLE_PROTOCOL
         .max(INBOX_PROTOCOL)
@@ -33,10 +33,17 @@ pub fn newest_feature_protocol() -> u64 {
         .max(CONSOLE_DETAIL_PROTOCOL)
 }
 
-/// Refusal frames from releases older than the mismatch prose may omit the
-/// requested protocol on a recorded mismatch; they answered at the base fence.
-pub fn recorded_expected_protocol() -> u64 {
-    PROTOCOL
+/// Render a protocol mismatch, naming the expected level only when the
+/// refusing frame carried it. Frames from releases before the field existed
+/// omit it, and those releases sent feature actions at fences 7-10, so no
+/// level can be inferred.
+pub fn protocol_mismatch_message(peer: &str, remote: u64, expected: Option<u64>) -> String {
+    match expected {
+        Some(expected) => format!(
+            "peer {peer} speaks protocol {remote}, this host expects protocol {expected}; upgrade both"
+        ),
+        None => format!("peer {peer} speaks protocol {remote}; upgrade both"),
+    }
 }
 
 pub fn discover_ssh_executable(
@@ -567,8 +574,8 @@ impl PeerRequest {
 pub struct HostHealth {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<u64>,
-    /// The newest feature level the exchange can negotiate, when the base
-    /// fence matched; feature calls still agree per action above the fence.
+    /// The newest feature level this release speaks. Only the local row
+    /// reports it: the wire carries a peer's base fence, not its ceiling.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub features: Option<u64>,
     pub host: HostId,

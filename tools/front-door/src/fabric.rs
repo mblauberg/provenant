@@ -743,10 +743,9 @@ impl F3Facade for BoundFacade<'_> {
                         ..
                     }) => {
                         health.protocol = Some(PROTOCOL);
-                        // The peer matched the base fence; feature calls still
-                        // agree per action, so report the ceiling beside it
-                        // and the base level cannot read as stale.
-                        health.features = Some(newest_feature_protocol());
+                        // The wire carries the peer's base fence, not its
+                        // feature ceiling, so leave `features` absent rather
+                        // than report this release's level for the peer.
                         health.reason = None;
                         health.host = value.host;
                         health.available = value.available;
