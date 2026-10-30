@@ -1054,6 +1054,8 @@ impl Driver<'_> {
                     last_cpu_progress_ms: Option<u64>,
                     publication_pending: bool,
                 }
+                let disk_paused = disk_paused && exit.is_none() && stop_reason.is_none();
+                let silent_for_ms = plan.silent_for_ms(now, state.last_progress_ms(), disk_paused);
                 let observed = Observed {
                     schema_version: 1,
                     scope: self.reservation.scope,
@@ -1067,11 +1069,9 @@ impl Driver<'_> {
                     last_output_at,
                     observed_at: wall_now(),
                     last_progress_ms: state.last_progress_ms(),
-                    silent: plan.silent(now, state.last_progress_ms()),
-                    silent_for_ms: plan
-                        .silent(now, state.last_progress_ms())
-                        .then(|| now.saturating_sub(state.last_progress_ms().unwrap_or(0))),
-                    disk_paused: disk_paused && exit.is_none() && stop_reason.is_none(),
+                    silent: silent_for_ms.is_some(),
+                    silent_for_ms,
+                    disk_paused,
                     provider_cpu_micros,
                     last_cpu_progress_ms,
                     publication_pending: false,

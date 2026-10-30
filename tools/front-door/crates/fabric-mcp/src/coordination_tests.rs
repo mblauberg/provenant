@@ -72,6 +72,7 @@ struct SubmitFacade {
     fail_first: bool,
     large_wait: bool,
     expire_run: bool,
+    run_unsatisfied: bool,
     clock: Option<SharedClock>,
     budgets: Vec<u64>,
     reads: Vec<u64>,
@@ -115,9 +116,15 @@ impl F3Facade for SubmitFacade {
             }
             return Err(FacadeError::Timeout);
         }
-        Ok(
-            json!({"timed_out":false, "padding": if self.large_wait { "x".repeat(5000) } else { String::new() }}),
-        )
+        if self.run_unsatisfied {
+            Ok(
+                json!({"timed_out":false,"satisfied":false,"reason":"provider silent; lane attempt-1 is still running"}),
+            )
+        } else {
+            Ok(
+                json!({"timed_out":false, "padding": if self.large_wait { "x".repeat(5000) } else { String::new() }}),
+            )
+        }
     }
     fn output(
         &mut self,
@@ -170,6 +177,7 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
         fail_first: true,
         large_wait: false,
         expire_run: false,
+        run_unsatisfied: false,
         clock: None,
         budgets: vec![],
         reads: vec![],
@@ -227,6 +235,19 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
     assert!(response.get("wait").is_none());
     assert!(response.get("outputs").is_none());
     assert!(response["continuation"].as_str().is_some());
+    service.facade.run_unsatisfied = true;
+    service.facade.large_wait = false;
+    service.facade.reads.clear();
+    let response = request()?
+        .execute(&mut service, &CancelToken::new())?
+        .structured_content;
+    assert!(response.get("outputs").is_none(), "{response}");
+    assert!(response["continuation"].is_string(), "{response}");
+    assert_eq!(
+        response["reason"],
+        "provider silent; lane attempt-1 is still running"
+    );
+    assert_eq!(response["wait"]["satisfied"], false);
     Ok(())
 }
 
@@ -253,6 +274,7 @@ fn wait_that_expires_before_observation_reports_timed_out() -> Result<(), Box<dy
         fail_first: false,
         large_wait: false,
         expire_run: true,
+        run_unsatisfied: false,
         clock: Some(clock.clone()),
         budgets: vec![],
         reads: vec![],

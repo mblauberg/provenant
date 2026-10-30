@@ -730,6 +730,17 @@ impl CapturePlan {
         now_ms.saturating_sub(last_progress_ms.unwrap_or(0)) >= self.silence_ms
     }
 
+    /// Silence is inapplicable while the guardian has paused disk work.
+    pub fn silent_for_ms(
+        &self,
+        now_ms: u64,
+        last_progress_ms: Option<u64>,
+        disk_paused: bool,
+    ) -> Option<u64> {
+        (!disk_paused && self.silent(now_ms, last_progress_ms))
+            .then(|| now_ms.saturating_sub(last_progress_ms.unwrap_or(0)))
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if self.stdout.limit() > 64 * 1024 * 1024
             || self.stderr.limit() > 64 * 1024 * 1024

@@ -328,8 +328,8 @@ pub(super) fn wait(
     };
     let mut stale = None;
     loop {
-        let silent = silent_lane(&lanes);
         let met = condition_met(&lanes, condition);
+        let silent = (!met).then(|| silent_lane(&lanes)).flatten();
         if silent.is_some() || met || Instant::now() >= deadline {
             if let Some(fail) = stale.filter(|fail: &Fail| fail.kind != ErrorKind::Contention) {
                 return Err(fail);
@@ -563,6 +563,47 @@ mod tests {
             assert_eq!(waited.silent_lane, Some(lane.attempt_id));
             assert_eq!(waited.lanes[0].state, lane.state);
             assert_eq!(calls, 1, "already-silent lane returns at arm time");
+        }
+    }
+
+    #[test]
+    fn a_met_any_condition_wins_over_a_silent_sibling() {
+        let mut silent = running(2);
+        silent.provider_silent_for_ms.0 = Some(1_800_000);
+        let mut calls = 0;
+        let waited = wait(
+            |_| {
+                calls += 1;
+                Ok(vec![done(1, 10), silent.clone()])
+            },
+            scope(&[1, 2], None, true),
+            Condition::Any,
+            Duration::from_secs(5),
+            POLL,
+        )
+        .unwrap();
+        assert!(waited.met);
+        assert_eq!(waited.silent_lane, None);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn disk_pause_and_build_slot_waits_suppress_silent_wakes() {
+        for reason in [
+            "disk pressure paused builds below gc.free_floor",
+            "build slot: a cargo build waits for one of the host's build slots",
+        ] {
+            let mut lane = running(1);
+            lane.provider_silent_for_ms.0 = Some(1_800_000);
+            let wait = run::LaneWait {
+                extra: Default::default(),
+                attempt_id: lane.attempt_id,
+                lane_class: run::LaneClass::ReadOnly,
+                waiting_for: reason.to_owned(),
+            };
+            let mut lanes = vec![lane];
+            super::super::apply_lane_wait_suppression(&mut lanes, &[wait]);
+            assert_eq!(super::super::silent_lane(&lanes), None, "{reason}");
         }
     }
 

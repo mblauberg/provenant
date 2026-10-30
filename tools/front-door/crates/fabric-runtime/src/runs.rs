@@ -302,6 +302,7 @@ mod tests {
         let mut other_read = record.clone();
         other_read.provider_silent_for_ms.0 = None;
         other_read.process_observation_valid.0 = true;
+        other_read.provider_silence_suppressed.0 = true;
         assert_eq!(record, other_read);
         assert!(
             serde_json::to_value(&record)

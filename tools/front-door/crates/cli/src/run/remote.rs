@@ -370,11 +370,14 @@ impl Peer {
         selected: &[(HostId, AttemptId)],
         remaining: Duration,
     ) -> Result<Vec<run::AttemptRecord>, Fail> {
-        read_records(
-            selected,
-            &Window::new(remaining),
-            &mut |host, action, left| self.call_within(host, action, left),
-        )
+        let window = Window::new(remaining);
+        let mut call = |host, action, left| self.call_within(host, action, left);
+        let mut lanes = read_records(selected, &window, &mut call)?;
+        let waits = fetch_waits(&lanes, selected, |host, action| {
+            call(host, action, window.next()?)
+        });
+        super::apply_lane_wait_suppression(&mut lanes, &waits);
+        Ok(lanes)
     }
     /// The peer's newest lanes that `keep` accepts, plus every lane `tracked`
     /// has seen running that those no longer include. Both reads together take
@@ -386,13 +389,15 @@ impl Peer {
         tracked: &mut watch::Tracked,
         keep: &dyn Fn(&run::AttemptRecord) -> bool,
     ) -> Result<Vec<run::AttemptRecord>, Fail> {
-        read_newest(
-            host,
-            &Window::new(remaining),
-            tracked,
-            keep,
-            &mut |host, action, left| self.call_within(host, action, left),
-        )
+        let window = Window::new(remaining);
+        let mut call = |host, action, left| self.call_within(host, action, left);
+        let mut lanes = read_newest(host, &window, tracked, keep, &mut call)?;
+        let selected: Vec<_> = lanes.iter().map(|lane| (host, lane.attempt_id)).collect();
+        let waits = fetch_waits(&lanes, &selected, |owner, action| {
+            call(owner, action, window.next()?)
+        });
+        super::apply_lane_wait_suppression(&mut lanes, &waits);
+        Ok(lanes)
     }
     /// What each queued or starting lane waits for, read from its owner. A
     /// peer that cannot say, or does not know the question, leaves a lane with
@@ -573,7 +578,9 @@ fn fetch_waits(
     for lane in lanes.iter().filter(|lane| {
         matches!(
             lane.state,
-            run::AttemptState::Queued { .. } | run::AttemptState::Starting { .. }
+            run::AttemptState::Queued { .. }
+                | run::AttemptState::Starting { .. }
+                | run::AttemptState::Running { .. }
         )
     }) {
         if let Some((host, _)) = selected.iter().find(|(_, id)| *id == lane.attempt_id) {
@@ -627,10 +634,13 @@ fn poll_until(
     loop {
         let last = match watch::tick(&mut fetch, deadline)? {
             watch::Tick::Lanes(lanes) => {
+                let met = condition_met(&lanes, condition);
+                if met {
+                    return Ok((lanes, true));
+                }
                 if super::silent_lane(&lanes).is_some() {
                     return Ok((lanes, false));
                 }
-                let met = condition_met(&lanes, condition);
                 if met || Instant::now() >= deadline {
                     return Ok((lanes, met));
                 }
@@ -915,7 +925,7 @@ pub(super) fn dispatch(
     data["host"] = json!(host);
     if let Some(met) = met {
         data["condition_met"] = json!(met);
-        if let Some(id) = super::silent_lane(&lanes) {
+        if !met && let Some(id) = super::silent_lane(&lanes) {
             data["timed_out"] = json!(false);
             data["reason"] = json!(format!("provider silent; lane {id} is still running"));
         }
@@ -1576,7 +1586,7 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
                     render_with_waits(&lanes, &[], &selected, edge.roots.state.as_path());
                 data["lanes"] = rendered["lanes"].clone();
                 data["condition_met"] = json!(met);
-                if let Some(id) = super::silent_lane(&lanes) {
+                if !met && let Some(id) = super::silent_lane(&lanes) {
                     data["timed_out"] = json!(false);
                     data["reason"] = json!(format!("provider silent; lane {id} is still running"));
                 }
@@ -2256,6 +2266,21 @@ mod tests {
     }
 
     #[test]
+    fn peer_any_wait_returns_met_before_a_silent_sibling() {
+        let mut silent = running(2);
+        silent.provider_silent_for_ms.0 = Some(1_800_000);
+        let (lanes, met) = poll_until(
+            |_| Ok(vec![done(1, 10), silent.clone()]),
+            Condition::Any,
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        assert!(met);
+        assert_eq!(super::super::silent_lane(&lanes), Some(silent.attempt_id));
+    }
+
+    #[test]
     fn wait_reports_the_last_cause_when_the_budget_runs_out() {
         let mut calls = 0;
         let out = poll_until(
@@ -2394,6 +2419,17 @@ mod tests {
             }
         }))
         .expect("attempt record")
+    }
+    fn done(id: u8, at: i64) -> run::AttemptRecord {
+        let mut lane = running(id);
+        lane.state = run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: run::Outcome::Succeeded,
+            exit_code: Some(0),
+            finished_at: WallTime::from_micros(at).unwrap(),
+            reason: None,
+        };
+        lane
     }
     fn attempt(id: u8) -> AttemptId {
         AttemptId::from_bytes([id; 16])

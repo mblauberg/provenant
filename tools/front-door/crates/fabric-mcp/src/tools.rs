@@ -1119,8 +1119,16 @@ impl ToolCall {
                             .get("timed_out")
                             .and_then(Value::as_bool)
                             .unwrap_or(false);
+                        let unfinished = run
+                            .get("satisfied")
+                            .and_then(Value::as_bool)
+                            .is_some_and(|satisfied| !satisfied);
+                        let reason = run.get("reason").cloned();
                         value["wait"] = run;
-                        if timed_out {
+                        if timed_out || unfinished {
+                            if let Some(reason) = reason {
+                                value["reason"] = reason;
+                            }
                             value["continuation"] = serde_json::json!(
                                 "Use fabric_run wait with the receipt targets, then fabric_output to read the result."
                             );

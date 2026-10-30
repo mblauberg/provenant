@@ -1298,6 +1298,28 @@ fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn process_checkpoint_freshness_allows_one_second_of_clock_skew() -> TestResult {
+    let now = WallTime::from_micros(10_000_000)?;
+    assert!(crate::reader::process_observation_fresh(
+        WallTime::from_micros(11_000_000)?,
+        now
+    ));
+    assert!(!crate::reader::process_observation_fresh(
+        WallTime::from_micros(11_000_001)?,
+        now
+    ));
+    assert!(crate::reader::process_observation_fresh(
+        WallTime::from_micros(5_000_000)?,
+        now
+    ));
+    assert!(!crate::reader::process_observation_fresh(
+        WallTime::from_micros(4_999_999)?,
+        now
+    ));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn read_only_open_works_without_directory_write_access_or_creating_files() -> TestResult {

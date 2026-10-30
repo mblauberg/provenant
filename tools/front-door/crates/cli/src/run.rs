@@ -4758,8 +4758,22 @@ fn condition_met(lanes: &[run::AttemptRecord], condition: Condition) -> bool {
 pub(super) fn silent_lane(lanes: &[run::AttemptRecord]) -> Option<AttemptId> {
     lanes
         .iter()
-        .find(|lane| lane.provider_silent_for_ms.0.is_some())
+        .find(|lane| lane.provider_silent_for_ms.0.is_some() && !lane.provider_silence_suppressed.0)
         .map(|lane| lane.attempt_id)
+}
+pub(super) fn apply_lane_wait_suppression(
+    lanes: &mut [run::AttemptRecord],
+    waits: &[run::LaneWait],
+) {
+    for lane in lanes {
+        lane.provider_silence_suppressed.0 |= waits
+            .iter()
+            .find(|wait| wait.attempt_id == lane.attempt_id)
+            .is_some_and(|wait| {
+                wait.waiting_for.starts_with("disk pressure paused")
+                    || wait.waiting_for.starts_with("build slot:")
+            });
+    }
 }
 /// Snapshot every attempt the targets name. Without targets, the selection is
 /// `owner`'s nonterminal work; host caps bound it. With `seen`, terminal
@@ -4901,6 +4915,8 @@ fn candidates<'a>(
                 id = tail;
             }
         }
+        let waits = session.store.lane_waits(&lanes, &call);
+        apply_lane_wait_suppression(&mut lanes, &waits);
         Ok(lanes)
     }
 }
@@ -4991,6 +5007,22 @@ fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, Stri
         data["ignored_settled"] = json!(waited.ignored);
     }
     Ok((data, human, !waited.met && waited.silent_lane.is_none()))
+}
+fn apply_cancel_wait(data: &mut Value, lanes: &Value, timed_out: bool, status: &mut Status) {
+    if lanes["reason"].is_string() {
+        if *status == Status::Ok {
+            *status = Status::Failed;
+        }
+    } else if timed_out && *status == Status::Ok {
+        *status = Status::Timeout;
+    }
+    data["lanes"] = lanes["lanes"].clone();
+    data["condition_met"] = lanes["condition_met"].clone();
+    for field in ["timed_out", "reason"] {
+        if let Some(value) = lanes.get(field) {
+            data[field] = value.clone();
+        }
+    }
 }
 /// Wait for every lane a run, task or attempt names, settled or not: the
 /// whole named set, for commands that act on a lane they just created.
@@ -6519,11 +6551,7 @@ fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     Duration::from_secs(seconds),
                     edge,
                 )?;
-                if timed_out && status == Status::Ok {
-                    status = Status::Timeout;
-                }
-                data["lanes"] = lanes["lanes"].clone();
-                data["condition_met"] = lanes["condition_met"].clone();
+                apply_cancel_wait(&mut data, &lanes, timed_out, &mut status);
                 human.push_str(&rendered);
             }
             Ok((data, human))
@@ -8972,6 +9000,24 @@ mod lane_depth_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancel_wait_preserves_silence_as_non_success_without_timeout() {
+        let wait = json!({
+            "lanes": [{"state":"running"}],
+            "condition_met": false,
+            "timed_out": false,
+            "reason": "provider silent; lane attempt-1 is still running"
+        });
+        let mut data = json!({});
+        let mut status = Status::Ok;
+        apply_cancel_wait(&mut data, &wait, false, &mut status);
+        assert_eq!(status, Status::Failed);
+        assert_eq!(data["timed_out"], false);
+        assert_eq!(data["condition_met"], false);
+        assert_eq!(data["reason"], wait["reason"]);
+        assert_eq!(data["lanes"], wait["lanes"]);
+    }
 
     /// A project with a linked worktree `writer` and a `nested` directory in it.
     /// The fixture's Git runs without the lane's `GIT_*` variables.

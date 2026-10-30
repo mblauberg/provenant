@@ -322,6 +322,15 @@ fn capture_plan_without_silence_uses_registry_default() -> TestResult {
     assert!(!plan.silent(1_799_999, Some(0)));
     assert!(plan.silent(1_800_000, Some(0)));
     assert!(!plan.silent(1_800_000, Some(1)));
+    assert_eq!(
+        plan.silent_for_ms(1_800_000, Some(0), true),
+        None,
+        "disk pause suppresses silence"
+    );
+    assert_eq!(
+        plan.silent_for_ms(1_800_000, Some(0), false),
+        Some(1_800_000)
+    );
     assert!(
         CapturePlan {
             silence_ms: 3_600_001,
