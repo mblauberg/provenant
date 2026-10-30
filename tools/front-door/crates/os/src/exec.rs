@@ -209,6 +209,8 @@ pub enum ExecError {
     ChildWaitPolicy(#[source] io::Error),
     #[error("utility cleanup transferred to the reserved reaper")]
     CleanupPending,
+    #[error("refusing to start a detached worker from a test harness")]
+    TestHarness,
     #[error("utility {operation} failed")]
     Io {
         operation: &'static str,
@@ -243,6 +245,12 @@ impl SystemExecutor {
 /// Start a one-shot worker in its own session with no terminal or pipe handles.
 /// The process reaper owns its eventual exit while the caller remains alive.
 pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
+    // Workers relaunch `current_exe`. A Cargo test harness reads worker
+    // arguments as test filters, so each relaunch reruns the tests that spawned
+    // it and the processes multiply until the host process table is full.
+    if argv.first().is_some_and(|program| is_test_harness(Path::new(program))) {
+        return Err(ExecError::TestHarness);
+    }
     crate::sys::raw_exec::verify_child_wait_policy().map_err(ExecError::ChildWaitPolicy)?;
     let reaper = Reaper::new(1).map_err(io_error("start reaper"))?;
     let permit = reaper.reserve().ok_or(ExecError::Busy)?;
@@ -264,6 +272,14 @@ pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
     .map_err(io_error("spawn detached worker"))?;
     drop(child); // Transfer custody without waiting or signalling the worker.
     Ok(())
+}
+
+/// Cargo places test executables, and only those, in a profile's `deps`.
+fn is_test_harness(program: &Path) -> bool {
+    program
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|directory| directory == "deps")
 }
 
 impl Executor for SystemExecutor {
