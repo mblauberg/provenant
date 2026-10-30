@@ -438,19 +438,31 @@ impl LiveQuota {
             deadline,
             crate::agy::REGISTRATION.quota.probe_seconds,
         )?;
-        if payload.get("status").and_then(Value::as_str) != Some("SUCCESS") {
-            return Err(ProbeFailure::Auth);
-        }
-        let actual = read(&log)
-            .ok()
-            .and_then(|b| agy_fingerprint(&b))
-            .ok_or(ProbeFailure::Auth)?;
-        if account.scope.account_key != format!("agy-{actual}") {
-            return Err(ProbeFailure::Auth);
-        }
+        let signed_in = payload.get("status").and_then(Value::as_str) == Some("SUCCESS");
+        let actual = agy_signed_in_account(&account.scope.account_key, signed_in, read(&log).ok())?;
         details.fingerprint = Some(actual);
         Ok(payload)
     }
+}
+/// The signed-in agy fingerprint, or why the probe cannot trust it. A sign-out
+/// or unreadable identity needs a login; a readable identity that is not the
+/// registered key is a different account, repaired by registering it. The
+/// identity itself is never part of the failure.
+fn agy_signed_in_account(
+    registered_key: &str,
+    signed_in: bool,
+    log: Option<Vec<u8>>,
+) -> Result<String, ProbeFailure> {
+    if !signed_in {
+        return Err(ProbeFailure::Auth);
+    }
+    let actual = log
+        .and_then(|bytes| agy_fingerprint(&bytes))
+        .ok_or(ProbeFailure::Auth)?;
+    if registered_key != format!("agy-{actual}") {
+        return Err(ProbeFailure::AccountMismatch);
+    }
+    Ok(actual)
 }
 /// Explicit Claude registrations only. No auth stores, identity probes or
 /// implicit default directory discovery are involved in chair switching.
@@ -505,6 +517,31 @@ mod tests {
             .command("unused-provider", &[], None, None, quota.now() + 60, 1)
             .unwrap_err();
         assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
+    }
+
+    #[test]
+    fn agy_account_switch_is_distinct_from_sign_out() {
+        let log =
+            |email: &str| format!("OAuth: authenticated successfully as {email}\n").into_bytes();
+        let registered = format!("agy-{}", agy_fingerprint(&log("old@example.com")).unwrap());
+        assert!(agy_signed_in_account(&registered, true, Some(log("old@example.com"))).is_ok());
+        assert_eq!(
+            agy_signed_in_account(&registered, true, Some(log("new@example.com"))),
+            Err(ProbeFailure::AccountMismatch)
+        );
+        // Signed out, or no identity in the log: still a login problem.
+        assert_eq!(
+            agy_signed_in_account(&registered, false, Some(log("old@example.com"))),
+            Err(ProbeFailure::Auth)
+        );
+        assert_eq!(
+            agy_signed_in_account(&registered, true, Some(b"no identity".to_vec())),
+            Err(ProbeFailure::Auth)
+        );
+        assert_eq!(
+            agy_signed_in_account(&registered, true, None),
+            Err(ProbeFailure::Auth)
+        );
     }
 
     #[test]

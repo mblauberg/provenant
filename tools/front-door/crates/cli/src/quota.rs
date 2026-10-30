@@ -474,7 +474,7 @@ pub(crate) fn persist_provider_success(
     next.auth_retry_pending = false;
     // A probe started before this lane may not overwrite newer evidence.
     next.claim = None;
-    if next.last_error == Some(ProbeFailure::Auth) {
+    if next.last_error.is_some_and(ProbeFailure::needs_login) {
         next.last_error = None;
         next.failures = 0;
         next.backoff_until_unix_seconds = None;
@@ -795,7 +795,7 @@ fn refresh_auth_metadata(
                     accounts.len() == 1 && accounts[0].account_key == next.account.account_key
                 })
         });
-        if next.last_error == Some(ProbeFailure::Auth)
+        if next.last_error.is_some_and(ProbeFailure::needs_login)
             || next
                 .snapshot
                 .as_ref()
@@ -1457,6 +1457,10 @@ fn quota_human(report: &QuotaReport) -> String {
             human.push_str(&format!("; refresh failed: {reason}"));
             if error == ProbeFailure::Auth {
                 human.push_str(" (needs login in this identity)");
+            } else if error == ProbeFailure::AccountMismatch {
+                human.push_str(
+                    " (the signed-in account differs from the registered one; run `provenant accounts register --adapter agy --directory <dir> <label>`)",
+                );
             }
         }
         for cooldown in &row.capacity_cooldowns {
@@ -1652,6 +1656,53 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_mismatch_names_the_repair_and_sign_out_keeps_login_text() {
+        let human = |error| {
+            let report = QuotaReport {
+                schema_version: 1,
+                generated_unix_seconds: 0,
+                accounts: vec![AccountRow {
+                    account: AccountScope {
+                        adapter: "agy".into(),
+                        account_key: "agy-google-abc".into(),
+                        label: "work".into(),
+                    },
+                    snapshot: None,
+                    status: QuotaStatus::AuthRequired,
+                    age_seconds: None,
+                    next_due_unix_seconds: None,
+                    refreshing: false,
+                    error: Some(error),
+                    capacity_cooldowns: vec![],
+                    display: None,
+                }],
+                sources: vec![],
+                coverage: Coverage { total: 1, known: 0 },
+                refreshing_ids: vec![],
+                next_due_unix_seconds: None,
+                report_path: String::new(),
+                display: Default::default(),
+                display_icon_warning: None,
+            };
+            quota_human(&report)
+        };
+        let mismatch = human(ProbeFailure::AccountMismatch);
+        assert!(mismatch.contains("account_mismatch"), "{mismatch}");
+        assert!(
+            mismatch.contains("signed-in account differs from the registered one"),
+            "{mismatch}"
+        );
+        assert!(
+            mismatch
+                .contains("provenant accounts register --adapter agy --directory <dir> <label>"),
+            "{mismatch}"
+        );
+        let signed_out = human(ProbeFailure::Auth);
+        assert!(signed_out.contains("needs login"), "{signed_out}");
+        assert!(!signed_out.contains("differs"), "{signed_out}");
+    }
 
     #[test]
     fn summary_only_flags_accounts_needing_attention() {
