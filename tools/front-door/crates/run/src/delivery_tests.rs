@@ -7,6 +7,25 @@ use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
 
 #[test]
+fn prepare_reports_missing_git_with_git_code() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = PrepareFixture::new()?;
+    let mut environment = fixture.environment.clone();
+    environment.retain(|(key, _)| key != "PROVENANT_GIT");
+    environment.push((
+        "PROVENANT_GIT".into(),
+        fixture.root.join("missing-git").into_os_string(),
+    ));
+    let error = HostDeliveryContext::new(environment)
+        .prepare(&fixture.writer, &fixture.request)
+        .err()
+        .ok_or("expected missing Git error")?;
+    assert!(matches!(error, RunError::GitUnavailable));
+    assert_eq!(error.code(), "GIT");
+    Ok(())
+}
+
+#[test]
 fn prepare_reports_common_git_dir_discovery_failure()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;

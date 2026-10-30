@@ -755,6 +755,10 @@ The small Git wrapper has one source and restores
 scrubbed environment or supplies publishing credentials; it does not inspect
 Git commands or route their objects.
 
+When a run operation returns `RunError` because the host cannot find a Git
+executable, it reports "Git executable unavailable" with the `GIT` code.
+Launch handoff converts this error to a handoff refusal with a reason string.
+
 The host seals the selected attempt candidate before launch. After provider
 exit and quiescence, it reads the selected private branch as raw metadata and
 pins its OID in the settlement journal. It never runs host commands with the

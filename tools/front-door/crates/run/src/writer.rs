@@ -67,8 +67,7 @@ fn runtime(state: &Path) -> Result<UtilityRuntime> {
         Err(e) if e.is_exists() => {}
         Err(e) => return Err(anchored_error(e, state)),
     }
-    let git = provenant_os::git::git_executable()
-        .ok_or(RunError::Validation("Git executable unavailable"))?;
+    let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
     UtilityRuntime::new(&git, home.clone())
         .map(|runtime| {
             runtime.with_lane_roots(provenant_confinement::utility::lane_state_roots(state))
@@ -1179,8 +1178,7 @@ impl WriterLaunch {
         attempt: &Directory,
         scratch: &Path,
     ) -> Result<()> {
-        let git = provenant_os::git::git_executable()
-            .ok_or(RunError::Validation("Git executable unavailable"))?;
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
         crate::objects::prepare_bound(
             &git,
             self.worktree.repo(),
@@ -1305,8 +1303,7 @@ impl WriterLaunch {
         // The raw branch OID is only a name until the complete graph has been
         // hash-checked. Do this before instruction recovery, diffs or ancestry.
         let source = crate::objects::bound_source(attempt)?;
-        let git_executable = provenant_os::git::git_executable()
-            .ok_or(RunError::Validation("Git executable unavailable"))?;
+        let git_executable = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
         let shared_tip = crate::objects::resolve_ref(
             &git_executable,
             self.worktree.repo(),
