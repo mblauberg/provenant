@@ -39,11 +39,11 @@ fn manifest_submission_retains_optional_work_context() -> Result {
             "tasks": [{
                 "prompt": "Review the bounded slice",
                 "context": {"graph_id":"manifest-graph", "node_id":"review", "pattern":"council"},
-                "route": {"kind":"model", "provider":"fixture", "model":"fixture/model"}
+                "route": {"kind":"model", "provider":"codex", "model":"gpt-6-luna"}
             }]
         }))?,
     )?;
-    // An unavailable fixture route settles locally and supplies an attempt fact.
+    // An unavailable provider account settles locally and supplies an attempt fact.
     let output = rig.command(&[
         "dispatch",
         "--manifest",

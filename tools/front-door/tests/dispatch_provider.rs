@@ -1513,7 +1513,7 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
         ("claude/claude-opus-5-5", true, true),
         ("claude/claude-opus-5-5", false, false),
         ("claude/claude-sonnet-5-5", true, false),
-        ("claude/claude-sonnet-5-6", false, false),
+        ("claude/claude-haiku-5-5", false, false),
     ] {
         let rig = claude_fixture()?;
         let cleanup = rig.process_cleanup();
@@ -2813,7 +2813,10 @@ fn cancel_wait_settles_stalled_import_with_durable_exit() -> Result {
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let lane = &lanes["data"]["lanes"][0];
     assert_eq!(lane["state"], "cancelled", "{lanes}");
-    assert_eq!(lane["reason"], "provider output is partial", "{lanes}");
+    assert_eq!(
+        lane["reason"], "cancelled: explicit_cancellation",
+        "{lanes}"
+    );
     Ok(())
 }
 
