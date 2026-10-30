@@ -169,9 +169,9 @@ fn hosts_probe_only_the_requested_page() -> Result {
     assert_eq!(hosts[0]["host"], first.to_string());
     assert_eq!(hosts[0]["available"], true, "{hosts}");
     assert_eq!(hosts[0]["protocol"], PROTOCOL);
-    // The base fence reports beside the newest negotiated feature level, so
-    // the base level cannot read as stale.
-    assert_eq!(hosts[0]["features"], CONSOLE_DETAIL_PROTOCOL, "{hosts}");
+    // The wire carries only the peer's base fence, not its feature ceiling,
+    // so a probed remote row omits `features`.
+    assert!(hosts[0].get("features").is_none(), "{hosts}");
     assert!(hosts[0].get("reason").is_none());
     assert_eq!(
         replies

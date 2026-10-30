@@ -187,16 +187,15 @@ pub enum FacadeError {
     HomeUnavailable,
     #[error("peer protocol version is incompatible")]
     PeerVersion,
-    #[error(
-        "peer {peer} speaks protocol {remote}, this host expects protocol {expected}; upgrade both"
-    )]
+    #[error("{}", crate::hosts::protocol_mismatch_message(peer, *remote, *expected))]
     PeerProtocolMismatch {
         peer: String,
         remote: u64,
-        /// The requested protocol level; frames written by older releases
-        /// omit it, and those requests sat at the base fence.
-        #[serde(default = "crate::hosts::recorded_expected_protocol")]
-        expected: u64,
+        /// The requested protocol level. Frames from releases before the field
+        /// existed omit it, and those releases sent feature actions at fences
+        /// 7-10, so no level can be inferred.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected: Option<u64>,
     },
     #[error("run launch outcome is unknown for operation {operation_id}")]
     LaunchUnknown { operation_id: OperationId },
@@ -341,7 +340,7 @@ impl From<&crate::hosts::PeerError> for FacadeError {
             } => Self::PeerProtocolMismatch {
                 peer: peer.clone(),
                 remote: *remote,
-                expected: *expected,
+                expected: Some(*expected),
             },
             PeerError::Project | PeerError::SourceHost | PeerError::RequestTooLarge => {
                 Self::InvalidInput
@@ -443,6 +442,25 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::FacadeError;
+
+    #[test]
+    fn legacy_mismatch_frame_omits_the_expected_level() {
+        let error: FacadeError = serde_json::from_value(serde_json::json!({
+            "code": "peer_protocol_mismatch",
+            "peer": "w",
+            "remote": 1,
+        }))
+        .unwrap();
+        assert_eq!(
+            error,
+            FacadeError::PeerProtocolMismatch {
+                peer: "w".into(),
+                remote: 1,
+                expected: None,
+            }
+        );
+        assert_eq!(error.to_string(), "peer w speaks protocol 1; upgrade both");
+    }
 
     #[test]
     fn future_schema_requires_upgrade_with_version_diagnostics() {
