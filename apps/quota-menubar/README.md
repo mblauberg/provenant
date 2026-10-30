@@ -35,11 +35,11 @@ The package has three targets. `ProvenantKit` is the shared client: it runs the 
 
 ## Console
 
-`provenant-console` opens one inbox window. It reads `provenant inbox --json` and lists pending decisions, assumptions and questions with their kind, whether they block, and their session. Answering runs `provenant answer --expect-revision N --channel console`, so a request that changed since it was opened is not overwritten: the window shows its current state and sends nothing. Delivery and acknowledgement state is shown as the CLI returns it.
+`provenant-console` opens one inbox window. It reads `provenant inbox --json` and lists pending decisions, assumptions and questions with their project, kind, whether they block, and their session. The app starts in `/` when opened from Finder, where the CLI lists the open requests of every project on the host in one call, and answers in the project that owns the request. Answering runs `provenant answer --expect-revision N --channel console`, so a request that changed since it was opened is not overwritten: the window shows its current state and sends nothing. Delivery and acknowledgement state is shown as the CLI returns it.
 
 The console refreshes when the app comes to the front and when you choose Refresh (⌘R); it has no timers. It exits when its last window closes. On quit it waits up to one second for answers still in flight, then removes their reply files; an answer that has not returned by then may not be saved. It opens no database, credential, provider store or SSH connection (a source test checks the shared and console sources). Keyboard use: Tab moves between the list, options, reply field and buttons; arrow keys choose an option; Return sends the default answer; ⌘W closes.
 
-`provenant console open` opens `Provenant Console.app`, or prints an install hint. `./bundle` builds that app with the console as its main executable and the menu agent beside it.
+`provenant console open` opens `Provenant Console.app`, or prints an install hint. `./bundle` builds that app with the console as its main executable and the menu agent beside it, and compiles the brand icon (`assets/brand/Provenant.icon`) into it with `xcrun actool`. Without Xcode it warns and builds with no icon.
 
 Memory and launch time are not measured in CI. Measure them on a Mac with `/usr/bin/time -l .build/release/provenant-console`.
 

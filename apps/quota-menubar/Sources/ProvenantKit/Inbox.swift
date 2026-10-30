@@ -22,7 +22,10 @@ public struct HumanRequest: Decodable, Equatable, Sendable, Identifiable {
     public let revision: UInt64
     public let createdAt: String
     public let updatedAt: String
+    public let projectId: String?
     public let projectKey: String?
+    /// The project's name, set by `InboxClient.list` from the host-wide listing; nil in a project's own listing.
+    public var projectLabel: String?
     public let chairSessionId: String
     public let request: Draft
     public let state: String
@@ -30,6 +33,11 @@ public struct HumanRequest: Decodable, Equatable, Sendable, Identifiable {
     public let closureReason: String?
 
     public var isOpen: Bool { state == "open" }
+
+    /// The project this request belongs to, for the list: its registered name, else the last part of its key.
+    public var projectName: String? {
+        projectLabel ?? projectKey.flatMap { $0.split(separator: "/").last.map(String.init) }
+    }
 }
 
 public struct HumanAnswer: Decodable, Equatable, Sendable {
@@ -133,16 +141,25 @@ public struct InboxClient: Sendable {
         let nextCursor: String?
         let truncated: Bool
         let coverage: String
+        /// Present when the CLI listed the whole host (no project around it): each project's name and path.
+        let projects: [String: Project]?
     }
+    private struct Project: Decodable, Sendable { let label: String? }
     private struct Single: Decodable, Sendable { let item: InboxItem }
 
-    /// Open requests (or every request) across pages, in the CLI's order.
+    /// Open requests (or every request) across pages, in the CLI's order. Run outside a project, the CLI lists the
+    /// open requests of every project on the host, and each carries its project's name.
     public func list(includeClosed: Bool = false, pageSize: Int = 50, maxPages: Int = 10) async throws -> Page<HumanRequest> {
         try await collectPages(maxPages: maxPages) { cursor in
             var arguments = ["inbox", "--state", includeClosed ? "all" : "open", "--limit", String(pageSize)]
             if let cursor { arguments += ["--cursor", cursor] }
             let listed = try await cli.call(arguments, as: Listed.self)
-            return Page(items: listed.items, nextCursor: listed.nextCursor, truncated: listed.truncated)
+            let items = listed.items.map { request -> HumanRequest in
+                var request = request
+                request.projectLabel = request.projectId.flatMap { listed.projects?[$0]?.label }
+                return request
+            }
+            return Page(items: items, nextCursor: listed.nextCursor, truncated: listed.truncated)
         }
     }
 

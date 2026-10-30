@@ -39,6 +39,14 @@ final class InboxClientTests: XCTestCase {
         XCTAssertTrue(replay.recorded.allSatisfy { $0.last == "--json" })
     }
 
+    func testHostWideListNamesEachRequestsProject() async throws {
+        let replay = Replay([(["inbox"], "inbox-host", 0)])
+        let page = try await InboxClient(cli: replay.client).list()
+        XCTAssertEqual(page.items.map(\.projectId), ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
+        XCTAssertEqual(page.items.map(\.projectName), ["provenant", "provenant"])
+        XCTAssertEqual(replay.recorded.count, 1)
+    }
+
     func testPageLimitReportsRemainingPages() async throws {
         let replay = Replay([(["inbox"], "inbox-page1", 0)])
         let page = try await InboxClient(cli: replay.client).list(maxPages: 1)
