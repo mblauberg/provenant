@@ -765,6 +765,52 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
 }
 
 #[test]
+fn appended_after_eof_names_the_recorded_and_final_lengths() -> TestResult {
+    use std::io::Write as _;
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let text = "sealed result";
+    let mut done = publication();
+    done.result = text;
+    store.publish_terminal(id, 1, &done, &exit(), &call)?;
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+    // Grow the file through a second handle between the streamed EOF and the
+    // final metadata check, so the streamed length and digest still match the
+    // record and only the final unchanged check can refuse.
+    let provenance = artifact_provenance(store.stream_result_observing(id, &call, None, || {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut handle| handle.write_all(b"appended"))
+            .unwrap();
+    }));
+    assert_eq!(
+        provenance,
+        ArtifactProvenance {
+            check: ArtifactCheck::Stream,
+            artifact: "result.md".into(),
+            expected: Some(ArtifactValue::Length(text.len() as u64)),
+            actual: Some(ArtifactValue::Length(text.len() as u64 + 8)),
+        }
+    );
+    let message = provenance.to_string();
+    assert!(message.contains(text.len().to_string().as_str()));
+    assert!(message.contains((text.len() as u64 + 8).to_string().as_str()));
+    Ok(())
+}
+
+#[test]
 fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

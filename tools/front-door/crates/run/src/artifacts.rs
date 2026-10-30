@@ -90,6 +90,18 @@ impl RunStore {
         call: &Request<'_>,
         required_verdict: Option<&str>,
     ) -> Result<provenant_records::result_capture::CapturedResult> {
+        self.stream_result_observing(id, call, required_verdict, || {})
+    }
+    /// Like `stream_result`, with `observing` invoked between the streamed EOF
+    /// and the final metadata check, so tests can grow the file through a
+    /// second handle in exactly the window the refusal must name.
+    pub(crate) fn stream_result_observing(
+        &self,
+        id: provenant_core::AttemptId,
+        call: &Request<'_>,
+        required_verdict: Option<&str>,
+        mut observing: impl FnMut(),
+    ) -> Result<provenant_records::result_capture::CapturedResult> {
         use provenant_os::exec::CaptureFilter;
         use sha2::{Digest as _, Sha256};
 
@@ -163,12 +175,15 @@ impl RunStore {
                 Some(ArtifactValue::digest(digest)),
             ));
         }
-        if !before.unchanged(&file.metadata()?) {
+        observing();
+        let after = file.metadata()?;
+        if !before.unchanged(&after) {
+            let grew = before.size != after.size;
             return Err(RunError::artifact_mismatch(
                 ArtifactCheck::Stream,
                 "result.md",
-                None,
-                None,
+                grew.then_some(ArtifactValue::Length(artifact.bytes)),
+                grew.then_some(ArtifactValue::Length(after.size)),
             ));
         }
         let safe = redactor
