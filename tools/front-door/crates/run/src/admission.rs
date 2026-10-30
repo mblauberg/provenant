@@ -224,13 +224,14 @@ impl RunStore {
                     self.disk_pause_wait(lane)
                         .or_else(|| self.build_slot_wait(lane, call))?
                 } else if matches!(lane.state, AttemptState::Queued { .. }) {
-                    match resources.process_budget() {
-                        Ok(budget) if !budget.has_room() => format!(
-                            "host capacity: user process count {} of {}",
-                            budget.used, budget.limit
-                        ),
-                        _ => "launch: not yet handed to a guardian".to_owned(),
-                    }
+                    self.recovery_process_wait(lane.run_id, call)
+                        .unwrap_or_else(|| match resources.process_budget() {
+                            Ok(budget) if !budget.has_room() => format!(
+                                "host capacity: user process count {} of {}",
+                                budget.used, budget.limit
+                            ),
+                            _ => "launch: not yet handed to a guardian".to_owned(),
+                        })
                 } else {
                     let active: i64 = self
                         .db

@@ -236,8 +236,13 @@ const PID_BYTES: usize = std::mem::size_of::<libc::pid_t>();
 fn user_process_count() -> io::Result<u64> {
     // SAFETY: getuid has no arguments and cannot fail.
     let uid = unsafe { libc::getuid() };
+    count_linux_tasks(std::path::Path::new("/proc"), uid)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn count_linux_tasks(proc: &std::path::Path, uid: libc::uid_t) -> io::Result<u64> {
     let mut tasks = 0_u64;
-    for entry in std::fs::read_dir("/proc")? {
+    for entry in std::fs::read_dir(proc)? {
         let entry = entry?;
         let name = entry.file_name();
         if !name
@@ -351,6 +356,34 @@ pub(crate) fn filesystem_bytes_at(path: &Path) -> io::Result<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn counts_tasks_by_real_uid_and_rejects_invalid_status() -> std::io::Result<()> {
+        let proc = tempfile::tempdir()?;
+        for (pid, status, count) in [
+            ("101", "Uid:\t42\t0\t0\t0\n", 3),
+            ("102", "Uid:\t43\t42\t42\t42\n", 2),
+        ] {
+            let process = proc.path().join(pid);
+            std::fs::create_dir_all(process.join("task"))?;
+            std::fs::write(process.join("status"), status)?;
+            for task in 0..count {
+                std::fs::create_dir(process.join("task").join(task.to_string()))?;
+            }
+        }
+        // A vanished process is ignored, including one that lost its task directory.
+        std::fs::create_dir(proc.path().join("103"))?;
+        std::fs::create_dir(proc.path().join("104"))?;
+        std::fs::write(proc.path().join("104/status"), "Uid:\t42\t42\t42\t42\n")?;
+        assert_eq!(super::count_linux_tasks(proc.path(), 42)?, 3);
+        std::fs::write(proc.path().join("104/status"), "Name:\tbroken\n")?;
+        assert_eq!(
+            super::count_linux_tasks(proc.path(), 42)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        Ok(())
+    }
     #[test]
     fn samples_are_plausible() {
         let memory = super::memory().unwrap();
