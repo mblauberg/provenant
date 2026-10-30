@@ -1359,6 +1359,260 @@ mod writer_recovery_tests {
     use crate::tests::{call, clock, context, input, route};
 
     #[test]
+    fn legacy_slot_root_writers_reconcile_exited_and_never_spawned_to_terminal()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::ffi::{OsStr, OsString};
+        for mode in [
+            "spawned",
+            "never_spawned",
+            "no_summary",
+            "no_summary_terminal",
+        ] {
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = input();
+            run.request.tasks[0].writer = Some(fixture.writer.clone());
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            let mut record = store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            if mode == "spawned" {
+                record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            }
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let mut launch = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+            std::fs::create_dir_all(&candidate)?;
+            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+            // A commit that initially exists only in the writer's private Git.
+            let private_git =
+                |args: &[&str]| -> std::result::Result<String, Box<dyn std::error::Error>> {
+                    let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
+                        .chain(args.iter().map(|arg| OsString::from(*arg)))
+                        .collect();
+                    let mut environment: Vec<(OsString, OsString)> = [
+                        ("PATH", "/usr/bin:/bin"),
+                        ("GIT_CONFIG_NOSYSTEM", "1"),
+                        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                        ("GIT_AUTHOR_NAME", "Fixture"),
+                        ("GIT_COMMITTER_NAME", "Fixture"),
+                        ("GIT_AUTHOR_EMAIL", "fixture@example.invalid"),
+                        ("GIT_COMMITTER_EMAIL", "fixture@example.invalid"),
+                    ]
+                    .into_iter()
+                    .map(|(key, value)| (key.into(), value.into()))
+                    .collect();
+                    environment.extend([
+                        (
+                            "GIT_DIR".into(),
+                            candidate.join("git-common").into_os_string(),
+                        ),
+                        (
+                            "GIT_COMMON_DIR".into(),
+                            candidate.join("git-common").into_os_string(),
+                        ),
+                        (
+                            "GIT_OBJECT_DIRECTORY".into(),
+                            candidate.join("git-objects").into_os_string(),
+                        ),
+                    ]);
+                    let mut options = ExecOptions::new(
+                        &argv,
+                        &fixture.writer.worktree,
+                        std::time::Duration::from_secs(5),
+                    );
+                    options.env = Some(&environment);
+                    let output = SystemExecutor::new(1)?.execute(options)?;
+                    assert!(
+                        output.termination == Termination::Exit(0),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr.bytes)
+                    );
+                    Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+                };
+            let tree = private_git(&["rev-parse", "HEAD^{tree}"])?;
+            let head = private_git(&[
+                "commit-tree",
+                &tree,
+                "-p",
+                &launch.base.to_string(),
+                "-m",
+                "legacy private commit",
+            ])?;
+            private_git(&["update-ref", launch.branch.as_str(), &head])?;
+            let (slot, binding) = launch.custody.take().ok_or("writer custody")?;
+            let slot_path = execution
+                .state_root
+                .as_path()
+                .join("worktrees")
+                .join(execution.project_id.to_string())
+                .join(provenant_confinement::worktrees::state_dir_name(
+                    &fixture.writer.worktree,
+                ));
+            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+                slot.try_clone()?,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            drop(provenant_supervisor::fixture::bind_writer_attempt(
+                lease, &attempt,
+            )?);
+            let modern = slot_path.join(id.to_string());
+            let mut reservation: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(modern.join("reservation.json"))?)?;
+            let anchor = slot.metadata()?;
+            reservation["reservation_device"] = anchor.device.into();
+            reservation["reservation_inode"] = anchor.inode.into();
+            if mode == "spawned" {
+                reservation["launch_state"] = "spawned".into();
+                let identity = serde_json::json!({"boot":reservation["boot"],"pid":999999,"native_start":1,"group_id":999999,"session_id":999999});
+                reservation["guardian"] = identity.clone();
+                reservation["provider"] = identity;
+            }
+            std::fs::write(
+                slot_path.join("reservation.json"),
+                serde_json::to_vec(&reservation)?,
+            )?;
+            std::fs::rename(
+                modern.join("ownership.json"),
+                slot_path.join("ownership.json"),
+            )?;
+            std::fs::remove_dir_all(modern)?;
+            if !mode.starts_with("no_summary") {
+                crate::artifacts::seal(
+                    &attempt,
+                    "launch.json",
+                    &serde_json::to_vec(&serde_json::json!({
+                        "schema_version": 1, "scope": scope, "requester": execution.actor_id
+                    }))?,
+                    RECORD_LIMIT,
+                )?;
+                let mut exit = crate::tests::exit();
+                exit.scope = scope;
+                exit.never_spawned = mode == "never_spawned";
+                if exit.never_spawned {
+                    exit.warnings.push("legacy provider never spawned".into());
+                }
+                crate::dispatch_tests::seal_exit(&store, &exit)?;
+            }
+            if mode == "no_summary_terminal" {
+                store.commit_lost(
+                    scope,
+                    "launch interrupted: provider never spawned; private evidence retained",
+                    &call,
+                )?;
+            }
+            let found = store.reconcile_with_observer(
+                run.run_id,
+                &crate::dispatch_tests::Fake::default(),
+                &call,
+                &provenant_supervisor::fixture::RecordedBootObserver,
+            )?;
+            assert!(
+                matches!(
+                    found.as_slice(),
+                    [(
+                        _,
+                        crate::Reconciled::Finished | crate::Reconciled::Withdrawn
+                    )]
+                ),
+                "{mode}: {found:?}"
+            );
+            let terminal = store.record(id, &call)?;
+            assert!(
+                matches!(terminal.state, AttemptState::Terminal { .. }),
+                "{mode}: {:?}",
+                terminal.state
+            );
+            if mode == "never_spawned" {
+                assert!(
+                    matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Rejected, reason: Some(ref reason), .. } if reason.contains("never spawned")),
+                    "{:?}",
+                    terminal.state
+                );
+            }
+            if mode.starts_with("no_summary") {
+                assert!(
+                    matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Lost, reason: Some(ref reason), .. } if reason.contains("never spawned")),
+                    "{:?}",
+                    terminal.state
+                );
+            }
+            assert!(store.writer_fences()?.is_empty());
+            assert!(store.writer_fence_listing()?.issues.is_empty());
+            assert!(!slot_path.join("reservation.json").exists());
+            assert!(slot_path.join("settlement.json").is_file());
+            if mode.starts_with("no_summary") {
+                assert_eq!(
+                    private_git(&["rev-parse", "HEAD"])?,
+                    head,
+                    "unlaunched private head retained"
+                );
+                store.gc_provider_state(
+                    &Directory::open_anchor(execution.state_root.as_path())?,
+                    7,
+                    clock
+                        .wall_now()?
+                        .checked_add(provenant_core::DurationMicros::from_seconds(2 * 86400)?)?,
+                    false,
+                    &call,
+                )?;
+                assert_eq!(
+                    private_git(&["rev-parse", "HEAD"])?,
+                    head,
+                    "private head retained after GC eligibility"
+                );
+            } else {
+                assert!(
+                    attempt
+                        .read_stable(OsStr::new("release.json"), RECORD_LIMIT)?
+                        .len()
+                        > 10
+                );
+                let imported = crate::objects::resolve_ref(
+                    &git,
+                    launch.worktree.repo(),
+                    launch.branch.as_str(),
+                )?;
+                assert_eq!(
+                    imported.to_string(),
+                    head,
+                    "private committed head imported before release"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn failed_import_becomes_terminal_after_three_attempts_and_releases_custody()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};

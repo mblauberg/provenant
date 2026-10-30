@@ -12,6 +12,69 @@ fn admission_clock_error_preserves_wire_message() {
 }
 
 type TestResult = std::result::Result<(), Box<dyn Error>>;
+
+#[test]
+fn legacy_slot_root_recovery_keeps_scope_anchor_and_writer_exclusion() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("writer");
+    std::fs::create_dir(&path)?;
+    drop(acquire(&path)?);
+    let slot = Directory::open_anchor(&path)?;
+    let evidence = attempt_evidence(&slot, scope())?;
+    let mut reservation: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
+    let anchor = slot.metadata()?;
+    reservation.reservation_device = anchor.device;
+    reservation.reservation_inode = anchor.inode;
+    write_record(
+        &slot,
+        "reservation.json",
+        &reservation,
+        PublishMode::NoReplace,
+    )?
+    .require_durable()?;
+    std::fs::remove_dir_all(path.join(scope().attempt.to_string()))?;
+    // A failed post-upgrade launch may have created an empty child already.
+    std::fs::create_dir(path.join(scope().attempt.to_string()))?;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    let recover = |scope| {
+        acquire_recovery(
+            slot.try_clone()?,
+            scope,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )
+    };
+    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
+    assert!(listing.issues.is_empty(), "{:?}", listing.issues);
+    assert_eq!(listing.reservations.len(), 1);
+    assert_eq!(listing.reservations[0].scope, scope());
+    assert!(reservation_present(&slot, scope())?);
+    let mut wrong = scope();
+    wrong.generation += 1;
+    assert!(recover(wrong).is_err());
+    wrong.attempt = AttemptId::from_bytes([9; 16]);
+    assert!(recover(wrong).is_err());
+    let recovery = recover(scope())?;
+    assert!(matches!(
+        recover(scope()),
+        Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
+    ));
+    drop(recovery);
+    assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
+    reservation.reservation_inode += 1;
+    write_record(
+        &slot,
+        "reservation.json",
+        &reservation,
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    assert!(matches!(recover(scope()), Err(CustodyError::InvalidRecord)));
+    assert!(path.join("reservation.json").is_file());
+    Ok(())
+}
 #[test]
 fn reservation_listing_isolates_an_inaccessible_slot() -> TestResult {
     let root = tempfile::tempdir()?;

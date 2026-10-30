@@ -1158,9 +1158,7 @@ impl RunStore {
                         .find(|fence| fence.scope == Self::scope(record));
                     let slot = match readable {
                         Some(fence) => fence
-                            .reservation
-                            .parent()
-                            .and_then(std::path::Path::parent)
+                            .custody_directory()
                             .ok_or_else(|| {
                                 RunError::unsafe_path(
                                     fence.reservation.clone(),
@@ -2169,19 +2167,28 @@ impl RunStore {
                     }))
                 });
             if let Some(state) = state {
+                if let Reconciled::Uncertain { reason } = &state {
+                    crate::settlement::blocked(
+                        &self.attempt_dir(run, id, false)?,
+                        Self::scope(&self.record(id, call)?),
+                        &reason.to_string(),
+                        call.clock,
+                    )?;
+                } else {
+                    crate::settlement::clear_blocked(
+                        &self.attempt_dir(run, id, false)?,
+                        Self::scope(&self.record(id, call)?),
+                    )?;
+                }
                 found.push((id, state));
             }
         }
         Ok(found)
     }
     fn withdraw_prepared_writer(&self, fence: &WriterFence, call: &Request<'_>) -> Result<bool> {
-        let directory = fence
-            .reservation
-            .parent()
-            .and_then(std::path::Path::parent)
-            .ok_or_else(|| {
-                RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
-            })?;
+        let directory = fence.custody_directory().ok_or_else(|| {
+            RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
+        })?;
         let recovery = custody::acquire_recovery(
             provenant_os::fs::Directory::open_anchor(directory)?,
             fence.scope,
@@ -2193,6 +2200,52 @@ impl RunStore {
             Ok(recovery) if recovery.scope() == fence.scope => recovery.withdraw_prepared().is_ok(),
             _ => false,
         })
+    }
+    fn settle_never_spawned_writer(
+        &self,
+        record: &AttemptRecord,
+        fence: &WriterFence,
+        call: &Request<'_>,
+    ) -> Result<Option<Reconciled>> {
+        let scope = Self::scope(record);
+        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        if fence.scope != scope
+            || read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
+        {
+            return Ok(None);
+        }
+        let directory = fence.custody_directory().ok_or_else(|| {
+            RunError::unsafe_path(fence.reservation.clone(), PathCheck::Containment)
+        })?;
+        let recovery = custody::acquire_recovery(
+            provenant_os::fs::Directory::open_anchor(directory)?,
+            scope,
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            call.cancel,
+            call.clock,
+        );
+        let Ok(recovery) = recovery else {
+            return Ok(None);
+        };
+        if !recovery
+            .never_spawned(&attempt)
+            .map_err(|error| RunError::Io(std::io::Error::other(error)))?
+        {
+            return Ok(None);
+        }
+        // No canonical exit exists to import the writer's private head.
+        // Lost-without-exit retains it through both cleanup and GC. Repeating
+        // this transaction also finishes a release interrupted after commit.
+        self.commit_lost(
+            scope,
+            "launch interrupted: provider never spawned; private evidence retained",
+            call,
+        )?;
+        recovery
+            .release_lost()
+            .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
+        self.set_temporary_retained(record.attempt_id, false, call)?;
+        Ok(Some(Reconciled::Finished))
     }
     /// Settle an attempt that has no launch summary. Only a reservation or
     /// handoff that provably never spawned is withdrawn; a held custody lock
@@ -2242,6 +2295,9 @@ impl RunStore {
                     call,
                 )?;
                 return Ok(Reconciled::Withdrawn);
+            }
+            if let Some(state) = self.settle_never_spawned_writer(record, &fence, call)? {
+                return Ok(state);
             }
             return Ok(Reconciled::uncertain(
                 UncertainReason::WriterCustodyUnconfirmed {
@@ -2349,6 +2405,11 @@ impl RunStore {
                 return Ok(Some(Reconciled::Withdrawn));
             }
             Some(fence) => {
+                if Self::needs_lost_settlement(record)
+                    && let Some(state) = self.settle_never_spawned_writer(record, &fence, call)?
+                {
+                    return Ok(Some(state));
+                }
                 return Ok(Some(Reconciled::uncertain(
                     UncertainReason::WriterReservationRetained {
                         reservation: fence.reservation.clone(),
