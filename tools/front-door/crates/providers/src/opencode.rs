@@ -67,7 +67,8 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
 }
 
 /// OpenCode uses the user's configuration and stored provider accounts.
-/// Inline permissions deny edits and shell commands for read-only runs.
+/// Inline permissions deny edits for read-only runs; the outer Seatbelt
+/// profile is the boundary for shell commands, as it is for Codex and Claude.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -123,7 +124,9 @@ fn prepare(
     );
     let mut permission = serde_json::json!({
         "edit": edit,
-        "bash": edit,
+        // Both access modes may run shell commands. The Seatbelt profile
+        // denies writes in read-only lanes, matching Codex and Claude.
+        "bash": "allow",
         "webfetch": "deny",
     });
     if input.git_context {
@@ -141,16 +144,13 @@ fn prepare(
     let package = package_root(input.executable)?;
     // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
     let bin = plan.scratch.path.join("bin");
-    let shell = access == Access::WorktreeWrite;
     let cargo_bin = input.home.join(".cargo/bin");
-    let mut path_entries = vec![bin.as_path()];
-    if shell {
-        path_entries.push(cargo_bin.as_path());
-    }
-    path_entries.extend([
+    let path_entries = [
+        bin.as_path(),
+        cargo_bin.as_path(),
         std::path::Path::new("/usr/bin"),
         std::path::Path::new("/bin"),
-    ]);
+    ];
     let path = std::env::join_paths(path_entries).map_err(|_| ProviderError::InvalidPath)?;
     let mut env = base_env(
         input,
@@ -172,9 +172,7 @@ fn prepare(
             .into_iter()
             .map(exact),
     );
-    if access == Access::WorktreeWrite {
-        runtime_reads.extend(crate::launch::git_global_files(&config_home));
-    }
+    runtime_reads.extend(crate::launch::git_global_files(&config_home));
     let config_dir = config_home.join("opencode");
     if config_dir.is_dir() {
         runtime_reads.push(subtree(config_dir));
@@ -201,11 +199,9 @@ fn prepare(
     }
     // Writers' system roots do not cover a host-selected Homebrew Git.
     let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
-    let mut tool_exec_roots = if shell {
-        vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
-    } else {
-        Vec::new()
-    };
+    // Both access modes may run shell commands; reads and writes are bounded
+    // by the outer profile. System roots do not cover a host-selected Git.
+    let mut tool_exec_roots = vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)];
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
@@ -223,25 +219,24 @@ fn prepare(
             private.join("state").into_os_string(),
         ),
     ]);
-    // Only lanes whose permissions allow bash can run the toolchain.
-    if shell {
-        crate::launch::rust_tools(
-            input,
-            access,
-            &mut runtime_reads,
-            &mut tool_exec_roots,
-            &mut env,
-            &mut setup,
-        );
-        crate::launch::node_tools(
-            input.home,
-            access,
-            crate::launch::lane_cache(input),
-            &mut runtime_reads,
-            &mut tool_exec_roots,
-            &mut env,
-        );
-    }
+    // Both access modes allow bash, so both get the same toolchain setup.
+    // Read-only lanes use its offline, read-only form.
+    crate::launch::rust_tools(
+        input,
+        access,
+        &mut runtime_reads,
+        &mut tool_exec_roots,
+        &mut env,
+        &mut setup,
+    );
+    crate::launch::node_tools(
+        input.home,
+        access,
+        crate::launch::lane_cache(input),
+        &mut runtime_reads,
+        &mut tool_exec_roots,
+        &mut env,
+    );
     env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
     // No repository configuration or plugins, and no Claude Code files.
     for key in [
@@ -863,6 +858,117 @@ mod tests {
     }
 
     #[test]
+    fn read_only_lane_allows_shell_and_grants_no_repository_or_state_writes() {
+        use provenant_confinement::permissions::{PathGrant, PathScope};
+        use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+
+        let base = crate::tests::read_only_plan("/fixture", None);
+        let mut permissions = base.permissions().clone();
+        // Provider state is attempt-private and separate from the lane state
+        // root, as in the Seatbelt snapshot fixture.
+        permissions.private_state = Some(PathGrant {
+            path: "/fixture/provider-state".into(),
+            scope: PathScope::Subtree,
+        });
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+        .unwrap();
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let env = |key: &str| {
+            spec.env
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        let config: serde_json::Value = serde_json::from_str(
+            &env("OPENCODE_CONFIG_CONTENT")
+                .expect("inline config")
+                .to_string_lossy(),
+        )
+        .unwrap();
+        assert_eq!(config["permission"]["bash"], "allow");
+        assert_eq!(config["permission"]["edit"], "deny");
+
+        let path: Vec<_> = std::env::split_paths(&env("PATH").expect("PATH")).collect();
+        for entry in ["/usr/bin", "/bin"] {
+            assert!(
+                path.iter().any(|dir| dir == std::path::Path::new(entry)),
+                "{entry}"
+            );
+        }
+        assert!(path.contains(&input.home.join(".cargo/bin")), "{path:?}");
+
+        let scratch = &plan.permissions().scratch.path;
+        let roots = &spec.profile.spec.tool_exec_roots;
+        for root in [
+            subtree("/bin"),
+            subtree("/usr/bin"),
+            subtree(package_root(input.executable).unwrap()),
+            subtree(input.home.join(".cargo/bin")),
+            subtree(input.home.join(".rustup/toolchains")),
+            subtree(scratch.join("target")),
+        ] {
+            assert!(roots.contains(&root), "{root:?}");
+        }
+
+        let profile = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &spec.profile,
+            input.home,
+        )
+        .unwrap();
+        for root in ["/bin", "/usr/bin", "/opt/homebrew/Cellar/provider/1.0"] {
+            assert!(
+                profile.contains(&format!("(allow process-exec (subpath \"{root}\"))")),
+                "{root}"
+            );
+        }
+        // Shell support must not make the worktree, repository or lane state
+        // writable; every write grant stays in the lane's own scratch or the
+        // provider's private data directory.
+        for line in profile
+            .lines()
+            .filter(|line| line.contains("(allow file-write"))
+        {
+            let path = line
+                .split_once('"')
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(path, _)| std::path::Path::new(path))
+                .unwrap_or_else(|| panic!("unparsed write grant: {line}"));
+            for forbidden in ["/fixture/repo", "/fixture/state"] {
+                let forbidden = std::path::Path::new(forbidden);
+                assert!(
+                    !(path == forbidden
+                        || path.starts_with(forbidden)
+                        || forbidden.starts_with(path)),
+                    "write grant {line} covers {}",
+                    forbidden.display()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn server_http_failure_cause_is_a_bounded_diagnostic() {
         let log = concat!(
             "timestamp=t level=INFO run=a message=\"watcher stopped\" path=/x http.span=1\n",
@@ -995,21 +1101,17 @@ mod tests {
                 link: bin.join("git"),
                 target: input.provenant.git.to_owned(),
             }));
-            // Read-only Git discovery must not enable other commands.
+            // Both modes may run system commands; the toolchain roots follow
+            // the same system and package roots.
             let roots = &spec.profile.spec.tool_exec_roots;
-            if access == Access::ReadOnly {
-                assert!(roots.is_empty());
-            } else {
-                // The toolchain roots follow the system and package roots.
-                assert_eq!(
-                    roots[..3],
-                    [
-                        subtree("/bin"),
-                        subtree("/usr/bin"),
-                        subtree(package_root(input.executable).unwrap()),
-                    ]
-                );
-            }
+            assert_eq!(
+                roots[..3],
+                [
+                    subtree("/bin"),
+                    subtree("/usr/bin"),
+                    subtree(package_root(input.executable).unwrap()),
+                ]
+            );
         }
     }
 

@@ -3114,8 +3114,7 @@ fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), Prov
 }
 
 #[test]
-fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result<(), ProviderError>
-{
+fn opencode_uses_user_config_and_accounts_with_mode_permissions() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("opencode", "configured/model");
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
@@ -3169,13 +3168,14 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                     .to_string_lossy(),
             )
             .expect("JSON config");
-            let permission = if access == Access::ReadOnly {
+            let edit = if access == Access::ReadOnly {
                 "deny"
             } else {
                 "allow"
             };
-            assert_eq!(config["permission"]["edit"], permission);
-            assert_eq!(config["permission"]["bash"], permission);
+            assert_eq!(config["permission"]["edit"], edit);
+            // Both modes run shell commands; the outer profile bounds them.
+            assert_eq!(config["permission"]["bash"], "allow");
             let scratch = format!("{}/**", plan.permissions().scratch.path.display());
             if git_context {
                 assert_eq!(
@@ -3193,8 +3193,8 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
 }
 
 #[test]
-fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
--> Result<(), Box<dyn std::error::Error>> {
+fn opencode_gets_the_rust_toolchain_in_each_access_mode() -> Result<(), Box<dyn std::error::Error>>
+{
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("opencode", "configured/model");
     let temp = tempfile::tempdir()?;
@@ -3240,11 +3240,44 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
             "{root:?}"
         );
     }
-    // Read-only lanes deny bash, so they get no toolchain.
+    // Read-only lanes also allow bash, so they get the offline toolchain in
+    // the lane scratch instead of the writer cache.
     let plan = fixture_access_plan(Access::ReadOnly, None, false);
     let spec = prepare(&home, &plan)?;
-    assert!(spec.profile.spec.tool_exec_roots.is_empty());
-    assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
+    let env = |key: &str| {
+        spec.env
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| Path::new(value).to_path_buf())
+    };
+    let scratch = &plan.permissions().scratch.path;
+    assert_eq!(env("CARGO_HOME"), Some(scratch.join("cargo-home")));
+    assert_eq!(env("CARGO_TARGET_DIR"), Some(scratch.join("target")));
+    assert_eq!(
+        env("CARGO_NET_OFFLINE"),
+        Some(Path::new("true").to_path_buf())
+    );
+    let path = env("PATH").expect("PATH");
+    assert!(
+        std::env::split_paths(&path).any(|dir| dir == home.join(".cargo/bin")),
+        "{path:?}"
+    );
+    for root in [
+        crate::launch::subtree("/bin"),
+        crate::launch::subtree("/usr/bin"),
+        crate::launch::subtree(scratch.join("target")),
+        crate::launch::subtree(home.join(".cargo/bin")),
+        crate::launch::subtree(home.join(".rustup/toolchains")),
+    ] {
+        assert!(
+            spec.profile.spec.tool_exec_roots.contains(&root),
+            "{root:?}"
+        );
+    }
+    assert!(
+        spec.setup
+            .contains(&crate::launch::SetupStep::CreateDir(scratch.join("target")))
+    );
     Ok(())
 }
 
