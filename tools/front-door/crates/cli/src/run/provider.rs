@@ -179,7 +179,7 @@ fn prepare_with_wait(
             .ok_or("unknown adapter")?
             .check_launch(&provenant_records::LaunchRequest {
                 resume: resume.is_some(),
-                write: task.writer.is_some() || !task.access.write_roots.is_empty(),
+                write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
                 network: task.access.network,
                 ..Default::default()
             })
@@ -1077,7 +1077,7 @@ fn prepare_command(
         .ok_or("unknown adapter")?
         .check_launch(&provenant_records::LaunchRequest {
             resume: resume.is_some(),
-            write: task.writer.is_some() || !task.access.write_roots.is_empty(),
+            write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
             network: task.access.network,
             ..Default::default()
         })
@@ -1261,7 +1261,7 @@ fn nested_policy_fallback(
     route: &ResolvedRoute,
     policy: &provenant_routing::ModelPolicy,
 ) -> Result<run::TaskRequest, String> {
-    if task.writer.is_some() || !task.access.write_roots.is_empty() {
+    if run::Service::has_writes(task.writer.is_some(), &task.access.write_roots) {
         return Err("model policy fallback requires read-only authority".into());
     }
     let fallback = task
@@ -5265,6 +5265,38 @@ mod tests {
         let observed = observe_codex_rollout(&base, thread);
         std::fs::remove_dir_all(&base)?;
         assert_eq!(observed?.model, "gpt-6-luna");
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_write_root_keeps_read_only_git_authority() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let write = root.join("write");
+        std::fs::create_dir(&write)?;
+        let access = run::LaneAccess {
+            write_roots: vec![write.clone()],
+            ..Default::default()
+        };
+        let request = confinement_request(
+            ProjectId::parse("0123456789abcdef0123456789abcdef")?,
+            ConfinementRoots {
+                cwd: &root,
+                home: &root,
+                scratch: &root,
+                private_state: &root,
+                assets: &root,
+                prompt_file: None,
+            },
+            None,
+            &access,
+            &Default::default(),
+            "codex",
+            false,
+        )?;
+        assert!(matches!(request.permissions.mode, AccessMode::ReadOnly));
+        assert_eq!(request.permissions.write_roots[0].path, write);
         Ok(())
     }
 

@@ -2296,7 +2296,8 @@ const PROVIDER_CREDENTIAL_DIRECTORIES: &[&str] = &[
     ".local/share/opencode",
 ];
 
-pub(crate) fn is_credential_root(path: &Path) -> bool {
+/// Whether a path lies within a known credential store.
+pub fn is_credential_root(path: &Path) -> bool {
     let components: Vec<&OsStr> = path
         .components()
         .filter_map(|component| match component {
