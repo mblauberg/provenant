@@ -176,6 +176,9 @@ fn run_announces_contributing_repo_file() -> Result<(), Box<dyn std::error::Erro
     std::fs::create_dir_all(&presets)?;
     let file = presets.join("single.toml");
     std::fs::write(&file, "[parameters]\nroute = 'utility'\n")?;
+    // The CLI reports the project path canonically, and macOS links `/var`
+    // away, so compare against the canonical spelling of the fixture file.
+    let file = std::fs::canonicalize(&file)?;
     let prompt = temp.path().join("prompt");
     std::fs::write(&prompt, "brief")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
