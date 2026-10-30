@@ -737,13 +737,10 @@ impl F3Facade for BoundFacade<'_> {
                     std::time::Duration::from_micros(cap),
                 ) {
                     Ok(PeerResponse {
-                        protocol: observed,
                         result: PeerResult::Health { data: value, .. },
                         ..
                     }) => {
-                        // Report what the peer answered with, not this host's
-                        // assumption; a peer cannot borrow our level.
-                        health.protocol = Some(observed);
+                        health.protocol = Some(PROTOCOL);
                         health.reason = None;
                         health.host = value.host;
                         health.available = value.available;

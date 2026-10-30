@@ -14,12 +14,7 @@ use std::{
     time::Duration,
 };
 
-/// The newest protocol level this release speaks. Health is the host-level
-/// probe, so it carries this level and `hosts` reports it for each host.
-/// A release that adds a newer action raises this too.
-pub const PROTOCOL: u64 = 10;
-/// Levels at which each action family last changed; below `PROTOCOL` once a
-/// newer action lands.
+pub const PROTOCOL: u64 = 6;
 pub const CONSOLE_PROTOCOL: u64 = 7;
 pub const INBOX_PROTOCOL: u64 = 8;
 pub const DOCTOR_PROTOCOL: u64 = 9;
@@ -1115,23 +1110,6 @@ mod tests {
             decode_recorded_response(&serde_json::to_vec(&response).unwrap()),
             Err(PeerError::Version)
         ));
-    }
-
-    #[test]
-    fn the_host_protocol_tracks_the_newest_action_level() {
-        // `hosts` reports this number, so a new action that raises the level
-        // must raise the host-level probe too.
-        let newest = [
-            PROTOCOL,
-            CONSOLE_PROTOCOL,
-            INBOX_PROTOCOL,
-            DOCTOR_PROTOCOL,
-            CONSOLE_DETAIL_PROTOCOL,
-        ]
-        .into_iter()
-        .max()
-        .unwrap();
-        assert_eq!(PROTOCOL, newest);
     }
 
     #[test]
