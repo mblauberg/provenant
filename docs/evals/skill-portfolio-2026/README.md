@@ -10,7 +10,7 @@ Detailed provider events and usage remain local run-owned evidence.
 
 | Dataset | Planned schedule | Result | Disposition |
 |---|---:|---|---|
-| [Current 28-owner holdout](routing-holdout.yaml) | 18 cases x 2 families x 3 trials | Not run | Catalogue holdout only; no current evaluation protocol has been frozen. |
+| [Current 28-owner holdout](routing-holdout.yaml) | 17 cases x 2 families x 3 trials (102 rows) | Not run | Catalogue holdout only; no current evaluation protocol has been frozen. |
 
 The current holdout names the live consolidated owners `ui-ux-design`,
 `skill-craft`, `session` and `tracker`. The 30 October 2026 skills rework
@@ -19,12 +19,14 @@ moved into `session`, `tracker` and `scope`) and renamed `tdd` to
 `test-design`; the previous holdout is kept at
 [predecessor/routing-holdout-20260719.yaml](predecessor/routing-holdout-20260719.yaml). It also tests the positive `setup-repo` trigger
 against the negative boundary for ordinary mechanics in an already-configured
-repository. Its 28-owner count (20 in `skills/`, 8 in `library/`) is checked against `*/SKILL.md` by the
-live catalogue tests; it is not a rewrite of the frozen protocol.
+repository. Its 28-owner count (20 in `skills/`, 8 in `library/`) is a catalogue snapshot,
+not a rewrite of the frozen protocol.
 
 The [frozen protocol](routing-protocol.json) (bound to the archived 19 July holdout) remains evaluation v7's original
 33-owner, 19 July artifact, including its source revision, identity and
 daemon-era route. It is retained as planned-unexecuted historical evidence.
+The frozen v7 protocol declares 18 cases, but its archived dataset holds 17
+(`m10` is absent); the frozen files are left as they were.
 
 No semantic result file exists because no provider-backed model attempt started.
 The semantic holdout remains provider-dependent and not run. A deliberate
@@ -38,7 +40,7 @@ every terminal action without retrying or relabelling failures.
 
 ## Current dispatch infrastructure coverage
 
-Boundary coverage lives with the Rust run/CLI owners. The 18-case holdout
+Boundary coverage lives with the Rust run/CLI owners. The 17-case holdout
 above remains unrun.
 
 ## Predecessor routing evidence

@@ -123,7 +123,7 @@ cases:
     expected:
       primary_skill: null
       required_companion_skills: []
-      allowed_companion_skills: []
+      allowed_companion_skills: [tracker]
   - id: m16
     category: audit-then-approved-implementation
     critical: true

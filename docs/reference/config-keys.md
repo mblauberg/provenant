@@ -361,7 +361,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `default` | `"prefer"` |
 | `effect` | `"prefer: a blocked cross-family leg is replaced by a same-family reviewer through another lens, as the ladder allows. require: wait for, or reroute to, another family instead."` |
 | `project` | `"strengthen"` |
-| `reader` | `"skills/code-review/SKILL.md, skills/implement/SKILL.md"` |
+| `reader` | `"tools/front-door/crates/config/src/knobs.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"require keeps decorrelated review at the price of waiting on quota or outages."` |
 | `type` | `"enum"` |
@@ -376,7 +376,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `max` | `2` |
 | `min` | `0` |
 | `project` | `"strengthen"` |
-| `reader` | `"skills/code-review/SKILL.md, skills/implement/SKILL.md"` |
+| `reader` | `"tools/front-door/crates/config/src/knobs.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"Each extra review costs one reviewer lane and adjudication time for wider defect coverage."` |
 | `type` | `"int"` |
@@ -388,7 +388,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `default` | `"auto"` |
 | `effect` | `"auto: one behaviour-preserving polish lane before review when the diff exceeds about 300 lines or touches more than one crate or package. always: every change. off: never."` |
 | `project` | `"strengthen"` |
-| `reader` | `"skills/implement/SKILL.md"` |
+| `reader` | `"tools/front-door/crates/config/src/knobs.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"Polish costs one writer lane per qualifying change for a simpler diff and shorter review."` |
 | `type` | `"enum"` |
@@ -401,7 +401,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `default` | `"delta"` |
 | `effect` | `"After a repair, re-review only the repair delta, or the whole change again."` |
 | `project` | `"strengthen"` |
-| `reader` | `"skills/code-review/SKILL.md, skills/implement/SKILL.md"` |
+| `reader` | `"tools/front-door/crates/config/src/knobs.rs"` |
 | `status` | `"wired"` |
 | `trade_off` | `"full catches interactions between the repair and untouched code at roughly the cost of the first review."` |
 | `type` | `"enum"` |
