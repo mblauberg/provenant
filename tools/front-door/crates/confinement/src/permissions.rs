@@ -2193,6 +2193,7 @@ fn encloses_credential_root_path(path: &Path) -> bool {
 }
 
 /// A subtree that holds `home` itself or one of its nested credential roots.
+#[cfg(any(target_os = "macos", test))]
 fn encloses_home_credentials(grant: &PathGrant, home: &Path) -> bool {
     grant.scope == PathScope::Subtree && encloses_home_credentials_path(&grant.path, home)
 }
