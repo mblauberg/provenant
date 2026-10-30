@@ -559,7 +559,7 @@ Accepted by every command, before or after the subcommand.
 
 ```json
 {
-  "description": "Rewrite retired routing timing keys to `schedule` in place after a timestamped backup, dropping expired pacing overrides",
+  "description": "Rewrite retired routing timing keys to `schedule` and remove retired fabric limits in place after a timestamped backup",
   "groups": [
     {
       "arguments": [
