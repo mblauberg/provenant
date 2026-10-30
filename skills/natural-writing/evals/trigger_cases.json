@@ -141,6 +141,45 @@
         "primary_skill": "legal-writing",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q176140",
+      "relation": "positive",
+      "prompt": "Draft a reply email to my landlord about the leaking tap: plain, a bit casual, and sounding like me rather than AI.",
+      "tags": [
+        "direct",
+        "correspondence"
+      ],
+      "expected": {
+        "primary_skill": "natural-writing",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176141",
+      "relation": "positive",
+      "prompt": "This report reads like a professor wrote it; make it sound like me: concrete, a few contractions, shorter verdict sentences, same numbers.",
+      "tags": [
+        "direct",
+        "voice"
+      ],
+      "expected": {
+        "primary_skill": "natural-writing",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q176142",
+      "relation": "negative",
+      "prompt": "Make this affidavit read less stiff and more like how I talk.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "legal-writing",
+        "companion_skills": []
+      }
     }
   ]
 }
