@@ -22,7 +22,9 @@ pub(crate) fn read_only_branch(
     let writer = match crate::resolve_writer(host, cwd, cwd) {
         Ok(writer) => writer,
         // Ordinary read-only dispatches also run outside linked worktrees.
-        Err(crate::RunError::Validation(_)) | Err(crate::RunError::Writer(_)) => return Ok(None),
+        Err(crate::RunError::Validation(_))
+        | Err(crate::RunError::Writer(_))
+        | Err(crate::RunError::WriterProjectMismatch { .. }) => return Ok(None),
         Err(error) => return Err(error),
     };
     match crate::prepare_writer(&writer, host, project) {
