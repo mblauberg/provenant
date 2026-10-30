@@ -110,7 +110,7 @@ impl Error {
                 | WorktreeError::LiveProcess(_)
                 | WorktreeError::UnknownWriter
                 | WorktreeError::GitEntryHeld { .. }
-                | WorktreeError::IncompleteCensus
+                | WorktreeError::IncompleteCensus { .. }
                 | WorktreeError::Primary
                 | WorktreeError::IdentityChanged
                 | WorktreeError::PrimaryMoved,
@@ -756,11 +756,10 @@ pub(crate) fn land_cleanup(
                 ));
                 return Ok(landed);
             }
-            match context
+            let (observations, details) = context
                 .workers
-                .observe_roots(std::slice::from_ref(&lane.path))
-                .get(&lane.path)
-            {
+                .observe_roots_with_details(std::slice::from_ref(&lane.path));
+            match observations.get(&lane.path) {
                 Some(worktrees::WorkerState::Free) => {}
                 Some(worktrees::WorkerState::Live) => {
                     landed.kept =
@@ -768,7 +767,15 @@ pub(crate) fn land_cleanup(
                     return Ok(landed);
                 }
                 _ => {
-                    landed.kept = Some(WorktreeError::IncompleteCensus.to_string());
+                    landed.kept = Some(
+                        WorktreeError::IncompleteCensus {
+                            detail: details
+                                .get(&lane.path)
+                                .cloned()
+                                .unwrap_or_else(|| workers.incomplete_census_detail()),
+                        }
+                        .to_string(),
+                    );
                     return Ok(landed);
                 }
             }

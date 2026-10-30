@@ -89,10 +89,8 @@ pub enum WorktreeError {
     LiveWriter,
     #[error("worktree writer is live: process {0} has its working directory inside the tree")]
     LiveProcess(ObservedProcess),
-    #[error(
-        "incomplete worker census; retry `provenant land` when process observation is complete"
-    )]
-    IncompleteCensus,
+    #[error("incomplete worker census: {detail}")]
+    IncompleteCensus { detail: String },
     #[error("worktree writer or registration is unknown")]
     UnknownWriter,
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
@@ -162,7 +160,7 @@ impl WorktreeError {
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
             }
-            Self::UnknownWriter | Self::IncompleteCensus => {
+            Self::UnknownWriter | Self::IncompleteCensus { .. } => {
                 "run `provenant worktree list` and retry when writer observation is available"
             }
             Self::Primary => {
@@ -388,6 +386,9 @@ pub enum WorkerState {
     Unknown,
 }
 
+/// Per-root custody states and reasons for unknown states.
+pub type WorkerObservations = (BTreeMap<PathBuf, WorkerState>, BTreeMap<PathBuf, String>);
+
 /// Injectable native observation seam. Implementations return one conservative
 /// state per canonical candidate root; they never grant signal authority.
 pub trait WorkerObserver: Send + Sync {
@@ -414,6 +415,20 @@ pub trait WorkerObserver: Send + Sync {
     fn live_process_for_land(&self, root: &Path) -> Option<ObservedProcess> {
         self.live_process(root)
     }
+
+    fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        (self.observe_roots(roots), BTreeMap::new())
+    }
+
+    fn observe_roots_for_land_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        (self.observe_roots_for_land(roots), BTreeMap::new())
+    }
+
+    /// A diagnostic for an incomplete census. It never affects custody; the
+    /// default is used by observers that cannot identify the observation.
+    fn incomplete_census_detail(&self) -> String {
+        "process census unavailable".into()
+    }
 }
 
 /// The refusal for a root observed live: it names the process when the
@@ -429,11 +444,11 @@ pub struct SystemWorkerObserver;
 
 impl WorkerObserver for SystemWorkerObserver {
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
-        system_worker_roots(roots, false)
+        system_worker_roots(roots, false).0
     }
 
     fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
-        system_worker_roots(roots, true)
+        system_worker_roots(roots, true).0
     }
 
     fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
@@ -442,6 +457,14 @@ impl WorkerObserver for SystemWorkerObserver {
 
     fn live_process_for_land(&self, root: &Path) -> Option<ObservedProcess> {
         system_live_process(root, true)
+    }
+
+    fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        system_worker_roots(roots, false)
+    }
+
+    fn observe_roots_for_land_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        system_worker_roots(roots, true)
     }
 }
 
@@ -461,13 +484,20 @@ fn system_live_process(root: &Path, ancestors: bool) -> Option<ObservedProcess> 
     .remove(root)
 }
 
-fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> BTreeMap<PathBuf, WorkerState> {
+fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> WorkerObservations {
     let ProcessObservation::Present(current) = current_process() else {
-        return roots
-            .iter()
-            .cloned()
-            .map(|root| (root, WorkerState::Unknown))
-            .collect();
+        return (
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Unknown))
+                .collect(),
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, "current process unavailable".into()))
+                .collect(),
+        );
     };
     observe_worker_roots(
         roots,
@@ -484,8 +514,10 @@ fn observe_worker_roots(
     cwd_observer: &dyn CwdObserver,
     current: &ProcessFact,
     ancestors: bool,
-) -> BTreeMap<PathBuf, WorkerState> {
-    observe_worker_holders(roots, observer, cwd_observer, current, ancestors).0
+) -> WorkerObservations {
+    let (states, _, details) =
+        observe_worker_holders(roots, observer, cwd_observer, current, ancestors);
+    (states, details)
 }
 
 /// The per-root state, and the first process seen inside each root.
@@ -498,6 +530,7 @@ fn observe_worker_holders(
 ) -> (
     BTreeMap<PathBuf, WorkerState>,
     BTreeMap<PathBuf, ObservedProcess>,
+    BTreeMap<PathBuf, String>,
 ) {
     let mut states: BTreeMap<_, _> = roots
         .iter()
@@ -505,30 +538,48 @@ fn observe_worker_holders(
         .map(|root| (root, WorkerState::Free))
         .collect();
     let mut holders = BTreeMap::new();
+    let mut details = BTreeMap::new();
     if roots.is_empty() {
-        return (states, holders);
+        return (states, holders, details);
     }
-    let Ok(census) = observer.census(65_536) else {
-        let unknown = roots
-            .iter()
-            .cloned()
-            .map(|root| (root, WorkerState::Unknown))
-            .collect();
-        return (unknown, holders);
+    let census = match observer.census(65_536) {
+        Ok(census) => census,
+        Err(error) => {
+            let unknown = roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Unknown))
+                .collect();
+            let detail = if matches!(
+                error,
+                provenant_supervisor::census::CensusError::ProcessList(_)
+            ) {
+                "process listing failed"
+            } else {
+                "process census unavailable"
+            };
+            return (
+                unknown,
+                holders,
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, detail.into()))
+                    .collect(),
+            );
+        }
     };
     // Custody is decided per root. A gap that could hide a process anywhere
     // (an incomplete or truncated listing, or a process that could not be
     // described or placed) leaves every root that is not positively live
     // unknown. Permission denial alone cannot exclude a same-user writer:
     // Linux processes can disable dumpability and hide their cwd.
-    let mut unknown_all = !census.listing_is_complete()
-        || census
-            .unknown_pids()
-            .values()
-            .any(|issue| *issue != ObservationIssue::PermissionDenied);
     for (&pid, &issue) in census.unknown_pids() {
+        let detail = format!("process {pid}: {issue:?}");
         if issue == ObservationIssue::PermissionDenied {
-            record_denied_process(&mut states, cwd_observer.uid(pid));
+            record_denied_process(&mut states, &mut details, cwd_observer.uid(pid), &detail);
+        } else {
+            record_unknown_all(&mut states, &mut details, &detail);
         }
     }
     // Exclude the caller's verified ancestors. A walk that stops early leaves
@@ -559,12 +610,25 @@ fn observe_worker_holders(
         match observe_same_process(observer, cwd_observer, fact) {
             NativeCwd::Gone => {}
             NativeCwd::Denied => {
-                record_denied_process(&mut states, cwd_observer.uid(fact.identity.pid));
+                record_denied_process(
+                    &mut states,
+                    &mut details,
+                    cwd_observer.uid(fact.identity.pid),
+                    &format!("process {}: PermissionDenied", fact.identity.pid),
+                );
             }
-            NativeCwd::Unknown => unknown_all = true,
+            NativeCwd::Unknown(category) => record_unknown_all(
+                &mut states,
+                &mut details,
+                &format!("process {}: {category}", fact.identity.pid),
+            ),
             NativeCwd::Path(path) => {
                 let Some(canonical) = canonical_cwd(&path) else {
-                    unknown_all = true;
+                    record_unknown_all(
+                        &mut states,
+                        &mut details,
+                        &format!("process {}: cwd unreadable", fact.identity.pid),
+                    );
                     continue;
                 };
                 record_live_path(&mut states, &canonical);
@@ -579,14 +643,14 @@ fn observe_worker_holders(
             }
         }
     }
-    if unknown_all {
-        for state in states.values_mut() {
-            if *state != WorkerState::Live {
-                *state = WorkerState::Unknown;
-            }
-        }
+    if !census.listing_is_complete() {
+        record_unknown_all(
+            &mut states,
+            &mut details,
+            "process listing truncated or incomplete",
+        );
     }
-    (states, holders)
+    (states, holders, details)
 }
 
 /// Canonicalise a process's working directory. A directory that has since been
@@ -614,10 +678,30 @@ enum NativeCwd {
     Gone,
     /// Denial needs independent credentials and root permissions to exclude access.
     Denied,
-    Unknown,
+    Unknown(String),
 }
 
-fn record_denied_process(states: &mut BTreeMap<PathBuf, WorkerState>, uid: Option<u32>) {
+fn record_unknown_all(
+    states: &mut BTreeMap<PathBuf, WorkerState>,
+    details: &mut BTreeMap<PathBuf, String>,
+    detail: &str,
+) {
+    for (root, state) in states {
+        if *state != WorkerState::Live {
+            *state = WorkerState::Unknown;
+            details
+                .entry(root.clone())
+                .or_insert_with(|| detail.to_owned());
+        }
+    }
+}
+
+fn record_denied_process(
+    states: &mut BTreeMap<PathBuf, WorkerState>,
+    details: &mut BTreeMap<PathBuf, String>,
+    uid: Option<u32>,
+    detail: &str,
+) {
     for (root, state) in states {
         if *state != WorkerState::Free {
             continue;
@@ -631,6 +715,9 @@ fn record_denied_process(states: &mut BTreeMap<PathBuf, WorkerState>, uid: Optio
         });
         if !excluded {
             *state = WorkerState::Unknown;
+            details
+                .entry(root.clone())
+                .or_insert_with(|| detail.to_owned());
         }
     }
 }
@@ -646,22 +733,21 @@ fn observe_same_process(
         ProcessObservation::Unknown(ObservationIssue::PermissionDenied) => {
             return NativeCwd::Denied;
         }
-        ProcessObservation::Present(_) | ProcessObservation::Unknown(_) => {
-            return NativeCwd::Unknown;
-        }
+        ProcessObservation::Present(_) => return NativeCwd::Unknown("identity race".into()),
+        ProcessObservation::Unknown(issue) => return NativeCwd::Unknown(format!("{issue:?}")),
     }
     let observed = match cwd_observer.cwd(expected.identity.pid) {
         Ok(CwdObservation::Path(path)) => NativeCwd::Path(path),
         Ok(CwdObservation::Gone) => return NativeCwd::Gone,
         Ok(CwdObservation::PermissionDenied) => NativeCwd::Denied,
-        Ok(CwdObservation::Unsupported) | Err(_) => {
-            return NativeCwd::Unknown;
-        }
+        Ok(CwdObservation::Unsupported) => return NativeCwd::Unknown("cwd unsupported".into()),
+        Err(_) => return NativeCwd::Unknown("cwd unreadable".into()),
     };
     match process_observer.observe(expected.identity.pid) {
         ProcessObservation::Present(after) if after.identity == expected.identity => observed,
         ProcessObservation::Absent => NativeCwd::Gone,
-        ProcessObservation::Present(_) | ProcessObservation::Unknown(_) => NativeCwd::Unknown,
+        ProcessObservation::Present(_) => NativeCwd::Unknown("identity race".into()),
+        ProcessObservation::Unknown(issue) => NativeCwd::Unknown(format!("{issue:?}")),
     }
 }
 
@@ -1163,9 +1249,9 @@ fn lock_worktree(
         Some(writer)
     };
     let canonical = canonicalize(verified.path())?;
-    let observations = context
+    let (observations, details) = context
         .workers
-        .observe_roots(std::slice::from_ref(&canonical));
+        .observe_roots_with_details(std::slice::from_ref(&canonical));
     // The writer lock establishes exclusion.
     // A census gap does not make a free lease live; only a positive
     // observation of a live process refuses. Landing also needs this root
@@ -1177,7 +1263,12 @@ fn lock_worktree(
         .unwrap_or(WorkerState::Unknown)
     {
         WorkerState::Unknown if context.workers.requires_complete_census() => {
-            Err(WorktreeError::IncompleteCensus)
+            Err(WorktreeError::IncompleteCensus {
+                detail: details
+                    .get(&canonical)
+                    .cloned()
+                    .unwrap_or_else(|| context.workers.incomplete_census_detail()),
+            })
         }
         WorkerState::Free | WorkerState::Unknown => Ok(LockedWorktree { verified, writer }),
         WorkerState::Live => Err(live_refusal(context.workers, &canonical)),
@@ -2054,7 +2145,9 @@ fn retain_reason(error: &WorktreeError) -> RetainReason {
         WorktreeError::GitOperationInProgress => RetainReason::GitOperationInProgress,
         WorktreeError::LiveWriter | WorktreeError::LiveProcess(_) => RetainReason::LiveWriter,
         WorktreeError::LockBusy => RetainReason::LockBusy,
-        WorktreeError::Cancelled | WorktreeError::IncompleteCensus => RetainReason::UnknownWriter,
+        WorktreeError::Cancelled | WorktreeError::IncompleteCensus { .. } => {
+            RetainReason::UnknownWriter
+        }
         error if error.is_custody_unknown() => RetainReason::UnknownWriter,
         WorktreeError::CheckedOut => RetainReason::CheckedOut,
         WorktreeError::IdentityChanged => RetainReason::Changed,
@@ -4123,7 +4216,8 @@ mod lifecycle_tests {
                 &Cwd(cwd),
                 &current,
                 false,
-            )[&root]
+            )
+            .0[&root]
         };
         // A deleted directory elsewhere is unrelated to the root.
         assert_eq!(
@@ -4223,7 +4317,8 @@ mod lifecycle_tests {
                     cwds,
                     &current,
                     ancestors,
-                )[&root]
+                )
+                .0[&root]
             };
             assert_eq!(observe(&cwds, false), WorkerState::Live);
             assert_eq!(
@@ -4306,7 +4401,8 @@ mod lifecycle_tests {
                     cwds,
                     &current,
                     true,
-                )[&root]
+                )
+                .0[&root]
             };
             // An ambiguous ancestry excludes no unverified ancestor, so it
             // says nothing about a root no process is inside.
@@ -4355,11 +4451,98 @@ mod lifecycle_tests {
     }
     impl WorkerObserver for InjectedCensus {
         fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
-            observe_worker_roots(roots, self, self, &self.current, true)
+            observe_worker_roots(roots, self, self, &self.current, true).0
         }
         fn requires_complete_census(&self) -> bool {
             true
         }
+        fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+            observe_worker_roots(roots, self, self, &self.current, true)
+        }
+    }
+
+    #[test]
+    fn worker_census_detail_excludes_foreign_denial_and_reports_unplaceable_process()
+    -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, ProcessIdentity};
+        let fixture = Fixture::new()?;
+        let root = canonicalize(&fixture.root)?;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+        let fact = |pid: i64| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let observer = InjectedCensus {
+            census: Census::from_observations(
+                [fact(1), fact(100), fact(200)],
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?,
+            cwds: BTreeMap::from([
+                (1, CwdObservation::PermissionDenied),
+                (200, CwdObservation::Unsupported),
+            ]),
+            current: fact(100),
+            uids: BTreeMap::from([(1, provenant_os::fs::effective_uid().wrapping_add(1))]),
+        };
+        let (states, details) = observe_worker_roots(
+            std::slice::from_ref(&root),
+            &observer,
+            &observer,
+            &observer.current,
+            false,
+        );
+        assert_eq!(states[&root], WorkerState::Unknown);
+        assert_eq!(details[&root], "process 200: cwd unsupported");
+        Ok(())
+    }
+
+    #[test]
+    fn worker_census_detail_reports_incomplete_listing() -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, ProcessIdentity};
+        let fixture = Fixture::new()?;
+        let root = canonicalize(&fixture.root)?;
+        let current = ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid: 100,
+                native_start: 100,
+                group_id: 100,
+                session_id: 100,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let observer = InjectedCensus {
+            census: Census::from_observations([current.clone()], [], [], false, false, 32)?,
+            cwds: BTreeMap::new(),
+            current,
+            uids: BTreeMap::new(),
+        };
+        let (states, details) = observe_worker_roots(
+            std::slice::from_ref(&root),
+            &observer,
+            &observer,
+            &observer.current,
+            false,
+        );
+        assert_eq!(states[&root], WorkerState::Unknown);
+        assert_eq!(details[&root], "process listing truncated or incomplete");
+        Ok(())
     }
 
     #[test]
@@ -4523,7 +4706,7 @@ mod lifecycle_tests {
         );
         assert!(matches!(
             remove_named(&unplaced, "landed"),
-            Err(WorktreeError::IncompleteCensus)
+            Err(WorktreeError::IncompleteCensus { ref detail }) if detail == "process 400: Io"
         ));
         // A readable process inside the tree still keeps it.
         let live = observer(ObservationIssue::PermissionDenied, Some(&created.path))?;
