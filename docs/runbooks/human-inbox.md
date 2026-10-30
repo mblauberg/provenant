@@ -48,14 +48,13 @@ provenant answer REQUEST_ID --action choose --option repair \
 For a peer owner, use `--host HOST` for list, show or answer, or qualify a
 request ID as `HOST_ID:REQUEST_ID`. Preserve the operation ID for retries.
 
-Run outside any project, such as from `/` where the Console app starts,
-`provenant inbox --json` lists the open requests of every project on this host.
-`data.projects` maps each request's `project_id` to its `label` and `path`. The
-list shows open requests only, so `--state all` and `--cursor` need a project
-directory. `inbox REQUEST_ID`, `answer` and `inbox close` find the owning
-project from the request ID. When no project resolves and the host's state
-cannot be read, the error is `no_project`, with the cause and the repair. Inside
-a project the command is unchanged.
+`provenant inbox --all-projects --json` lists requests in registered projects
+on this host, regardless of the current directory. `data.projects` maps each
+request's `project_id` to its `label` and `path`. Pass `--cursor` to follow
+`next_cursor`, and use `--session` to filter before paging. Use `--all-projects`
+with `inbox REQUEST_ID`, `answer`, or `inbox close` to locate the owning project
+by request ID. Without it, these commands use the current project; if no project
+resolves, `no_project` reports the cause and names `--all-projects` as a repair.
 Close and acknowledgement must run on the owner host or in the owning chair
 session; remote attempts return `owner_local_only`.
 The MCP `fabric_inbox` tool accepts `host` for list, answer, close and

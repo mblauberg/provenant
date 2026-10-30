@@ -141,17 +141,16 @@ public struct InboxClient: Sendable {
         let nextCursor: String?
         let truncated: Bool
         let coverage: String
-        /// Present when the CLI listed the whole host (no project around it): each project's name and path.
+        /// Present when the CLI listed the whole host: each project's name and path.
         let projects: [String: Project]?
     }
     private struct Project: Decodable, Sendable { let label: String? }
     private struct Single: Decodable, Sendable { let item: InboxItem }
 
-    /// Open requests (or every request) across pages, in the CLI's order. Run outside a project, the CLI lists the
-    /// open requests of every project on the host, and each carries its project's name.
+    /// Requests across pages, in the CLI's order, from every registered project on the host.
     public func list(includeClosed: Bool = false, pageSize: Int = 50, maxPages: Int = 10) async throws -> Page<HumanRequest> {
         try await collectPages(maxPages: maxPages) { cursor in
-            var arguments = ["inbox", "--state", includeClosed ? "all" : "open", "--limit", String(pageSize)]
+            var arguments = ["inbox", "--all-projects", "--state", includeClosed ? "all" : "open", "--limit", String(pageSize)]
             if let cursor { arguments += ["--cursor", cursor] }
             let listed = try await cli.call(arguments, as: Listed.self)
             let items = listed.items.map { request -> HumanRequest in
@@ -164,13 +163,13 @@ public struct InboxClient: Sendable {
     }
 
     public func item(_ id: String) async throws -> InboxItem {
-        try await cli.call(["inbox", id], as: Single.self).item
+        try await cli.call(["inbox", "--all-projects", id], as: Single.self).item
     }
 
     /// `provenant answer`. A `conflict` refusal reads the request again and returns it as `.stale`.
     public func answer(_ id: String, action: AnswerAction, option: String? = nil, text: String? = nil,
                        expectRevision: UInt64) async throws -> AnswerOutcome {
-        var arguments = ["answer", id, "--action", action.rawValue, "--expect-revision", String(expectRevision), "--channel", "console"]
+        var arguments = ["answer", "--all-projects", id, "--action", action.rawValue, "--expect-revision", String(expectRevision), "--channel", "console"]
         if let option { arguments += ["--option", option] }
         var file: URL?
         defer { if let file { replies.release(file) } }

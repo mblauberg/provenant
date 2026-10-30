@@ -27,8 +27,8 @@ final class Replay: @unchecked Sendable {
 
 final class InboxClientTests: XCTestCase {
     func testListFollowsTheCursorAndKeepsKindBlockingAndSession() async throws {
-        let replay = Replay([(["inbox", "--state", "open", "--limit", "50", "--cursor", "CUR1"], "inbox-page2", 0),
-                             (["inbox", "--state", "open"], "inbox-page1", 0)])
+        let replay = Replay([(["inbox", "--all-projects", "--state", "open", "--limit", "50", "--cursor", "CUR1"], "inbox-page2", 0),
+                             (["inbox", "--all-projects", "--state", "open"], "inbox-page1", 0)])
         let page = try await InboxClient(cli: replay.client).list()
         XCTAssertEqual(page.items.map(\.request.title), ["Pick the storage layer", "Assume UTC timestamps", "Which name?"])
         XCTAssertEqual(page.items.map(\.request.kind), ["decision", "assumption", "question"])
@@ -36,7 +36,7 @@ final class InboxClientTests: XCTestCase {
         XCTAssertEqual(page.items[0].chairSessionId, "3f9c2a10d4e84b7f")
         XCTAssertNil(page.nextCursor)
         XCTAssertEqual(replay.recorded.count, 2)
-        XCTAssertTrue(replay.recorded.allSatisfy { $0.last == "--json" })
+        XCTAssertTrue(replay.recorded.allSatisfy { $0.contains("--all-projects") && $0.last == "--json" })
     }
 
     func testHostWideListNamesEachRequestsProject() async throws {
@@ -63,20 +63,21 @@ final class InboxClientTests: XCTestCase {
         XCTAssertEqual(receipt.delivery?.state, "queued")
         XCTAssertEqual(receipt.state, "answered")
         let call = try XCTUnwrap(replay.recorded.first)
-        XCTAssertEqual(call, ["answer", "1", "--action", "choose", "--expect-revision", "3", "--channel", "console", "--option", "sqlite", "--json"])
+        XCTAssertEqual(call, ["answer", "--all-projects", "1", "--action", "choose", "--expect-revision", "3", "--channel", "console", "--option", "sqlite", "--json"])
     }
 
     func testStaleRevisionReadsTheCurrentStateAndWritesNothing() async throws {
-        let replay = Replay([(["answer"], "answer-conflict", 1), (["inbox", "1"], "inbox-item-stale", 0)])
+        let replay = Replay([(["answer"], "answer-conflict", 1), (["inbox", "--all-projects", "1"], "inbox-item-stale", 0)])
         let outcome = try await InboxClient(cli: replay.client).answer("1", action: .confirm, expectRevision: 3)
         guard case .stale(let current) = outcome else { return XCTFail("expected a stale outcome") }
+        XCTAssertTrue(replay.recorded.allSatisfy { $0.contains("--all-projects") })
         XCTAssertEqual(current.request.revision, 5)
         XCTAssertEqual(current.request.state, "superseded")
         XCTAssertEqual(replay.recorded.filter { $0.first == "answer" }.count, 1)
     }
 
     func testItemCarriesAnswerAndAcknowledgement() async throws {
-        let replay = Replay([(["inbox", "1"], "inbox-item-answered", 0)])
+        let replay = Replay([(["inbox", "--all-projects", "1"], "inbox-item-answered", 0)])
         let item = try await InboxClient(cli: replay.client).item("1")
         XCTAssertEqual(item.answer?.channel, "console")
         XCTAssertEqual(item.delivery?.state, "acknowledged")

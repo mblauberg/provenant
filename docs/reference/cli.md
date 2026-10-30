@@ -121,6 +121,7 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
+| `--all-projects` | `{"defaults": ["false"], "name": "all_projects", "values": ["true", "false"]}` |
 | `id` | `{"name": "id", "positional": true}` |
 | `--state` | `{"defaults": ["open"], "name": "state", "values": ["open", "all"]}` |
 | `--session` | `{"name": "session"}` |
@@ -136,6 +137,7 @@ Accepted by every command, before or after the subcommand.
   "groups": [
     {
       "arguments": [
+        "all_projects",
         "id",
         "state",
         "session",
@@ -155,6 +157,7 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
+| `--all-projects` | `{"defaults": ["false"], "name": "all_projects", "values": ["true", "false"]}` |
 | `id` | `{"name": "id", "positional": true, "required": true}` |
 | `--host` | `{"description": "Owner host label or host ID", "name": "host"}` |
 | `--state` | `{"name": "state", "required": true, "values": ["withdrawn", "superseded", "expired"]}` |
@@ -170,6 +173,7 @@ Accepted by every command, before or after the subcommand.
   "groups": [
     {
       "arguments": [
+        "all_projects",
         "id",
         "host",
         "state",
@@ -221,6 +225,7 @@ Accepted by every command, before or after the subcommand.
 
 | Argument | Contract |
 |---|---|
+| `--all-projects` | `{"defaults": ["false"], "name": "all_projects", "values": ["true", "false"]}` |
 | `id` | `{"name": "id", "positional": true, "required": true}` |
 | `--host` | `{"description": "Owner host label or host ID", "name": "host"}` |
 | `--action` | `{"name": "action", "required": true, "values": ["choose", "reply", "confirm", "override"]}` |
@@ -239,6 +244,7 @@ Accepted by every command, before or after the subcommand.
   "groups": [
     {
       "arguments": [
+        "all_projects",
         "id",
         "host",
         "action",

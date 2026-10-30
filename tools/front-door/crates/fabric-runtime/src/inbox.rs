@@ -83,37 +83,96 @@ pub fn overview(
     })
 }
 
-/// Open requests of every project in this host's state, whatever the caller's
-/// project. Read-only: absent state is an error, never created.
+/// Page requests of registered projects using the same lookup as item actions.
 pub fn host_open_requests(
     root: &StateRoot,
-    clock: &dyn Clock,
-    cancel: &CancelToken,
+    projects: &[provenant_core::ProjectId],
+    session: Option<&str>,
+    state: InboxFilter,
     limit: u64,
-) -> Result<(Vec<HumanRequest>, bool), InboxError> {
-    let page = overview(root, clock, cancel, 1_048_576).map_err(|error| match error {
-        OverviewError::Incompatible => InboxError::Store(provenant_fabric_store::Error::Invalid(
-            "inbox store version",
-        )),
-        OverviewError::Unavailable => InboxError::OwnerUnavailable,
-    })?;
-    let call = Request { clock, cancel };
-    let store = Store::open_existing(root, &call)?;
-    let mut truncated = page.truncated;
-    let mut items = Vec::new();
-    for item in page.items {
-        if items.len() as u64 == limit {
-            truncated = true;
-            break;
-        }
-        let project = item
-            .project_id
-            .parse()
-            .map_err(|_| InboxError::Invalid("project"))?;
-        let id = HumanRequestId::parse(&item.id).map_err(|_| InboxError::Invalid("id"))?;
-        items.push(store.human_request(project, id, &call)?);
+    cursor: Option<InboxCursor>,
+    call: &Request<'_>,
+) -> Result<(Vec<HumanRequest>, Option<InboxCursor>), InboxError> {
+    let store = Store::open_existing(root, call)?;
+    let scope = CanonicalV1::record_digest(
+        "human_host_inbox_cursor",
+        1,
+        &(projects, session, state, limit),
+    )
+    .map_err(provenant_fabric_store::Error::from)?;
+    let generation = || -> Result<u64, InboxError> {
+        projects.iter().try_fold(0u64, |sum, project| {
+            sum.checked_add(store.human_generation(*project, call)?)
+                .ok_or(InboxError::Invalid("inbox generation"))
+        })
+    };
+    let snapshot = generation()?;
+    if cursor
+        .as_ref()
+        .is_some_and(|c| c.scope != scope || c.snapshot != snapshot)
+    {
+        return Err(InboxError::CursorExpired);
     }
-    Ok((items, truncated))
+    let mut items = Vec::new();
+    let mut truncated = false;
+    let mut boundary = None;
+    for (index, project) in projects.iter().enumerate() {
+        let page = store.human_requests(
+            *project,
+            session,
+            state == InboxFilter::All,
+            cursor.as_ref().map(|c| c.after),
+            limit,
+            call,
+        )?;
+        truncated |= page.truncated;
+        if page.truncated
+            && let Some(last) = page.items.last()
+        {
+            boundary = Some(boundary.map_or(last.id, |old: HumanRequestId| old.min(last.id)));
+        }
+        for item in page.items {
+            let mut shadowed = false;
+            for earlier in &projects[..index] {
+                match store.human_request(*earlier, item.id, call) {
+                    Ok(_) => {
+                        shadowed = true;
+                        break;
+                    }
+                    Err(provenant_fabric_store::Error::NotFound) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            if !shadowed {
+                items.push(item);
+            }
+        }
+    }
+    if generation()? != snapshot {
+        return Err(InboxError::CursorExpired);
+    }
+    items.sort_by_key(|item| item.id);
+    if let Some(boundary) = boundary {
+        items.retain(|item| item.id <= boundary);
+    }
+    if items.len() > limit as usize {
+        items.truncate(limit as usize);
+        truncated = true;
+    }
+    let next = if truncated {
+        items
+            .last()
+            .map(|item| item.id)
+            .or(boundary)
+            .map(|after| InboxCursor {
+                after,
+                scope,
+                snapshot,
+            })
+    } else {
+        None
+    };
+    Ok((items, next))
 }
 
 /// The project among `projects` that owns request `id`, if any.
