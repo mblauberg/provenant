@@ -3854,6 +3854,15 @@ fn quota_pool_is_validated_and_limited_to_grouped_adapters()
         bundled.quota_pool(&ModelId::parse("agy/gemini-3.8-flash")?),
         Some("gemini")
     );
+    // Uncatalogued models take the pool their family names, or none.
+    for (model, pool) in [
+        ("agy/gemini-9-pro", Some("gemini")),
+        ("agy/claude-opus-9", Some("claude")),
+        ("agy/other-1", None),
+        ("codex/gemini-1", None),
+    ] {
+        assert_eq!(bundled.quota_pool(&ModelId::parse(model)?), pool, "{model}");
+    }
     for (model, pool, valid) in [
         ("agy/claude-sonnet-4-6", Some("claude"), true),
         ("agy/claude-sonnet-4-6", None, true),
