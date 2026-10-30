@@ -330,8 +330,6 @@ pub enum RunError {
     AttemptReservationRetained,
     #[error("invalid run record: {0}")]
     Validation(&'static str),
-    #[error("invalid run record: {0}")]
-    ValidationOwned(String),
     #[error("invalid run record: writer HEAD is not the lane branch")]
     WriterHeadNotLaneBranch,
     #[error("invalid run record: review required; use lane deliver --accept-review ATTEMPT")]

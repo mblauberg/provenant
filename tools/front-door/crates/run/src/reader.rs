@@ -9,6 +9,16 @@ use provenant_records::{AttemptFact, AttemptFile, OutputRef, ReviewerFact, Revie
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
 
+const PROCESS_OBSERVATION_MAX_AGE_MICROS: i64 = 5_000_000;
+const PROCESS_OBSERVATION_MAX_FUTURE_SKEW_MICROS: i64 = 1_000_000;
+
+pub(super) fn process_observation_fresh(observed: WallTime, now: WallTime) -> bool {
+    observed.as_micros().saturating_sub(now.as_micros())
+        <= PROCESS_OBSERVATION_MAX_FUTURE_SKEW_MICROS
+        && now.as_micros().saturating_sub(observed.as_micros())
+            <= PROCESS_OBSERVATION_MAX_AGE_MICROS
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AttemptFilter {
     pub run_id: Option<RunId>,
@@ -529,23 +539,35 @@ impl RunStore {
             return Err(RunError::Validation("attempt run association"));
         }
         validate_attempt(&record)?;
-        let checkpoint = match self.attempt_dir(record.run_id, id, false) {
-            Ok(directory) => match read {
-                RecordRead::Durable => crate::artifacts::read_sealed(
-                    &directory,
-                    AttemptFile::Process.name(),
-                    RECORD_LIMIT,
-                )?,
-                RecordRead::Observed => crate::artifacts::read_sealed_observed(
-                    &directory,
-                    AttemptFile::Process.name(),
-                    RECORD_LIMIT,
-                )?,
-            },
-            Err(RunError::Filesystem(error)) if error.is_not_found() => None,
-            Err(error) => return Err(error),
+        let (checkpoint, checkpoint_readable) = match self.attempt_dir(record.run_id, id, false) {
+            Ok(directory) => {
+                let read_checkpoint = match read {
+                    RecordRead::Durable => crate::artifacts::read_sealed(
+                        &directory,
+                        AttemptFile::Process.name(),
+                        RECORD_LIMIT,
+                    ),
+                    RecordRead::Observed => crate::artifacts::read_sealed_observed(
+                        &directory,
+                        AttemptFile::Process.name(),
+                        RECORD_LIMIT,
+                    ),
+                };
+                match (read_checkpoint, read) {
+                    (Ok(bytes), _) => (bytes, true),
+                    // Settlement reads stay strict; a live observation must not
+                    // turn a damaged or unreadable checkpoint into silence.
+                    (Err(error), RecordRead::Durable) => return Err(error),
+                    (Err(_), RecordRead::Observed) => (None, false),
+                }
+            }
+            Err(RunError::Filesystem(error)) if error.is_not_found() => (None, true),
+            Err(error) if matches!(read, RecordRead::Durable) => return Err(error),
+            Err(_) => (None, false),
         };
+        record.process_observation_valid.0 = checkpoint_readable;
         if let Some(bytes) = checkpoint {
+            record.process_observation_valid.0 = false;
             #[derive(serde::Deserialize)]
             struct ProcessCheckpoint {
                 schema_version: u64,
@@ -553,22 +575,52 @@ impl RunStore {
                 #[serde(default)]
                 last_output_at: Option<WallTime>,
                 #[serde(default)]
+                observed_at: Option<WallTime>,
+                #[serde(default)]
                 priority: Option<i32>,
+                #[serde(default)]
+                silent: bool,
+                #[serde(default)]
+                silent_for_ms: Option<u64>,
+                #[serde(default)]
+                disk_paused: bool,
             }
-            let observation: ProcessCheckpoint = serde_json::from_slice(&bytes)
-                .map_err(|_| RunError::Validation("process observation"))?;
-            if observation.schema_version != 1
-                || observation.scope
-                    != (provenant_supervisor::custody::Scope {
-                        run: record.run_id,
-                        attempt: record.attempt_id,
-                        generation: record.generation,
-                    })
+            let parsed = serde_json::from_slice::<ProcessCheckpoint>(&bytes);
+            let scoped = parsed.as_ref().is_ok_and(|observation| {
+                observation.schema_version == 1
+                    && observation.scope
+                        == (provenant_supervisor::custody::Scope {
+                            run: record.run_id,
+                            attempt: record.attempt_id,
+                            generation: record.generation,
+                        })
+            });
+            if matches!(read, RecordRead::Durable) {
+                parsed
+                    .as_ref()
+                    .map_err(|_| RunError::Validation("process observation"))?;
+                if !scoped {
+                    return Err(RunError::Validation("process observation scope"));
+                }
+            }
+            if let Ok(observation) = parsed
+                && scoped
             {
-                return Err(RunError::Validation("process observation scope"));
+                record.process_observation_valid.0 = true;
+                record.last_output_at = observation.last_output_at;
+                record.priority = observation.priority;
+                record.provider_silence_suppressed.0 = observation.disk_paused;
+                let fresh = observation
+                    .observed_at
+                    .zip(call.clock.wall_now().ok())
+                    .is_some_and(|(observed, now)| process_observation_fresh(observed, now));
+                if observation.silent
+                    && fresh
+                    && matches!(record.state, AttemptState::Running { .. })
+                {
+                    record.provider_silent_for_ms.0 = observation.silent_for_ms;
+                }
             }
-            record.last_output_at = observation.last_output_at;
-            record.priority = observation.priority;
         }
         Ok((run, record))
     }

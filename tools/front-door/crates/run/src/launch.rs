@@ -83,7 +83,7 @@ pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64) -> CapturePlan {
         silence_ms: task
             .profile
             .knob_u64("lanes.silence_seconds")
-            .unwrap_or(300)
+            .unwrap_or(1800)
             .saturating_mul(1000),
         ..CapturePlan::default()
     }
@@ -427,17 +427,6 @@ pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read
     (read && release) || (!root.starts_with(state) && !state.starts_with(root))
 }
 
-/// Refuse a resolved child root by the same rule the confinement compiler
-/// applies, naming the flag and the path in the message.
-fn refused_root(flag: &'static str, path: &std::path::Path, read: bool) -> Option<RunError> {
-    provenant_confinement::refuses_lane_root(path, read).then(|| {
-        RunError::ValidationOwned(format!(
-            "{flag} {} is or encloses a credential root",
-            path.display()
-        ))
-    })
-}
-
 /// A child's network reach may not exceed its parent's, each write root must
 /// sit inside a parent write root and each read root inside any parent root.
 /// The host repeats submission checks: roots must be existing canonical
@@ -468,16 +457,21 @@ fn child_access_within(
                     && access_root_allowed(canonical, &state, read)
             })
     };
-    for (roots, flag, read) in [
-        (&child.access.read_roots, "--read-root", true),
-        (&child.access.write_roots, "--write-root", false),
-    ] {
-        for root in roots {
-            if let Ok(canonical) = provenant_os::fs::canonicalize(root)
-                && let Some(error) = refused_root(flag, &canonical, read)
-            {
-                return Err(error);
-            }
+    for (root, read) in child
+        .access
+        .read_roots
+        .iter()
+        .map(|root| (root, true))
+        .chain(child.access.write_roots.iter().map(|root| (root, false)))
+    {
+        // Apply the same subtree rule as the confinement compiler.
+        if provenant_os::fs::canonicalize(root)
+            .ok()
+            .is_some_and(|canonical| provenant_confinement::refuses_lane_root(&canonical, read))
+        {
+            return Err(RunError::Confinement(
+                provenant_confinement::permissions::PermissionError::CredentialRoot,
+            ));
         }
     }
     let writes: Vec<PathBuf> = parent
@@ -512,6 +506,55 @@ mod release_root_tests {
     use super::*;
     use std::path::Path;
 
+    /// A read root in a Codex standalone release passes the shared entry
+    /// exception; a write root there stays refused.
+    #[test]
+    fn child_allows_codex_standalone_read_roots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // The rule is lexical, so check it without the filesystem first.
+        let shape = std::path::Path::new(
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin/bin",
+        );
+        assert!(
+            !provenant_confinement::refuses_lane_root(shape, true),
+            "reads pass entry"
+        );
+        assert!(
+            provenant_confinement::refuses_lane_root(shape, false),
+            "writes stay strict"
+        );
+        // Against a machine's real home: build a temp release and walk it
+        // through `child_access_within`. A lane can seal `~/.codex`; then the
+        // fixture cannot exist and the filesystem part is skipped silently.
+        let Some(home) = std::env::var_os("HOME") else {
+            return Ok(());
+        };
+        let releases = std::path::Path::new(&home).join(".codex/packages/standalone/releases");
+        if std::fs::create_dir_all(&releases).is_err() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir_in(&releases)?;
+        let release = std::fs::canonicalize(temp.path())?;
+        let state_dir = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(state_dir.path())?.join("state");
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.read_roots = vec![release.clone()];
+        let mut child = parent.clone();
+        child.access.read_roots = vec![release.clone()];
+        child.access.write_roots = vec![];
+        assert!(
+            child_access_within(&parent, &child, &state).is_ok(),
+            "reads in a standalone release pass entry"
+        );
+        child.access.write_roots = vec![release.clone()];
+        child.access.read_roots = vec![];
+        let error = child_access_within(&parent, &child, &state).unwrap_err();
+        assert!(error.to_string().contains(
+            &provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
+        ));
+        Ok(())
+    }
+
     #[test]
     fn child_refuses_credential_and_enclosing_roots()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -531,15 +574,18 @@ mod release_root_tests {
             let mut parent = crate::tests::input().request.tasks.remove(0);
             parent.access.read_roots = vec![root.clone()];
             parent.access.write_roots = vec![root.clone()];
-            for (flag, read) in [("--read-root", true), ("--write-root", false)] {
+            for read in [true, false] {
                 let mut child = parent.clone();
                 child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
                 child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
                 let error =
                     child_access_within(&parent, &child, &temp.path().join("state")).unwrap_err();
-                let message = error.to_string();
-                assert!(message.contains(flag), "{message}");
-                assert!(message.contains(&root.display().to_string()), "{message}");
+                assert!(matches!(
+                    error,
+                    RunError::Confinement(
+                        provenant_confinement::permissions::PermissionError::CredentialRoot
+                    )
+                ));
             }
         }
         Ok(())
@@ -559,12 +605,11 @@ mod release_root_tests {
                 ("--read-root", true, read_allowed),
                 ("--write-root", false, write_allowed),
             ] {
-                let refused = refused_root(flag, Path::new(path), read);
-                assert_eq!(refused.is_none(), allowed, "{flag} {path}");
-                if let Some(RunError::ValidationOwned(message)) = refused {
-                    assert!(message.contains(flag), "{message}");
-                    assert!(message.contains(path), "{message}");
-                }
+                assert_eq!(
+                    !provenant_confinement::refuses_lane_root(Path::new(path), read),
+                    allowed,
+                    "{flag} {path}"
+                );
             }
         }
     }

@@ -22,10 +22,29 @@ use std::time::{Duration, Instant};
 
 // Match Run's persisted claim backoff so transient contention cannot spend
 // every guardian callback before a replacement driver is eligible.
-fn retry_terminal(mut terminal: impl FnMut() -> bool, mut wait: impl FnMut(Duration)) -> bool {
-    for delay in [0, 5, 30, 120] {
+// Fixture builds keep the production value only for its schedule test.
+#[cfg_attr(feature = "fixture", allow(dead_code))]
+const PRODUCTION_TERMINAL_RETRY_MS: [u64; 4] = [0, 5_000, 30_000, 120_000];
+// Fixture builds prove the retry path without spending five seconds on the
+// forged-row recovery case; production keeps the schedule above. The window
+// still has to outlast a test repairing the row on a slow CI host.
+#[cfg(feature = "fixture")]
+const TERMINAL_RETRY_MS: [u64; 4] = [0, 50, 250, 1_000];
+#[cfg(not(feature = "fixture"))]
+const TERMINAL_RETRY_MS: [u64; 4] = PRODUCTION_TERMINAL_RETRY_MS;
+
+fn retry_terminal(terminal: impl FnMut() -> bool, wait: impl FnMut(Duration)) -> bool {
+    retry_terminal_with(TERMINAL_RETRY_MS, terminal, wait)
+}
+
+fn retry_terminal_with(
+    schedule: [u64; 4],
+    mut terminal: impl FnMut() -> bool,
+    mut wait: impl FnMut(Duration),
+) -> bool {
+    for delay in schedule {
         if delay != 0 {
-            wait(Duration::from_secs(delay));
+            wait(Duration::from_millis(delay));
         }
         if terminal() {
             return true;
@@ -1045,13 +1064,17 @@ impl Driver<'_> {
                     stderr_bytes: u64,
                     last_output_ms: Option<u64>,
                     last_output_at: Option<WallTime>,
+                    observed_at: Option<WallTime>,
                     last_progress_ms: Option<u64>,
                     silent: bool,
+                    silent_for_ms: Option<u64>,
                     disk_paused: bool,
                     provider_cpu_micros: Option<u64>,
                     last_cpu_progress_ms: Option<u64>,
                     publication_pending: bool,
                 }
+                let disk_paused = disk_paused && exit.is_none() && stop_reason.is_none();
+                let silent_for_ms = plan.silent_for_ms(now, state.last_progress_ms(), disk_paused);
                 let observed = Observed {
                     schema_version: 1,
                     scope: self.reservation.scope,
@@ -1063,9 +1086,11 @@ impl Driver<'_> {
                     stderr_bytes: err.outcome().total_bytes,
                     last_output_ms,
                     last_output_at,
+                    observed_at: wall_now(),
                     last_progress_ms: state.last_progress_ms(),
-                    silent: plan.silent(now, state.last_progress_ms()),
-                    disk_paused: disk_paused && exit.is_none() && stop_reason.is_none(),
+                    silent: silent_for_ms.is_some(),
+                    silent_for_ms,
+                    disk_paused,
                     provider_cpu_micros,
                     last_cpu_progress_ms,
                     publication_pending: false,

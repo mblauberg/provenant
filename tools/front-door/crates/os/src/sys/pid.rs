@@ -1,7 +1,216 @@
-use crate::pid::{CwdObservation, PidError, ProcessSignal};
+use crate::pid::{CwdObservation, PidError, ProcessSignal, ProcessState};
 use std::io;
 
 const MAX_EINTR_RETRIES: u64 = 8;
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_thread_state(states: &[Option<i32>]) -> io::Result<ProcessState> {
+    // These values are from Darwin's mach/thread_info.h; 5 is HALTED.
+    // Missing a stall falls back to recovery; a false stall blocks recovery.
+    const RUNNING: i32 = 1;
+    const UNINTERRUPTIBLE: i32 = 4;
+    if !states.iter().any(Option::is_some)
+        || states
+            .iter()
+            .flatten()
+            .any(|state| !(1..=5).contains(state))
+    {
+        return Err(io::Error::other("invalid thread states"));
+    }
+    Ok(
+        if states.contains(&Some(UNINTERRUPTIBLE)) && !states.contains(&Some(RUNNING)) {
+            ProcessState::Uninterruptible
+        } else {
+            ProcessState::Running
+        },
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_threads(pid: i32) -> io::Result<Vec<u64>> {
+    // A full buffer may have been truncated. Do not infer a stall from an incomplete census.
+    const MAX_THREADS: usize = 16_384;
+    const PROC_PIDLISTTHREADS: i32 = 6;
+    let mut threads = vec![0u64; MAX_THREADS];
+    let size = i32::try_from(threads.len() * std::mem::size_of::<u64>())
+        .map_err(|_| io::Error::other("thread buffer too large"))?;
+    // SAFETY: the vector supplies writable storage of size bytes, retained by the caller.
+    let count = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDLISTTHREADS,
+            0,
+            threads.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if count <= 0 || count >= size || !(count as usize).is_multiple_of(std::mem::size_of::<u64>()) {
+        return Err(io::Error::other("thread list unavailable or incomplete"));
+    }
+    threads.truncate(count as usize / std::mem::size_of::<u64>());
+    Ok(threads)
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_thread_states(pid: i32) -> io::Result<ProcessState> {
+    let threads = darwin_threads(pid)?;
+    let mut states = Vec::with_capacity(threads.len());
+    let mut refreshed = None;
+    let requested = std::mem::size_of::<libc::proc_threadinfo>() as i32;
+    for thread in threads {
+        let mut info = std::mem::MaybeUninit::<libc::proc_threadinfo>::uninit();
+        // SAFETY: info supplies writable ABI-sized storage and libproc does not retain it.
+        let returned = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTHREADINFO,
+                thread,
+                info.as_mut_ptr().cast(),
+                requested,
+            )
+        };
+        if returned != requested {
+            // Ignore a failed query only if a fresh census proves the thread vanished.
+            if refreshed.is_none() {
+                refreshed = Some(darwin_threads(pid)?);
+            }
+            if refreshed
+                .as_ref()
+                .is_some_and(|current| current.contains(&thread))
+            {
+                return Err(io::Error::other("thread state unavailable"));
+            }
+            states.push(None);
+            continue;
+        }
+        // SAFETY: a full-size successful call initialised the record.
+        states.push(Some(unsafe { info.assume_init() }.pth_run_state));
+    }
+    darwin_thread_state(&states)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_stat_state(stat: &str) -> io::Result<ProcessState> {
+    // comm is parenthesised and may itself contain spaces or parentheses.
+    let (_, tail) = stat
+        .rsplit_once(')')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid proc stat"))?;
+    let state = tail
+        .strip_prefix(' ')
+        .and_then(|tail| tail.split_whitespace().next())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing proc state"))?;
+    match state {
+        "D" => Ok(ProcessState::Uninterruptible),
+        "T" | "t" => Ok(ProcessState::Stopped),
+        "Z" | "X" | "x" => Ok(ProcessState::Gone),
+        "R" | "S" | "I" | "W" | "P" => Ok(ProcessState::Running),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unknown proc state",
+        )),
+    }
+}
+
+pub(crate) fn process_state(pid: i32) -> io::Result<ProcessState> {
+    #[cfg(target_os = "linux")]
+    {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => linux_stat_state(&stat),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ProcessState::Gone),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let requested = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+        // SAFETY: info is writable storage of the requested ABI size; libproc retains no pointer.
+        let returned = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                requested,
+            )
+        };
+        if returned == 0 {
+            return Err(io::Error::other("process status unavailable"));
+        }
+        if returned != requested {
+            return Err(io::Error::other("short process status record"));
+        }
+        // SAFETY: a full-size successful call initialised the record.
+        let info = unsafe { info.assume_init() };
+        if info.pbsi_status == libc::SZOMB {
+            return Ok(ProcessState::Gone);
+        }
+        let threads = darwin_thread_states(pid)?;
+        Ok(if threads == ProcessState::Uninterruptible {
+            threads
+        } else if info.pbsi_status == libc::SSTOP {
+            ProcessState::Stopped
+        } else {
+            threads
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "process state unsupported",
+        ))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn classifies_darwin_thread_states() {
+    assert_eq!(
+        darwin_thread_state(&[Some(4), Some(3)]).unwrap(),
+        ProcessState::Uninterruptible
+    );
+    assert_eq!(
+        darwin_thread_state(&[Some(4), Some(1)]).unwrap(),
+        ProcessState::Running
+    );
+    assert_eq!(
+        darwin_thread_state(&[Some(5), Some(3)]).unwrap(),
+        ProcessState::Running
+    );
+    assert_eq!(
+        darwin_thread_state(&[None, Some(4), Some(3)]).unwrap(),
+        ProcessState::Uninterruptible
+    );
+    assert_eq!(
+        darwin_thread_state(&[None, Some(4), Some(1)]).unwrap(),
+        ProcessState::Running
+    );
+    assert!(darwin_thread_state(&[]).is_err());
+    assert!(darwin_thread_state(&[None, None]).is_err());
+    assert!(darwin_thread_state(&[Some(4), Some(99)]).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn parses_linux_stat_states_with_complex_names() {
+    for (state, expected) in [
+        ("D", ProcessState::Uninterruptible),
+        ("T", ProcessState::Stopped),
+        ("t", ProcessState::Stopped),
+        ("S", ProcessState::Running),
+        ("R", ProcessState::Running),
+        ("Z", ProcessState::Gone),
+    ] {
+        assert_eq!(
+            linux_stat_state(&format!("123 (name ) with spaces) {state} 1 2 3")).unwrap(),
+            expected
+        );
+    }
+    assert!(linux_stat_state("123 (broken").is_err());
+    assert!(linux_stat_state("123 (name) ? 1").is_err());
+}
 
 pub(crate) fn uid(pid: i32) -> Option<u32> {
     #[cfg(target_os = "linux")]
@@ -148,16 +357,30 @@ enum DarwinCwdCall {
     Record,
 }
 
+/// The result of probing a process whose cwd libproc would not report.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DarwinLiveness {
+    Alive,
+    Gone,
+    Unknown,
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn classify_darwin_result(
     pid: i32,
     size: i32,
     expected: usize,
     error: Option<io::Error>,
+    liveness: impl FnOnce() -> DarwinLiveness,
 ) -> Result<DarwinCwdCall, PidError> {
     if size == 0 {
-        // proc_pidinfo uses zero to mean the process is gone. errno may be stale.
-        return Ok(DarwinCwdCall::Gone);
+        // Zero means libproc would not describe the process; it does not prove
+        // absence. Only a probe proving ESRCH may report the process gone.
+        return Ok(match liveness() {
+            DarwinLiveness::Gone => DarwinCwdCall::Gone,
+            DarwinLiveness::Alive | DarwinLiveness::Unknown => DarwinCwdCall::PermissionDenied,
+        });
     }
     if size < 0 {
         let error = match error {
@@ -214,6 +437,34 @@ fn decode_darwin_path(pid: i32, raw: &[libc::c_char]) -> Result<std::path::PathB
 }
 
 #[cfg(target_os = "macos")]
+fn darwin_liveness(pid: i32) -> DarwinLiveness {
+    // Mirror the census rule: zero from libproc is ambiguous, so getsid decides
+    // absence. Clear errno first because a failed getsid may inherit stale errno.
+    // SAFETY: __error returns this thread's live errno slot; writing zero
+    // ensures a failed getsid result cannot inherit stale errno.
+    let errno_slot = unsafe { libc::__error() };
+    // SAFETY: errno_slot is the live thread-local slot returned immediately
+    // above; writing it cannot affect another thread.
+    unsafe { *errno_slot = 0 };
+    // SAFETY: getsid reads only the scalar PID, retains no pointer, and reports
+    // failure through this thread's errno slot.
+    let session = unsafe { libc::getsid(pid) };
+    // SAFETY: __error returns the same live thread-local slot after the call.
+    let errno_slot = unsafe { libc::__error() };
+    // SAFETY: errno_slot is the live thread-local slot returned immediately
+    // above; only its integer value is read.
+    let errno = unsafe { *errno_slot };
+    if session > 0 {
+        DarwinLiveness::Alive
+    } else if session == -1 && errno == libc::ESRCH {
+        DarwinLiveness::Gone
+    } else {
+        // Another failure, including EPERM/EACCES, cannot prove absence.
+        DarwinLiveness::Unknown
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
     let expected = std::mem::size_of::<libc::proc_vnodepathinfo>();
     let mut retries = 0;
@@ -234,7 +485,7 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
             )
         };
         let error = (size < 0).then(io::Error::last_os_error);
-        match classify_darwin_result(pid, size, expected, error)? {
+        match classify_darwin_result(pid, size, expected, error, || darwin_liveness(pid))? {
             DarwinCwdCall::Gone => return Ok(CwdObservation::Gone),
             DarwinCwdCall::PermissionDenied => return Ok(CwdObservation::PermissionDenied),
             DarwinCwdCall::Unsupported => return Ok(CwdObservation::Unsupported),
@@ -282,11 +533,17 @@ mod tests {
     #[test]
     fn darwin_zero_result_ignores_stale_errno_and_short_records_are_typed() {
         assert!(matches!(
-            classify_darwin_result(42, 0, 24, Some(io::Error::from_raw_os_error(libc::EACCES))),
+            classify_darwin_result(
+                42,
+                0,
+                24,
+                Some(io::Error::from_raw_os_error(libc::EACCES)),
+                || DarwinLiveness::Gone
+            ),
             Ok(DarwinCwdCall::Gone)
         ));
         assert!(matches!(
-            classify_darwin_result(42, 23, 24, None),
+            classify_darwin_result(42, 23, 24, None, || DarwinLiveness::Gone),
             Err(PidError::CwdShortRecord {
                 pid: 42,
                 returned: 23,
@@ -296,9 +553,32 @@ mod tests {
     }
 
     #[test]
+    fn darwin_zero_result_needs_a_proven_absence_before_reporting_gone() {
+        // A live process whose cwd libproc refuses to report is unplaceable.
+        for liveness in [DarwinLiveness::Alive, DarwinLiveness::Unknown] {
+            let result = classify_darwin_result(42, 0, 24, None, || liveness);
+            assert!(
+                matches!(result, Ok(DarwinCwdCall::PermissionDenied)),
+                "{liveness:?} returned {result:?}"
+            );
+        }
+        // Only a probe that proves ESRCH reports the process gone.
+        assert!(matches!(
+            classify_darwin_result(42, 0, 24, None, || DarwinLiveness::Gone),
+            Ok(DarwinCwdCall::Gone)
+        ));
+    }
+
+    #[test]
     fn darwin_cwd_classifies_permission_unsupported_and_malformed_paths() {
         assert!(matches!(
-            classify_darwin_result(42, -1, 24, Some(io::Error::from_raw_os_error(libc::EPERM))),
+            classify_darwin_result(
+                42,
+                -1,
+                24,
+                Some(io::Error::from_raw_os_error(libc::EPERM)),
+                || DarwinLiveness::Alive
+            ),
             Ok(DarwinCwdCall::PermissionDenied)
         ));
         assert!(matches!(
@@ -306,7 +586,8 @@ mod tests {
                 42,
                 -1,
                 24,
-                Some(io::Error::from_raw_os_error(libc::ENOTSUP))
+                Some(io::Error::from_raw_os_error(libc::ENOTSUP)),
+                || DarwinLiveness::Alive
             ),
             Ok(DarwinCwdCall::Unsupported)
         ));

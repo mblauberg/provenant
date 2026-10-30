@@ -141,14 +141,18 @@ impl From<run::RunError> for Fail {
 /// A reply whose reader deadline expired still reports what it saw.
 fn reply_waited(command: &str, outcome: Result<(Value, String, bool), Fail>) -> Reply {
     let mut expired = false;
+    let mut silent = false;
     let mut out = reply(
         command,
         outcome.map(|(data, human, timed_out)| {
             expired = timed_out;
+            silent = data["reason"].is_string();
             (data, human)
         }),
     );
-    if expired {
+    if silent {
+        out.result.status = Status::Failed;
+    } else if expired {
         out.result.status = Status::Timeout;
     }
     out
@@ -489,8 +493,7 @@ fn assess_model_result(
         )
         && (failed_check || decoded.outcome == run::Outcome::Failed)
     {
-        let retry = if task.writer.is_none()
-            && task.access.write_roots.is_empty()
+        let retry = if !run::Service::has_writes(task.writer.is_some(), &task.access.write_roots)
             && record.continuation.as_deref() != Some("policy_fallback")
         {
             // Caller alternatives take precedence over the bundled fallback.
@@ -4470,7 +4473,15 @@ fn render_lanes(
             let route_text = plain_text(&route, usize::MAX);
             // A lane that has not started says what it is waiting for.
             let wait = waits.iter().find(|w| w.attempt_id == lane.attempt_id);
-            let reason = reason.or_else(|| wait.map(|w| w.waiting_for.clone()));
+            let silence_reason = lane
+                .provider_silent_for_ms.0
+                .map(provenant_records::run::provider_silence_reason);
+            let reason = reason
+                .or_else(|| wait.map(|w| w.waiting_for.clone()))
+                .or_else(|| silence_reason.clone());
+            let waiting_for = wait
+                .map(|w| w.waiting_for.clone())
+                .or(silence_reason);
             let reason_text = reason
                 .as_deref()
                 .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
@@ -4645,7 +4656,7 @@ fn render_lanes(
                 "reason": reason,
                 "settlement": settlement,
                 "lane_class": wait.map(|w| w.lane_class),
-                "waiting_for": wait.map(|w| &w.waiting_for),
+                "waiting_for": waiting_for,
                 "requested_route": lane.requested_route,
                 "applied_route": lane.applied_route,
                 "skipped_routes": lane.skipped_routes,
@@ -4753,6 +4764,26 @@ fn condition_met(lanes: &[run::AttemptRecord], condition: Condition) -> bool {
                 states.iter().all(|(done, _)| *done) || states.iter().any(|(_, input)| *input)
             }
         }
+}
+pub(super) fn silent_lane(lanes: &[run::AttemptRecord]) -> Option<AttemptId> {
+    lanes
+        .iter()
+        .find(|lane| lane.provider_silent_for_ms.0.is_some() && !lane.provider_silence_suppressed.0)
+        .map(|lane| lane.attempt_id)
+}
+pub(super) fn apply_lane_wait_suppression(
+    lanes: &mut [run::AttemptRecord],
+    waits: &[run::LaneWait],
+) {
+    for lane in lanes {
+        lane.provider_silence_suppressed.0 |= waits
+            .iter()
+            .find(|wait| wait.attempt_id == lane.attempt_id)
+            .is_some_and(|wait| {
+                wait.waiting_for.starts_with("disk pressure paused")
+                    || wait.waiting_for.starts_with("build slot:")
+            });
+    }
 }
 /// Snapshot every attempt the targets name. Without targets, the selection is
 /// `owner`'s nonterminal work; host caps bound it. With `seen`, terminal
@@ -4894,6 +4925,8 @@ fn candidates<'a>(
                 id = tail;
             }
         }
+        let waits = session.store.lane_waits(&lanes, &call);
+        apply_lane_wait_suppression(&mut lanes, &waits);
         Ok(lanes)
     }
 }
@@ -4976,10 +5009,30 @@ fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, Stri
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
     let (mut data, human) = render_settled(session, &waited.lanes, lane_cooldown_view(&cooldowns))?;
     data["condition_met"] = json!(waited.met);
+    if let Some(id) = waited.silent_lane {
+        data["timed_out"] = json!(false);
+        data["reason"] = json!(format!("provider silent; lane {id} is still running"));
+    }
     if waited.ignored > 0 {
         data["ignored_settled"] = json!(waited.ignored);
     }
-    Ok((data, human, !waited.met))
+    Ok((data, human, !waited.met && waited.silent_lane.is_none()))
+}
+fn apply_cancel_wait(data: &mut Value, lanes: &Value, timed_out: bool, status: &mut Status) {
+    if lanes["reason"].is_string() {
+        if *status == Status::Ok {
+            *status = Status::Failed;
+        }
+    } else if timed_out && *status == Status::Ok {
+        *status = Status::Timeout;
+    }
+    data["lanes"] = lanes["lanes"].clone();
+    data["condition_met"] = lanes["condition_met"].clone();
+    for field in ["timed_out", "reason"] {
+        if let Some(value) = lanes.get(field) {
+            data[field] = value.clone();
+        }
+    }
 }
 /// Wait for every lane a run, task or attempt names, settled or not: the
 /// whole named set, for commands that act on a lane they just created.
@@ -5085,12 +5138,20 @@ fn watched_reply(
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
     let (mut data, _) = render_settled(session, &watched.lanes, lane_cooldown_view(&cooldowns))?;
     data["condition_met"] = json!(watched.settled);
+    if let Some(id) = watched.silent_lane {
+        data["timed_out"] = json!(false);
+        data["reason"] = json!(format!("provider silent; lane {id} is still running"));
+    }
     let human = if json {
         String::new()
     } else {
         watch::end_line(watched)
     };
-    Ok((data, human, !watched.settled))
+    Ok((
+        data,
+        human,
+        !watched.settled && watched.silent_lane.is_none(),
+    ))
 }
 /// `lanes --watch`: a line for each state a counted lane enters, until all
 /// have settled or the budget passes.
@@ -6500,11 +6561,7 @@ fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     Duration::from_secs(seconds),
                     edge,
                 )?;
-                if timed_out && status == Status::Ok {
-                    status = Status::Timeout;
-                }
-                data["lanes"] = lanes["lanes"].clone();
-                data["condition_met"] = lanes["condition_met"].clone();
+                apply_cancel_wait(&mut data, &lanes, timed_out, &mut status);
                 human.push_str(&rendered);
             }
             Ok((data, human))
@@ -8953,6 +9010,24 @@ mod lane_depth_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancel_wait_preserves_silence_as_non_success_without_timeout() {
+        let wait = json!({
+            "lanes": [{"state":"running"}],
+            "condition_met": false,
+            "timed_out": false,
+            "reason": "provider silent; lane attempt-1 is still running"
+        });
+        let mut data = json!({});
+        let mut status = Status::Ok;
+        apply_cancel_wait(&mut data, &wait, false, &mut status);
+        assert_eq!(status, Status::Failed);
+        assert_eq!(data["timed_out"], false);
+        assert_eq!(data["condition_met"], false);
+        assert_eq!(data["reason"], wait["reason"]);
+        assert_eq!(data["lanes"], wait["lanes"]);
+    }
 
     /// A project with a linked worktree `writer` and a `nested` directory in it.
     /// The fixture's Git runs without the lane's `GIT_*` variables.
@@ -12252,6 +12327,41 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn render_lanes_surfaces_provider_silence_while_running()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let mut lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "silent-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 1,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state":"running"},
+            "usage": {},
+            "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
+        }))?;
+        lane.provider_silent_for_ms.0 = Some(1_800_000);
+        let (data, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
+        assert!(human.contains("provider silent for 1800s; provider still running"));
+        assert_eq!(
+            data["lanes"][0]["reason"],
+            "provider silent for 1800s; provider still running"
+        );
+        assert_eq!(
+            data["lanes"][0]["waiting_for"],
+            "provider silent for 1800s; provider still running"
+        );
+        assert_eq!(data["lanes"][0]["state"], "running");
+        Ok(())
+    }
+    #[test]
     fn render_lanes_shows_uncommitted_with_its_dirty_paths()
     -> Result<(), Box<dyn std::error::Error>> {
         let reason = "writer left uncommitted edits and no new commit: src/a.rs, b.txt";
@@ -12382,6 +12492,68 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Entry agrees with compile: a read root in a Codex standalone release
+    /// passes the credential-root refusal, while a write root there stays
+    /// refused with the flag and the root named.
+    #[test]
+    fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::error::Error>> {
+        // The rule is lexical, so check it without the filesystem first.
+        let shape = Path::new(
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin/bin",
+        );
+        assert!(
+            !provenant_confinement::refuses_lane_root(shape, true),
+            "reads pass entry"
+        );
+        assert!(
+            provenant_confinement::refuses_lane_root(shape, false),
+            "writes stay strict"
+        );
+        // Against a machine's real home: build a temp release and walk it
+        // through `lane_access`. A lane can seal `~/.codex`; then the fixture
+        // cannot exist and the filesystem part is skipped silently.
+        let Some(home) = std::env::var_os("HOME") else {
+            return Ok(());
+        };
+        let releases = Path::new(&home).join(".codex/packages/standalone/releases");
+        if std::fs::create_dir_all(&releases).is_err() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir_in(&releases)?;
+        let release = std::fs::canonicalize(temp.path())?;
+        let state = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(state.path())?;
+        let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+            mode: Some(Mode::ReadOnly),
+            worktree: None,
+            read_root,
+            write_root,
+            network: None,
+            capability: vec![],
+        };
+        let granted = lane_access(
+            &access(vec![release.clone()], vec![]),
+            &state.join("grants"),
+        )
+        .map_err(|fail| fail.message)?;
+        assert_eq!(granted.read_roots, vec![release.clone()]);
+        let fail = lane_access(
+            &access(vec![], vec![release.clone()]),
+            &state.join("writes"),
+        )
+        .unwrap_err();
+        let message =
+            provenant_confinement::permissions::PermissionError::CredentialRoot.to_string();
+        assert_eq!(
+            fail.message,
+            format!(
+                "--write-root {} is a credential root: {message}",
+                release.display()
+            )
+        );
         Ok(())
     }
 

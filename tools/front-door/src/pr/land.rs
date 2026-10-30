@@ -209,8 +209,19 @@ impl WorkerObserver for LandWorkers<'_> {
         self.0.observe_roots_for_land(roots)
     }
 
+    fn observe_roots_with_details(
+        &self,
+        roots: &[PathBuf],
+    ) -> provenant_confinement::worktrees::WorkerObservations {
+        self.0.observe_roots_for_land_with_details(roots)
+    }
+
     fn live_process(&self, root: &std::path::Path) -> Option<ObservedProcess> {
         self.0.live_process_for_land(root)
+    }
+
+    fn incomplete_census_detail(&self) -> String {
+        self.0.incomplete_census_detail()
     }
 }
 
@@ -432,7 +443,7 @@ fn follow_up(
             }
             globals.project = Some(cleanup_project.to_path_buf());
             let workers = LandWorkers(workers);
-            let (mut worktree, branch_gone) =
+            let (mut worktree, branch_gone, worktree_kept) =
                 prune_worktree(globals, branch, &upstream, tip, &workers);
             if relocated && worktree.status == Status::Done {
                 worktree.detail.push_str(&format!(
@@ -441,15 +452,23 @@ fn follow_up(
                 ));
             }
             steps.push(worktree);
-            steps.push(delete_branch(
-                &git,
-                cleanup_project,
-                branch,
-                base,
-                &upstream,
-                tip,
-                branch_gone,
-            )?);
+            if worktree_kept {
+                steps.push(Step::new(
+                    "branch",
+                    Status::Skipped,
+                    format!("{branch} deletion skipped because its registered worktree was kept"),
+                ));
+            } else {
+                steps.push(delete_branch(
+                    &git,
+                    cleanup_project,
+                    branch,
+                    base,
+                    &upstream,
+                    tip,
+                    branch_gone,
+                )?);
+            }
         }
     }
     Ok(steps)
@@ -521,9 +540,10 @@ fn prune_worktree(
     upstream: &str,
     tip: GitOid,
     workers: &dyn WorkerObserver,
-) -> (Step, bool) {
+) -> (Step, bool, bool) {
     let landed = worktrees::land_cleanup(globals, branch, upstream, tip, workers);
     let mut branch_gone = false;
+    let mut worktree_kept = false;
     let step = match landed {
         Ok(landed) if !landed.registered => Step::new(
             "worktree",
@@ -532,6 +552,7 @@ fn prune_worktree(
         ),
         Ok(landed) => {
             branch_gone = landed.branch_deleted;
+            worktree_kept = landed.registered && !landed.removed;
             let output = if landed.output.is_empty() {
                 String::new()
             } else {
@@ -554,7 +575,7 @@ fn prune_worktree(
         }
         Err(error) => Step::new("worktree", Status::Refused, error.to_string()),
     };
-    (step, branch_gone)
+    (step, branch_gone, worktree_kept)
 }
 
 /// Move the local base branch to the fetched one, only forward and only in a

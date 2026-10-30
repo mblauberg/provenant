@@ -2226,7 +2226,7 @@ pub(crate) fn validate_read_exec_grant(grant: &PathGrant) -> Result<(), Permissi
 /// `~/.codex`, `packages`, `standalone`, `releases` nor any sibling (auth,
 /// config, sessions, state, logs) matches, and nothing credential-named may
 /// appear below the release directory.
-fn is_codex_standalone_package(path: &Path) -> bool {
+pub fn is_codex_standalone_package(path: &Path) -> bool {
     let normal: Vec<&OsStr> = path
         .components()
         .filter_map(|component| match component {

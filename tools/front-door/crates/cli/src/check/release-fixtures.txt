@@ -12,6 +12,7 @@ docs/runbooks/configuration.md release.home-path ca4f050fa11812ca
 docs/runbooks/fabric-hosts.md release.home-path e2af7abfbdb20bbc
 tools/front-door/crates/cli/src/run.rs release.github-token 16f71fd8d2683d39
 tools/front-door/crates/cli/src/run.rs release.github-token fd4ac28293da79a0
+tools/front-door/crates/cli/src/run.rs release.home-path 06788c17a1dd80b8
 tools/front-door/crates/cli/src/run.rs release.home-path 1b33c5fcf2e3f8d8
 tools/front-door/crates/cli/src/run.rs release.home-path 32dfa2b7dac4116f
 tools/front-door/crates/cli/src/run.rs release.home-path 9011d081761b5af1

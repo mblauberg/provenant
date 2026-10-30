@@ -82,14 +82,38 @@ impl Candidate {
     }
 }
 /// Callers only need to know whether a selection is unique, ambiguous or
-/// missing, so the lane history is read no further once more than one
-/// distinct target of the requested kind is present: an ambiguity keeps
-/// holding over later pages, and the ambiguity report names a bounded prefix
-/// of the matches instead of every prefix collision.
+/// missing, so stop reading lane history once two distinct targets match.
+/// Later pages cannot make an ambiguous selection unique.
 fn index(
     context: &run::ExecutionContext,
     selection: &str,
     allow_run: bool,
+) -> Result<Vec<Candidate>, Fail> {
+    scan(context, selection, allow_run, SCAN_PAGE)
+}
+
+/// Page size for history paging in [`scan`]; larger in production, which the
+/// `ScanFixture` tests treat as "the whole history on one page".
+const SCAN_PAGE: u64 = 100;
+
+/// The scan itself, walking the project's lane history in `page_limit`-sized
+/// batches. The limit stays wide in production and is narrowed by the tests
+/// to put stops on both sides of a page boundary.
+fn scan(
+    context: &run::ExecutionContext,
+    selection: &str,
+    allow_run: bool,
+    page_limit: u64,
+) -> Result<Vec<Candidate>, Fail> {
+    scan_with(context, selection, allow_run, page_limit, || {})
+}
+
+fn scan_with(
+    context: &run::ExecutionContext,
+    selection: &str,
+    allow_run: bool,
+    page_limit: u64,
+    mut page_read: impl FnMut(),
 ) -> Result<Vec<Candidate>, Fail> {
     let clock = super::SystemClock::new();
     let cancel = super::CancelToken::new();
@@ -138,27 +162,18 @@ fn index(
     let mut query = run::LaneQuery {
         targets: vec![],
         all: true,
-        limit: 100,
+        limit: page_limit,
         after: 0,
         newest_first: false,
         owner: None,
         unseen_after: None,
     };
     let mut candidates = Vec::new();
-    // Judge ambiguity through `choose` itself so the stop rule cannot drift
-    // from the selection semantics it reports. The report renders five
-    // matches and a remainder, so stop the scan once that much is already
-    // on hand and `choose` proves the choice is ambiguous: no later page
-    // can turn it back into a unique match or a miss.
-    let ambiguous = |candidates: &[Candidate]| {
-        matches!(
-            choose(selection, candidates.to_owned(), allow_run),
-            Err(fail) if fail.kind == super::ErrorKind::Conflict
-        )
-    };
+    // Count the identities choose retains without repeatedly sorting candidates.
+    let mut distinct = std::collections::HashSet::new();
     loop {
+        page_read();
         let page = store.lanes(&query, &call)?;
-        let before = candidates.len();
         for lane in page.lanes {
             let matched = candidates.len();
             let run_matches = lane.run_id.to_string().starts_with(parts[0]);
@@ -189,12 +204,14 @@ fn index(
                 });
             }
             // Only a new match can change the verdict.
-            if candidates.len() > matched && candidates.len() >= 6 && ambiguous(&candidates) {
-                return Ok(candidates);
+            for candidate in &candidates[matched..] {
+                if let Some(selected) = match_candidate(&parts, candidate.clone(), allow_run)
+                    && distinct.insert((selected.name(), selected.project, selected.host))
+                    && distinct.len() > 1
+                {
+                    return Ok(candidates);
+                }
             }
-        }
-        if candidates.len() > before && ambiguous(&candidates) {
-            break;
         }
         match page.next {
             Some(after) => query.after = after,
@@ -203,50 +220,58 @@ fn index(
     }
     Ok(candidates)
 }
+/// The match half of [`choose`]: filtered to the requested kind, then sorted
+/// and deduplicated by rendered name, project and host. Shared with the
+/// scan's stop rule so it counts the names a conflict would actually report.
+fn lane_matches(selection: &str, candidates: Vec<Candidate>, allow_run: bool) -> Vec<Candidate> {
+    let parts: Vec<_> = selection.split('/').collect();
+    let mut selected: Vec<_> = candidates
+        .into_iter()
+        .filter_map(|candidate| match_candidate(&parts, candidate, allow_run))
+        .collect();
+    selected.sort_by_key(Candidate::name);
+    selected.dedup_by(|left, right| {
+        left.name() == right.name() && left.project == right.project && left.host == right.host
+    });
+    selected
+}
+fn match_candidate(parts: &[&str], mut candidate: Candidate, allow_run: bool) -> Option<Candidate> {
+    let prefix = |id: Option<String>, part: &str| id.is_some_and(|id| id.starts_with(part));
+    let target = &candidate.target;
+    let run_matches = prefix(target.run.map(|id| id.to_string()), parts[0])
+        || prefix(candidate.host.map(|id| id.to_string()), parts[0]);
+    let matched = match parts {
+        [id] => {
+            if target.attempt.is_some() {
+                prefix(target.attempt.map(|id| id.to_string()), id)
+            } else {
+                allow_run && prefix(target.run.map(|id| id.to_string()), id)
+            }
+        }
+        [_, id] if run_matches => {
+            if prefix(target.attempt.map(|id| id.to_string()), id) {
+                true
+            } else if allow_run && prefix(target.task.map(|id| id.to_string()), id) {
+                candidate.target.attempt = None;
+                true
+            } else {
+                false
+            }
+        }
+        [_, task, attempt] if run_matches => {
+            prefix(target.task.map(|id| id.to_string()), task)
+                && prefix(target.attempt.map(|id| id.to_string()), attempt)
+        }
+        _ => false,
+    };
+    matched.then_some(candidate)
+}
 pub(super) fn choose(
     selection: &str,
     candidates: Vec<Candidate>,
     allow_run: bool,
 ) -> Result<Candidate, Fail> {
-    let parts: Vec<_> = selection.split('/').collect();
-    let prefix = |id: Option<String>, part: &str| id.is_some_and(|id| id.starts_with(part));
-    let mut selected = Vec::new();
-    for mut candidate in candidates {
-        let target = &candidate.target;
-        let run_matches = prefix(target.run.map(|id| id.to_string()), parts[0])
-            || prefix(candidate.host.map(|id| id.to_string()), parts[0]);
-        let matched = match parts.as_slice() {
-            [id] => {
-                if target.attempt.is_some() {
-                    prefix(target.attempt.map(|id| id.to_string()), id)
-                } else {
-                    allow_run && prefix(target.run.map(|id| id.to_string()), id)
-                }
-            }
-            [_, id] if run_matches => {
-                if prefix(target.attempt.map(|id| id.to_string()), id) {
-                    true
-                } else if allow_run && prefix(target.task.map(|id| id.to_string()), id) {
-                    candidate.target.attempt = None;
-                    true
-                } else {
-                    false
-                }
-            }
-            [_, task, attempt] if run_matches => {
-                prefix(target.task.map(|id| id.to_string()), task)
-                    && prefix(target.attempt.map(|id| id.to_string()), attempt)
-            }
-            _ => false,
-        };
-        if matched {
-            selected.push(candidate);
-        }
-    }
-    selected.sort_by_key(Candidate::name);
-    selected.dedup_by(|left, right| {
-        left.name() == right.name() && left.project == right.project && left.host == right.host
-    });
+    let mut selected = lane_matches(selection, candidates, allow_run);
     match selected.len() {
         0 => Err(Fail::new(
             super::Status::Invalid,
@@ -260,18 +285,13 @@ pub(super) fn choose(
             super::Status::Invalid,
             super::ErrorKind::Conflict,
             format!(
-                "ambiguous ID {selection}: {}{}; run `provenant help output` and retry with one full RUN/TASK/ATTEMPT ID",
+                "ambiguous ID {selection}: {} (list may be partial); run `provenant help output` and retry with one full RUN/TASK/ATTEMPT ID",
                 selected
                     .iter()
                     .take(5)
                     .map(Candidate::name)
                     .collect::<Vec<_>>()
-                    .join(", "),
-                if selected.len() > 5 {
-                    format!(", and {} more", selected.len() - 5)
-                } else {
-                    String::new()
-                }
+                    .join(", ")
             ),
         )),
     }
@@ -532,7 +552,11 @@ mod tests {
             false,
         )
         .expect_err("ambiguous attempt");
-        assert!(error.message.contains("and 3 more"), "{}", error.message);
+        assert!(
+            error.message.contains("list may be partial"),
+            "{}",
+            error.message
+        );
         assert!(
             error
                 .message
@@ -622,6 +646,9 @@ mod tests {
         cancel: super::super::CancelToken,
         context: run::ExecutionContext,
         store: run::RunStore,
+        /// Test-only history page size for [`ScanFixture::scan`]; a limit
+        /// below `SCAN_PAGE` puts page boundaries inside a stop.
+        page_limit: u64,
     }
     impl ScanFixture {
         fn open() -> Result<Self, Box<dyn std::error::Error>> {
@@ -656,7 +683,17 @@ mod tests {
                 cancel,
                 context,
                 store,
+                page_limit: SCAN_PAGE,
             })
+        }
+        /// Page the scan's history in `limit`-sized batches.
+        fn with_page_limit(mut self, limit: u64) -> Self {
+            self.page_limit = limit;
+            self
+        }
+        /// The production scan reading this fixture's store.
+        fn scan(&self, selection: &str, allow_run: bool) -> Result<Vec<Candidate>, Fail> {
+            scan(&self.context, selection, allow_run, self.page_limit)
         }
         fn call(&self) -> run::Request<'_> {
             run::Request {
@@ -665,24 +702,73 @@ mod tests {
             }
         }
     }
-    /// A prepared run under the shared run prefix `11111111`, its siblings
-    /// differing from it beyond the tenth hex character, with a unique attempt
-    /// ID per lane.
+    /// The first history page, read independently of the scan's paging.
+    fn first_page_len(fixture: &ScanFixture) -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(fixture
+            .store
+            .lanes(
+                &run::LaneQuery {
+                    targets: vec![],
+                    all: true,
+                    limit: 100,
+                    after: 0,
+                    newest_first: false,
+                    owner: None,
+                    unseen_after: None,
+                },
+                &fixture.call(),
+            )?
+            .lanes
+            .len())
+    }
+    /// A prepared run under the shared run prefix `11111111`, with one
+    /// attempt per task listed in `tasks` — the run's task IDs define which
+    /// sibling byte (its first task) the run ID differs by, and attempt IDs
+    /// are taken from `attempt_base` and up.
     fn shared_prefix_run(
-        tail: u8,
-        attempt: u8,
+        tasks: &[u8],
+        attempt_base: u8,
         clock: &super::super::SystemClock,
     ) -> Result<run::PreparedRun, Box<dyn std::error::Error>> {
-        let (task_id, run_id) = (
-            TaskId::from_bytes([tail; 16]),
-            RunId::from_bytes({
-                let mut bytes = [0x11_u8; 16];
-                bytes[4] = tail;
-                bytes
-            }),
-        );
+        let run_id = RunId::from_bytes({
+            let mut bytes = [0x11_u8; 16];
+            bytes[4] = tasks
+                .first()
+                .copied()
+                .ok_or("a run needs one task per attempt")?;
+            bytes
+        });
+        let task = |task_id: TaskId| run::TaskRequest {
+            context: None,
+            extra: Default::default(),
+            build_heavy: false,
+            title: None,
+            base: None,
+            head: None,
+            base_ref: None,
+            task_id,
+            prompt_digest: provenant_records::CanonicalV1::file_digest(b"p"),
+            route: run::RequestedRoute::Model {
+                extra: Default::default(),
+                provider: "fixture".into(),
+                model: "fixture/model".into(),
+                effort: None,
+            },
+            account: None,
+            fallback: vec![],
+            profile: Default::default(),
+            authority_digest: provenant_core::Digest::from_bytes([5; 32]),
+            provider_timeout_seconds: 3600,
+            writer: None,
+            delivery_id: None,
+            deliver: None,
+            access: Default::default(),
+        };
         Ok(run::PreparedRun {
-            operation_id: provenant_core::OperationId::parse(&format!("prefix-scan-{tail}"))?,
+            operation_id: provenant_core::OperationId::parse(&format!(
+                "prefix-scan-{}",
+                run_id.to_string().get(8..10).unwrap_or_default()
+            ))?,
             run_id,
             created_at: clock.wall_now()?,
             request: run::CanonicalRequest {
@@ -691,42 +777,24 @@ mod tests {
                 chair: None,
                 fresh_continuation: None,
                 schema_version: 1,
-                tasks: vec![run::TaskRequest {
-                    context: None,
-                    extra: Default::default(),
-                    build_heavy: false,
-                    title: None,
-                    base: None,
-                    head: None,
-                    base_ref: None,
-                    task_id,
-                    prompt_digest: provenant_records::CanonicalV1::file_digest(b"p"),
-                    route: run::RequestedRoute::Model {
-                        extra: Default::default(),
-                        provider: "fixture".into(),
-                        model: "fixture/model".into(),
-                        effort: None,
-                    },
-                    account: None,
-                    fallback: vec![],
-                    profile: Default::default(),
-                    authority_digest: provenant_core::Digest::from_bytes([5; 32]),
-                    provider_timeout_seconds: 3600,
-                    writer: None,
-                    delivery_id: None,
-                    deliver: None,
-                    access: Default::default(),
-                }],
+                tasks: tasks
+                    .iter()
+                    .map(|&t| task(TaskId::from_bytes([t; 16])))
+                    .collect(),
                 concurrency: 1,
                 parent: None,
                 lane_depth: Some(1),
                 parent_attempt: Some(AttemptId::from_bytes([9; 16])),
             },
-            attempts: vec![run::NewAttempt {
-                task_id,
-                attempt_id: AttemptId::from_bytes([attempt; 16]),
-                prompt: "p".into(),
-            }],
+            attempts: tasks
+                .iter()
+                .enumerate()
+                .map(|(index, &t)| run::NewAttempt {
+                    task_id: TaskId::from_bytes([t; 16]),
+                    attempt_id: AttemptId::from_bytes([attempt_base + index as u8; 16]),
+                    prompt: "p".into(),
+                })
+                .collect(),
         })
     }
     fn shared_prefix_run_id(tail: u8) -> RunId {
@@ -741,35 +809,17 @@ mod tests {
         let fixture = ScanFixture::open()?;
         for tail in 1..=7 {
             fixture.store.create(
-                &shared_prefix_run(tail, tail + 0x20, &fixture.clock)?,
+                &shared_prefix_run(&[tail], tail + 0x20, &fixture.clock)?,
                 &fixture.call(),
             )?;
         }
         let selection = "11111111";
-        let scanned = index(&fixture.context, selection, true).map_err(|f| f.message)?;
+        let scanned = fixture.scan(selection, true).map_err(|f| f.message)?;
         let error = choose(selection, scanned, true).expect_err("ambiguous prefix");
         assert_eq!(error.kind, super::super::ErrorKind::Conflict);
         assert!(error.message.contains("ambiguous ID"), "{}", error.message);
-        // Six of the seven sibling lanes share the prefix and the store holds
-        // them all, but the scan stopped once the report carried five matches
-        // plus a proved remainder: runs six and seven never render.
-        let lanes = fixture
-            .store
-            .lanes(
-                &run::LaneQuery {
-                    targets: vec![],
-                    all: true,
-                    limit: 100,
-                    after: 0,
-                    newest_first: false,
-                    owner: None,
-                    unseen_after: None,
-                },
-                &fixture.call(),
-            )?
-            .lanes;
-        assert_eq!(lanes.len(), 7);
-        for tail in 1..=5 {
+        assert_eq!(first_page_len(&fixture)?, 7);
+        for tail in 1..=2 {
             assert!(
                 error
                     .message
@@ -778,9 +828,13 @@ mod tests {
                 error.message
             );
         }
-        assert!(error.message.contains("and 1 more"), "{}", error.message);
         assert!(
-            !error.message.contains(&shared_prefix_run_id(6).to_string()),
+            error.message.contains("list may be partial"),
+            "{}",
+            error.message
+        );
+        assert!(
+            !error.message.contains(&shared_prefix_run_id(3).to_string()),
             "{}",
             error.message
         );
@@ -796,14 +850,14 @@ mod tests {
         let fixture = ScanFixture::open()?;
         for tail in 1..=7 {
             fixture.store.create(
-                &shared_prefix_run(tail, tail + 0x20, &fixture.clock)?,
+                &shared_prefix_run(&[tail], tail + 0x20, &fixture.clock)?,
                 &fixture.call(),
             )?;
         }
         let selection = "11111111";
         // With runs refused as kinds, a run-only prefix needs the whole history
         // to prove no lane attempt matches instead: the scan does not stop.
-        let scanned = index(&fixture.context, selection, false).map_err(|f| f.message)?;
+        let scanned = fixture.scan(selection, false).map_err(|f| f.message)?;
         assert_eq!(scanned.len(), 7);
         let error = choose(selection, scanned, false).expect_err("no lane attempt");
         assert_eq!(error.kind, super::super::ErrorKind::NotFound);
@@ -819,14 +873,14 @@ mod tests {
         let fixture = ScanFixture::open()?;
         for tail in [1u8, 9] {
             fixture.store.create(
-                &shared_prefix_run(tail, tail + 0x20, &fixture.clock)?,
+                &shared_prefix_run(&[tail], tail + 0x20, &fixture.clock)?,
                 &fixture.call(),
             )?;
         }
         // `11111111` alone is ambiguous; naming the sibling byte resolves.
         let error = choose(
             "11111111",
-            index(&fixture.context, "11111111", true).map_err(|f| f.message)?,
+            fixture.scan("11111111", true).map_err(|f| f.message)?,
             true,
         )
         .expect_err("ambiguous prefix");
@@ -834,12 +888,135 @@ mod tests {
         let selection = "1111111101";
         let selected = choose(
             selection,
-            index(&fixture.context, selection, true).map_err(|f| f.message)?,
+            fixture.scan(selection, true).map_err(|f| f.message)?,
             true,
         )
         .map_err(|f| f.message)?;
         assert_eq!(selected.target.run, Some(shared_prefix_run_id(1)));
         assert_eq!(selected.project, Some(fixture.context.project_id));
+        Ok(())
+    }
+    /// Eight runs under the shared run prefix `11111111`: run one with four
+    /// attempt rows of its own (its tasks sit outside the sibling bytes) and
+    /// seven single-attempt siblings, eleven lane rows in all, stored oldest
+    /// first. The second distinct run is therefore row five.
+    fn prefix_scan_dataset(fixture: &ScanFixture) -> Result<(), Box<dyn std::error::Error>> {
+        fixture.store.create(
+            &shared_prefix_run(&[1, 0x0a, 0x0b, 0x0c], 0x40, &fixture.clock)?,
+            &fixture.call(),
+        )?;
+        for tail in 2..=8u8 {
+            fixture.store.create(
+                &shared_prefix_run(&[tail], tail + 0x50, &fixture.clock)?,
+                &fixture.call(),
+            )?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn conflict_report_matches_wherever_the_page_boundary_falls()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let selection = "11111111";
+        // Row five ends a five-row page and opens a two-row page.
+        // The production page size puts the stop mid-page too.
+        let mut messages = Vec::new();
+        for limit in [2, 5, SCAN_PAGE] {
+            let fixture = ScanFixture::open()?.with_page_limit(limit);
+            prefix_scan_dataset(&fixture)?;
+            let scanned = fixture.scan(selection, true).map_err(|f| f.message)?;
+            let error = choose(selection, scanned, true).expect_err("ambiguous prefix");
+            assert_eq!(
+                error.kind,
+                super::super::ErrorKind::Conflict,
+                "page limit {limit}"
+            );
+            assert_eq!(first_page_len(&fixture)?, 11, "page limit {limit}");
+            messages.push(error.message);
+        }
+        assert!(
+            messages.windows(2).all(|window| window[0] == window[1]),
+            "{}",
+            messages[1]
+        );
+        let message = &messages[0];
+        assert!(message.contains("ambiguous ID"), "{}", message);
+        for tail in 1..=2 {
+            assert!(
+                message.contains(&shared_prefix_run_id(tail).to_string()),
+                "{}",
+                message
+            );
+        }
+        assert!(message.contains("list may be partial"), "{}", message);
+        // Run one holds four of the eleven rows, but its four identical
+        // candidates deduplicate into one reported run.
+        let run_one = shared_prefix_run_id(1).to_string();
+        assert_eq!(message.matches(&run_one).count(), 1, "{}", message);
+        for tail in 3..=8 {
+            assert!(
+                !message.contains(&shared_prefix_run_id(tail).to_string()),
+                "{}",
+                message
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn scan_stops_before_later_nonmatching_pages() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = ScanFixture::open()?;
+        for tail in (1..=2).chain(16..=45) {
+            fixture.store.create(
+                &shared_prefix_run(&[tail], tail + 0x20, &fixture.clock)?,
+                &fixture.call(),
+            )?;
+        }
+        assert_eq!(first_page_len(&fixture)?, 32);
+        let pages = std::cell::Cell::new(0);
+        let scanned = scan_with(&fixture.context, "111111110", true, 2, || {
+            pages.set(pages.get() + 1);
+        })
+        .map_err(|f| f.message)?;
+        assert_eq!(pages.get(), 1);
+        assert_eq!(scanned.len(), 2);
+        assert_eq!(
+            choose("111111110", scanned, true)
+                .expect_err("ambiguous")
+                .kind,
+            super::super::ErrorKind::Conflict
+        );
+        Ok(())
+    }
+    #[test]
+    fn attempts_of_one_run_deduplicate_across_pages_and_resolve_one_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Paged at two, run one's four attempt rows sit on two pages, and
+        // the four identical bare-run candidates they carry deduplicate into
+        // the one run.
+        let narrow = ScanFixture::open()?.with_page_limit(2);
+        narrow.store.create(
+            &shared_prefix_run(&[1, 0x0a, 0x0b, 0x0c], 0x40, &narrow.clock)?,
+            &narrow.call(),
+        )?;
+        let scanned = narrow.scan("11111111", true).map_err(|f| f.message)?;
+        assert_eq!(scanned.len(), 4, "{}", scanned.len());
+        let selected = choose("11111111", scanned, true).map_err(|f| f.message)?;
+        assert_eq!(selected.target.run, Some(shared_prefix_run_id(1)));
+        assert!(selected.target.task.is_none());
+        assert_eq!(selected.project, Some(narrow.context.project_id));
+        // With the sibling runs around, a qualified selection still reads
+        // every page and resolves one task of one run.
+        let wide = ScanFixture::open()?.with_page_limit(2);
+        prefix_scan_dataset(&wide)?;
+        let selection = "11111111/01010101";
+        let scanned = wide.scan(selection, true).map_err(|f| f.message)?;
+        assert_eq!(scanned.len(), 11, "{}", scanned.len());
+        let selected = choose(selection, scanned, true)
+            .map_err(|f| f.message)
+            .expect("one task");
+        assert_eq!(selected.target.run, Some(shared_prefix_run_id(1)));
+        assert_eq!(selected.target.task, Some(TaskId::from_bytes([1; 16])));
+        assert!(selected.target.attempt.is_none());
+        assert_eq!(selected.project, Some(wide.context.project_id));
         Ok(())
     }
 }
