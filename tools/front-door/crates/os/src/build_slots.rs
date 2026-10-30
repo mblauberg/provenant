@@ -537,8 +537,14 @@ mod tests {
             "{error}"
         );
         assert!(error.to_string().contains("all 1 build slots"), "{error}");
-        assert!(reports.len() >= 3, "{reports:?}");
+        // A loaded runner can take most of the timeout per poll, so require
+        // the immediate report plus at least one later one, in order.
+        assert!(reports.len() >= 2, "{reports:?}");
         assert_eq!(reports[0], (1, Duration::ZERO));
+        assert!(
+            reports.windows(2).all(|pair| pair[0].1 < pair[1].1),
+            "{reports:?}"
+        );
     }
 
     #[test]
