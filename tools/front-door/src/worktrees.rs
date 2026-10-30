@@ -1404,10 +1404,10 @@ mod human_tests {
     fn worktree_list_line_renders_the_path_as_a_plain_path() -> Check {
         let head = "4a".repeat(20);
         assert_eq!(
-            rendered("/Users/user/Repos/seal/sealle-app")?,
+            rendered("/Users/alice/Repos/example-app")?,
             format!(
                 "branch=refs/heads/master dirty=dirty head={head} \
-                 path=/Users/user/Repos/seal/sealle-app writer=live\n"
+                 path=/Users/alice/Repos/example-app writer=live\n"
             )
         );
         Ok(())
@@ -1416,7 +1416,7 @@ mod human_tests {
     #[test]
     fn worktree_list_line_quotes_a_path_only_when_it_needs_it() -> Check {
         assert!(
-            rendered("/Users/user/My Repos/app")?.contains(" path=\"/Users/user/My Repos/app\" ")
+            rendered("/Users/alice/My Repos/app")?.contains(" path=\"/Users/alice/My Repos/app\" ")
         );
         assert!(rendered("/")?.contains(" path=/ "));
         Ok(())
@@ -1424,9 +1424,9 @@ mod human_tests {
 
     #[test]
     fn worktree_list_json_keeps_the_structured_path() -> Check {
-        let value = serde_json::to_value(info("/Users/user/app")?)?;
+        let value = serde_json::to_value(info("/Users/alice/app")?)?;
         assert_eq!(value["path"]["kind"], "path");
-        assert_eq!(value["path"]["relative"]["path"], "Users/user/app");
+        assert_eq!(value["path"]["relative"]["path"], "Users/alice/app");
         Ok(())
     }
 }

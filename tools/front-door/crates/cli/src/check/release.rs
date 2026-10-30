@@ -356,7 +356,7 @@ fn byte_matches(bytes: &[u8]) -> Result<Vec<Match>, CheckError> {
     if bytes.len() as u64 > MAX_FILE {
         return Err(CheckError::Evidence("release content exceeds 5 MiB"));
     }
-    utf8(bytes)?;
+    // Rules match bytes, so binary content is scanned rather than refused.
     let mut matches = Vec::new();
     for (line, bytes) in bytes.split(|b| *b == b'\n').enumerate() {
         for &(id, message, matches_rule) in RULES {
@@ -509,7 +509,19 @@ mod tests {
         );
         assert!(!github_token(b"ghp_too_short"));
         assert!(!home_path(b"/home/"));
-        assert!(byte_matches(&[0xff]).is_err());
+        assert!(byte_matches(&[0xff]).unwrap().is_empty());
+        let binary = [
+            &[0x89, b'P', b'N', b'G', 0xff, b'\n'][..],
+            b"ghp_",
+            &[b'a'; 20],
+        ]
+        .concat();
+        assert!(
+            byte_matches(&binary)
+                .unwrap()
+                .iter()
+                .any(|m| m.0 == "release.github-token" && m.1 == 2)
+        );
     }
     #[test]
     fn tree_and_index_parsers_preserve_tabs_and_newlines_in_names() {
