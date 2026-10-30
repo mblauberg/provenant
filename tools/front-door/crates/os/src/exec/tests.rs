@@ -14,7 +14,9 @@ fn detached_worker_refuses_to_relaunch_a_test_harness() -> Result<(), Box<dyn st
         spawn_detached(&argv, temp.path()),
         Err(ExecError::TestHarness)
     ));
-    assert!(!is_test_harness(Path::new("/Users/me/.local/bin/provenant")));
+    assert!(!is_test_harness(Path::new(
+        "/Users/me/.local/bin/provenant"
+    )));
     assert!(!is_test_harness(Path::new("target/debug/provenant")));
     Ok(())
 }

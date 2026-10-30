@@ -248,7 +248,10 @@ pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
     // Workers relaunch `current_exe`. A Cargo test harness reads worker
     // arguments as test filters, so each relaunch reruns the tests that spawned
     // it and the processes multiply until the host process table is full.
-    if argv.first().is_some_and(|program| is_test_harness(Path::new(program))) {
+    if argv
+        .first()
+        .is_some_and(|program| is_test_harness(Path::new(program)))
+    {
         return Err(ExecError::TestHarness);
     }
     crate::sys::raw_exec::verify_child_wait_policy().map_err(ExecError::ChildWaitPolicy)?;
