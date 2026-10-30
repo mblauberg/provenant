@@ -1,9 +1,7 @@
 //! The attempt holder: Run's admission and terminal transaction, composed into
 //! the same-binary guardian. It runs while the guardian still holds custody.
 use crate::{artifacts::read_sealed, launch::Providers, *};
-use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, ProjectId, RootInputs, RunId, WaitBudget,
-};
+use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RootInputs, RunId};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
 use provenant_supervisor::{
     custody::{self, CustodyError, ExitObservation},
@@ -278,33 +276,6 @@ pub(crate) fn object_import_refused(
 }
 
 impl provenant_supervisor::Holder for RunHolder<'_> {
-    fn provider_lease(
-        &self,
-        raw: &[u8],
-        resolved_route: &str,
-    ) -> custody::Result<Option<provenant_os::fs::LockGuard>> {
-        let context: HolderContext = crate::db::decode(raw).map_err(custody_error)?;
-        let provider = resolved_route
-            .split_once('/')
-            .map(|(provider, _)| provider)
-            .filter(|provider| !provider.is_empty())
-            .ok_or(CustodyError::InvalidRecord)?;
-        let clock = SystemClock::new();
-        let state = context
-            .launch
-            .as_ref()
-            .map_or(context.roots.state_root.as_path(), |launch| {
-                launch.configuration_root.as_path()
-            });
-        Ok(Some(provenant_os::provider_fence::wait(
-            state,
-            provider,
-            provenant_os::fs::LockMode::Shared,
-            WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
-            &CancelToken::new(),
-            &clock,
-        )?))
-    }
     fn admit(&self, context: &[u8], attempt: &Directory) -> custody::Result<()> {
         let (context, store) = HolderContext::open(context).map_err(custody_error)?;
         store
@@ -1396,6 +1367,8 @@ mod writer_recovery_tests {
             "never_spawned",
             "no_summary",
             "no_summary_terminal",
+            "no_summary_terminal_modern",
+            "no_summary_terminal_other_generation",
         ] {
             let fixture = PrepareFixture::new()?;
             let execution = registered_landed_writer_fixture(&fixture)?;
@@ -1524,15 +1497,26 @@ mod writer_recovery_tests {
                 reservation["guardian"] = identity.clone();
                 reservation["provider"] = identity;
             }
-            std::fs::write(
-                slot_path.join("reservation.json"),
-                serde_json::to_vec(&reservation)?,
-            )?;
-            std::fs::rename(
-                modern.join("ownership.json"),
-                slot_path.join("ownership.json"),
-            )?;
-            std::fs::remove_dir_all(modern)?;
+            if mode == "no_summary_terminal_other_generation" {
+                reservation["scope"]["generation"] = (scope.generation + 1).into();
+                let anchor = provenant_os::fs::Directory::open_anchor(&modern)?.metadata()?;
+                reservation["reservation_device"] = anchor.device.into();
+                reservation["reservation_inode"] = anchor.inode.into();
+                std::fs::write(
+                    modern.join("reservation.json"),
+                    serde_json::to_vec(&reservation)?,
+                )?;
+            } else if mode != "no_summary_terminal_modern" {
+                std::fs::write(
+                    slot_path.join("reservation.json"),
+                    serde_json::to_vec(&reservation)?,
+                )?;
+                std::fs::rename(
+                    modern.join("ownership.json"),
+                    slot_path.join("ownership.json"),
+                )?;
+                std::fs::remove_dir_all(modern)?;
+            }
             if !mode.starts_with("no_summary") {
                 crate::artifacts::seal(
                     &attempt,
@@ -1550,12 +1534,28 @@ mod writer_recovery_tests {
                 }
                 crate::dispatch_tests::seal_exit(&store, &exit)?;
             }
-            if mode == "no_summary_terminal" {
+            if mode.starts_with("no_summary_terminal") {
                 store.commit_lost(
                     scope,
                     "launch interrupted: provider never spawned; private evidence retained",
                     &call,
                 )?;
+                let mut spawned = false;
+                store.queue_reconcile_with(run.run_id, &call, |argv, _| {
+                    assert_eq!(argv[1..3], ["internal", "settle"]);
+                    spawned = true;
+                    Ok(())
+                })?;
+                assert!(spawned, "{mode}: reconcile must queue recovery");
+                let queued = store.run_dir(run.run_id, false)?;
+                assert!(
+                    crate::artifacts::read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
+                        .is_some(),
+                    "{mode}: reconcile must queue recovery"
+                );
+                if mode == "no_summary_terminal_other_generation" {
+                    continue;
+                }
             }
             let found = store.reconcile_with_observer(
                 run.run_id,
@@ -1596,7 +1596,12 @@ mod writer_recovery_tests {
             assert!(store.writer_fences()?.is_empty());
             assert!(store.writer_fence_listing()?.issues.is_empty());
             assert!(!slot_path.join("reservation.json").exists());
-            assert!(slot_path.join("settlement.json").is_file());
+            let evidence = if mode == "no_summary_terminal_modern" {
+                slot_path.join(id.to_string())
+            } else {
+                slot_path.clone()
+            };
+            assert!(evidence.join("settlement.json").is_file());
             if mode.starts_with("no_summary") {
                 assert_eq!(
                     private_git(&["rev-parse", "HEAD"])?,

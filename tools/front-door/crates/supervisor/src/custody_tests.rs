@@ -185,6 +185,51 @@ fn reservation_listing_surfaces_a_legacy_slot_root_reservation() -> TestResult {
 }
 
 #[test]
+fn slot_root_reservation_only_fences_its_attempt() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    // A legacy writer published its reservation at the slot root instead of
+    // its attempt directory; the record names one attempt only.
+    write_record(
+        &slot,
+        "reservation.json",
+        &Reservation {
+            schema_version: 1,
+            scope: scope(),
+            launch_state: LaunchState::Prepared,
+            attempt_device: None,
+            attempt_inode: None,
+            reservation_device: 0,
+            reservation_inode: 0,
+            binding: StoredWriterBinding::ReadOnly,
+            boot: "fixture-recorded-boot-v1".to_owned(),
+            guardian: None,
+            provider: None,
+            unresolved_cleanup: true,
+            descendants: Vec::new(),
+            census_incomplete: true,
+            omitted_descendants: 0,
+        },
+        PublishMode::NoReplace,
+    )?
+    .require_durable()?;
+    assert!(reservation_present(&slot, scope())?);
+    let mut successor = scope();
+    successor.attempt = AttemptId::from_bytes([9; 16]);
+    assert!(!reservation_present(&slot, successor)?);
+    // The successor's own reservation still counts beside the legacy record.
+    let own = root.path().join(successor.attempt.to_string());
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(&own)?;
+    std::fs::write(own.join("reservation.json"), b"{}")?;
+    assert!(reservation_present(&slot, successor)?);
+    std::fs::remove_file(own.join("reservation.json"))?;
+    // A record the reader cannot decode stays fenced: fail safe.
+    std::fs::write(root.path().join("reservation.json"), b"{}")?;
+    assert!(reservation_present(&slot, successor)?);
+    Ok(())
+}
+
+#[test]
 fn worktree_settlement_retains_flock_until_recovery_is_dropped() -> TestResult {
     for read_only in [false, true] {
         let root = tempfile::tempdir()?;
@@ -636,7 +681,6 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
         OwnedLaunch {
             command: ProviderCommand {
                 priority: 0,
-                provider_lease: None,
                 lane_ports: None,
                 resolved_route: "fixture/provider".into(),
                 permission_plan_digest: Digest::from_bytes([0; 32]),

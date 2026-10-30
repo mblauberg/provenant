@@ -168,7 +168,6 @@ pub(crate) fn handoff(
         &publication.directory,
         owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
         &publication.custody,
-        owned.command.provider_lease.as_ref(),
         &owned.command.environment,
         &owned.command.config_environment,
         &payload,
@@ -237,17 +236,10 @@ pub trait DiskPressure {
 ///
 /// `admit` runs first, after custody is accepted and before the provider
 /// spawns, so a queued attempt waits for host admission inside its own
-/// guardian. An error publishes a never-spawned exit and still calls `terminal`.
+/// guardian. An error publishes a never-spawned exit and still calls `terminal`,
+/// except when the attempt directory is provably removed: there is nowhere to
+/// publish the exit or settle, so only the writer reservation remains.
 pub trait Holder {
-    /// Hold a provider's shared launch lease until provider cleanup completes.
-    /// The route comes from the host handoff, after fallback selection.
-    fn provider_lease(
-        &self,
-        _context: &[u8],
-        _resolved_route: &str,
-    ) -> Result<Option<provenant_os::fs::LockGuard>> {
-        Ok(None)
-    }
     fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
     /// Stop host-side submission services before descendant cleanup begins.
     /// Failure is bookkeeping evidence, never a provider stop reason.
@@ -468,8 +460,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         exit_publisher,
         holder: hooks.holder,
         holder_context: message.holder_context,
-        provider_lease: inherited.provider_lease,
-        resolved_route: message.resolved_route,
         lane_ports: message.lane_ports,
         secret_input: message.secret_input,
         priority: message.priority,
@@ -494,8 +484,6 @@ struct Driver<'a> {
     exit_publisher: Option<&'a dyn ExitPublisher>,
     holder: Option<&'a dyn Holder>,
     holder_context: Vec<u8>,
-    provider_lease: Option<provenant_os::fs::LockGuard>,
-    resolved_route: String,
     lane_ports: Option<provenant_os::lane_ports::Plan>,
     secret_input: Option<provenant_os::exec::SecretInput>,
     priority: u8,
@@ -591,18 +579,6 @@ impl Driver<'_> {
                 *omitted = omitted.saturating_add(1);
             }
         };
-        let provider_lease = if let Some(lease) = self.provider_lease.take() {
-            Some(lease)
-        } else {
-            match self
-                .holder
-                .map(|holder| holder.provider_lease(&self.holder_context, &self.resolved_route))
-                .transpose()
-            {
-                Ok(lease) => lease.flatten(),
-                Err(_) => return self.never_spawned("provider update busy; retry the lane"),
-            }
-        };
         if let Some(holder) = self.holder
             && let Err(error) = holder.admit(&self.holder_context, &self.attempt)
         {
@@ -644,10 +620,7 @@ impl Driver<'_> {
             cwd,
             input,
             plan,
-            [
-                provider_lease.as_ref(),
-                ports.as_ref().map(provenant_os::lane_ports::Lease::guard),
-            ],
+            ports.as_ref().map(provenant_os::lane_ports::Lease::guard),
         );
         let mut child = match spawn_result {
             Ok(child) => child,
@@ -762,7 +735,6 @@ impl Driver<'_> {
             }
             if exit.is_some() && !host_closed {
                 child.resume_builds();
-                drop(self.provider_lease.take());
                 host_closed = true;
                 if let Some(holder) = self.holder
                     && holder
@@ -1232,6 +1204,11 @@ impl Driver<'_> {
             omitted_warnings,
         };
         let published = self.publish_until_durable(&record, &mut state)?;
+        // When the attempt directory is provably removed there is nowhere to
+        // publish the exit or the holder's terminal records, so settlement is
+        // deliberately skipped: `terminal` would only retry against a missing
+        // directory. The writer reservation remains as recovery evidence in
+        // the lock slot. A rename is not a removal and still settles.
         if cleanup_complete && published {
             self.release(&record)?;
         }
@@ -1333,7 +1310,7 @@ impl Driver<'_> {
         cwd: &Path,
         input: &[u8],
         plan: CapturePlan,
-        leases: [Option<&provenant_os::fs::LockGuard>; 2],
+        ports: Option<&provenant_os::fs::LockGuard>,
     ) -> io::Result<crate::process_os::provider::ProviderGroup> {
         match argv.first() {
             Some(executable) => match snapshot_executable(executable.as_os_str()) {
@@ -1345,8 +1322,8 @@ impl Driver<'_> {
                             cwd,
                             input: !input.is_empty(),
                             secret_input: self.secret_input.as_ref(),
-                            inherited_lease: leases[0],
-                            inherited_ports: leases[1],
+                            inherited_lease: None,
+                            inherited_ports: ports,
                             process_group: false,
                             capture_stdout: plan.stdout.piped(),
                             capture_stderr: plan.stderr.piped(),
@@ -1370,7 +1347,10 @@ impl Driver<'_> {
             )),
         }
     }
-    /// Publish a launch refusal while retaining the scoped custody proof.
+    /// Publish a launch refusal while retaining the scoped custody proof. If
+    /// the attempt directory is provably removed there is no exit to publish
+    /// and no terminal settlement to attempt; the refusal stays in the writer
+    /// reservation for recovery.
     fn never_spawned(&mut self, warning: &str) -> Result<()> {
         self.reservation.launch_state = LaunchState::NeverSpawned;
         self.reservation.unresolved_cleanup = false;
@@ -1384,6 +1364,8 @@ impl Driver<'_> {
             PublishMode::Replace,
         )?)?;
         let record = ProcessExit::never_spawned(self.reservation.scope, None, vec![warning.into()]);
+        // A provably removed attempt has nowhere to publish the refusal, so
+        // skip release too: the durable reservation above is the evidence.
         if self.publish_until_durable(&record, &mut State::never_spawned())? {
             self.release(&record)?;
         }
@@ -1456,8 +1438,11 @@ impl Driver<'_> {
         }
         Ok(())
     }
-    /// Retry until the exit is durable or the attempt is gone. Custody survives
-    /// ENOSPC and signals; process.json exposes publication_pending.
+    /// Retry until the exit is durable or the attempt is provably removed.
+    /// Custody survives ENOSPC and signals; process.json exposes
+    /// publication_pending. A removed attempt keeps its held descriptor usable,
+    /// so removal is judged by directory identity, never by a pathname or an
+    /// errno alone.
     fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<bool> {
         let bytes = record.bounded_bytes()?;
         if bytes.len() as u64 > EXIT_LIMIT {
@@ -1465,6 +1450,10 @@ impl Driver<'_> {
         }
         let mut released_reserve = false;
         let mut visible = false;
+        // A held attempt descriptor keeps working after the directory is
+        // removed, so cache its identity and current pathname while linked.
+        let attempt_identity = DirectoryIdentity::of(&self.attempt)?;
+        let attempt_path = self.attempt.current_path().ok();
         let system_exit_publisher = SystemExitPublisher;
         let exit_publisher: &dyn ExitPublisher =
             self.exit_publisher.unwrap_or(&system_exit_publisher);
@@ -1476,12 +1465,11 @@ impl Driver<'_> {
             } else {
                 exit_publisher.publish(&self.attempt, &bytes)
             };
-            if result
-                .as_ref()
-                .err()
-                .and_then(filesystem_error)
-                .is_some_and(provenant_os::fs::FsError::is_not_found)
-            {
+            // A removed attempt is terminal for publication even when the
+            // operation's errno is not ENOENT. Renames and replacements are not
+            // removals, so the held descriptor decides when the pathname is
+            // missing or names another inode.
+            if attempt_removed(&self.attempt, attempt_path.as_deref(), attempt_identity) {
                 return Ok(false);
             }
             let mut tick = Tick::at(0);
@@ -1574,6 +1562,78 @@ fn filesystem_error(error: &CustodyError) -> Option<&provenant_os::fs::FsError> 
         CustodyError::Filesystem(error) => Some(error),
         _ => None,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirectoryIdentity {
+    device: u64,
+    inode: u64,
+}
+impl DirectoryIdentity {
+    fn of(directory: &Directory) -> Result<Self> {
+        let metadata = directory.metadata()?;
+        Ok(Self {
+            device: metadata.device,
+            inode: metadata.inode,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DescriptorLink {
+    Linked,
+    Unlinked,
+    Unknown,
+}
+
+/// The held directory is present only when its cached pathname still names the
+/// same inode. A missing or replaced pathname is ambiguous between removal and
+/// a rename, so the held descriptor decides; without reliable evidence the
+/// directory is not confirmed gone and publication keeps retrying.
+fn attempt_removed(attempt: &Directory, path: Option<&Path>, identity: DirectoryIdentity) -> bool {
+    if path.is_some_and(|path| path_identifies(path, identity)) {
+        return false;
+    }
+    matches!(descriptor_link(attempt, identity), DescriptorLink::Unlinked)
+}
+
+fn path_identifies(path: &Path, identity: DirectoryIdentity) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.dev() == identity.device && metadata.ino() == identity.inode)
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_link(attempt: &Directory, _: DirectoryIdentity) -> DescriptorLink {
+    match attempt.metadata() {
+        Ok(metadata) if metadata.links == 0 => DescriptorLink::Unlinked,
+        Ok(_) => DescriptorLink::Linked,
+        Err(_) => DescriptorLink::Unknown,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn descriptor_link(attempt: &Directory, identity: DirectoryIdentity) -> DescriptorLink {
+    // F_GETPATH reports the descriptor's current pathname, including after an
+    // ancestor rename. A removed directory keeps reporting its old name, so
+    // that name must still resolve to the held inode to prove it is linked.
+    match attempt.current_path() {
+        Ok(path) => match std::fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if metadata.dev() == identity.device && metadata.ino() == identity.inode =>
+            {
+                DescriptorLink::Linked
+            }
+            Ok(_) => DescriptorLink::Unlinked,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => DescriptorLink::Unlinked,
+            Err(_) => DescriptorLink::Unknown,
+        },
+        Err(_) => DescriptorLink::Unknown,
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn descriptor_link(_: &Directory, _: DirectoryIdentity) -> DescriptorLink {
+    DescriptorLink::Unknown
 }
 
 fn push_warning(warnings: &mut Vec<String>, omitted: &mut u64, label: &str) {

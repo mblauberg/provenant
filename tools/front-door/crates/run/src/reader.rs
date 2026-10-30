@@ -260,6 +260,14 @@ pub struct LanePage {
     pub lanes: Vec<AttemptRecord>,
     pub next: Option<u64>,
 }
+/// How a record read treats the sealed process checkpoint. The mode is chosen
+/// explicitly by the caller: mutations and recovery need a durable read, views
+/// only need to report what is already published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordRead {
+    Durable,
+    Observed,
+}
 impl RunStore {
     /// Read only the stored prompt or result for a console search. Other
     /// artifact classes can contain credentials or provider state and are
@@ -411,8 +419,29 @@ impl RunStore {
             })
             .collect()
     }
+    /// The record read used before a mutation or recovery decision. It makes
+    /// the process checkpoint durable, so a failed sync surfaces instead of
+    /// feeding the checkpoint observation into a write.
     pub fn record(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
-        let (run, record) = self.record_with_run(id, call)?;
+        self.read_record(id, call, RecordRead::Durable)
+    }
+    /// The record read for view paths. It reports the published checkpoint
+    /// without syncing it, so status, lane listings and output paging do not
+    /// pay a durable flush per history row.
+    pub(crate) fn record_observed(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        self.read_record(id, call, RecordRead::Observed)
+    }
+    fn read_record(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+        read: RecordRead,
+    ) -> Result<AttemptRecord> {
+        let (run, record) = self.record_with_run(id, call, read)?;
         self.held_owner(&run, Some(&record))?;
         Ok(record)
     }
@@ -480,6 +509,7 @@ impl RunStore {
         &self,
         id: AttemptId,
         call: &Request<'_>,
+        read: RecordRead,
     ) -> Result<(RunRecord, AttemptRecord)> {
         call.check()?;
         let (raw, run_id, task_id, number, revision, terminal): (Vec<u8>, String, String, i64, i64, bool) = self.db.query_row("SELECT record,run,task,number,revision,terminal FROM attempts WHERE id=?1 AND project=?2", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?.ok_or(RunError::NotFound)?;
@@ -500,11 +530,18 @@ impl RunStore {
         }
         validate_attempt(&record)?;
         let checkpoint = match self.attempt_dir(record.run_id, id, false) {
-            Ok(directory) => crate::artifacts::read_sealed(
-                &directory,
-                AttemptFile::Process.name(),
-                RECORD_LIMIT,
-            )?,
+            Ok(directory) => match read {
+                RecordRead::Durable => crate::artifacts::read_sealed(
+                    &directory,
+                    AttemptFile::Process.name(),
+                    RECORD_LIMIT,
+                )?,
+                RecordRead::Observed => crate::artifacts::read_sealed_observed(
+                    &directory,
+                    AttemptFile::Process.name(),
+                    RECORD_LIMIT,
+                )?,
+            },
             Err(RunError::Filesystem(error)) if error.is_not_found() => None,
             Err(error) => return Err(error),
         };
@@ -556,7 +593,7 @@ impl RunStore {
                 limit: OUTPUT_LIMIT,
             });
         }
-        let record = self.record(id, call)?;
+        let record = self.record_observed(id, call)?;
         let missing_output = if matches!(record.state, AttemptState::Terminal { .. }) {
             RunError::NotFound
         } else {
@@ -565,15 +602,19 @@ impl RunStore {
         let (bytes, complete, digest) = match part {
             ArtifactPart::Stderr => {
                 let dir = self.attempt_dir(record.run_id, id, false)?;
-                let (bytes, complete) = match crate::artifacts::read_sealed(
+                let (bytes, complete) = match crate::artifacts::read_sealed_observed(
                     &dir,
                     AttemptFile::Stderr.name(),
                     CAPTURE_LIMIT,
                 )? {
                     Some(bytes) => (bytes, true),
                     None => (
-                        crate::artifacts::read_sealed(&dir, "stderr.log.tail", CAPTURE_LIMIT)?
-                            .ok_or(missing_output)?,
+                        crate::artifacts::read_sealed_observed(
+                            &dir,
+                            "stderr.log.tail",
+                            CAPTURE_LIMIT,
+                        )?
+                        .ok_or(missing_output)?,
                         false,
                     ),
                 };
@@ -748,7 +789,7 @@ impl RunStore {
             .map(|(_, id)| {
                 AttemptId::parse(&id)
                     .map_err(|_| RunError::Validation("attempt index ID"))
-                    .and_then(|id| self.record(id, call))
+                    .and_then(|id| self.record_observed(id, call))
             })
             .collect::<Result<_>>()?;
         Ok(LanePage { lanes, next })

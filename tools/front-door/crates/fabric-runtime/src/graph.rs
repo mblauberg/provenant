@@ -5,7 +5,7 @@
 //! key is idempotent: a repeated key observes the existing attempt instead of
 //! launching a duplicate provider process.
 
-use provenant_core::{CancelToken, Clock, ProjectId, StateRoot, WaitBudget};
+use provenant_core::{CancelToken, Clock, DurationMicros, ProjectId, StateRoot, WaitBudget};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode};
 use provenant_records::{CanonicalError, CanonicalV1, DecodeError, Limits, decode_v1};
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,33 @@ const PAUSE_REASON_BYTES: usize = 4_096;
 const HOST_ID_BYTES: usize = 256;
 const MAX_UNKNOWN_USAGE: usize = 64;
 const MAX_USAGE_EVENTS: usize = 128;
+
+/// Launch retries granted after the initial failure, with a bounded backoff.
+/// Past this count the node is blocked instead of retried.
+pub const MAX_LAUNCH_RETRIES: u8 = 3;
+/// Seconds before the first launch retry; each further failure doubles it.
+const LAUNCH_RETRY_FIRST_SECONDS: u64 = 5;
+/// The longest launch retry wait.
+const LAUNCH_RETRY_MAX_SECONDS: u64 = 600;
+
+/// Persisted retry wait on a node whose launch failed with a transient kind.
+/// The wait belongs to the node's current attempt: it is recorded under the
+/// attempt key, so a later retry observes or relaunches exactly that attempt,
+/// never a duplicate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchRetry {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    /// Failed launches so far, counting the initial launch.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub failures: u8,
+    /// Earliest next launch, for the host tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_at: Option<provenant_core::WallTime>,
+    /// Why the last launch failed, bounded, kept for status while waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
 
 /// Canonical encoding length, or `usize::MAX` when the value cannot be encoded.
 fn canonical_len<T: Serialize>(value: &T) -> usize {
@@ -700,6 +727,10 @@ pub struct NodeProgress {
     /// Stable cause of an admission or settlement failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advance_error_code: Option<String>,
+    /// Launch retry wait for the current attempt after a transient launch
+    /// error. Cleared when the attempt is observed again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_retry: Option<LaunchRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
     /// One durable row per route actually tried, in route order.
@@ -1915,6 +1946,117 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
     )
 }
 
+/// Whether a failed launch is worth a bounded retry, decided only from the
+/// error's typed kind, never from its prose. Host capacity, store
+/// contention, wait expiry, an unconfirmed launch handoff and filesystem I/O
+/// are transient; access, confinement, invalid input and every untyped error
+/// block the node. The launch itself stays idempotent by attempt key, so a
+/// retry observes an already accepted attempt instead of launching twice.
+fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
+    use crate::coordination::facade::FacadeError;
+    let Some(error) = error.downcast_ref::<FacadeError>() else {
+        return false;
+    };
+    matches!(
+        error,
+        FacadeError::Busy
+            | FacadeError::Timeout
+            | FacadeError::HomeUnavailable
+            | FacadeError::Io { .. }
+            | FacadeError::DispatchUnobserved { .. }
+            | FacadeError::LaunchUnknown { .. }
+    )
+}
+
+/// A permanent refusal's remedy, as recorded for status beside the reason.
+fn launch_remedy(error: &(dyn Error + 'static), graph_id: &str) -> String {
+    use crate::coordination::facade::FacadeError;
+    if error.downcast_ref::<FacadeError>().is_some_and(|error| {
+        matches!(
+            error,
+            FacadeError::ConfinementRefused
+                | FacadeError::LaneDepth
+                | FacadeError::LaneCoordinationRefused
+        )
+    }) {
+        format!(
+            "check the host's capacity and the access the node declares; fix the cause, cancel this graph with `provenant fabric graph cancel {graph_id}`, then rerun the document under a new graph_id"
+        )
+    } else {
+        format!(
+            "fix the node's route, worktree or inputs in the graph document, cancel this graph with `provenant fabric graph cancel {graph_id}`, then rerun the document under a new graph_id"
+        )
+    }
+}
+
+/// Apply a persisted disposition to a node whose launch errored while its
+/// attempt was still starting: a bounded retry with backoff for a transient
+/// kind, a blocked node with reason and remedy otherwise and after the retry
+/// limit. Saves the checkpoint either way.
+fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
+    checkpoint: &mut GraphCheckpoint,
+    index: usize,
+    error: &R::Error,
+    clock: Option<provenant_core::WallTime>,
+    journal: &mut J,
+) -> Result<(), GraphError<R::Error, J::Error>> {
+    let retrying = launch_retry_kind(error);
+    if retrying {
+        let Some(now) = clock else {
+            // Like a decide timeout, a launch wait needs a real clock: refuse
+            // the advance with the attempt still starting, so no wait is lost.
+            return Err(GraphError::Refused(format!(
+                "node {}: no wall clock to schedule the launch retry; retry the advance",
+                checkpoint.nodes[index].id
+            )));
+        };
+        let retry = checkpoint.nodes[index]
+            .launch_retry
+            .get_or_insert_with(|| LaunchRetry {
+                extra: Default::default(),
+                failures: 0,
+                wake_at: None,
+                reason: None,
+            });
+        retry.failures = retry.failures.saturating_add(1);
+        if retry.failures <= MAX_LAUNCH_RETRIES {
+            let delay = provenant_core::retry::Backoff::new(
+                std::time::Duration::from_secs(LAUNCH_RETRY_FIRST_SECONDS),
+                2,
+                std::time::Duration::from_secs(LAUNCH_RETRY_MAX_SECONDS),
+            )
+            .delay(u64::from(retry.failures) - 1);
+            retry.wake_at = DurationMicros::from_seconds(delay.as_secs())
+                .ok()
+                .and_then(|duration| now.checked_add(duration).ok());
+            retry.reason = Some(bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES));
+            asks::refresh_wake(checkpoint);
+            return journal.save(checkpoint).map_err(GraphError::Journal);
+        }
+    }
+    // A permanent refusal, or a retry budget spent: block the node with the
+    // reason and a remedy, and keep the refusal visible in graph status.
+    let progress = &mut checkpoint.nodes[index];
+    let id = &progress.id;
+    let code = if retrying {
+        "launch_retry_exhausted"
+    } else {
+        "launch_refused"
+    };
+    progress.advance_error_code = Some(code.into());
+    progress.advance_error = Some(format!(
+        "node {id}: the launch failed: {}; {}",
+        bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES),
+        launch_remedy(error, &checkpoint.graph_id)
+    ));
+    progress.state = NodeState::Blocked;
+    // Keep the attempt row even when launch handoff is uncertain. A guardian
+    // may already exist, and cancellation needs its identity and custody.
+    progress.launch_retry = None;
+    asks::refresh_wake(checkpoint);
+    journal.save(checkpoint).map_err(GraphError::Journal)
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "one observation set follows internal rescheduling for this advance"
@@ -2025,6 +2167,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         state: NodeState::Pending,
                         advance_error: None,
                         advance_error_code: None,
+                        launch_retry: None,
                         outputs: None,
                         attempts: Vec::new(),
                     })
@@ -2421,6 +2564,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 continue;
             }
             loop {
+                // A persisted launch wait defers this node until its own wake
+                // on every advance, tick or manual, so a failing host that
+                // cannot launch is not hammered with new submissions.
+                let launch_clock = owner.wall_now();
+                if checkpoint.nodes[node_index]
+                    .launch_retry
+                    .as_ref()
+                    .and_then(|retry| retry.wake_at)
+                    .is_some_and(|wake| launch_clock.is_none_or(|now| now < wake))
+                {
+                    break;
+                }
                 let progress = &checkpoint.nodes[node_index];
                 let route_index = match progress.attempts.last() {
                     None => 0,
@@ -2679,31 +2834,51 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                 }
                 let continued = land::continued_branch(node, &checkpoint, &positions);
-                let observation = owner
-                    .observe_or_start(
-                        &key,
-                        NodeInput {
-                            context: node_context(&plan, node),
-                            read_roots: &node.read_roots,
-                            distinct_from_attempts: &distinct_attempts,
-                            require_distinct: node.distinct_strength
-                                == Some(FamilyStrength::Require),
-                            source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
-                            title: node.title.as_deref().unwrap_or(&node.id),
-                            prompt: &prompt,
-                            required_verdict: node.required_verdict.as_deref(),
-                        },
-                        &route,
-                        node.access,
-                        node.worktree.as_deref(),
-                        Replay {
-                            delivery: land::delivery(node),
-                            branch: continued.as_deref(),
-                            stored_ref: stored_ref.as_deref(),
-                            launch_actor: &launch_actor,
-                        },
-                    )
-                    .map_err(GraphError::Run)?;
+                let observation = match owner.observe_or_start(
+                    &key,
+                    NodeInput {
+                        context: node_context(&plan, node),
+                        read_roots: &node.read_roots,
+                        distinct_from_attempts: &distinct_attempts,
+                        require_distinct: node.distinct_strength == Some(FamilyStrength::Require),
+                        source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
+                        title: node.title.as_deref().unwrap_or(&node.id),
+                        prompt: &prompt,
+                        required_verdict: node.required_verdict.as_deref(),
+                    },
+                    &route,
+                    node.access,
+                    node.worktree.as_deref(),
+                    Replay {
+                        delivery: land::delivery(node),
+                        branch: continued.as_deref(),
+                        stored_ref: stored_ref.as_deref(),
+                        launch_actor: &launch_actor,
+                    },
+                ) {
+                    Ok(observation) => observation,
+                    // A launch that fails while its attempt is still starting
+                    // leaves the node stopped for good unless a disposition is
+                    // persisted here: a bounded retry wake or a blocked node.
+                    Err(error)
+                        if checkpoint.nodes[node_index]
+                            .attempts
+                            .last()
+                            .is_some_and(|last| {
+                                last.state == AttemptState::Starting && last.attempt_ref.is_none()
+                            }) =>
+                    {
+                        launch_disposition::<R, J>(
+                            &mut checkpoint,
+                            node_index,
+                            &error,
+                            owner.wall_now(),
+                            journal,
+                        )?;
+                        break;
+                    }
+                    Err(error) => return Err(GraphError::Run(error)),
+                };
                 let mut usage_error = None;
                 let mut cost_error = None;
                 let usage = if let AttemptObservation::Terminal {
@@ -2771,12 +2946,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .collect()
                     };
                 let mut settled_result = None;
+                let retry_was_pending;
                 let should_continue = {
                     let progress = &mut checkpoint.nodes[node_index];
                     let attempt = progress
                         .attempts
                         .last_mut()
                         .ok_or(GraphError::BadCheckpoint)?;
+                    // Any observation answers the stopped launch, so its wait
+                    // is over and the checkpoint wake no longer owes it.
+                    retry_was_pending = progress.launch_retry.take().is_some();
                     match observation {
                         AttemptObservation::Pending { attempt_ref } => {
                             attempt.state = AttemptState::Running;
@@ -2867,6 +3046,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                     }
                 };
+                if retry_was_pending {
+                    asks::refresh_wake(&mut checkpoint);
+                }
                 if recorded_separation.is_some() {
                     checkpoint.nodes[node_index].separation = recorded_separation;
                 }
@@ -4535,8 +4717,15 @@ fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         }
         let last = progress.attempts.last();
         let state_is_consistent = match progress.state {
-            NodeState::Pending | NodeState::Blocked | NodeState::Skipped => {
+            NodeState::Pending | NodeState::Skipped => progress.attempts.is_empty(),
+            NodeState::Blocked => {
                 progress.attempts.is_empty()
+                    || (matches!(
+                        progress.advance_error_code.as_deref(),
+                        Some("launch_refused" | "launch_retry_exhausted")
+                    ) && last.is_some_and(|attempt| {
+                        attempt.state != AttemptState::Terminal && attempt.attempt_ref.is_none()
+                    }))
             }
             NodeState::Running => match last {
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,
@@ -5346,16 +5535,30 @@ mod tests {
         }))
         .unwrap();
         let mut journal = MemoryJournal::default();
+        // A progress boundary inside a composite: the crash window is an
+        // accepted but unobserved child, whose attempt stays starting with no
+        // reference, and the settled child must never rerun.
         let mut crashing = FakeOwner {
-            observations: [terminal_with_result(
-                AttemptOutcome::Succeeded,
-                "evidence A",
-            )]
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, "evidence A"),
+                AttemptObservation::Pending { attempt_ref: None },
+            ]
             .into(),
             ..Default::default()
         };
-        assert!(advance(&document, &mut crashing, &mut journal).is_err());
+        let interrupted = advance(&document, &mut crashing, &mut journal).unwrap();
         assert_eq!(crashing.calls.len(), 2);
+        assert_eq!(interrupted.status, GraphStatus::Pending);
+        let progress = &interrupted.checkpoint.nodes[1];
+        assert_eq!(progress.state, NodeState::Running);
+        assert!(progress.launch_retry.is_none());
+        assert_eq!(
+            progress
+                .attempts
+                .last()
+                .map(|last| (last.state, last.outcome.is_none())),
+            Some((AttemptState::Running, true))
+        );
         let mut resumed = FakeOwner {
             observations: [terminal_with_result(
                 AttemptOutcome::Succeeded,
@@ -8331,6 +8534,336 @@ mod tests {
     }
     mod ask_tests {
         include!("graph/ask_tests.rs");
+    }
+    fn at(seconds: i64) -> provenant_core::WallTime {
+        provenant_core::WallTime::from_micros(1_800_000_000_000_000 + seconds * 1_000_000).unwrap()
+    }
+
+    /// An owner whose launch fails with typed facade kinds, for the persisted
+    /// launch dispositions. Errors are keyed by call number, first call is 1.
+    #[derive(Default)]
+    struct ErrorLauncher {
+        errors: std::collections::BTreeMap<usize, crate::coordination::facade::FacadeError>,
+        observations: VecDeque<AttemptObservation>,
+        calls: Vec<AttemptKey>,
+        stored_refs: Vec<Option<String>>,
+        now: Option<provenant_core::WallTime>,
+        now_after_error: Option<provenant_core::WallTime>,
+    }
+
+    impl AttemptOwner for ErrorLauncher {
+        type Error = crate::coordination::facade::FacadeError;
+
+        fn actor(&self) -> String {
+            "actor".into()
+        }
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            self.now
+        }
+        fn observe_or_start(
+            &mut self,
+            key: &AttemptKey,
+            _node: NodeInput<'_>,
+            _route: &GraphRoute,
+            _access: AccessMode,
+            _worktree: Option<&str>,
+            replay: Replay<'_>,
+        ) -> Result<AttemptObservation, Self::Error> {
+            self.calls.push(key.clone());
+            self.stored_refs.push(replay.stored_ref.map(str::to_owned));
+            let error = self.errors.remove(&self.calls.len());
+            if let Some(error) = error {
+                if self.now_after_error.is_some() {
+                    self.now = self.now_after_error;
+                }
+                return Err(error);
+            }
+            self.observations
+                .pop_front()
+                .ok_or(Self::Error::OwnerUnavailable)
+        }
+    }
+
+    fn busy_times(
+        count: usize,
+    ) -> std::collections::BTreeMap<usize, crate::coordination::facade::FacadeError> {
+        (1..=count)
+            .map(|round| (round, crate::coordination::facade::FacadeError::Busy))
+            .collect()
+    }
+
+    fn retry_of(checkpoint: &GraphCheckpoint) -> &LaunchRetry {
+        checkpoint.nodes[0]
+            .launch_retry
+            .as_ref()
+            .expect("a pending launch retry")
+    }
+
+    #[test]
+    fn transient_launch_error_waits_and_retries_the_same_attempt_once_due() {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: busy_times(1),
+            observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let first = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(first.status, GraphStatus::Pending);
+        let progress = &first.checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Running);
+        assert_eq!(progress.attempts.len(), 1, "no duplicate attempt row");
+        let attempt = &progress.attempts[0];
+        assert_eq!(attempt.state, AttemptState::Starting);
+        assert!(attempt.attempt_ref.is_none());
+        let retry = progress.launch_retry.as_ref().expect("persisted wait");
+        assert_eq!(retry.failures, 1);
+        assert_eq!(retry.wake_at, Some(at(5)));
+        assert!(
+            retry
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("busy"))
+        );
+        assert_eq!(first.checkpoint.wake_at, Some(at(5)));
+
+        // Before the wake the node is never relaunched, on tick or manually.
+        owner.now = Some(at(2));
+        let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(waiting.status, GraphStatus::Pending);
+        assert_eq!(owner.calls.len(), 1);
+
+        // After the wake the same attempt key is replayed and settles once.
+        owner.now = Some(at(6));
+        let done = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(done.status, GraphStatus::Complete);
+        assert_eq!(owner.calls.len(), 2);
+        assert_eq!(owner.calls[1], owner.calls[0], "one attempt, one key");
+        assert_eq!(
+            owner.stored_refs,
+            vec![None, None],
+            "relaunched, not replayed"
+        );
+        let progress = &done.checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Succeeded);
+        assert!(progress.launch_retry.is_none());
+        assert_eq!(done.checkpoint.wake_at, None);
+    }
+
+    #[test]
+    fn launch_retry_backoff_starts_after_a_slow_failed_submission() {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            now_after_error: Some(at(30)),
+            errors: [(1, crate::coordination::facade::FacadeError::Busy)].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(retry_of(journal.0.as_ref().unwrap()).wake_at, Some(at(35)));
+    }
+
+    #[test]
+    fn an_unobserved_writer_disk_check_is_a_retryable_launch_error() {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: [(
+                1,
+                crate::coordination::facade::FacadeError::DispatchUnobserved {
+                    reason: "disk observation failed".into(),
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        advance(&document, &mut owner, &mut journal).unwrap();
+        let retry = retry_of(journal.0.as_ref().unwrap());
+        assert_eq!(retry.failures, 1);
+        assert!(
+            retry
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("disk observation failed")
+        );
+        assert_eq!(retry.wake_at, Some(at(5)));
+    }
+
+    #[test]
+    fn launch_errors_past_the_retry_limit_block_the_node() {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: busy_times(4),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        advance(&document, &mut owner, &mut journal).unwrap();
+        let retry = retry_of(journal.0.as_ref().unwrap());
+        assert_eq!(retry.failures, 1);
+        assert_eq!(retry.wake_at, Some(at(5)));
+        for (now, failures, wake) in [(6, 2, Some(at(16))), (17, 3, Some(at(37)))] {
+            owner.now = Some(at(now));
+            advance(&document, &mut owner, &mut journal).unwrap();
+            let retry = retry_of(journal.0.as_ref().unwrap());
+            assert_eq!(retry.failures, failures);
+            assert_eq!(retry.wake_at, wake);
+        }
+        // The fourth bounded retry is spent, so the node is blocked, not
+        // silently stopped.
+        owner.now = Some(at(38));
+        advance(&document, &mut owner, &mut journal).unwrap();
+        let checkpoint = journal.0.as_ref().unwrap();
+        let progress = &checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Blocked);
+        assert!(progress.launch_retry.is_none());
+        assert_eq!(progress.attempts.len(), 1);
+        assert_eq!(progress.attempts[0].state, AttemptState::Starting);
+        assert_eq!(checkpoint.wake_at, None);
+        assert_eq!(
+            progress.advance_error_code.as_deref(),
+            Some("launch_retry_exhausted")
+        );
+        let reason = progress.advance_error.as_deref().expect("blocked reason");
+        assert!(reason.contains("service is busy"));
+        assert!(reason.contains("provenant fabric graph cancel g-test"));
+        assert!(reason.contains("new graph_id"));
+        assert_eq!(owner.calls.len(), 4);
+
+        // A blocked node never launches again.
+        owner.now = Some(at(39));
+        let stopped = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(stopped.checkpoint.nodes[0].state, NodeState::Blocked);
+        assert_eq!(owner.calls.len(), 4);
+    }
+
+    #[test]
+    fn a_permanent_refusal_blocks_the_node_at_once_with_reason_and_remedy() {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: [(1, crate::coordination::facade::FacadeError::InvalidInput)].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        // Like failed nodes, a blocked node settles the graph; the refusal
+        // itself stays on the node for status.
+        assert_eq!(run.status, GraphStatus::Complete);
+        let progress = &run.checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Blocked);
+        assert!(progress.launch_retry.is_none());
+        assert_eq!(progress.attempts.len(), 1);
+        assert_eq!(progress.attempts[0].state, AttemptState::Starting);
+        assert_eq!(
+            progress.advance_error_code.as_deref(),
+            Some("launch_refused")
+        );
+        let reason = progress.advance_error.as_deref().expect("blocked reason");
+        assert!(reason.contains("invalid input"));
+        assert!(reason.contains("provenant fabric graph cancel g-test"));
+        assert!(reason.contains("new graph_id"));
+        assert_eq!(run.checkpoint.wake_at, None);
+
+        // The refusal is durable: the next advance never relaunches the node.
+        let again = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(again.checkpoint.nodes[0].state, NodeState::Blocked);
+        assert_eq!(owner.calls.len(), 1);
+    }
+
+    #[test]
+    fn a_saved_attempt_reference_never_gains_a_launch_retry_or_a_second_row() {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: [(
+                2,
+                crate::coordination::facade::FacadeError::ConfinementRefused,
+            )]
+            .into(),
+            observations: VecDeque::from([
+                AttemptObservation::Pending {
+                    attempt_ref: Some("host/1".into()),
+                },
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let pending = advance(&document, &mut owner, &mut journal).unwrap();
+        let progress = &pending.checkpoint.nodes[0];
+        assert_eq!(progress.state, NodeState::Running);
+        assert!(progress.launch_retry.is_none());
+        assert_eq!(progress.attempts.len(), 1);
+        assert_eq!(progress.attempts[0].attempt_ref.as_deref(), Some("host/1"));
+
+        // After the reference was saved a launch error cannot manage the
+        // attempt's disposition: the attempt is owned by its reference, so the
+        // error propagates and the node is neither retried nor blocked.
+        let error = advance(&document, &mut owner, &mut journal)
+            .expect_err("error propagates without a disposition");
+        assert!(matches!(error, GraphError::Run(_)));
+        let progress = &journal.0.as_ref().unwrap().nodes[0];
+        assert!(progress.launch_retry.is_none());
+        assert_eq!(progress.state, NodeState::Running);
+        assert_eq!(progress.attempts[0].attempt_ref.as_deref(), Some("host/1"));
+
+        // The next advance observes the stored reference and never resubmits.
+        let done = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(done.status, GraphStatus::Complete);
+        for call in &owner.calls {
+            assert_eq!(call, &owner.calls[0], "one attempt, one key");
+        }
+        assert_eq!(
+            owner.stored_refs,
+            vec![None, Some("host/1".into()), Some("host/1".into())]
+        );
+    }
+
+    #[test]
+    fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
+        use crate::coordination::facade::FacadeError;
+        let operation = provenant_core::OperationId::parse("op").unwrap();
+        for transient in [
+            FacadeError::Busy,
+            FacadeError::Timeout,
+            FacadeError::HomeUnavailable,
+            FacadeError::Io {
+                operation: "read file".into(),
+                path: None,
+            },
+            FacadeError::LaunchUnknown {
+                operation_id: operation,
+            },
+        ] {
+            assert!(launch_retry_kind(&transient), "{transient}");
+        }
+        for permanent in [
+            FacadeError::InvalidInput,
+            FacadeError::ConfinementRefused,
+            FacadeError::DispatchRefused {
+                reason: "why".into(),
+            },
+            FacadeError::NotFound,
+            FacadeError::Cancelled,
+            FacadeError::OwnerUnavailable,
+            FacadeError::StateCorrupt,
+        ] {
+            assert!(!launch_retry_kind(&permanent), "{permanent}");
+        }
+        #[derive(Debug)]
+        struct Untyped;
+        impl std::fmt::Display for Untyped {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("untyped")
+            }
+        }
+        impl Error for Untyped {}
+        assert!(!launch_retry_kind(&Untyped));
     }
 }
 

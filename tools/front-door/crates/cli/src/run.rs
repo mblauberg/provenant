@@ -193,6 +193,30 @@ pub struct Registry<'a> {
     pub cancel: Option<&'a CancelToken>,
 }
 impl Registry<'_> {
+    fn prepare_with_wait(
+        &self,
+        task: &run::TaskRequest,
+        prompt: &str,
+        paths: &run::LaunchPaths,
+        resume: Option<&run::AttemptRecord>,
+        wait: Option<u64>,
+    ) -> Result<run::PreparedLaunch, String> {
+        let prepared = provider::prepare(self, task, prompt, paths, resume, wait)?;
+        #[cfg(feature = "fixture")]
+        let prepared = {
+            let mut prepared = prepared;
+            if self.host.is_some_and(|host| host.fixture_state_write)
+                && let Some(confinement) = &mut prepared.confinement
+            {
+                confinement.profile.observations.insert(
+                    provenant_confinement::permissions::FixtureOperation::StateWrite,
+                    provenant_confinement::permissions::FixtureOutcome::Allowed,
+                );
+            }
+            prepared
+        };
+        Ok(prepared)
+    }
     /// Whether any registered adapter can continue a recorded session.
     pub fn continues_sessions(&self) -> bool {
         REGISTRY.iter().any(|entry| {
@@ -380,9 +404,17 @@ impl run::Providers for Registry<'_> {
         context: &run::HolderContext,
     ) -> Result<run::Decoded, String> {
         let (configuration_root, _) = context.disk_roots();
+        // Every branch carries the holder home: without it the OpenCode
+        // identity lookup has no `.local/share` fallback and decodes capture
+        // nothing when the launch environment unset `XDG_DATA_HOME`.
+        let holder_home = Some(context.roots.home.as_path());
         // A child store must never write host capacity evidence.
         if configuration_root != context.roots.state_root {
-            return Registry::default().decode(route, stdout, exit, provider_state);
+            return Registry {
+                home: holder_home,
+                ..Default::default()
+            }
+            .decode(route, stdout, exit, provider_state);
         }
         let mut inputs = provenant_core::RootInputs::new(
             context.roots.home.clone(),
@@ -394,8 +426,11 @@ impl run::Providers for Registry<'_> {
             Err(_) => {
                 // A failed sealed-root binding must not fall back to this
                 // registry's unrelated roots when recording capacity evidence.
-                let mut decoded =
-                    Registry::default().decode(route, stdout, exit, provider_state)?;
+                let mut decoded = Registry {
+                    home: holder_home,
+                    ..Default::default()
+                }
+                .decode(route, stdout, exit, provider_state)?;
                 if decoded.reason.as_deref().is_some_and(capacity_reason) {
                     let reason = decoded.reason.get_or_insert_with(String::new);
                     let mut end = reason
@@ -412,6 +447,7 @@ impl run::Providers for Registry<'_> {
         };
         let registry = Registry {
             roots: Some(&roots),
+            home: holder_home,
             state_root: Some(configuration_root),
             ..Default::default()
         };
@@ -424,21 +460,7 @@ impl run::Providers for Registry<'_> {
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
     ) -> Result<run::PreparedLaunch, String> {
-        let prepared = provider::prepare(self, task, prompt, paths, resume)?;
-        #[cfg(feature = "fixture")]
-        let prepared = {
-            let mut prepared = prepared;
-            if self.host.is_some_and(|host| host.fixture_state_write)
-                && let Some(confinement) = &mut prepared.confinement
-            {
-                confinement.profile.observations.insert(
-                    provenant_confinement::permissions::FixtureOperation::StateWrite,
-                    provenant_confinement::permissions::FixtureOutcome::Allowed,
-                );
-            }
-            prepared
-        };
-        Ok(prepared)
+        self.prepare_with_wait(task, prompt, paths, resume, None)
     }
 
     fn decode(
@@ -596,7 +618,7 @@ fn assess_settlement_retry(
     if !(capacity || quota) || config.settlement_retries == 0 || policy_attempt >= max_attempts {
         return Default::default();
     }
-    let writes = task.writer.is_some() || !task.access.write_roots.is_empty();
+    let writes = run::Service::has_writes(task.writer.is_some(), &task.access.write_roots);
     let applied = || {
         Some(run::RequestedRoute::Model {
             extra: Default::default(),
@@ -1112,7 +1134,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
     };
     Ok(provenant_routing::RouteRequest {
         intent: provenant_routing::RouteIntent {
-            writes: task.writer.is_some() || !task.access.write_roots.is_empty(),
+            writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
             workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
                 provenant_routing::Workload::Review
             } else {
@@ -1426,8 +1448,8 @@ fn network_access(switch: Option<Switch>, postgres: bool) -> Option<run::Network
 }
 
 /// Resolve dispatch access flags into the sealed record. Roots must be
-/// existing directories, stored canonically, and clear of the state root;
-/// the confinement compiler refuses credential, broad and Git roots.
+/// existing directories, stored canonically, and clear of credential and state
+/// roots; the confinement compiler also checks broad and Git roots.
 pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
     lane_access_checked(access, state_root)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
@@ -1443,6 +1465,8 @@ enum AccessError {
     MissingDirectory { flag: &'static str, path: PathBuf },
     #[error("{flag} {} overlaps the Provenant state root", path.display())]
     StateOverlap { flag: &'static str, path: PathBuf },
+    #[error("credential root requires a selected fixture-backed mechanism")]
+    CredentialRoot,
     #[error("--write-root {} overlaps the --worktree; worktree-write already grants the worktree", .0.display())]
     WorktreeOverlap(PathBuf),
 }
@@ -1464,9 +1488,6 @@ fn lane_access_checked(
     // A first dispatch can precede the state root's creation; compare lexically then.
     let state =
         provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
-    // Installed releases are immutable and hold the bundled skills that preset
-    // roles read, so a read root may sit inside one release directory.
-    let releases = state.join("releases");
     let resolve = |paths: &[PathBuf], flag: &'static str| {
         paths
             .iter()
@@ -1478,10 +1499,10 @@ fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
-                let release = flag == "--read-root"
-                    && canonical.starts_with(&releases)
-                    && canonical != releases;
-                if !release && (canonical.starts_with(&state) || state.starts_with(&canonical)) {
+                if provenant_confinement::is_credential_root(&canonical) {
+                    return Err(AccessError::CredentialRoot);
+                }
+                if !run::access_root_allowed(&canonical, &state, flag == "--read-root") {
                     return Err(AccessError::StateOverlap {
                         flag,
                         path: path.clone(),
@@ -1709,6 +1730,17 @@ pub fn submit_with_host(
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    submit_with_host_and_wait(session, edge, submission, call, host, None)
+}
+
+fn submit_with_host_and_wait(
+    session: &Session,
+    edge: &Edge<'_>,
+    submission: Submission,
+    call: &run::Request<'_>,
+    host: Option<&run::HostLaunchContext>,
+    provider_lease_wait: Option<u64>,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
@@ -1733,11 +1765,15 @@ pub fn submit_with_host(
                     let message = String::from(check);
                     let mut fail = Fail::new(status, kind, message.clone());
                     // Keep the volume, available bytes and floor for MCP callers.
-                    fail.detail = Some(
-                        provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
-                            reason: message,
-                        },
-                    );
+                    fail.detail = Some(if status == Status::Refused {
+                            provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
+                                reason: message.clone(),
+                            }
+                        } else {
+                            provenant_fabric_runtime::coordination::facade::FacadeError::DispatchUnobserved {
+                                reason: message,
+                            }
+                    });
                     fail
                 })?;
             }
@@ -1832,9 +1868,25 @@ pub fn submit_with_host(
     let started = if parent_attempt.is_some() {
         Vec::new()
     } else if let Some(host) = host {
-        launch_on_host(session, record.run_id, edge, call, Some(host), None, None)?
+        launch_on_host_with_wait(
+            session,
+            record.run_id,
+            edge,
+            call,
+            Some(host),
+            None,
+            None,
+            provider_lease_wait,
+        )?
     } else {
-        launch(session, record.run_id, edge, call)?
+        launch_prepared_with_wait(
+            session,
+            record.run_id,
+            edge,
+            call,
+            None,
+            provider_lease_wait,
+        )?
     };
     Ok((record, started))
 }
@@ -2595,9 +2647,22 @@ fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> {
         _ => Ok(()),
     }
 }
+#[cfg(test)]
 pub(crate) fn check_flag_capabilities(
     command: &Dispatch,
     roots: Option<&Roots>,
+) -> Result<(), Fail> {
+    let has_writes = run::Service::has_writes(
+        matches!(command.access.mode(), Mode::WorktreeWrite),
+        &command.access.write_root,
+    );
+    check_flag_capabilities_with_writes(command, roots, has_writes)
+}
+
+fn check_flag_capabilities_with_writes(
+    command: &Dispatch,
+    roots: Option<&Roots>,
+    has_writes: bool,
 ) -> Result<(), Fail> {
     let route = requested(
         command.route.model.as_ref().map(|m| m.0.as_str()),
@@ -2610,7 +2675,6 @@ pub(crate) fn check_flag_capabilities(
         .iter()
         .any(|name| name == "postgres");
     let flag_network = network_access(command.access.network, postgres);
-    let write = matches!(command.access.mode(), Mode::WorktreeWrite);
     let check = |provider: &str,
                  model: Option<&str>,
                  effort: Option<&str>,
@@ -2623,7 +2687,7 @@ pub(crate) fn check_flag_capabilities(
             effort,
             resume: false,
             network,
-            write,
+            write: has_writes,
         })
         .map_err(refused)
     };
@@ -2724,7 +2788,13 @@ fn dispatch_inner(
             "coordination mutations are not allowed inside a lane",
         ));
     }
-    check_flag_capabilities(&command, Some(edge.roots))?;
+    // Validate roots before checking the capabilities they request.
+    let mut lane_access = lane_access(&command.access, edge.roots.state.as_path())?;
+    let has_writes = run::Service::has_writes(
+        matches!(command.access.mode(), Mode::WorktreeWrite),
+        &lane_access.write_roots,
+    );
+    check_flag_capabilities_with_writes(&command, Some(edge.roots), has_writes)?;
     // Preflight. An owned worktree is the first side effect, so every check
     // that does not depend on the tree runs before it and a refusal leaves
     // no tree behind.
@@ -2772,8 +2842,6 @@ fn dispatch_inner(
             format!("{what} is not available in this build"),
         ))
     };
-    // An owned tree's write-root overlap is checked again once it exists.
-    let mut lane_access = lane_access(&command.access, edge.roots.state.as_path())?;
     let postgres = command
         .access
         .capability
@@ -3151,7 +3219,7 @@ fn dispatch_inner(
             },
         )
         .collect();
-    let (record, started) = submit(
+    let (record, started) = submit_with_host_and_wait(
         &session,
         edge,
         Submission {
@@ -3162,6 +3230,8 @@ fn dispatch_inner(
             knobs: command.knobs,
         },
         &call,
+        None,
+        command.wait,
     )?;
     let (mut data, human, timed_out) =
         report(&session, &record, &started, command.wait, edge, &call)?;
@@ -3611,17 +3681,37 @@ fn launch_prepared(
     call: &run::Request<'_>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
+    launch_prepared_with_wait(session, run, edge, call, ready, None)
+}
+fn launch_prepared_with_wait(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    ready: Option<&run::PreparedStart>,
+    provider_lease_wait: Option<u64>,
+) -> Result<Vec<run::Started>, Fail> {
     // Every lane-facing launch path is submission-only. Only its host holder
     // prepares providers, including credentials and the child's OS profile.
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
         return Ok(Vec::new());
     }
-    launch_on_host(session, run, edge, call, None, None, ready)
+    launch_on_host_with_wait(
+        session,
+        run,
+        edge,
+        call,
+        None,
+        None,
+        ready,
+        provider_lease_wait,
+    )
 }
 
 struct PreparedProvider<'a> {
-    fallback: &'a dyn run::Providers,
+    fallback: &'a Registry<'a>,
     ready: Option<&'a run::PreparedStart>,
+    provider_lease_wait: Option<u64>,
 }
 impl run::Providers for PreparedProvider<'_> {
     fn runtime_cap(&self, provider: &str) -> Option<u64> {
@@ -3656,7 +3746,8 @@ impl run::Providers for PreparedProvider<'_> {
                 .take()
                 .ok_or_else(|| "prepared continuation consumed".into());
         }
-        self.fallback.prepare(task, prompt, paths, resume)
+        self.fallback
+            .prepare_with_wait(task, prompt, paths, resume, self.provider_lease_wait)
     }
     fn decode(
         &self,
@@ -3916,6 +4007,20 @@ fn launch_on_host(
     validated: Option<&run::ValidatedChild>,
     ready: Option<&run::PreparedStart>,
 ) -> Result<Vec<run::Started>, Fail> {
+    launch_on_host_with_wait(session, run, edge, call, host, validated, ready, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_on_host_with_wait(
+    session: &Session,
+    run: RunId,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    host: Option<&run::HostLaunchContext>,
+    validated: Option<&run::ValidatedChild>,
+    ready: Option<&run::PreparedStart>,
+    provider_lease_wait: Option<u64>,
+) -> Result<Vec<run::Started>, Fail> {
     let inherited_host = host.is_some();
     let host = match host {
         Some(host) => host.clone(),
@@ -4114,6 +4219,7 @@ fn launch_on_host(
     let providers = PreparedProvider {
         fallback: &registry,
         ready,
+        provider_lease_wait,
     };
     // Fixture guardians observe a recorded boot key, so the reservation must be
     // taken against the same key as on the lane-launch path of the test host.
@@ -11440,6 +11546,13 @@ mod tests {
         assert!(rendered.contains("retry later"));
         assert!(!rendered.chars().any(char::is_control));
 
+        let state = run::Reconciled::Uncertain {
+            reason: run::UncertainReason::ReconcileFailed {
+                error: "writer fence listing failed".into(),
+            },
+        };
+        assert!(reconcile_summary(&state).contains("writer fence listing failed"));
+
         let data = json!({"writer_reservation_errors": [{"reason": "legacy reservation has invalid anchor"}]});
         let blocked = reconcile_reply(
             Ok((
@@ -12172,6 +12285,80 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn explicit_write_root_is_checked_at_preflight_and_routing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("safe");
+        std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(root)?;
+        let parse = |flag: &str, route: &str| {
+            let args = [
+                "run",
+                "--prompt-stdin",
+                "--mode",
+                "read-only",
+                "--write-root",
+                root.to_str().unwrap(),
+                flag,
+                route,
+            ];
+            match crate::parse(args.into_iter().map(std::ffi::OsString::from)) {
+                crate::ParseOutcome::Invocation(inv) => match inv.command {
+                    crate::Command::Run(request) => request,
+                    _ => panic!("expected run"),
+                },
+                other => panic!("{other:?}"),
+            }
+        };
+        let command = parse("--route", "command/fmt");
+        let access =
+            lane_access(&command.access, &temp.path().join("state")).map_err(|e| e.message)?;
+        assert_eq!(access.write_roots, vec![root.clone()]);
+        let fail = check_flag_capabilities(&command, None).unwrap_err();
+        assert_eq!(fail.kind.code(), "UNSUPPORTED");
+        assert_eq!(fail.message, "command does not support write");
+        let command = parse("--model", "codex/gpt-6-luna");
+        check_flag_capabilities(&command, None).map_err(|e| e.message)?;
+        let mut task = trace_run(
+            1,
+            AttemptId::from_bytes([3; 16]),
+            WallTime::from_micros(100)?,
+        )?
+        .request
+        .tasks
+        .remove(0);
+        task.route = requested(Some("codex/gpt-6-luna"), None, None).map_err(|e| e.message)?;
+        task.access = access;
+        assert!(task.writer.is_none());
+        assert!(route_request(&task)?.intent.writes);
+        Ok(())
+    }
+
+    #[test]
+    fn lane_access_refuses_credential_roots() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join(".ssh").join("nested");
+        std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(root)?;
+        for read in [true, false] {
+            let access = crate::Access {
+                mode: Some(Mode::ReadOnly),
+                worktree: None,
+                read_root: if read { vec![root.clone()] } else { vec![] },
+                write_root: if read { vec![] } else { vec![root.clone()] },
+                network: None,
+                capability: vec![],
+            };
+            let fail = lane_access(&access, &temp.path().join("state")).unwrap_err();
+            assert_eq!(
+                fail.message,
+                provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
@@ -12267,7 +12454,9 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let state = temp.path().join("state");
         let releases = state.join("releases");
-        let skills = releases.join("sha256:abc").join("skills");
+        let release =
+            releases.join(provenant_records::SourceDigest::from_bytes([1; 32]).to_string());
+        let skills = release.join("skills");
         std::fs::create_dir_all(&skills)?;
         std::fs::create_dir_all(state.join("projects"))?;
         let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
@@ -12285,9 +12474,19 @@ mod tests {
             granted.read_roots,
             [provenant_os::fs::canonicalize(&skills)?]
         );
+        assert!(lane_access(&access(vec![release.clone()], Vec::new()), &state).is_ok());
+        for invalid in ["not-a-digest", "sha256:abc", ".provenant-staging.fixture"] {
+            let root = releases.join(invalid).join("skills");
+            std::fs::create_dir_all(&root)?;
+            assert!(matches!(
+                lane_access_checked(&access(vec![root], Vec::new()), &state),
+                Err(AccessError::StateOverlap { .. })
+            ));
+        }
         for refused in [
             access(vec![releases.clone()], Vec::new()),
             access(vec![state.join("projects")], Vec::new()),
+            access(Vec::new(), vec![release]),
             access(Vec::new(), vec![skills.clone()]),
         ] {
             assert!(matches!(
@@ -12704,6 +12903,182 @@ mod tests {
                 .contains("capacity cooldown configuration unavailable")
         );
         assert!(!roots.state.as_path().join("quota").exists());
+        Ok(())
+    }
+
+    /// Population of OpenCode's own session record: the synthetic v2
+    /// `session_message` database the dispatch tests pair with the fixtures.
+    fn seed_opencode_session(
+        data: &Path,
+        session: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(data)?;
+        let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+        db.execute_batch("CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
+        db.execute(
+            "INSERT INTO session_message VALUES (?1, 'assistant', ?2)",
+            (
+                session,
+                serde_json::to_string(&json!({"model": {"providerID": provider, "id": model}}))?,
+            ),
+        )?;
+        Ok(())
+    }
+
+    const OPENCODE_DECODE_XDG_MARKER: &str = "PROVENANT_TEST_OPENCODE_DECODE_XDG";
+
+    fn opencode_decode_route() -> run::RouteRecord {
+        run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("opencode/opencode/glm-5.3-flash-free".into()),
+            ..Default::default()
+        }
+    }
+
+    fn opencode_decode_holder_context(
+        temp: &Path,
+    ) -> Result<run::HolderContext, Box<dyn std::error::Error>> {
+        Ok(run::HolderContext {
+            schema_version: 1,
+            roots: run::RootSeed {
+                home: temp.join("home"),
+                checkout: temp.join("checkout"),
+                state_root: temp.join("state"),
+            },
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: ActorId::from_bytes([2; 16]),
+            run_id: RunId::from_bytes([3; 16]),
+            attempt_id: AttemptId::from_bytes([4; 16]),
+            host_delivery: None,
+            launch: None,
+            sealed: None,
+        })
+    }
+
+    /// Re-run `test` in a confined child process whose environment omits
+    /// `XDG_DATA_HOME` (when `xdg` is `None`) or pins it to `xdg`, so the
+    /// decode sees a controlled value without mutating this process's env.
+    fn run_opencode_decode_child(
+        test: &str,
+        xdg: Option<&Path>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        use std::ffi::OsString;
+        let argv = vec![
+            std::env::current_exe()?.into_os_string(),
+            "--exact".into(),
+            format!("run::tests::{test}").into(),
+            "--nocapture".into(),
+        ];
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                key != OPENCODE_DECODE_XDG_MARKER
+                    && key != "XDG_DATA_HOME"
+                    && key != provenant_core::RUN_STATE_DIRECTORY_ENV
+            })
+            .collect();
+        env.push((
+            OsString::from(OPENCODE_DECODE_XDG_MARKER),
+            OsString::from("1"),
+        ));
+        if let Some(xdg) = xdg {
+            env.push(("XDG_DATA_HOME".into(), xdg.as_os_str().into()));
+        }
+        let cwd = std::env::current_dir()?;
+        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+        options.env = Some(&env);
+        options.stdout = StreamPolicy::Capture { limit: 65_536 };
+        options.stderr = StreamPolicy::Capture { limit: 65_536 };
+        let out = SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        assert!(!out.timed_out, "{out:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn opencode_decode_with_context_reads_home_data_when_xdg_is_unset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os(OPENCODE_DECODE_XDG_MARKER).is_none() {
+            run_opencode_decode_child(
+                "opencode_decode_with_context_reads_home_data_when_xdg_is_unset",
+                None,
+            )?;
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let context = opencode_decode_holder_context(temp.path())?;
+        seed_opencode_session(
+            &context.roots.home.join(".local/share/opencode"),
+            "ses_x",
+            "opencode",
+            "glm-5.3-flash-free",
+        )?;
+        // The success fixture's stream reports no model; the session record
+        // beside the holder home supplies it through `decode_with_context`.
+        let decoded = Registry::default().decode_with_context(
+            &opencode_decode_route(),
+            include_bytes!("../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+            &clean_exit(),
+            Path::new("/nonexistent"),
+            &context,
+        )?;
+        assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+        assert_eq!(decoded.session.as_deref(), Some("ses_x"));
+        assert_eq!(
+            decoded
+                .observed_route
+                .as_ref()
+                .and_then(|r| r.model.as_deref()),
+            Some("opencode/opencode/glm-5.3-flash-free")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn absolute_xdg_data_home_wins_over_home_for_decode_with_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os(OPENCODE_DECODE_XDG_MARKER).is_none() {
+            let xdg = tempfile::tempdir()?;
+            seed_opencode_session(
+                &xdg.path().join("opencode"),
+                "ses_x",
+                "opencode",
+                "beam-free",
+            )?;
+            run_opencode_decode_child(
+                "absolute_xdg_data_home_wins_over_home_for_decode_with_context",
+                Some(xdg.path()),
+            )?;
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let context = opencode_decode_holder_context(temp.path())?;
+        // A differing home record proves `XDG_DATA_HOME` took precedence.
+        seed_opencode_session(
+            &context.roots.home.join(".local/share/opencode"),
+            "ses_x",
+            "opencode",
+            "home-decoy",
+        )?;
+        let decoded = Registry::default().decode_with_context(
+            &opencode_decode_route(),
+            include_bytes!("../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+            &clean_exit(),
+            Path::new("/nonexistent"),
+            &context,
+        )?;
+        assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+        assert_eq!(
+            decoded
+                .observed_route
+                .as_ref()
+                .and_then(|r| r.model.as_deref()),
+            Some("opencode/opencode/beam-free")
+        );
         Ok(())
     }
 

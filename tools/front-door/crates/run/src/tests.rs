@@ -107,6 +107,67 @@ fn unsafe_state_root_is_named_relative_to_itself() -> TestResult {
     );
     Ok(())
 }
+#[test]
+fn mutation_record_reads_sync_the_checkpoint_while_views_do_not() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    let run = store.create(&input, &call)?;
+    let record = store.record(id, &call)?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let checkpoint = serde_json::json!({
+        "schema_version": 1,
+        "scope": RunStore::scope(&record),
+    });
+    crate::artifacts::seal(
+        &attempt,
+        "process.json",
+        &serde_json::to_vec(&checkpoint)?,
+        RECORD_LIMIT,
+    )?;
+    crate::artifacts::seal(&attempt, "stderr.log", b"view output", CAPTURE_LIMIT)?;
+
+    // Mutation consumers read the checkpoint durably.
+    crate::artifacts::sync_probe::reset();
+    store.record(id, &call)?;
+    assert!(crate::artifacts::sync_probe::count() >= 1);
+
+    // Lane listings are a view: same checkpoint, no durable flush.
+    crate::artifacts::sync_probe::reset();
+    let page = store.lanes(
+        &LaneQuery {
+            targets: Vec::new(),
+            all: true,
+            limit: 10,
+            after: 0,
+            newest_first: false,
+            owner: None,
+            unseen_after: None,
+        },
+        &call,
+    )?;
+    assert_eq!(page.lanes.len(), 1);
+    assert_eq!(crate::artifacts::sync_probe::count(), 0);
+
+    // Output paging is a view too.
+    crate::artifacts::sync_probe::reset();
+    let chunk = store.read_output(
+        id,
+        ArtifactPart::Stderr,
+        ByteRange::default(),
+        &context,
+        &call,
+    )?;
+    assert_eq!(chunk.bytes, b"view output");
+    assert_eq!(crate::artifacts::sync_probe::count(), 0);
+    Ok(())
+}
+
 pub(super) fn context(
     base: &Path,
 ) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
@@ -761,6 +822,52 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
             ]))),
         }
     );
+    Ok(())
+}
+
+#[test]
+fn appended_after_eof_names_the_recorded_and_final_lengths() -> TestResult {
+    use std::io::Write as _;
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let text = "sealed result";
+    let mut done = publication();
+    done.result = text;
+    store.publish_terminal(id, 1, &done, &exit(), &call)?;
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+    // Grow the file through a second handle between the streamed EOF and the
+    // final metadata check, so the streamed length and digest still match the
+    // record and only the final unchanged check can refuse.
+    let provenance = artifact_provenance(store.stream_result_observing(id, &call, None, || {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut handle| handle.write_all(b"appended"))
+            .unwrap();
+    }));
+    assert_eq!(
+        provenance,
+        ArtifactProvenance {
+            check: ArtifactCheck::Stream,
+            artifact: "result.md".into(),
+            expected: Some(ArtifactValue::Length(text.len() as u64)),
+            actual: Some(ArtifactValue::Length(text.len() as u64 + 8)),
+        }
+    );
+    let message = provenance.to_string();
+    assert!(message.contains(text.len().to_string().as_str()));
+    assert!(message.contains((text.len() as u64 + 8).to_string().as_str()));
     Ok(())
 }
 

@@ -472,6 +472,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
         FacadeError::ConfinementRefused => (Outcome::Refused, ErrorKind::Refused),
         FacadeError::DispatchRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
+        FacadeError::DispatchUnobserved { .. } => (Outcome::Error, ErrorKind::Io),
         FacadeError::WorktreeMissing => (Outcome::Invalid, ErrorKind::WorktreeMissing),
         FacadeError::WorktreeUnregistered { .. } => {
             (Outcome::Refused, ErrorKind::WorktreeUnregistered)

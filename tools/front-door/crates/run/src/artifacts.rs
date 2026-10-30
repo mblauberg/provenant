@@ -90,6 +90,18 @@ impl RunStore {
         call: &Request<'_>,
         required_verdict: Option<&str>,
     ) -> Result<provenant_records::result_capture::CapturedResult> {
+        self.stream_result_observing(id, call, required_verdict, || {})
+    }
+    /// Like `stream_result`, with `observing` invoked between the streamed EOF
+    /// and the final metadata check, so tests can grow the file through a
+    /// second handle in exactly the window the refusal must name.
+    pub(crate) fn stream_result_observing(
+        &self,
+        id: provenant_core::AttemptId,
+        call: &Request<'_>,
+        required_verdict: Option<&str>,
+        mut observing: impl FnMut(),
+    ) -> Result<provenant_records::result_capture::CapturedResult> {
         use provenant_os::exec::CaptureFilter;
         use sha2::{Digest as _, Sha256};
 
@@ -163,12 +175,15 @@ impl RunStore {
                 Some(ArtifactValue::digest(digest)),
             ));
         }
-        if !before.unchanged(&file.metadata()?) {
+        observing();
+        let after = file.metadata()?;
+        if !before.unchanged(&after) {
+            let grew = before.size != after.size;
             return Err(RunError::artifact_mismatch(
                 ArtifactCheck::Stream,
                 "result.md",
-                None,
-                None,
+                grew.then_some(ArtifactValue::Length(artifact.bytes)),
+                grew.then_some(ArtifactValue::Length(after.size)),
             ));
         }
         let safe = redactor
@@ -261,8 +276,36 @@ pub(crate) fn artifact_path(attempt: provenant_core::AttemptId, name: &str) -> R
 }
 /// Opens of a sealed name that concurrent replacements may retire in a row.
 const REPLACED_OPENS: usize = 4;
+/// Counts durable reads on the calling thread so tests can prove which record
+/// path a consumer takes without relying on timing.
+#[cfg(test)]
+pub(crate) mod sync_probe {
+    use std::cell::Cell;
+    thread_local! {
+        static DURABLE_SYNCS: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(crate) fn reset() {
+        DURABLE_SYNCS.with(|count| count.set(0));
+    }
+    pub(crate) fn count() -> usize {
+        DURABLE_SYNCS.with(Cell::get)
+    }
+    pub(crate) fn record() {
+        DURABLE_SYNCS.with(|count| count.set(count.get() + 1));
+    }
+}
 pub(crate) fn read_sealed(dir: &Directory, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
     read_sealed_observing(dir, name, limit, || {})
+}
+/// A read-only observation of a sealed name. It skips the two syncs that make
+/// [`read_sealed`] durable, so callers report what is published without paying
+/// an `F_FULLFSYNC` per read. Never use the bytes to decide a write.
+pub(crate) fn read_sealed_observed(
+    dir: &Directory,
+    name: &str,
+    limit: u64,
+) -> Result<Option<Vec<u8>>> {
+    read_sealed_with(dir, name, limit, false, || {})
 }
 /// A checkpoint such as process.json is replaced by rename while readers poll it.
 /// A handle opened just before the rename then reports no links. That is a
@@ -273,6 +316,15 @@ pub(crate) fn read_sealed_observing(
     dir: &Directory,
     name: &str,
     limit: u64,
+    opened: impl FnMut(),
+) -> Result<Option<Vec<u8>>> {
+    read_sealed_with(dir, name, limit, true, opened)
+}
+fn read_sealed_with(
+    dir: &Directory,
+    name: &str,
+    limit: u64,
+    durable: bool,
     mut opened: impl FnMut(),
 ) -> Result<Option<Vec<u8>>> {
     let mut retired = 0;
@@ -304,8 +356,12 @@ pub(crate) fn read_sealed_observing(
             continue;
         }
         let bytes = file.read_bounded(limit)?;
-        file.sync()?;
-        dir.sync()?;
+        if durable {
+            file.sync()?;
+            dir.sync()?;
+            #[cfg(test)]
+            sync_probe::record();
+        }
         return Ok(Some(bytes));
     }
 }
@@ -365,6 +421,24 @@ mod tests {
         })?;
         assert_eq!(read.as_deref(), Some(&b"new"[..]));
         assert_eq!(opens, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn observed_read_follows_a_checkpoint_replaced_after_open() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let dir = Directory::open_anchor(temp.path())?;
+        checkpoint(&dir, b"old")?;
+        let mut opens = 0;
+        let read = read_sealed_with(&dir, "process.json", 1024, false, || {
+            opens += 1;
+            if opens == 1 {
+                checkpoint(&dir, b"new").expect("replace checkpoint");
+            }
+        })?;
+        assert_eq!(read.as_deref(), Some(&b"new"[..]));
+        assert_eq!(opens, 2);
+        assert_eq!(read, read_sealed(&dir, "process.json", 1024)?);
         Ok(())
     }
 
