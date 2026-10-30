@@ -691,10 +691,24 @@ a bounded stderr cause on refusal.
 `check` exits 1 on findings, 2 on malformed input and 3 on unreadable
 evidence. `check release` reads Git with redirects, replacements,
 fsmonitor, textconv and lazy fetch off, and a missing object never yields a
-clean result. No check fetches or rewrites.
+clean result. No check fetches or rewrites. Each line in
+`crates/cli/src/check/release-fixtures.txt` has the form
+`<path> <rule> <digest>`, where `digest` is the first 16 lowercase hex characters of
+SHA-256 over the exact matched line bytes, excluding its newline. A finding
+is suppressed only when all three fields match, in both the working tree and
+history blobs. Every suppression is counted in scan evidence. An entry whose
+path is tracked but matches no finding in the current tree is reported as a
+stale fixture finding and must be removed or updated. After reviewing such a change, list any new
+path and rerun the fixture unit test with `PROVENANT_BLESS_RELEASE_FIXTURES=1`; it rewrites
+the digests for listed paths. Path and symlink checks remain active for
+listed paths, and commit metadata checks are unaffected. Changes to this
+allowlist require review.
 - Why: a release scan that passes on missing evidence would publish secrets.
 - Test: `tests/checks.rs::release_ignores_grafts_and_rejects_missing_ancestry_evidence`;
-  `::release_scans_added_then_deleted_blobs_and_commit_identity_bytes`
+  `::release_scans_added_then_deleted_blobs_and_commit_identity_bytes`;
+  `crates/cli/src/check/release.rs::tests::reviewed_literal_is_suppressed_but_other_line_at_same_path_is_reported`;
+  `::different_history_token_at_a_listed_path_is_reported`;
+  `::stale_fixture_entry_is_reported_and_suppression_count_is_noted`
 - Owner: `crates/cli/src/check/`, `src/checks.rs`
 
 ## Not provided
