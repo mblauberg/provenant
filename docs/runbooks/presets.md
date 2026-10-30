@@ -307,7 +307,7 @@ is a routing property for now, shown by `explain` as `cross_preferred`.
 against the spec, design fit and reuse, simplicity, conventions and
 readability, and tests. `security-privacy` and `concurrency-data-errors` join
 when `risk_tags` names `security` or `concurrency`, and `adversarial` joins
-when it names `terminal`. `generator-evaluator` takes the same list, with
+when it names `terminal`; `risk_tier = "terminal"` counts as that tag. `generator-evaluator` takes the same list, with
 correctness against the spec and simplicity by default. Every lens prompt
 carries the same context. The reviewer has read access to the whole
 repository, treats the diff stat and slices as navigation aids rather than the
@@ -321,7 +321,7 @@ finding one disposition: accepted, rejected or deferred, with a reason. The
 
 The routing review shapes are canonical for who reviews. A lens whose `tier`
 is empty takes its pool from the shape that `routing.review.select_shape`
-picks for `risk_tier` (or the `review_shape` override): `quick` runs one junior
+picks for `risk_tier` (`routine` is `quick`, `substantial` `standard`, `crucial` and `terminal` `deep`; or the `review_shape` override): `quick` runs one junior
 reviewer, `standard` two, and `deep` up to six with its named lenses. Conditional
 lenses add to that count. Set a lens `tier` to override the shape for that lens.
 `--explain` prints the selected shape. Synthesis reconciles the evidence and

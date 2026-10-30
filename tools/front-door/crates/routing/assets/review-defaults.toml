@@ -23,7 +23,9 @@ reviewers = [
 [review.select]
 default = "standard"
 [review.select.by_risk]
-low = "quick"
-high = "deep"
+routine = "quick"
+substantial = "standard"
+crucial = "deep"
+terminal = "deep"
 [review.select.by_kind]
 [review.select.by_paths]

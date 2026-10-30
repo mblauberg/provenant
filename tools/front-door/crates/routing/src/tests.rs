@@ -1697,7 +1697,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
         2
     );
     assert_eq!(
-        layered.domains.routing.review.select.by_risk["low"],
+        layered.domains.routing.review.select.by_risk["routine"],
         "quick"
     );
     assert_eq!(
@@ -1712,7 +1712,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     assert!(layered.domains.routing.review.shapes.contains_key("custom"));
     assert!(layered.domains.routing.review.shapes.contains_key("quick"));
     assert_eq!(
-        layered.domains.routing.review.select.by_risk["low"],
+        layered.domains.routing.review.select.by_risk["routine"],
         "quick"
     );
     assert_eq!(
@@ -1749,7 +1749,10 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
             "{invalid}: {:?}",
             config.warnings
         );
-        assert_eq!(config.domains.routing.review.select.by_risk["low"], "quick");
+        assert_eq!(
+            config.domains.routing.review.select.by_risk["routine"],
+            "quick"
+        );
         assert_eq!(
             config.domains.routing.review.shapes["quick"].reviewers[0].pool,
             RoutingConfig::default().review.shapes["quick"].reviewers[0].pool

@@ -128,7 +128,7 @@ reviewers = [
 
 [domains.routing.review.select]
 default = "standard"
-by_risk = { low = "quick", high = "deep" }
+by_risk = { routine = "quick", substantial = "standard", crucial = "deep", terminal = "deep" }
 by_paths = { ".github/workflows/**" = "deep" }
 ```
 

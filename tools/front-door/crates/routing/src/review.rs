@@ -313,11 +313,14 @@ mod tests {
                 .source
         };
         assert_eq!(
-            select(Some("quick"), Some("low"), Some("docs"), &paths),
+            select(Some("quick"), Some("routine"), Some("docs"), &paths),
             "override"
         );
-        assert_eq!(select(None, Some("low"), Some("docs"), &paths), "by_paths");
-        assert_eq!(select(None, Some("low"), Some("docs"), &[]), "by_risk");
+        assert_eq!(
+            select(None, Some("routine"), Some("docs"), &paths),
+            "by_paths"
+        );
+        assert_eq!(select(None, Some("routine"), Some("docs"), &[]), "by_risk");
         assert_eq!(select(None, None, Some("docs"), &[]), "by_kind");
         assert_eq!(select(None, None, None, &[]), "default");
         assert!(

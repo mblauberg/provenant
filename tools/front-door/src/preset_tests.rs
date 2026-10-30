@@ -946,8 +946,8 @@ fn shapes() -> super::preset::ShapeSelector {
     Box::new(|named, risk| {
         let (name, source, count) = match (named, risk) {
             (Some("standard"), _) => ("standard", "override", 2),
-            (_, Some("high")) => ("deep", "by_risk", 6),
-            (_, Some("low")) => ("quick", "by_risk", 1),
+            (_, Some("crucial")) => ("deep", "by_risk", 6),
+            (_, Some("routine")) => ("quick", "by_risk", 1),
             _ => ("standard", "default", 2),
         };
         Ok(super::preset::ShapeHint {
@@ -1017,6 +1017,30 @@ fn triggered_lenses_follow_the_risk_tags() {
 }
 
 #[test]
+fn terminal_risk_tier_carries_the_terminal_tag() {
+    let document = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.risk_tier='terminal'",
+        ],
+        false,
+    )
+    .unwrap();
+    let ids = lens_ids(&document);
+    assert!(ids.contains(&"lens-adversarial".to_owned()));
+    assert!(!ids.contains(&"lens-security-privacy".to_owned()));
+    let document = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.risk_tier='crucial'",
+        ],
+        false,
+    )
+    .unwrap();
+    assert!(!lens_ids(&document).contains(&"lens-adversarial".to_owned()));
+}
+
+#[test]
 fn lens_tiers_come_from_the_review_shape_unless_overridden() {
     let document = council(
         &[
@@ -1071,7 +1095,7 @@ fn each_review_stage_selects_its_shape_from_its_own_parameters() {
     let standard = lens_count(&plain.document, "council");
     // A stage-level risk tier reaches that stage's shape selection.
     let mut high = batch.to_vec();
-    high.push("council.risk_tier='high'".into());
+    high.push("council.risk_tier='crucial'".into());
     let high = expand(&layers, "big-batch", "brief", &high).unwrap();
     assert_ne!(lens_count(&high.document, "council"), standard);
     assert!(high.review_shape.unwrap().contains("deep (by_risk)"));
@@ -1082,7 +1106,7 @@ fn each_review_stage_selects_its_shape_from_its_own_parameters() {
         .insert(
             "repo",
             "wrap",
-            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nrisk_tier = 'low'\n",
+            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nrisk_tier = 'routine'\n",
         )
         .unwrap();
     let low = expand(&layers, "wrap", "brief", &[]).unwrap();
@@ -1655,7 +1679,7 @@ fn ambient_subject_and_risk_tier_flow_to_children_that_declare_them() {
         .insert(
             "repo",
             "wrap",
-            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nsubject = { type = 'integration' }\nrisk_tier = 'high'\n",
+            "stages = [{ id = 'council', preset = 'review-council', parameters = { worktree = '/repo/lane' } }]\n[parameters]\nsubject = { type = 'integration' }\nrisk_tier = 'crucial'\n",
         )
         .unwrap();
     let result = expand(&layers, "wrap", "brief", &[]).unwrap();
