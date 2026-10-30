@@ -223,6 +223,16 @@ const REPLACED_OPENS: usize = 4;
 pub(crate) fn read_sealed(dir: &Directory, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
     read_sealed_observing(dir, name, limit, || {})
 }
+/// A read-only observation of a sealed name. It skips the two syncs that make
+/// [`read_sealed`] durable, so callers report what is published without paying
+/// an `F_FULLFSYNC` per read. Never use the bytes to decide a write.
+pub(crate) fn read_sealed_observed(
+    dir: &Directory,
+    name: &str,
+    limit: u64,
+) -> Result<Option<Vec<u8>>> {
+    read_sealed_with(dir, name, limit, false, || {})
+}
 /// A checkpoint such as process.json is replaced by rename while readers poll it.
 /// A handle opened just before the rename then reports no links. That is a
 /// lifecycle transition, not a hard-link attack: discard the handle unread and
@@ -232,6 +242,15 @@ pub(crate) fn read_sealed_observing(
     dir: &Directory,
     name: &str,
     limit: u64,
+    opened: impl FnMut(),
+) -> Result<Option<Vec<u8>>> {
+    read_sealed_with(dir, name, limit, true, opened)
+}
+fn read_sealed_with(
+    dir: &Directory,
+    name: &str,
+    limit: u64,
+    durable: bool,
     mut opened: impl FnMut(),
 ) -> Result<Option<Vec<u8>>> {
     let mut retired = 0;
@@ -263,8 +282,10 @@ pub(crate) fn read_sealed_observing(
             continue;
         }
         let bytes = file.read_bounded(limit)?;
-        file.sync()?;
-        dir.sync()?;
+        if durable {
+            file.sync()?;
+            dir.sync()?;
+        }
         return Ok(Some(bytes));
     }
 }
@@ -318,6 +339,24 @@ mod tests {
         })?;
         assert_eq!(read.as_deref(), Some(&b"new"[..]));
         assert_eq!(opens, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn observed_read_follows_a_checkpoint_replaced_after_open() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let dir = Directory::open_anchor(temp.path())?;
+        checkpoint(&dir, b"old")?;
+        let mut opens = 0;
+        let read = read_sealed_with(&dir, "process.json", 1024, false, || {
+            opens += 1;
+            if opens == 1 {
+                checkpoint(&dir, b"new").expect("replace checkpoint");
+            }
+        })?;
+        assert_eq!(read.as_deref(), Some(&b"new"[..]));
+        assert_eq!(opens, 2);
+        assert_eq!(read, read_sealed(&dir, "process.json", 1024)?);
         Ok(())
     }
 

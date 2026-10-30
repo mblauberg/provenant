@@ -500,7 +500,7 @@ impl RunStore {
         }
         validate_attempt(&record)?;
         let checkpoint = match self.attempt_dir(record.run_id, id, false) {
-            Ok(directory) => crate::artifacts::read_sealed(
+            Ok(directory) => crate::artifacts::read_sealed_observed(
                 &directory,
                 AttemptFile::Process.name(),
                 RECORD_LIMIT,
@@ -565,15 +565,19 @@ impl RunStore {
         let (bytes, complete, digest) = match part {
             ArtifactPart::Stderr => {
                 let dir = self.attempt_dir(record.run_id, id, false)?;
-                let (bytes, complete) = match crate::artifacts::read_sealed(
+                let (bytes, complete) = match crate::artifacts::read_sealed_observed(
                     &dir,
                     AttemptFile::Stderr.name(),
                     CAPTURE_LIMIT,
                 )? {
                     Some(bytes) => (bytes, true),
                     None => (
-                        crate::artifacts::read_sealed(&dir, "stderr.log.tail", CAPTURE_LIMIT)?
-                            .ok_or(missing_output)?,
+                        crate::artifacts::read_sealed_observed(
+                            &dir,
+                            "stderr.log.tail",
+                            CAPTURE_LIMIT,
+                        )?
+                        .ok_or(missing_output)?,
                         false,
                     ),
                 };
