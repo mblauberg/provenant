@@ -888,8 +888,9 @@ fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
         .join(format!("runs/{}/request.json", input.run_id));
     let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
     value["concurrency"] = 99.into();
-    let recomputed = serde_json::from_value::<CanonicalRequest>(value.clone())?.digest()?;
-    std::fs::write(&path, serde_json::to_vec(&value)?)?;
+    let raw = crate::db::bytes(&value)?;
+    let recomputed = CanonicalV1::record_digest("run-request", 1, &value)?;
+    std::fs::write(&path, raw)?;
     assert_eq!(
         artifact_provenance(store.request(input.run_id, &call)),
         ArtifactProvenance {
@@ -898,6 +899,50 @@ fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
             expected: Some(digest_prefix(stored)),
             actual: Some(digest_prefix(recomputed)),
         }
+    );
+    Ok(())
+}
+
+#[test]
+fn older_request_bytes_are_verified_before_decoding() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+
+    let mut value = serde_json::to_value(&input.request)?;
+    let task = value["tasks"][0].as_object_mut().unwrap();
+    task.insert(
+        "profile".into(),
+        serde_json::to_value(&input.request.tasks[0].profile)?,
+    );
+    assert_eq!(task.len(), 9);
+    let mut raw = crate::db::bytes(&value)?;
+    let digest = CanonicalV1::record_digest("run-request", 1, &value)?;
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/request.json", input.run_id));
+    std::fs::write(&path, &raw)?;
+    let mut record = store.run(input.run_id, &call)?;
+    record.request_digest = digest;
+    store.db.execute(
+        "UPDATE runs SET record=?1 WHERE id=?2",
+        rusqlite::params![crate::db::bytes(&record)?, input.run_id.to_string()],
+    )?;
+    let decoded = store.request(input.run_id, &call)?;
+    assert_eq!(decoded.tasks[0].profile, input.request.tasks[0].profile);
+    assert_ne!(decoded.digest()?, digest);
+
+    raw[0] ^= 1;
+    std::fs::write(&path, raw)?;
+    assert_eq!(
+        artifact_provenance(store.request(input.run_id, &call)).check,
+        ArtifactCheck::RequestDigest
     );
     Ok(())
 }

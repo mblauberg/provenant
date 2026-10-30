@@ -872,8 +872,13 @@ impl RunStore {
     pub fn request(&self, run: RunId, call: &Request<'_>) -> Result<CanonicalRequest> {
         let raw = read_sealed(&self.run_dir(run, false)?, "request.json", RECORD_LIMIT)?
             .ok_or(RunError::NotFound)?;
-        let request: CanonicalRequest = decode(&raw)?;
-        let digest = request.digest()?;
+        // The writer hashes these canonical bytes with the record domain. Do
+        // not reserialize a decoded request: its schema may have evolved.
+        use sha2::{Digest as _, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"provenant-record\0run-request\x001\0");
+        hash.update(&raw);
+        let digest = provenant_core::Digest::from_bytes(hash.finalize().into());
         let stored = self.run(run, call)?.request_digest;
         if digest != stored {
             return Err(RunError::artifact_mismatch(
@@ -883,7 +888,7 @@ impl RunStore {
                 Some(ArtifactValue::digest(digest)),
             ));
         }
-        Ok(request)
+        decode(&raw)
     }
     /// Hand each queued attempt of `run` to its own guardian, which admits it
     /// and later commits its terminal record. `context` builds the opaque
