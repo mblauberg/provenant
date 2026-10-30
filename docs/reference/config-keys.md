@@ -121,7 +121,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
   },
   "update": {
     "default": true,
-    "effect": "Run the detected native updater in a detached one-shot worker scheduled by quota events. Provider preparation briefly shares the update lock; running lanes do not hold it. If all candidates are updating, dispatch waits at most --wait (capped at 30 seconds), then uses the installed version. false opts out; {command: [program, argument, ...]} overrides the updater directly without a shell.",
+    "effect": "Run the detected native updater between lanes in a detached one-shot worker scheduled by quota events. false opts out; {command: [program, argument, ...]} overrides the updater directly without a shell.",
     "type": "bool_or_command_argv"
   },
   "update_interval_seconds": {
