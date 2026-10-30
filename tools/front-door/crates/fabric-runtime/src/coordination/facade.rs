@@ -187,8 +187,17 @@ pub enum FacadeError {
     HomeUnavailable,
     #[error("peer protocol version is incompatible")]
     PeerVersion,
-    #[error("peer {peer} speaks protocol {remote}, this host speaks {protocol}; upgrade both", protocol = crate::hosts::PROTOCOL)]
-    PeerProtocolMismatch { peer: String, remote: u64 },
+    #[error(
+        "peer {peer} speaks protocol {remote}, this host expects protocol {expected}; upgrade both"
+    )]
+    PeerProtocolMismatch {
+        peer: String,
+        remote: u64,
+        /// The requested protocol level; frames written by older releases
+        /// omit it, and those requests sat at the base fence.
+        #[serde(default = "crate::hosts::recorded_expected_protocol")]
+        expected: u64,
+    },
     #[error("run launch outcome is unknown for operation {operation_id}")]
     LaunchUnknown { operation_id: OperationId },
     #[error("run continuation is unsupported")]
@@ -325,9 +334,14 @@ impl From<&crate::hosts::PeerError> for FacadeError {
         use crate::hosts::PeerError;
         match error {
             PeerError::Version => Self::PeerVersion,
-            PeerError::ProtocolMismatch { peer, remote } => Self::PeerProtocolMismatch {
+            PeerError::ProtocolMismatch {
+                peer,
+                remote,
+                expected,
+            } => Self::PeerProtocolMismatch {
                 peer: peer.clone(),
                 remote: *remote,
+                expected: *expected,
             },
             PeerError::Project | PeerError::SourceHost | PeerError::RequestTooLarge => {
                 Self::InvalidInput

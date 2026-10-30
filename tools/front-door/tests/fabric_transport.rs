@@ -1,6 +1,6 @@
 //! The real Rust command edge runs without Python, Node or ambient state.
 mod support;
-use provenant_fabric_runtime::hosts::{DOCTOR_PROTOCOL, PROTOCOL};
+use provenant_fabric_runtime::hosts::{CONSOLE_DETAIL_PROTOCOL, DOCTOR_PROTOCOL, PROTOCOL};
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -169,6 +169,9 @@ fn hosts_probe_only_the_requested_page() -> Result {
     assert_eq!(hosts[0]["host"], first.to_string());
     assert_eq!(hosts[0]["available"], true, "{hosts}");
     assert_eq!(hosts[0]["protocol"], PROTOCOL);
+    // The base fence reports beside the newest negotiated feature level, so
+    // the base level cannot read as stale.
+    assert_eq!(hosts[0]["features"], CONSOLE_DETAIL_PROTOCOL, "{hosts}");
     assert!(hosts[0].get("reason").is_none());
     assert_eq!(
         replies
@@ -201,7 +204,8 @@ fn hosts_probe_only_the_requested_page() -> Result {
     assert_eq!(hosts[1]["host"], second.to_string());
     assert_eq!(hosts[1]["available"], false);
     assert!(hosts[1].get("protocol").is_none());
-    // An unreachable peer also has no observed protocol.
+    assert!(hosts[1].get("features").is_none());
+    // An unreachable peer also has no observed protocol or feature ceiling.
     std::fs::write(&ssh, "#!/bin/sh\ncat >/dev/null\nexit 255\n")?;
     let (status, output) = json_command(&rig, &["hosts", "--json"])?;
     assert_eq!(status, 0, "{output}");
@@ -209,6 +213,7 @@ fn hosts_probe_only_the_requested_page() -> Result {
         if host["host"] != local.to_string() {
             assert_eq!(host["available"], false);
             assert!(host.get("protocol").is_none());
+            assert!(host.get("features").is_none());
         }
     }
     rig.assert_legacy_unchanged()
@@ -3293,8 +3298,9 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         }))?,
     )?;
     std::fs::write(&calls, "")?;
-    let expected =
-        format!("peer workshop speaks protocol 1, this host speaks {PROTOCOL}; upgrade both");
+    let expected = format!(
+        "peer workshop speaks protocol 1, this host expects protocol {PROTOCOL}; upgrade both"
+    );
     let (status, output) = json_command(&rig, &["lanes", "--host", "workshop", "--json"])?;
     assert_eq!(status, 1, "{output}");
     assert_eq!(output["error"]["code"], "PEER_VERSION", "{output}");
@@ -3334,12 +3340,14 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
     assert_eq!(remote["available"], false);
     assert_eq!(remote["protocol"], 1);
     assert_eq!(remote["reason"], "peer_version");
+    assert!(remote.get("features").is_none());
     let local_health = hosts
         .iter()
         .find(|entry| entry["host"] == local.to_string())
         .ok_or("local")?;
     assert_eq!(local_health["available"], true);
     assert_eq!(local_health["protocol"], PROTOCOL);
+    assert_eq!(local_health["features"], CONSOLE_DETAIL_PROTOCOL);
     let calls = std::fs::read_to_string(calls)?;
     assert_eq!(calls.lines().count(), 3);
     let actions = calls
@@ -3365,6 +3373,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
     assert_eq!(remote["available"], false);
     assert_eq!(remote["protocol"], 1);
     assert_eq!(remote["reason"], "peer_version");
+    assert!(remote.get("features").is_none());
     rig.assert_legacy_unchanged()
 }
 

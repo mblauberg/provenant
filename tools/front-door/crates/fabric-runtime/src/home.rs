@@ -745,6 +745,7 @@ mod tests {
                 Err(PeerError::ProtocolMismatch {
                     peer: peer.destination.clone(),
                     remote: 1,
+                    expected: crate::hosts::PROTOCOL,
                 })
             }
         }
@@ -778,7 +779,9 @@ mod tests {
             assert_eq!(error.code(), "peer_version");
             assert_eq!(
                 error.to_string(),
-                format!("peer worker speaks protocol 1, this host speaks {PROTOCOL}; upgrade both")
+                format!(
+                    "peer worker speaks protocol 1, this host expects protocol {PROTOCOL}; upgrade both"
+                )
             );
             let operation = remote
                 .journal

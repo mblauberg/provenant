@@ -681,6 +681,7 @@ impl F3Facade for BoundFacade<'_> {
             let Some(peer) = peer else {
                 page.push(HostHealth {
                     protocol: Some(PROTOCOL),
+                    features: Some(newest_feature_protocol()),
                     reason: None,
                     host,
                     available: true,
@@ -699,6 +700,7 @@ impl F3Facade for BoundFacade<'_> {
             };
             let mut health = HostHealth {
                 protocol: None,
+                features: None,
                 reason: None,
                 host,
                 available: false,
@@ -741,6 +743,10 @@ impl F3Facade for BoundFacade<'_> {
                         ..
                     }) => {
                         health.protocol = Some(PROTOCOL);
+                        // The peer matched the base fence; feature calls still
+                        // agree per action, so report the ceiling beside it
+                        // and the base level cannot read as stale.
+                        health.features = Some(newest_feature_protocol());
                         health.reason = None;
                         health.host = value.host;
                         health.available = value.available;
