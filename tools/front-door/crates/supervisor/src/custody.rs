@@ -407,12 +407,13 @@ pub(crate) fn acquire_writer_with_observer(
             other => other.into(),
         })?;
     let lock_directory = directory;
-    // Old guardians kept their evidence in the slot itself. Do not admit a
-    // successor over that fence before recovery has retained its writer head.
-    match lock_directory.metadata_at(OsStr::new("reservation.json"), false) {
-        Ok(_) => return Err(CustodyError::Fenced),
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error.into()),
+    // Old guardians kept their evidence in the slot itself. Another attempt's
+    // legacy record does not block a successor: the slot writer lock above
+    // already excludes a concurrent writer, and the successor's own evidence
+    // is inspected below. Its own legacy record, or one that cannot be trusted,
+    // still fences it before recovery has retained its writer head.
+    if legacy_record_fences(&lock_directory, scope)? {
+        return Err(CustodyError::Fenced);
     }
     let directory = create_attempt_evidence(&lock_directory, scope)?;
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
@@ -514,22 +515,41 @@ pub fn attempt_evidence(
 ) -> provenant_os::fs::Result<Directory> {
     directory.open_verified_directory(OsStr::new(&scope.attempt.to_string()))
 }
+/// Whether the legacy slot-root record fences this attempt.
+///
+/// A record that cannot be read, decoded or validated fences every attempt:
+/// its scope cannot be trusted, so it fails safe. A valid record fences only
+/// the attempt it names. Another attempt's record does not fence through the
+/// legacy record; that attempt's own evidence decides.
+fn legacy_record_fences(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<bool> {
+    match directory.metadata_at(OsStr::new("reservation.json"), false) {
+        Ok(_) => {}
+        Err(error) if error.is_not_found() => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let fenced = match read_record::<Reservation>(directory, "reservation.json", RECORD_LIMIT) {
+        Ok(record) => {
+            // Validation plus the slot anchor check used by recovery: a record
+            // whose anchor differs cannot be recovered and is not trusted to
+            // name a scope.
+            let anchored = directory.metadata().is_ok_and(|metadata| {
+                record.reservation_device == metadata.device
+                    && record.reservation_inode == metadata.inode
+            });
+            !anchored || record.validate().is_err() || record.scope.attempt == scope.attempt
+        }
+        Err(_) => true,
+    };
+    Ok(fenced)
+}
 /// Test for this attempt's retained reservation without interpreting shared-slot records.
 pub fn reservation_present(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<bool> {
-    match directory.metadata_at(OsStr::new("reservation.json"), false) {
-        // Legacy writers kept one reservation at the slot root; it fences only
-        // the attempt it names. An unreadable or undecodable record fails
-        // safe as retained. Another attempt's record leaves this attempt's
-        // own evidence to decide.
-        Ok(_) => {
-            let legacy: Result<Reservation> =
-                read_record(directory, "reservation.json", RECORD_LIMIT);
-            if legacy.map_or(true, |record| record.scope.attempt == scope.attempt) {
-                return Ok(true);
-            }
-        }
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error),
+    // Legacy writers kept one reservation at the slot root; it fences only
+    // the attempt it names. An unreadable, undecodable or invalid record fails
+    // safe as retained. Another attempt's record leaves this attempt's own
+    // evidence to decide.
+    if legacy_record_fences(directory, scope)? {
+        return Ok(true);
     }
     let evidence = match attempt_evidence(directory, scope) {
         Ok(directory) => directory,
@@ -545,17 +565,16 @@ pub fn reservation_present(directory: &Directory, scope: Scope) -> provenant_os:
 /// Legacy evidence stays in place so its recorded slot inode remains valid.
 /// Callers must hold the slot's writer lock and validate the returned record.
 fn recovery_evidence(directory: &Directory, scope: Scope) -> provenant_os::fs::Result<Directory> {
-    match attempt_evidence(directory, scope) {
-        Ok(child) => match child.metadata_at(OsStr::new("reservation.json"), false) {
-            Ok(_) => return Ok(child),
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error),
-        },
-        Err(error) if error.is_not_found() => {}
-        Err(error) => return Err(error),
+    // Only this attempt's legacy record, or one that cannot be trusted, keeps
+    // the shared slot as its evidence. Another attempt's record is that
+    // attempt's to recover, so this attempt's own evidence decides instead.
+    if legacy_record_fences(directory, scope)? {
+        directory.metadata_at(OsStr::new("reservation.json"), false)?;
+        return directory.try_clone();
     }
-    directory.metadata_at(OsStr::new("reservation.json"), false)?;
-    directory.try_clone()
+    let child = attempt_evidence(directory, scope)?;
+    child.metadata_at(OsStr::new("reservation.json"), false)?;
+    Ok(child)
 }
 fn create_attempt_evidence(directory: &Directory, scope: Scope) -> Result<Directory> {
     let name = scope.attempt.to_string();
@@ -1432,6 +1451,8 @@ pub fn acquire_recovery(
         clock,
     )?;
     let lock_directory = directory;
+    // recovery_evidence applies legacy_record_fences, so another attempt's
+    // legacy slot-root record is never read as this attempt's reservation.
     let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     validate_anchor(&directory, &reservation)?;
