@@ -423,7 +423,7 @@ where
     Ok(Option::<std::path::PathBuf>::deserialize(deserializer)?
         .filter(|path| !path.as_os_str().is_empty()))
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     pub body_bytes: u64,
@@ -447,46 +447,6 @@ fn default_graph_timeout_seconds() -> u64 {
 }
 fn default_store_busy_timeout_ms() -> u64 {
     30_000
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LimitsConfig {
-    body_bytes: u64,
-    input_frame_bytes: u64,
-    json_depth: u64,
-    page_rows: u64,
-    output_lines: u64,
-    output_bytes: u64,
-    result_bytes: u64,
-    lease_seconds: u64,
-    peer_seconds: u64,
-    #[serde(default = "default_graph_timeout_seconds")]
-    graph_timeout_seconds: u64,
-    #[serde(default = "default_store_busy_timeout_ms")]
-    store_busy_timeout_ms: u64,
-}
-
-impl<'de> Deserialize<'de> for Limits {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let limits = LimitsConfig::deserialize(deserializer)?;
-        Ok(Self {
-            body_bytes: limits.body_bytes,
-            input_frame_bytes: limits.input_frame_bytes,
-            json_depth: limits.json_depth,
-            page_rows: limits.page_rows,
-            output_lines: limits.output_lines,
-            output_bytes: limits.output_bytes,
-            result_bytes: limits.result_bytes,
-            lease_seconds: limits.lease_seconds,
-            peer_seconds: limits.peer_seconds,
-            graph_timeout_seconds: limits.graph_timeout_seconds,
-            store_busy_timeout_ms: limits.store_busy_timeout_ms,
-        })
-    }
 }
 
 impl DomainConfig for FabricConfig {
@@ -699,11 +659,15 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("commands.{name}.argv", "array"),
     FieldMetadata::new("home_hosts.{host}", "string"),
 ];
+fn boundary(error: &SectionError) -> bool {
+    error.code == "retired.bundle_bytes" || boundary_existing(error)
+}
+
 pub const SECTION: DomainSection = DomainSection::new::<FabricConfig>("fabric", defaults)
     .with_boundary_check(boundary)
     .with_fields(FIELD_METADATA);
 
-fn boundary(error: &SectionError) -> bool {
+fn boundary_existing(error: &SectionError) -> bool {
     let field = error.field.as_str();
     let under = |path: &str| {
         field == path

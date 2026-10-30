@@ -243,11 +243,15 @@ pub const CONFIG_SCHEMA_VERSION: u64 = 1;
 
 pub use managed::HookRegistration;
 
-/// The repair a retired timing key calls for, appended to the refusal.
+/// The repair a retired key calls for, appended to the refusal.
 fn retired_repair(source: &SectionError) -> &'static str {
-    if source.code.starts_with("moved_to_schedule.") {
+    if is_retired_key_code(source.code) {
         "; repair: run `provenant config migrate`"
     } else {
         ""
     }
+}
+
+pub(crate) fn is_retired_key_code(code: &str) -> bool {
+    code.starts_with("moved_to_schedule.") || code.starts_with("retired.")
 }

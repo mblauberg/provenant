@@ -159,11 +159,26 @@ pub(crate) fn validate_edit<T: DeserializeOwned + Serialize>(
         let mut table = parse((entry.defaults)(profile), &origin, "")?;
         normalise_tables(&mut table);
         merge_table(&mut table, user);
-        if let Some(error) = (entry.validate)(&table).into_iter().next() {
+        if let Some(error) = validate_entry(entry, &table).into_iter().next() {
             return Err(domain_issue(entry.name, error, &table, &sites, &origin).error());
         }
     }
     Ok(())
+}
+
+fn validate_entry(entry: &crate::DomainSection, table: &Table) -> Vec<SectionError> {
+    if entry.name == "fabric"
+        && table
+            .get("limits")
+            .and_then(Item::as_table_like)
+            .is_some_and(|limits| limits.contains_key("bundle_bytes"))
+    {
+        return vec![SectionError {
+            field: "limits.bundle_bytes".into(),
+            code: "retired.bundle_bytes",
+        }];
+    }
+    (entry.validate)(table)
 }
 
 fn merge_table(target: &mut dyn toml_edit::TableLike, source: &dyn toml_edit::TableLike) {
@@ -441,7 +456,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         normalise_tables(&mut table);
         // A bad compiled asset is a build defect, not a finding in the user's
         // file. Validate it before any user override can mask the defect.
-        if let Some(error) = (entry.validate)(&table).into_iter().next() {
+        if let Some(error) = validate_entry(entry, &table).into_iter().next() {
             return Err(
                 domain_issue(entry.name, error, &table, &compiled_sites, &compiled).error(),
             );
@@ -556,7 +571,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             .get_mut(entry.name)
             .and_then(Item::as_table_mut)
         {
-            let errors = (entry.validate)(table);
+            let errors = validate_entry(entry, table);
             if let Some(error) = errors.iter().find(|error| (entry.boundary)(error))
                 && boundary_error.is_none()
             {
@@ -605,7 +620,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
                     let mut candidate = Item::Table(table.clone());
                     if remove_item_path(&mut candidate, &path)
                         && candidate.as_table().is_some_and(|table| {
-                            !(entry.validate)(table)
+                            !validate_entry(entry, table)
                                 .iter()
                                 .any(|error| error.code == "schema")
                         })
@@ -628,7 +643,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
             for path in repairs {
                 repair_semantic(table, baseline, &path, &prefix, &mut origins, &compiled);
             }
-            if !(entry.validate)(table).is_empty() {
+            if !validate_entry(entry, table).is_empty() {
                 *table = defaults["domains"][entry.name]
                     .as_table()
                     .cloned()
@@ -1180,7 +1195,18 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
                     source.code
                 )
             }
-            Some(source) if source.code.starts_with("moved_to_schedule.") => {
+            Some(source) if crate::is_retired_key_code(source.code) => {
+                if source.code.starts_with("retired.") {
+                    return Ok(Finding {
+                        rule: issue.rule.into(),
+                        path: user_path()?,
+                        line: issue.location.line,
+                        message: format!(
+                            "{key}: ignored invalid configuration ({}: {}); run `provenant config migrate`",
+                            issue.rule, source.code
+                        ),
+                    });
+                }
                 let replacement = source.code.trim_start_matches("moved_to_schedule.");
                 format!(
                     "{key}: ignored invalid configuration ({}: {}); replace the retired key with schedule.{replacement}; run `provenant config migrate`",

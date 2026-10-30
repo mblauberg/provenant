@@ -499,8 +499,8 @@ pub enum Config {
         #[arg(long, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=500))]
         limit: u64,
     },
-    /// Rewrite retired routing timing keys to `schedule` in place after a
-    /// timestamped backup, dropping expired pacing overrides.
+    /// Rewrite retired routing timing keys to `schedule` and remove retired
+    /// fabric limits in place after a timestamped backup.
     Migrate {
         /// Report what would change without writing
         #[arg(long)]

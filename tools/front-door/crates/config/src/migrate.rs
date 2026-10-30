@@ -320,6 +320,43 @@ fn migrate_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DomainConfig, DomainSection, DomainSections, SectionError};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct FabricFixture {
+        limits: LimitsFixture,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct LimitsFixture {
+        body_bytes: u64,
+    }
+
+    impl DomainConfig for FabricFixture {}
+
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct FixtureDomains {
+        fabric: FabricFixture,
+    }
+
+    fn fixture_defaults(_: crate::Profile) -> &'static str {
+        "[limits]\nbody_bytes = 1024\n"
+    }
+
+    fn fixture_boundary(error: &SectionError) -> bool {
+        error.code == "retired.bundle_bytes"
+    }
+
+    static FIXTURE_ENTRIES: [DomainSection; 1] =
+        [
+            DomainSection::new::<FabricFixture>("fabric", fixture_defaults)
+                .with_boundary_check(fixture_boundary),
+        ];
+    static FIXTURE_SECTIONS: DomainSections<FixtureDomains> = DomainSections::new(&FIXTURE_ENTRIES);
 
     #[test]
     fn drops_retired_fabric_bundle_limit_without_routing() {
@@ -335,6 +372,51 @@ mod tests {
         assert!(!document.to_string().contains("bundle_bytes"));
         assert!(document.to_string().contains("body_bytes = 12"));
         assert!(rewrite(&mut document, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn retired_fabric_bundle_limit_blocks_writes_until_migrated() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let roots = crate::tests::state_roots(&state);
+        std::fs::create_dir(&state).unwrap();
+        let path = state.join("config.toml");
+        let original =
+            "schema_version = 1\n[domains.fabric.limits]\n# retained comment\nbundle_bytes = 42\n";
+        std::fs::write(&path, original).unwrap();
+        let edit = || {
+            crate::edit_config(
+                &roots,
+                &FIXTURE_SECTIONS,
+                &crate::EditOptions::new("test"),
+                |document, _| {
+                    document["domains"]["fabric"]["limits"]["body_bytes"] = 2048.into();
+                    Ok(())
+                },
+            )
+        };
+
+        let error = match edit() {
+            Ok(_) => panic!("retired key must block writes"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("retired.bundle_bytes"), "{error}");
+        assert!(error.contains("provenant config migrate"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        crate::migrate(&roots, &FIXTURE_SECTIONS, false).unwrap();
+        let migrated = std::fs::read_to_string(&path).unwrap();
+        assert!(!migrated.contains("bundle_bytes"), "{migrated}");
+        assert!(
+            crate::load_with_domains(
+                &roots,
+                Some(std::io::Cursor::new(migrated.as_bytes())),
+                &FIXTURE_SECTIONS
+            )
+            .is_ok()
+        );
+        let edited = edit().unwrap();
+        assert_eq!(edited.config.domains.fabric.limits.body_bytes, 2048);
     }
 
     #[test]
