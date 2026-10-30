@@ -138,6 +138,17 @@ An ordinary verdict gate can consume a successful task's result; the gate
 still has no attempt. A failed command fails its task. A missing executable
 settles as adapter unavailable through the existing launch failure path.
 
+## Provider credentials in lane shells
+
+On macOS a Seatbelt profile applies to the whole process tree, so a shell
+command a provider runs gets the same file grants as the provider itself.
+OpenCode and Codex lanes can therefore read their own provider's credential:
+OpenCode reads `~/.local/share/opencode/auth.json` for its sign-in and
+connected API keys, and Codex reads and rewrites `~/.codex/auth.json` when it
+refreshes tokens. This is an accepted limit. A lane is not granted other
+providers' credential stores, and GitHub CLI configuration stays denied
+([#2432](https://github.com/mblauberg/provenant/issues/2432)).
+
 ## Claude network access
 
 With open network (the default, or `--network on`), Claude enables `WebFetch`
