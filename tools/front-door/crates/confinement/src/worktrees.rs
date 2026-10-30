@@ -609,12 +609,12 @@ fn observe_worker_holders(
         }
         match observe_same_process(observer, cwd_observer, fact) {
             NativeCwd::Gone => {}
-            NativeCwd::Denied => {
+            NativeCwd::Denied(category) => {
                 record_denied_process(
                     &mut states,
                     &mut details,
                     cwd_observer.uid(fact.identity.pid),
-                    &format!("process {}: PermissionDenied", fact.identity.pid),
+                    &format!("process {}: {category}", fact.identity.pid),
                 );
             }
             NativeCwd::Unknown(category) => record_unknown_all(
@@ -677,7 +677,7 @@ enum NativeCwd {
     Path(PathBuf),
     Gone,
     /// Denial needs independent credentials and root permissions to exclude access.
-    Denied,
+    Denied(&'static str),
     Unknown(String),
 }
 
@@ -731,7 +731,7 @@ fn observe_same_process(
         ProcessObservation::Present(before) if before.identity == expected.identity => {}
         ProcessObservation::Absent => return NativeCwd::Gone,
         ProcessObservation::Unknown(ObservationIssue::PermissionDenied) => {
-            return NativeCwd::Denied;
+            return NativeCwd::Denied("PermissionDenied");
         }
         ProcessObservation::Present(_) => return NativeCwd::Unknown("identity race".into()),
         ProcessObservation::Unknown(issue) => return NativeCwd::Unknown(format!("{issue:?}")),
@@ -739,7 +739,7 @@ fn observe_same_process(
     let observed = match cwd_observer.cwd(expected.identity.pid) {
         Ok(CwdObservation::Path(path)) => NativeCwd::Path(path),
         Ok(CwdObservation::Gone) => return NativeCwd::Gone,
-        Ok(CwdObservation::PermissionDenied) => NativeCwd::Denied,
+        Ok(CwdObservation::PermissionDenied) => NativeCwd::Denied("cwd unreadable"),
         Ok(CwdObservation::Unsupported) => return NativeCwd::Unknown("cwd unsupported".into()),
         Err(_) => return NativeCwd::Unknown("cwd unreadable".into()),
     };
@@ -4610,6 +4610,72 @@ mod lifecycle_tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_occupant_cwd_keeps_the_tree_for_removal() -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, ProcessIdentity};
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-M", "main"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let cancellation = cancel();
+        let fact = |pid: i64| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let current = fact(100);
+        let occupant = fact(200);
+        let observer = InjectedCensus {
+            census: Census::from_observations(
+                [current.clone(), occupant],
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?,
+            cwds: BTreeMap::from([(200, CwdObservation::PermissionDenied)]),
+            current,
+            uids: BTreeMap::from([(200, provenant_os::fs::effective_uid())]),
+        };
+        let created = create(
+            &test_context.context(),
+            WorktreeCreate {
+                branch: "landed".to_owned(),
+                base: None,
+            },
+            &cancellation,
+        )?;
+        // The occupant is same-uid, so its unreadable cwd cannot be excluded.
+        fs::set_permissions(&created.path, fs::Permissions::from_mode(0o755))?;
+        let refused = remove(
+            &WorktreeContext {
+                workers: &observer,
+                ..test_context.context()
+            },
+            WorktreeRemove::Name {
+                name: "landed".to_owned(),
+                discard: false,
+                integration: None,
+                expected_head: None,
+            },
+            &cancellation,
+        );
+        assert!(
+            matches!(&refused, Err(WorktreeError::IncompleteCensus { detail }) if detail == "process 200: cwd unreadable"),
+            "{refused:?}"
+        );
+        assert!(created.path.exists());
         Ok(())
     }
 

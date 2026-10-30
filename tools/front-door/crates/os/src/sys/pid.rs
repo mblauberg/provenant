@@ -357,16 +357,30 @@ enum DarwinCwdCall {
     Record,
 }
 
+/// The result of probing a process whose cwd libproc would not report.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DarwinLiveness {
+    Alive,
+    Gone,
+    Unknown,
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn classify_darwin_result(
     pid: i32,
     size: i32,
     expected: usize,
     error: Option<io::Error>,
+    liveness: impl FnOnce() -> DarwinLiveness,
 ) -> Result<DarwinCwdCall, PidError> {
     if size == 0 {
-        // proc_pidinfo uses zero to mean the process is gone. errno may be stale.
-        return Ok(DarwinCwdCall::Gone);
+        // Zero means libproc would not describe the process; it does not prove
+        // absence. Only a probe proving ESRCH may report the process gone.
+        return Ok(match liveness() {
+            DarwinLiveness::Gone => DarwinCwdCall::Gone,
+            DarwinLiveness::Alive | DarwinLiveness::Unknown => DarwinCwdCall::PermissionDenied,
+        });
     }
     if size < 0 {
         let error = match error {
@@ -423,6 +437,34 @@ fn decode_darwin_path(pid: i32, raw: &[libc::c_char]) -> Result<std::path::PathB
 }
 
 #[cfg(target_os = "macos")]
+fn darwin_liveness(pid: i32) -> DarwinLiveness {
+    // Mirror the census rule: zero from libproc is ambiguous, so getsid decides
+    // absence. Clear errno first because a failed getsid may inherit stale errno.
+    // SAFETY: __error returns this thread's live errno slot; writing zero
+    // ensures a failed getsid result cannot inherit stale errno.
+    let errno_slot = unsafe { libc::__error() };
+    // SAFETY: errno_slot is the live thread-local slot returned immediately
+    // above; writing it cannot affect another thread.
+    unsafe { *errno_slot = 0 };
+    // SAFETY: getsid reads only the scalar PID, retains no pointer, and reports
+    // failure through this thread's errno slot.
+    let session = unsafe { libc::getsid(pid) };
+    // SAFETY: __error returns the same live thread-local slot after the call.
+    let errno_slot = unsafe { libc::__error() };
+    // SAFETY: errno_slot is the live thread-local slot returned immediately
+    // above; only its integer value is read.
+    let errno = unsafe { *errno_slot };
+    if session > 0 {
+        DarwinLiveness::Alive
+    } else if session == -1 && errno == libc::ESRCH {
+        DarwinLiveness::Gone
+    } else {
+        // Another failure, including EPERM/EACCES, cannot prove absence.
+        DarwinLiveness::Unknown
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
     let expected = std::mem::size_of::<libc::proc_vnodepathinfo>();
     let mut retries = 0;
@@ -443,7 +485,7 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
             )
         };
         let error = (size < 0).then(io::Error::last_os_error);
-        match classify_darwin_result(pid, size, expected, error)? {
+        match classify_darwin_result(pid, size, expected, error, || darwin_liveness(pid))? {
             DarwinCwdCall::Gone => return Ok(CwdObservation::Gone),
             DarwinCwdCall::PermissionDenied => return Ok(CwdObservation::PermissionDenied),
             DarwinCwdCall::Unsupported => return Ok(CwdObservation::Unsupported),
@@ -491,11 +533,17 @@ mod tests {
     #[test]
     fn darwin_zero_result_ignores_stale_errno_and_short_records_are_typed() {
         assert!(matches!(
-            classify_darwin_result(42, 0, 24, Some(io::Error::from_raw_os_error(libc::EACCES))),
+            classify_darwin_result(
+                42,
+                0,
+                24,
+                Some(io::Error::from_raw_os_error(libc::EACCES)),
+                || DarwinLiveness::Gone
+            ),
             Ok(DarwinCwdCall::Gone)
         ));
         assert!(matches!(
-            classify_darwin_result(42, 23, 24, None),
+            classify_darwin_result(42, 23, 24, None, || DarwinLiveness::Gone),
             Err(PidError::CwdShortRecord {
                 pid: 42,
                 returned: 23,
@@ -505,9 +553,32 @@ mod tests {
     }
 
     #[test]
+    fn darwin_zero_result_needs_a_proven_absence_before_reporting_gone() {
+        // A live process whose cwd libproc refuses to report is unplaceable.
+        for liveness in [DarwinLiveness::Alive, DarwinLiveness::Unknown] {
+            let result = classify_darwin_result(42, 0, 24, None, || liveness);
+            assert!(
+                matches!(result, Ok(DarwinCwdCall::PermissionDenied)),
+                "{liveness:?} returned {result:?}"
+            );
+        }
+        // Only a probe that proves ESRCH reports the process gone.
+        assert!(matches!(
+            classify_darwin_result(42, 0, 24, None, || DarwinLiveness::Gone),
+            Ok(DarwinCwdCall::Gone)
+        ));
+    }
+
+    #[test]
     fn darwin_cwd_classifies_permission_unsupported_and_malformed_paths() {
         assert!(matches!(
-            classify_darwin_result(42, -1, 24, Some(io::Error::from_raw_os_error(libc::EPERM))),
+            classify_darwin_result(
+                42,
+                -1,
+                24,
+                Some(io::Error::from_raw_os_error(libc::EPERM)),
+                || DarwinLiveness::Alive
+            ),
             Ok(DarwinCwdCall::PermissionDenied)
         ));
         assert!(matches!(
@@ -515,7 +586,8 @@ mod tests {
                 42,
                 -1,
                 24,
-                Some(io::Error::from_raw_os_error(libc::ENOTSUP))
+                Some(io::Error::from_raw_os_error(libc::ENOTSUP)),
+                || DarwinLiveness::Alive
             ),
             Ok(DarwinCwdCall::Unsupported)
         ));
