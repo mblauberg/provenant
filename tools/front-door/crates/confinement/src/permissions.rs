@@ -2141,10 +2141,34 @@ fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionErr
 
 pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), PermissionError> {
     grant.validate()?;
-    if is_credential_root(&grant.path) || encloses_credential_root(grant) {
+    if refuses_credential_grant(grant, false) {
         return Err(PermissionError::CredentialRoot);
     }
     Ok(())
+}
+
+/// Whether a lane root at `path` must be refused because it is credential
+/// named or encloses a nested credential root. Read and exec roots allow the
+/// Codex standalone package, which is credential named but holds no
+/// credentials. Entry checks and the compiler share this predicate so they
+/// cannot drift.
+pub fn refuses_lane_root(path: &Path, read: bool) -> bool {
+    refuses_credential_grant(
+        &PathGrant {
+            path: path.to_owned(),
+            scope: PathScope::Subtree,
+        },
+        read,
+    )
+}
+
+/// The grant-level form of [`refuses_lane_root`], honouring an exact grant's
+/// narrower reach.
+fn refuses_credential_grant(grant: &PathGrant, read: bool) -> bool {
+    if read && is_codex_standalone_package(&grant.path) && !encloses_credential_root(grant) {
+        return false;
+    }
+    is_credential_root(&grant.path) || encloses_credential_root(grant)
 }
 
 /// A subtree of `/Users/<name>` or `/home/<name>` that holds a nested
@@ -2152,16 +2176,17 @@ pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), Perm
 /// The home itself is a broad root; `compile_sbpl` repeats this check against
 /// the host's actual home, wherever it lives.
 fn encloses_credential_root(grant: &PathGrant) -> bool {
-    let mut normal = grant
-        .path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(value),
-            _ => None,
-        });
+    grant.scope == PathScope::Subtree && encloses_credential_root_path(&grant.path)
+}
+
+fn encloses_credential_root_path(path: &Path) -> bool {
+    let mut normal = path.components().filter_map(|component| match component {
+        Component::Normal(value) => Some(value),
+        _ => None,
+    });
     match (normal.next(), normal.next()) {
         (Some(root), Some(user)) if root == "Users" || root == "home" => {
-            encloses_home_credentials(grant, &Path::new("/").join(root).join(user))
+            encloses_home_credentials_path(path, &Path::new("/").join(root).join(user))
         }
         _ => false,
     }
@@ -2169,16 +2194,19 @@ fn encloses_credential_root(grant: &PathGrant) -> bool {
 
 /// A subtree that holds `home` itself or one of its nested credential roots.
 fn encloses_home_credentials(grant: &PathGrant, home: &Path) -> bool {
-    grant.scope == PathScope::Subtree
-        && (home.starts_with(&grant.path)
-            || [
-                ".config",
-                "Library",
-                "Library/Application Support",
-                "Archives",
-            ]
-            .iter()
-            .any(|nested| grant.path == home.join(nested)))
+    grant.scope == PathScope::Subtree && encloses_home_credentials_path(&grant.path, home)
+}
+
+fn encloses_home_credentials_path(path: &Path, home: &Path) -> bool {
+    home.starts_with(path)
+        || [
+            ".config",
+            "Library",
+            "Library/Application Support",
+            "Archives",
+        ]
+        .iter()
+        .any(|nested| path == home.join(nested))
 }
 
 /// Validates a grant that confers only read and exec. It is the one place the
@@ -2186,10 +2214,10 @@ fn encloses_home_credentials(grant: &PathGrant, home: &Path) -> bool {
 /// roots and private state keep the strict credential-root check.
 pub(crate) fn validate_read_exec_grant(grant: &PathGrant) -> Result<(), PermissionError> {
     grant.validate()?;
-    if is_codex_standalone_package(&grant.path) && !encloses_credential_root(grant) {
-        return Ok(());
+    if refuses_credential_grant(grant, true) {
+        return Err(PermissionError::CredentialRoot);
     }
-    validate_noncredential_grant(grant)
+    Ok(())
 }
 
 /// Exactly `<home>/.codex/packages/standalone/releases/<release>` or a path
@@ -3072,6 +3100,43 @@ mod tests {
             assert!(
                 !encloses_home_credentials(&grant(path, PathScope::Subtree), home),
                 "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn lane_root_table_agrees_with_compiler_checks() {
+        let standalone =
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
+        for (path, read_allowed, write_allowed) in [
+            ("/Users/alice/.ssh", false, false),
+            ("/Users/alice/.config", false, false),
+            (standalone, true, false),
+            ("/Users/alice/project", true, true),
+        ] {
+            let grant = PathGrant {
+                path: PathBuf::from(path),
+                scope: PathScope::Subtree,
+            };
+            assert_eq!(
+                validate_read_exec_grant(&grant).is_ok(),
+                read_allowed,
+                "read {path}"
+            );
+            assert_eq!(
+                validate_noncredential_grant(&grant).is_ok(),
+                write_allowed,
+                "write {path}"
+            );
+            assert_eq!(
+                !refuses_lane_root(Path::new(path), true),
+                read_allowed,
+                "entry read {path}"
+            );
+            assert_eq!(
+                !refuses_lane_root(Path::new(path), false),
+                write_allowed,
+                "entry write {path}"
             );
         }
     }

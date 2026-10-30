@@ -1465,10 +1465,21 @@ enum AccessError {
     MissingDirectory { flag: &'static str, path: PathBuf },
     #[error("{flag} {} overlaps the Provenant state root", path.display())]
     StateOverlap { flag: &'static str, path: PathBuf },
-    #[error("credential root requires a selected fixture-backed mechanism")]
-    CredentialRoot,
+    #[error("{flag} {} is or encloses a credential root", path.display())]
+    CredentialRoot { flag: &'static str, path: PathBuf },
     #[error("--write-root {} overlaps the --worktree; worktree-write already grants the worktree", .0.display())]
     WorktreeOverlap(PathBuf),
+}
+
+/// Refuse a resolved root by the same rule the confinement compiler applies,
+/// naming the flag and the path in the message.
+fn refused_root(flag: &'static str, given: &Path, canonical: &Path) -> Option<AccessError> {
+    provenant_confinement::refuses_lane_root(canonical, flag == "--read-root").then(|| {
+        AccessError::CredentialRoot {
+            flag,
+            path: given.to_path_buf(),
+        }
+    })
 }
 
 fn lane_access_checked(
@@ -1499,8 +1510,8 @@ fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
-                if provenant_confinement::is_credential_root(&canonical) {
-                    return Err(AccessError::CredentialRoot);
+                if let Some(error) = refused_root(flag, path, &canonical) {
+                    return Err(error);
                 }
                 if !run::access_root_allowed(&canonical, &state, flag == "--read-root") {
                     return Err(AccessError::StateOverlap {
@@ -12335,27 +12346,71 @@ mod tests {
     }
 
     #[test]
-    fn lane_access_refuses_credential_roots() -> Result<(), Box<dyn std::error::Error>> {
+    fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn std::error::Error>>
+    {
         let temp = tempfile::tempdir()?;
-        let root = temp.path().join(".ssh").join("nested");
-        std::fs::create_dir_all(&root)?;
-        let root = std::fs::canonicalize(root)?;
-        for read in [true, false] {
-            let access = crate::Access {
-                mode: Some(Mode::ReadOnly),
-                worktree: None,
-                read_root: if read { vec![root.clone()] } else { vec![] },
-                write_root: if read { vec![] } else { vec![root.clone()] },
-                network: None,
-                capability: vec![],
-            };
-            let fail = lane_access(&access, &temp.path().join("state")).unwrap_err();
-            assert_eq!(
-                fail.message,
-                provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
-            );
+        let credential = temp.path().join(".ssh").join("nested");
+        std::fs::create_dir_all(&credential)?;
+        let mut roots = vec![std::fs::canonicalize(&credential)?];
+        // The home itself and its `.config` are enclosing roots; use the host's
+        // real directories so the check sees a conventional home.
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+            && home.is_dir()
+        {
+            if home.join(".config").is_dir() {
+                roots.push(home.join(".config"));
+            }
+            roots.push(home);
+        }
+        assert!(roots.len() >= 2);
+        for root in roots {
+            for (flag, read) in [("--read-root", true), ("--write-root", false)] {
+                let access = crate::Access {
+                    mode: Some(Mode::ReadOnly),
+                    worktree: None,
+                    read_root: if read { vec![root.clone()] } else { vec![] },
+                    write_root: if read { vec![] } else { vec![root.clone()] },
+                    network: None,
+                    capability: vec![],
+                };
+                let fail = lane_access(&access, &temp.path().join("state")).unwrap_err();
+                assert!(fail.message.contains(flag), "{}", fail.message);
+                assert!(
+                    fail.message.contains(&root.display().to_string()),
+                    "{}",
+                    fail.message
+                );
+            }
         }
         Ok(())
+    }
+
+    #[test]
+    fn entry_root_table_matches_confinement() {
+        let standalone =
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
+        for (path, read_allowed, write_allowed) in [
+            ("/Users/alice/.ssh", false, false),
+            ("/Users/alice/.config", false, false),
+            (standalone, true, false),
+            ("/Users/alice/project", true, true),
+        ] {
+            for (flag, allowed) in [
+                ("--read-root", read_allowed),
+                ("--write-root", write_allowed),
+            ] {
+                let refused = refused_root(flag, Path::new(path), Path::new(path));
+                assert_eq!(refused.is_none(), allowed, "{flag} {path}");
+                if let Some(AccessError::CredentialRoot {
+                    flag: named,
+                    path: named_path,
+                }) = refused
+                {
+                    assert_eq!(named, flag);
+                    assert_eq!(named_path, Path::new(path));
+                }
+            }
+        }
     }
 
     #[test]

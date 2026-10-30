@@ -427,6 +427,17 @@ pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read
     (read && release) || (!root.starts_with(state) && !state.starts_with(root))
 }
 
+/// Refuse a resolved child root by the same rule the confinement compiler
+/// applies, naming the flag and the path in the message.
+fn refused_root(flag: &'static str, path: &std::path::Path, read: bool) -> Option<RunError> {
+    provenant_confinement::refuses_lane_root(path, read).then(|| {
+        RunError::ValidationOwned(format!(
+            "{flag} {} is or encloses a credential root",
+            path.display()
+        ))
+    })
+}
+
 /// A child's network reach may not exceed its parent's, each write root must
 /// sit inside a parent write root and each read root inside any parent root.
 /// The host repeats submission checks: roots must be existing canonical
@@ -457,18 +468,16 @@ fn child_access_within(
                     && access_root_allowed(canonical, &state, read)
             })
     };
-    for root in child
-        .access
-        .read_roots
-        .iter()
-        .chain(&child.access.write_roots)
-    {
-        if provenant_os::fs::canonicalize(root)
-            .is_ok_and(|path| provenant_confinement::is_credential_root(&path))
-        {
-            return Err(RunError::Validation(
-                "credential root requires a selected fixture-backed mechanism",
-            ));
+    for (roots, flag, read) in [
+        (&child.access.read_roots, "--read-root", true),
+        (&child.access.write_roots, "--write-root", false),
+    ] {
+        for root in roots {
+            if let Ok(canonical) = provenant_os::fs::canonicalize(root)
+                && let Some(error) = refused_root(flag, &canonical, read)
+            {
+                return Err(error);
+            }
         }
     }
     let writes: Vec<PathBuf> = parent
@@ -501,27 +510,63 @@ fn child_access_within(
 #[cfg(test)]
 mod release_root_tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
-    fn child_refuses_credential_roots() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn child_refuses_credential_and_enclosing_roots()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        let root = temp.path().join(".ssh").join("nested");
-        std::fs::create_dir_all(&root)?;
-        let root = std::fs::canonicalize(root)?;
-        let mut parent = crate::tests::input().request.tasks.remove(0);
-        parent.access.read_roots = vec![root.clone()];
-        parent.access.write_roots = vec![root.clone()];
-        for read in [true, false] {
-            let mut child = parent.clone();
-            child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
-            child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
-            let error =
-                child_access_within(&parent, &child, &temp.path().join("state")).unwrap_err();
-            assert!(error.to_string().contains(
-                &provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
-            ));
+        let credential = temp.path().join(".ssh").join("nested");
+        std::fs::create_dir_all(&credential)?;
+        let mut roots = vec![std::fs::canonicalize(credential)?];
+        // The home itself is an enclosing root; use the host's real directory
+        // so the check sees a conventional home.
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+            && home.is_dir()
+        {
+            roots.push(home);
+        }
+        assert!(roots.len() >= 2);
+        for root in roots {
+            let mut parent = crate::tests::input().request.tasks.remove(0);
+            parent.access.read_roots = vec![root.clone()];
+            parent.access.write_roots = vec![root.clone()];
+            for (flag, read) in [("--read-root", true), ("--write-root", false)] {
+                let mut child = parent.clone();
+                child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
+                child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
+                let error =
+                    child_access_within(&parent, &child, &temp.path().join("state")).unwrap_err();
+                let message = error.to_string();
+                assert!(message.contains(flag), "{message}");
+                assert!(message.contains(&root.display().to_string()), "{message}");
+            }
         }
         Ok(())
+    }
+
+    #[test]
+    fn child_root_table_matches_confinement() {
+        let standalone =
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
+        for (path, read_allowed, write_allowed) in [
+            ("/Users/alice/.ssh", false, false),
+            ("/Users/alice/.config", false, false),
+            (standalone, true, false),
+            ("/Users/alice/project", true, true),
+        ] {
+            for (flag, read, allowed) in [
+                ("--read-root", true, read_allowed),
+                ("--write-root", false, write_allowed),
+            ] {
+                let refused = refused_root(flag, Path::new(path), read);
+                assert_eq!(refused.is_none(), allowed, "{flag} {path}");
+                if let Some(RunError::ValidationOwned(message)) = refused {
+                    assert!(message.contains(flag), "{message}");
+                    assert!(message.contains(path), "{message}");
+                }
+            }
+        }
     }
 
     #[test]

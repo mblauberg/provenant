@@ -622,6 +622,7 @@ impl From<&RunError> for ErrorKind {
             RunError::GitUnavailable => Self::Git,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
             RunError::Validation(_)
+            | RunError::ValidationOwned(_)
             | RunError::WriterHeadNotLaneBranch
             | RunError::ReviewAcceptanceRequired
             | RunError::InvalidBase(_)
