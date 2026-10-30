@@ -209,6 +209,13 @@ impl WorkerObserver for LandWorkers<'_> {
         self.0.observe_roots_for_land(roots)
     }
 
+    fn observe_roots_with_details(
+        &self,
+        roots: &[PathBuf],
+    ) -> provenant_confinement::worktrees::WorkerObservations {
+        self.0.observe_roots_for_land_with_details(roots)
+    }
+
     fn live_process(&self, root: &std::path::Path) -> Option<ObservedProcess> {
         self.0.live_process_for_land(root)
     }

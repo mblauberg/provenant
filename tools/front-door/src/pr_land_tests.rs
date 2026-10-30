@@ -1754,7 +1754,13 @@ pub(crate) fn pr_land_refuses_each_unsafe_step_and_reports_the_rest() -> Result 
     assert_eq!(code(&output), 0, "{value}");
     assert_eq!(value["data"]["cleanup_pending"], true, "{value}");
     assert_eq!(status(&value, "worktree")?, "refused", "{value}");
-    assert_eq!(status(&value, "branch")?, "refused", "{value}");
+    assert_eq!(status(&value, "branch")?, "skipped", "{value}");
+    assert!(
+        value
+            .to_string()
+            .contains("feat deletion skipped because its registered worktree was kept"),
+        "{value}"
+    );
     assert!(landing.worktree.join("notes.txt").exists());
     assert!(
         landing.worktree.join("target/artifact").exists(),
