@@ -432,6 +432,9 @@ enum ConfigAction<'a> {
         since: Option<jiff::Timestamp>,
         limit: usize,
     },
+    Migrate {
+        dry_run: bool,
+    },
 }
 fn read_patch(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     use std::io::Read;
@@ -493,6 +496,9 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
             }
             ConfigAction::History { since, limit } => {
                 serde_json::json!({ "entries": config::history(&roots, since, limit)? })
+            }
+            ConfigAction::Migrate { dry_run } => {
+                serde_json::to_value(config::migrate(&roots, sections, dry_run)?)?
             }
         })
     })();
@@ -880,6 +886,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             },
             globals,
         ),
+        Command::Config(provenant_cli::Config::Migrate { dry_run }) => {
+            config_command("config migrate", ConfigAction::Migrate { dry_run }, globals)
+        }
         Command::Config(provenant_cli::Config::Set { name, value }) => config_command(
             "config set",
             ConfigAction::Edit(if name == "profile" {

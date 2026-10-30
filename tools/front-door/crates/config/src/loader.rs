@@ -748,19 +748,12 @@ fn seed_origins(
 }
 fn warn(path: &Path, warning: &Finding) {
     use std::io::Write;
-    let repair = if warning.message.contains("moved_to_schedule.") {
-        let quoted = path.display().to_string().replace('\'', "'\\''");
-        format!("; repair: \"$EDITOR\" '{quoted}'")
-    } else {
-        String::new()
-    };
     let _ = writeln!(
         std::io::stderr().lock(),
-        "warning: {}:{}: {}{}",
+        "warning: {}:{}: {}",
         path.display(),
         warning.line,
-        warning.message,
-        repair
+        warning.message
     );
 }
 
@@ -1190,7 +1183,7 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
             Some(source) if source.code.starts_with("moved_to_schedule.") => {
                 let replacement = source.code.trim_start_matches("moved_to_schedule.");
                 format!(
-                    "{key}: ignored invalid configuration ({}: {}); replace the retired key with schedule.{replacement}; edit config.toml and run `provenant config check`",
+                    "{key}: ignored invalid configuration ({}: {}); replace the retired key with schedule.{replacement}; run `provenant config migrate`",
                     issue.rule, source.code
                 )
             }
@@ -2354,7 +2347,7 @@ mod warning_tests {
         };
         let warning = issue_finding(&issue)?;
         assert!(warning.message.contains("schedule.expires"));
-        assert!(warning.message.contains("provenant config check"));
+        assert!(warning.message.contains("provenant config migrate"));
         assert!(first_warning(
             roots.state.as_path(),
             Some("revision one"),

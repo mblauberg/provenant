@@ -82,15 +82,26 @@ an enforced lane restriction.
 `provenant route override list` shows policy and pacing schedules, whether
 each is active and the time remaining to expiry.
 
-The timing keys that predate `schedule` are not converted. A pacing override or
-policy rule that still carries one is dropped with a located warning that names
-the replacement, such as
+The timing keys that predate `schedule` are not converted on load. A pacing
+override or policy rule that still carries one is dropped with a located
+warning that names the replacement, such as
 `domains.routing.pacing_overrides.0: ignored invalid configuration (domain: moved_to_schedule.expires)`;
 other records still load. A rule that enforces a lane restriction refuses the
-configuration instead, at the retired key. Move `starts_unix_seconds` to
-`schedule.starts` and `expires_unix_seconds` to `schedule.expires`, each
-written as an RFC 3339 timestamp, and a top-level `windows` to
-`schedule.windows`.
+configuration instead, at the retired key. While any retired key remains,
+every configuration write, including `provenant accounts register`, is refused
+and names the same repair.
+
+Run `provenant config migrate` to rewrite them in place. `--dry-run` reports
+what would change without writing, and `--json` returns the report.
+`starts_unix_seconds` becomes `schedule.starts`, `expires_unix_seconds` becomes
+`schedule.expires` (each as an RFC 3339 timestamp) and a top-level `windows`
+becomes `schedule.windows`. A pacing override whose expiry has passed is
+dropped, since it can no longer apply; a policy rule is converted and kept. The
+command saves the previous file as `config.toml.bak-<UTC timestamp>` in the
+state directory before it writes, keeps comments and layout elsewhere in the
+file, and refuses, changing nothing, when a record already sets the
+`schedule` key it would write. A comment attached to a dropped override goes
+with it.
 
 The bundled policy follows issues #2177 and #2185 and the repository's price
 table. These are adjustable operating defaults:

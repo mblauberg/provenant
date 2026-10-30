@@ -105,6 +105,27 @@ pub fn edit_config<T>(
 where
     T: serde::de::DeserializeOwned + Serialize,
 {
+    edit_document(roots, sections, options, true, |document, current| {
+        let current = current.ok_or(ConfigError::Edit {
+            reason: "configuration unavailable",
+        })?;
+        edit(document, current)
+    })
+}
+
+/// [`edit_config`], optionally without loading the current configuration
+/// first. A repair of a configuration that does not load, such as a migration
+/// of retired keys, cannot require the load it is repairing.
+pub(crate) fn edit_document<T>(
+    roots: &provenant_core::Roots,
+    sections: &crate::DomainSections<T>,
+    options: &EditOptions<'_>,
+    load_first: bool,
+    edit: impl FnOnce(&mut DocumentMut, Option<&ResolvedConfig<T>>) -> Result<(), ConfigError>,
+) -> Result<Edited<T>, ConfigError>
+where
+    T: serde::de::DeserializeOwned + Serialize,
+{
     // A dry run writes nothing, so it neither creates the state directory
     // nor takes the lock.
     let held = if options.dry_run {
@@ -135,11 +156,15 @@ where
             current: before_revision,
         });
     }
-    let current = crate::loader::load_with_domains(
-        roots,
-        text.as_deref().map(|source| Cursor::new(source.as_bytes())),
-        sections,
-    )?;
+    let current = load_first
+        .then(|| {
+            crate::loader::load_with_domains(
+                roots,
+                text.as_deref().map(|source| Cursor::new(source.as_bytes())),
+                sections,
+            )
+        })
+        .transpose()?;
     let mut document: DocumentMut =
         text.as_deref()
             .unwrap_or(MINIMAL)
@@ -147,7 +172,7 @@ where
             .map_err(|_| ConfigError::Edit {
                 reason: "invalid TOML",
             })?;
-    edit(&mut document, &current)?;
+    edit(&mut document, current.as_ref())?;
     let updated = document.to_string();
     // Reads recover invalid optional values; a write must refuse instead of
     // publishing a document whose effective value differs from the edit.

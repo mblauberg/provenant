@@ -12,6 +12,7 @@ pub mod experiment;
 mod gc;
 mod github_policy;
 mod history;
+mod migrate;
 mod schema;
 pub use gc::{
     ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold, ProjectGcSettings,
@@ -53,6 +54,7 @@ pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
 pub use knobs::{KnobEdit, KnobSource, KnobValue};
 pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
+pub use migrate::{MigrateReport, Migration, migrate};
 pub use presets::Profile;
 pub use project_binding::{
     GcProjectSelection, ProjectBinding, ProjectLocation, bind_host, bind_project, lookup_host,
@@ -99,7 +101,7 @@ pub enum ConfigError {
     UnsupportedVersion { location: Location },
     #[error("config exceeds collection bounds at {location}")]
     CollectionLimit { location: Location },
-    #[error("invalid domain configuration at {location}: {source}{rejected}")]
+    #[error("invalid domain configuration at {location}: {source}{rejected}{}", retired_repair(.source))]
     Domain {
         location: Location,
         #[source]
@@ -240,3 +242,12 @@ pub use release::{Release, package_release};
 pub const CONFIG_SCHEMA_VERSION: u64 = 1;
 
 pub use managed::HookRegistration;
+
+/// The repair a retired timing key calls for, appended to the refusal.
+fn retired_repair(source: &SectionError) -> &'static str {
+    if source.code.starts_with("moved_to_schedule.") {
+        "; repair: run `provenant config migrate`"
+    } else {
+        ""
+    }
+}

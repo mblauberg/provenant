@@ -1353,6 +1353,19 @@ mod tests {
         );
     }
     #[test]
+    fn config_migrate_takes_dry_run() {
+        for (words, expected) in [
+            (vec!["config", "migrate"], false),
+            (vec!["config", "migrate", "--dry-run"], true),
+        ] {
+            let Command::Config(Config::Migrate { dry_run }) = valid(&words).command else {
+                panic!("config migrate")
+            };
+            assert_eq!(dry_run, expected);
+        }
+    }
+
+    #[test]
     fn explicit_read_only_mode_is_not_promoted_to_a_writer_by_a_target() {
         // Regression: `--mode read-only --worktree` was rewritten to
         // worktree-write, so a read-only-policy model was refused as a write.

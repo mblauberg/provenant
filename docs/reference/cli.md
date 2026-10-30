@@ -543,6 +543,30 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant config migrate`
+
+| Argument | Contract |
+|---|---|
+| `--dry-run` | `{"defaults": ["false"], "description": "Report what would change without writing", "name": "dry_run", "values": ["true", "false"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Rewrite retired routing timing keys to `schedule` in place after a timestamped backup, dropping expired pacing overrides",
+  "groups": [
+    {
+      "arguments": [
+        "dry_run"
+      ],
+      "multiple": true,
+      "name": "Migrate",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant config set`
 
 | Argument | Contract |
