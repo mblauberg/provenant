@@ -58,6 +58,7 @@ if ! "$yes" && [ ! -f "$receipt" ]; then
 fi
 umask 077
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/provenant-install.XXXXXX")
+app_stage=
 instruction_count=0
 instructions_committed=false
 cleanup() {
@@ -72,6 +73,7 @@ cleanup() {
             instruction_count=$((instruction_count - 1))
         done
     fi
+    if [ -n "$app_stage" ]; then rm -rf "$app_stage"; fi
     rm -rf "$scratch"
 }
 trap cleanup 0
@@ -128,6 +130,31 @@ else
     actual=$(shasum -a 256 "$scratch/package.tar.gz")
     actual=${actual%% *}
     [ "$actual" = "$expected" ] || die 4 'Release checksum mismatch'
+    if [ "$target" = aarch64-apple-darwin ]; then
+        apps_archive=provenant-apps-aarch64-apple-darwin.tar.gz
+        apps_status=$(curl -LsS --proto '=https' --tlsv1.2 -w '%{http_code}' "$base/$apps_archive" -o "$scratch/$apps_archive" </dev/null) || die 4 'Cannot download bundled app archive'
+        case "$apps_status" in
+            200)
+                curl -fLsS --proto '=https' --tlsv1.2 "$base/$apps_archive.sha256" -o "$scratch/apps-checksum" </dev/null || die 4 'Cannot download bundled app checksum'
+                apps_expected=$(awk 'NR == 1 {print $1}' "$scratch/apps-checksum")
+                [ "${#apps_expected}" -eq 64 ] || die 4 'Invalid bundled app checksum'
+                case "$apps_expected" in *[!0-9a-fA-F]*) die 4 'Invalid bundled app checksum' ;; esac
+                apps_actual=$(shasum -a 256 "$scratch/$apps_archive")
+                apps_actual=${apps_actual%% *}
+                [ "$apps_actual" = "$apps_expected" ] || die 4 'Bundled app checksum mismatch'
+                mkdir "$scratch/apps"
+                tar -xzpf "$scratch/$apps_archive" -C "$scratch/apps" </dev/null || die 4 'Cannot unpack bundled app archive'
+                app='Provenant Console.app'
+                for binary in provenant-console quota-menubar; do
+                    [ -x "$scratch/apps/$app/Contents/MacOS/$binary" ] || die 4 "Bundled app executable is missing: $binary"
+                done
+                mkdir -p "$HOME/Applications"
+                app_stage=$(mktemp -d "$HOME/Applications/.provenant-upgrade.XXXXXX")
+                cp -R "$scratch/apps/$app" "$app_stage/$app" ;;
+            404) printf '%s\n' 'This release has no bundled app archive; upgrading Provenant without refreshing the app.' >&2 ;;
+            *) die 4 "Cannot download bundled app archive (HTTP $apps_status)" ;;
+        esac
+    fi
     mkdir "$release"
     tar -xzpf "$scratch/package.tar.gz" -C "$release" </dev/null || die 4 'Cannot unpack release'
 fi
@@ -225,6 +252,28 @@ if "$guided"; then
     esac
 fi
 "$release/bin/provenant" "$@" </dev/null
+if [ -n "$app_stage" ]; then
+    agent="$HOME/Library/LaunchAgents/dev.provenant.quota-menubar.plist"
+    service="gui/$(id -u)/dev.provenant.quota-menubar"
+    if [ -f "$agent" ]; then launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :; fi
+    rm -rf "$HOME/Applications/$app"
+    mv "$app_stage/$app" "$HOME/Applications/$app"
+    app_stage=
+    if [ -f "$agent" ]; then
+        plutil -replace ProgramArguments.0 -string "$HOME/Applications/$app/Contents/MacOS/quota-menubar" "$agent"
+        attempts=0
+        until launchctl bootstrap "gui/$(id -u)" "$agent" </dev/null; do
+            attempts=$((attempts + 1))
+            [ "$attempts" -lt 5 ] || die 4 'Could not restart the Provenant menu bar app'
+            sleep 0.3
+        done
+        launchctl kickstart -k "$service" </dev/null || die 4 'Could not restart the Provenant menu bar app'
+        launchctl print "$service" </dev/null >/dev/null || die 4 'Could not verify the Provenant menu bar app'
+        grep -F "$HOME/Applications/$app/Contents/MacOS/quota-menubar" "$agent" >/dev/null || die 4 'LaunchAgent does not point to the refreshed app'
+    fi
+    [ -x "$HOME/Applications/$app/Contents/MacOS/provenant-console" ] &&
+        [ -x "$HOME/Applications/$app/Contents/MacOS/quota-menubar" ] || die 4 'Refreshed app executables are missing'
+fi
 instructions_committed=true
 if "$guided"; then
     case " $providers " in *' claude '*)
