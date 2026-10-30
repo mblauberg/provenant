@@ -18,19 +18,35 @@ pub fn schedule(roots: &Roots, cwd: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .as_timestamp()
         .as_second();
-    if !config.providers.iter().any(|(provider, settings)| {
-        schedulable(roots.state.as_path(), provider, settings, now, || {
-            crate::run::provider_executable(provider).is_ok()
-        })
+    schedule_worker(
+        roots.state.as_path(),
+        cwd,
+        &config.providers,
+        now,
+        |provider| crate::run::provider_executable(provider).is_ok(),
+        |argv, cwd| provenant_os::exec::spawn_detached(argv, cwd).map_err(|e| e.to_string()),
+    )
+}
+
+fn schedule_worker(
+    state: &Path,
+    cwd: &Path,
+    providers: &std::collections::BTreeMap<String, provenant_config::ProviderSettings>,
+    now: i64,
+    installed: impl Fn(&str) -> bool,
+    spawn: impl FnOnce(&[std::ffi::OsString], &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if !providers.iter().any(|(provider, settings)| {
+        schedulable(state, provider, settings, now, || installed(provider))
     }) {
         return Ok(());
     }
-    if !provenant_providers::update::reserve_worker(roots.state.as_path(), now) {
+    if !provenant_providers::update::reserve_worker(state, now) {
         return Ok(());
     }
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-    let argv = worker_argv(&executable, roots.state.as_path());
-    provenant_os::exec::spawn_detached(&argv, cwd).map_err(|e| e.to_string())
+    let argv = worker_argv(&executable, state);
+    spawn(&argv, cwd)
 }
 
 /// The worker starts in the event's working directory, which is its project.
@@ -213,6 +229,54 @@ mod tests {
         assert!(!schedulable(temp.path(), "claude", &settings, 100, || true));
         drop(lane);
         assert!(schedulable(temp.path(), "claude", &settings, 100, || true));
+        Ok(())
+    }
+
+    #[test]
+    fn scheduling_drops_probe_before_spawn_and_respects_backoff()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::fs::LockMode;
+        use std::cell::Cell;
+        let temp = tempfile::tempdir()?;
+        let mut providers = std::collections::BTreeMap::from([(
+            "claude".to_owned(),
+            provenant_config::ProviderSettings::default(),
+        )]);
+        let spawned = Cell::new(0);
+        let run = |providers: &_, installed: bool| {
+            schedule_worker(
+                temp.path(),
+                temp.path(),
+                providers,
+                100,
+                |_| installed,
+                |argv, cwd| {
+                    assert_eq!(cwd, temp.path());
+                    assert_eq!(argv[3], "internal");
+                    let _probe = provenant_os::provider_fence::acquire(
+                        temp.path(),
+                        "claude",
+                        LockMode::Exclusive,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    spawned.set(spawned.get() + 1);
+                    Ok(())
+                },
+            )
+        };
+        providers.get_mut("claude").unwrap().update =
+            provenant_config::ProviderUpdate::Enabled(false);
+        run(&providers, true)?;
+        providers.get_mut("claude").unwrap().update =
+            provenant_config::ProviderUpdate::Enabled(true);
+        run(&providers, false)?;
+        let held = provenant_os::provider_fence::acquire(temp.path(), "claude", LockMode::Shared)?;
+        run(&providers, true)?;
+        assert_eq!(spawned.get(), 0);
+        drop(held);
+        run(&providers, true)?;
+        run(&providers, true)?;
+        assert_eq!(spawned.get(), 1);
         Ok(())
     }
 }

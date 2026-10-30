@@ -1266,7 +1266,6 @@ impl Providers for Ready {
         _: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, String> {
         Ok(PreparedLaunch {
-            provider_lease: None,
             argv: vec!["fixture".into()],
             environment: Vec::new(),
             stdin: Vec::new(),

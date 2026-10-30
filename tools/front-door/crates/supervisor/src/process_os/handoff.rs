@@ -18,7 +18,6 @@ pub(crate) struct Inherited {
     pub attempt_directory: Directory,
     pub writer: LockGuard,
     pub custody: LockGuard,
-    pub provider_lease: Option<LockGuard>,
 }
 fn deadline(timeout: Duration) -> io::Result<Instant> {
     Instant::now()
@@ -119,7 +118,6 @@ pub(crate) fn spawn(
     attempt_directory: &Directory,
     writer: &LockGuard,
     custody: &LockGuard,
-    provider_lease: Option<&LockGuard>,
     environment: &[(OsString, OsString)],
     config_environment: &[OsString],
     payload: &[u8],
@@ -133,16 +131,13 @@ pub(crate) fn spawn(
     let reaper = provenant_os::sys::reaper::Reaper::new(1)?;
     let permit = reaper.reserve().ok_or(CustodyError::HandoffUnknown)?;
     let (mut parent, child_channel) = UnixStream::pair()?;
-    let mut descriptors = vec![
+    let descriptors = vec![
         child_channel.as_fd(),
         writer_directory.handoff_file().as_fd(),
         attempt_directory.handoff_file().as_fd(),
         writer.handoff_file().as_fd(),
         custody.handoff_file().as_fd(),
     ];
-    if let Some(lease) = provider_lease {
-        descriptors.push(lease.handoff_file().as_fd());
-    }
     let executable = std::env::current_exe()?;
     let mut command = Command::new(executable);
     command.arg("internal").arg("supervise");
@@ -193,7 +188,7 @@ pub(crate) fn spawn(
 /// descriptors or an unlocked/mismatched lock refuse the handshake before exec.
 pub(crate) fn inherit(args: &[OsString]) -> Result<Inherited> {
     let mut descriptors = Vec::with_capacity(args.len());
-    let mut malformed = !matches!(args.len(), 5 | 6);
+    let mut malformed = args.len() != 5;
     for arg in args {
         let Some(fd) = arg
             .to_str()
@@ -325,30 +320,12 @@ pub(crate) fn inherit(args: &[OsString]) -> Result<Inherited> {
         "custody.lock",
         files.next().ok_or(CustodyError::InvalidRecord)?,
     )?;
-    let provider_lease = files
-        .next()
-        .map(|file| {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = file.metadata()?;
-            if !metadata.is_file()
-                || metadata.nlink() != 1
-                || metadata.uid() != provenant_os::sys::fs::effective_uid()
-                || metadata.mode() & 0o077 != 0
-            {
-                return Err(CustodyError::InvalidRecord);
-            }
-            // This is the host's already-held open description. No unlock or
-            // reacquisition occurs between preparation and the guardian handoff.
-            Ok(LockGuard::from_handoff(file))
-        })
-        .transpose()?;
     Ok(Inherited {
         channel,
         writer_directory,
         attempt_directory,
         writer,
         custody,
-        provider_lease,
     })
 }
 
@@ -389,7 +366,7 @@ mod tests {
     use provenant_os::{fs::LockMode, provider_fence};
 
     #[test]
-    fn inherited_preparation_lease_has_no_gap_before_guardian_custody()
+    fn inherited_custody_does_not_hold_preparation_lease()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let directory = Directory::open_anchor(temp.path())?;
@@ -404,7 +381,6 @@ mod tests {
             directory.handoff_file().try_clone()?.into_raw_fd(),
             writer.handoff_file().try_clone()?.into_raw_fd(),
             custody.handoff_file().try_clone()?.into_raw_fd(),
-            provider.handoff_file().try_clone()?.into_raw_fd(),
         ];
         let args: Vec<_> = raw
             .into_iter()
@@ -412,13 +388,8 @@ mod tests {
             .collect();
         let inherited = inherit(&args)?;
         drop(provider);
-        assert!(inherited.provider_lease.is_some());
-        assert!(matches!(
-            provider_fence::acquire(temp.path(), "codex", LockMode::Exclusive),
-            Err(provenant_os::fs::FsError::LockTimeout { .. })
-        ));
-        drop(inherited);
         let _update = provider_fence::acquire(temp.path(), "codex", LockMode::Exclusive)?;
+        drop(inherited);
         Ok(())
     }
 }

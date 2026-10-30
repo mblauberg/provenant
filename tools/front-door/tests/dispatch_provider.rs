@@ -13,6 +13,113 @@ use support::{Result, TestRig, code};
 
 const HANDOFF_SECRET: &str = "sk-abcdefghijklmnopqrstuvwx";
 
+#[cfg(target_os = "macos")]
+fn agy_lease_fixture() -> Result {
+    let args: Vec<_> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--version") {
+        io::stdout().write_all(b"agy 1.0.0\n")?;
+    } else if args.iter().any(|arg| arg == "/usage") {
+        let log = args
+            .windows(2)
+            .find(|pair| pair[0] == "--log-file")
+            .ok_or("log argument")?;
+        fs::write(
+            &log[1],
+            "OAuth: authenticated successfully as fixture@example.test\n",
+        )?;
+        io::stdout().write_all(b"{\"status\":\"SUCCESS\"}\n")?;
+    } else {
+        use std::os::unix::fs::MetadataExt;
+        let prompt = args
+            .windows(2)
+            .find(|pair| pair[0] == "--print")
+            .ok_or("prompt argument")?;
+        let marker = prompt[1]
+            .split_once("report lease status ")
+            .ok_or("identity marker")?
+            .1;
+        let values: Vec<u64> = marker
+            .split_whitespace()
+            .take(2)
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let [_device, inode] = values.as_slice() else {
+            return Err("lock identity missing".into());
+        };
+        let mut inspected = 0;
+        for fd in 3..1024 {
+            if let Ok(metadata) = fs::metadata(format!("/dev/fd/{fd}")) {
+                inspected += 1;
+                assert_ne!(metadata.ino(), *inode, "provider inherited update lock");
+            }
+        }
+        assert!(inspected > 0, "provider descriptors could not be inspected");
+        io::stdout().write_all(
+            br#"{"event":"init","conversation_id":"fixture-session","init":{"model":"gemini-3.8-flash"}}"#,
+        )?;
+        io::stdout().write_all(b"\n")?;
+        let frame = json!({"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"## Findings\nlease-free provider started\n## Evidence\nNo descriptor matched the update lock.","error":null,"usage":{"input_tokens":0,"output_tokens":0}}});
+        io::stdout().write_all(format!("{frame}\n").as_bytes())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_proceeds_when_provider_update_is_busy() -> Result {
+    let mut rig = TestRig::new()?;
+    let _cleanup = rig.process_cleanup();
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("agy"))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let keychain = rig.home.join("Library/Keychains/login.keychain-db");
+    fs::create_dir_all(keychain.parent().ok_or("keychain parent")?)?;
+    fs::write(keychain, "fixture")?;
+    let lock = provenant_os::provider_fence::acquire(
+        &rig.state,
+        "agy",
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(rig.state.join("provider-updates/agy.lock"))?;
+    fs::write(
+        &prompt,
+        format!("report lease status {} {}", metadata.dev(), metadata.ino()),
+    )?;
+    let started = std::time::Instant::now();
+    let result = rig.command(&[
+        "run",
+        "--model",
+        "agy/gemini-3.8-flash",
+        "--operation-id",
+        "busy-provider",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait",
+        "1s",
+        "--json",
+    ])?;
+    assert!(started.elapsed() < std::time::Duration::from_secs(8));
+    assert_eq!(code(&result), 0, "{result:?}");
+    let response: Value = serde_json::from_slice(&result.stdout.bytes)?;
+    let run = response["data"]["run_id"].as_str().ok_or("run id")?;
+    let lanes = rig.command(&["lanes", "--id", run, "--wait", "5s", "--json"])?;
+    assert_eq!(code(&lanes), 0, "{lanes:?}");
+    let output = rig.command(&["output", run, "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout.bytes).contains("lease-free provider started"),
+        "{output:?}"
+    );
+    drop(lock);
+    Ok(())
+}
+
 fn handoff_recovery_provider(prompt: &str, args: &[String], auth: &Value) -> Result {
     let account = auth["tokens"]["account_id"]
         .as_str()
@@ -3673,6 +3780,18 @@ fn owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation() -> Result 
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().next().is_some_and(|arg| {
+        std::path::Path::new(&arg)
+            .file_name()
+            .is_some_and(|name| name == "agy")
+    }) {
+        return if agy_lease_fixture().is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
     let result = if args
         .first()
         .is_some_and(|s| s == "exec" || s == "run" || s == "--version" || s == "auth" || s == "-p")
@@ -3682,6 +3801,8 @@ fn main() -> ExitCode {
         provenant_supervisor::fixture::run_libtest(
             &args,
             &[
+                #[cfg(target_os = "macos")]
+                "dispatch_proceeds_when_provider_update_is_busy",
                 "cancel_wait_settles_stalled_import_with_durable_exit",
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",
                 "output_names_the_attempt_it_reads_and_writes_or_locates_parts",
@@ -3715,6 +3836,8 @@ fn main() -> ExitCode {
             ],
             |name| {
                 let result = match name {
+                    #[cfg(target_os = "macos")]
+                    "dispatch_proceeds_when_provider_update_is_busy" => dispatch_proceeds_when_provider_update_is_busy(),
                     "cancel_wait_settles_stalled_import_with_durable_exit" => cancel_wait_settles_stalled_import_with_durable_exit(),
                     "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
                         receipt_output_reports_unknown_route_for_settled_lost_attempt()

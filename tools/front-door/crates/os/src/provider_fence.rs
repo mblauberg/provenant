@@ -1,8 +1,8 @@
-//! Shared lane leases and exclusive updater custody for one provider.
+//! Shared preparation leases and exclusive updater custody for one provider.
 //!
 //! Lock files are stable and never unlinked: the kernel releases their leases
-//! when the last holder exits. Provider children inherit shared lane leases;
-//! updater groups inherit exclusive leases so runner death cannot drop custody.
+//! when the last holder exits. Updater groups inherit exclusive leases so
+//! runner death cannot drop custody; preparation leases stay close-on-exec.
 use crate::fs::{self, Directory, LockGuard, LockMode};
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use std::{ffi::OsStr, path::Path};
@@ -101,6 +101,7 @@ mod tests {
         let _other = acquire(temp.path(), "claude", LockMode::Shared)?;
         drop(update);
         let first = acquire(temp.path(), "codex", LockMode::Shared)?;
+        assert!(crate::sys::fs::is_cloexec(first.handoff_file()));
         let second = acquire(temp.path(), "codex", LockMode::Shared)?;
         assert!(matches!(
             acquire(temp.path(), "codex", LockMode::Exclusive),
