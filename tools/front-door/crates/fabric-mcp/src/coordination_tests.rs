@@ -37,6 +37,7 @@ struct FakeFacade;
 struct SubmitFacade {
     fail_first: bool,
     large_wait: bool,
+    expire_run: bool,
     budgets: Vec<u64>,
     reads: Vec<u64>,
 }
@@ -73,6 +74,9 @@ impl F3Facade for SubmitFacade {
     ) -> Result<Value, FacadeError> {
         self.budgets
             .push(budget.remaining(MonoTime::from_micros(0)).as_micros());
+        if self.expire_run {
+            return Err(FacadeError::Timeout);
+        }
         Ok(
             json!({"timed_out":false, "padding": if self.large_wait { "x".repeat(5000) } else { String::new() }}),
         )
@@ -127,6 +131,7 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
     let facade = SubmitFacade {
         fail_first: true,
         large_wait: false,
+        expire_run: false,
         budgets: vec![],
         reads: vec![],
     };
@@ -185,6 +190,46 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
     assert!(response["continuation"].as_str().is_some());
     Ok(())
 }
+
+#[test]
+fn wait_that_expires_before_observation_reports_timed_out() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.join("state"));
+    let root = inputs.resolve(&Resolver)?.state;
+    let clock = TestClock::new(
+        WallTime::from_micros(2_000_000_000_000_000)?,
+        MonoTime::from_micros(0),
+    );
+    let coordination = CoordinationService::open(
+        &root,
+        ProjectId::from_bytes([1; 16]),
+        ActorId::from_bytes([2; 16]),
+        &clock,
+        &ThreadPause,
+        &CancelToken::new(),
+    )?;
+    let facade = SubmitFacade {
+        fail_first: false,
+        large_wait: false,
+        expire_run: true,
+        budgets: vec![],
+        reads: vec![],
+    };
+    let mut service = Service::new(coordination, facade, &clock);
+    let response = ToolCall::parse("fabric_run", json!({"op":"wait","targets":[{"attempt":"11111111111111111111111111111111"}],"condition":"all","wait_seconds":1}))?
+        .execute(&mut service, &CancelToken::new())?
+        .structured_content;
+    assert_eq!(response["timed_out"], true, "{response}");
+    assert_eq!(response["satisfied"], false, "{response}");
+    assert_eq!(
+        response["observation_error"]["code"], "timeout",
+        "{response}"
+    );
+    Ok(())
+}
+
 impl F3Facade for FakeFacade {
     type Identity = Fact;
     type Submit = Fact;
