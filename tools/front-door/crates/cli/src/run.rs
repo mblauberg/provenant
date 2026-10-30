@@ -618,7 +618,7 @@ fn assess_settlement_retry(
     if !(capacity || quota) || config.settlement_retries == 0 || policy_attempt >= max_attempts {
         return Default::default();
     }
-    let writes = task.writer.is_some() || !task.access.write_roots.is_empty();
+    let writes = run::Service::has_writes(task.writer.is_some(), &task.access.write_roots);
     let applied = || {
         Some(run::RequestedRoute::Model {
             extra: Default::default(),
@@ -1134,7 +1134,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
     };
     Ok(provenant_routing::RouteRequest {
         intent: provenant_routing::RouteIntent {
-            writes: task.writer.is_some() || !task.access.write_roots.is_empty(),
+            writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
             workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
                 provenant_routing::Workload::Review
             } else {
@@ -1448,8 +1448,8 @@ fn network_access(switch: Option<Switch>, postgres: bool) -> Option<run::Network
 }
 
 /// Resolve dispatch access flags into the sealed record. Roots must be
-/// existing directories, stored canonically, and clear of the state root;
-/// the confinement compiler refuses credential, broad and Git roots.
+/// existing directories, stored canonically, and clear of credential and state
+/// roots; the confinement compiler also checks broad and Git roots.
 pub fn lane_access(access: &crate::Access, state_root: &Path) -> Result<run::LaneAccess, Fail> {
     lane_access_checked(access, state_root)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))
@@ -1465,6 +1465,8 @@ enum AccessError {
     MissingDirectory { flag: &'static str, path: PathBuf },
     #[error("{flag} {} overlaps the Provenant state root", path.display())]
     StateOverlap { flag: &'static str, path: PathBuf },
+    #[error("credential root requires a selected fixture-backed mechanism")]
+    CredentialRoot,
     #[error("--write-root {} overlaps the --worktree; worktree-write already grants the worktree", .0.display())]
     WorktreeOverlap(PathBuf),
 }
@@ -1497,6 +1499,9 @@ fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
+                if provenant_confinement::is_credential_root(&canonical) {
+                    return Err(AccessError::CredentialRoot);
+                }
                 if !run::access_root_allowed(&canonical, &state, flag == "--read-root") {
                     return Err(AccessError::StateOverlap {
                         flag,
@@ -2642,9 +2647,22 @@ fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> {
         _ => Ok(()),
     }
 }
+#[cfg(test)]
 pub(crate) fn check_flag_capabilities(
     command: &Dispatch,
     roots: Option<&Roots>,
+) -> Result<(), Fail> {
+    let has_writes = run::Service::has_writes(
+        matches!(command.access.mode(), Mode::WorktreeWrite),
+        &command.access.write_root,
+    );
+    check_flag_capabilities_with_writes(command, roots, has_writes)
+}
+
+fn check_flag_capabilities_with_writes(
+    command: &Dispatch,
+    roots: Option<&Roots>,
+    has_writes: bool,
 ) -> Result<(), Fail> {
     let route = requested(
         command.route.model.as_ref().map(|m| m.0.as_str()),
@@ -2657,7 +2675,6 @@ pub(crate) fn check_flag_capabilities(
         .iter()
         .any(|name| name == "postgres");
     let flag_network = network_access(command.access.network, postgres);
-    let write = matches!(command.access.mode(), Mode::WorktreeWrite);
     let check = |provider: &str,
                  model: Option<&str>,
                  effort: Option<&str>,
@@ -2670,7 +2687,7 @@ pub(crate) fn check_flag_capabilities(
             effort,
             resume: false,
             network,
-            write,
+            write: has_writes,
         })
         .map_err(refused)
     };
@@ -2771,7 +2788,13 @@ fn dispatch_inner(
             "coordination mutations are not allowed inside a lane",
         ));
     }
-    check_flag_capabilities(&command, Some(edge.roots))?;
+    // Validate roots before checking the capabilities they request.
+    let mut lane_access = lane_access(&command.access, edge.roots.state.as_path())?;
+    let has_writes = run::Service::has_writes(
+        matches!(command.access.mode(), Mode::WorktreeWrite),
+        &lane_access.write_roots,
+    );
+    check_flag_capabilities_with_writes(&command, Some(edge.roots), has_writes)?;
     // Preflight. An owned worktree is the first side effect, so every check
     // that does not depend on the tree runs before it and a refusal leaves
     // no tree behind.
@@ -2819,8 +2842,6 @@ fn dispatch_inner(
             format!("{what} is not available in this build"),
         ))
     };
-    // An owned tree's write-root overlap is checked again once it exists.
-    let mut lane_access = lane_access(&command.access, edge.roots.state.as_path())?;
     let postgres = command
         .access
         .capability
@@ -12263,6 +12284,80 @@ mod tests {
         assert_eq!(data["lanes"][0]["reason"], json!(reason));
         Ok(())
     }
+    #[test]
+    fn explicit_write_root_is_checked_at_preflight_and_routing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("safe");
+        std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(root)?;
+        let parse = |flag: &str, route: &str| {
+            let args = [
+                "run",
+                "--prompt-stdin",
+                "--mode",
+                "read-only",
+                "--write-root",
+                root.to_str().unwrap(),
+                flag,
+                route,
+            ];
+            match crate::parse(args.into_iter().map(std::ffi::OsString::from)) {
+                crate::ParseOutcome::Invocation(inv) => match inv.command {
+                    crate::Command::Run(request) => request,
+                    _ => panic!("expected run"),
+                },
+                other => panic!("{other:?}"),
+            }
+        };
+        let command = parse("--route", "command/fmt");
+        let access =
+            lane_access(&command.access, &temp.path().join("state")).map_err(|e| e.message)?;
+        assert_eq!(access.write_roots, vec![root.clone()]);
+        let fail = check_flag_capabilities(&command, None).unwrap_err();
+        assert_eq!(fail.kind.code(), "UNSUPPORTED");
+        assert_eq!(fail.message, "command does not support write");
+        let command = parse("--model", "codex/gpt-6-luna");
+        check_flag_capabilities(&command, None).map_err(|e| e.message)?;
+        let mut task = trace_run(
+            1,
+            AttemptId::from_bytes([3; 16]),
+            WallTime::from_micros(100)?,
+        )?
+        .request
+        .tasks
+        .remove(0);
+        task.route = requested(Some("codex/gpt-6-luna"), None, None).map_err(|e| e.message)?;
+        task.access = access;
+        assert!(task.writer.is_none());
+        assert!(route_request(&task)?.intent.writes);
+        Ok(())
+    }
+
+    #[test]
+    fn lane_access_refuses_credential_roots() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join(".ssh").join("nested");
+        std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(root)?;
+        for read in [true, false] {
+            let access = crate::Access {
+                mode: Some(Mode::ReadOnly),
+                worktree: None,
+                read_root: if read { vec![root.clone()] } else { vec![] },
+                write_root: if read { vec![] } else { vec![root.clone()] },
+                network: None,
+                capability: vec![],
+            };
+            let fail = lane_access(&access, &temp.path().join("state")).unwrap_err();
+            assert_eq!(
+                fail.message,
+                provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

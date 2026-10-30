@@ -457,6 +457,20 @@ fn child_access_within(
                     && access_root_allowed(canonical, &state, read)
             })
     };
+    for root in child
+        .access
+        .read_roots
+        .iter()
+        .chain(&child.access.write_roots)
+    {
+        if provenant_os::fs::canonicalize(root)
+            .is_ok_and(|path| provenant_confinement::is_credential_root(&path))
+        {
+            return Err(RunError::Validation(
+                "credential root requires a selected fixture-backed mechanism",
+            ));
+        }
+    }
     let writes: Vec<PathBuf> = parent
         .access
         .write_roots
@@ -487,6 +501,28 @@ fn child_access_within(
 #[cfg(test)]
 mod release_root_tests {
     use super::*;
+
+    #[test]
+    fn child_refuses_credential_roots() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join(".ssh").join("nested");
+        std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(root)?;
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.read_roots = vec![root.clone()];
+        parent.access.write_roots = vec![root.clone()];
+        for read in [true, false] {
+            let mut child = parent.clone();
+            child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
+            child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
+            let error =
+                child_access_within(&parent, &child, &temp.path().join("state")).unwrap_err();
+            assert!(error.to_string().contains(
+                &provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
+            ));
+        }
+        Ok(())
+    }
 
     #[test]
     fn child_inherits_only_release_read_roots()
