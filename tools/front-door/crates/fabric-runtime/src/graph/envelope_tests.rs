@@ -261,6 +261,16 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 state: NodeState::Succeeded,
                 advance_error: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
                 advance_error_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
+                launch_retry: (!boundary
+                    && node.composite.is_none()
+                    && node.decide.is_none()
+                    && node.land.is_none())
+                .then(|| LaunchRetry {
+                    extra: Default::default(),
+                    failures: u8::MAX,
+                    wake_at: Some(envelope::latest()),
+                    reason: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
+                }),
                 loop_pause_code: node.loop_body.as_ref().map(|_| "c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 outputs: Some(if boundary {
                     gate_outputs(false)

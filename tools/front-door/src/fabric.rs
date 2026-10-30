@@ -5957,6 +5957,23 @@ pub fn graph(
     })();
     match result {
         Ok(data) => {
+            // Only the launching commands answer for a blocked launch; status
+            // and cancel report it as ordinary graph state.
+            let launching = matches!(command, "fabric graph run" | "fabric graph resume");
+            let refused = data.checkpoint.nodes.iter().find_map(|node| {
+                (node.advance_error_code.as_deref() == Some("launch_refused"))
+                    .then_some(node.advance_error.as_deref())
+                    .flatten()
+            });
+            if let Some(reason) = refused.filter(|_| launching) {
+                return crate::fail(
+                    command,
+                    provenant_records::Outcome::Refused,
+                    "dispatch_refused",
+                    reason,
+                    globals,
+                );
+            }
             let human = graph_human(&data);
             crate::emit(
                 &provenant_records::CommandResult::new(

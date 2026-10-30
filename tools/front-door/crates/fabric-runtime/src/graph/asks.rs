@@ -5,8 +5,9 @@
 //! several can be open at once. The checkpoint stores the rendered ask, so a
 //! replay sends the identical request, and it records the answer and who gave
 //! it, or the default taken at the deadline. `wake_at` on the checkpoint is
-//! the earliest open deadline, for a host tick; until one exists, every
-//! advance checks the deadline itself.
+//! the earliest open deadline, for a host tick; running CI gates and nodes
+//! waiting on a bounded launch retry also owe the tick a wake. Until one
+//! exists, every advance checks the deadline itself.
 use super::*;
 use provenant_core::{DurationMicros, WallTime};
 
@@ -391,6 +392,15 @@ fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
                     let ci = node.ci.as_ref().and_then(|ci| ci.wake_at);
                     ci.or_else(|| node.land.as_ref().and_then(|land| land.wake_at))
                 }),
+        )
+        // A node waiting on its own bounded launch retry also owes the tick a
+        // wake.
+        .chain(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.state == NodeState::Running)
+                .filter_map(|node| node.launch_retry.as_ref().and_then(|retry| retry.wake_at)),
         )
         .min()
 }
