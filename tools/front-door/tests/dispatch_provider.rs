@@ -328,7 +328,7 @@ fn policy_codex_fixture() -> Result<TestRig> {
     Ok(rig)
 }
 /// `settled` is the exit `run` gives when the whole retry chain settles
-/// inside its own wait; otherwise it times out (124) and `lanes` waits on.
+/// inside its own wait; otherwise it returns `waiting` (0) and `lanes` waits on.
 /// Which one happens depends on host speed, so both are accepted. A wait that
 /// starts while a successor is still pending counts only that successor, so
 /// once the chain has settled the run is read again: a wholly settled named
@@ -339,7 +339,7 @@ fn settled_policy_lanes(
     settled: i64,
 ) -> Result<Value> {
     assert!(
-        code(&output) == settled || code(&output) == 124,
+        code(&output) == settled || code(&output) == 0,
         "{output:?}"
     );
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -1228,7 +1228,7 @@ fn codex_dispatch_observes_rollout() -> Result {
                 "--wait",
                 "1s",
             ])?;
-            assert_eq!(code(&slow), 124, "{slow:?}");
+            assert_eq!(code(&slow), 0, "{slow:?}");
             let text = String::from_utf8(slow.stdout.bytes)?;
             let id = text
                 .lines()
