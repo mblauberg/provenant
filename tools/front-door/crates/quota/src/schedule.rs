@@ -74,7 +74,7 @@ pub fn next_due(
         return Ok(None);
     };
     let event_auth_retry = record.auth_retry_pending
-        || (trigger == Trigger::Manual && record.last_error == Some(ProbeFailure::Auth));
+        || (trigger == Trigger::Manual && record.last_error.is_some_and(ProbeFailure::needs_login));
     let mut due = match record.last_attempt_unix_seconds {
         Some(at) if !event_auth_retry && record.last_error != Some(ProbeFailure::Network) => {
             add(at, ttl)?
@@ -107,7 +107,7 @@ pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option
             .delay(failures.saturating_sub(1))
             .as_secs()
         }
-        ProbeFailure::Auth => 900,
+        ProbeFailure::Auth | ProbeFailure::AccountMismatch => 900,
         ProbeFailure::MissingCli | ProbeFailure::Disabled => 86400,
         ProbeFailure::Malformed | ProbeFailure::ProbeDirectory => 120,
     };
@@ -206,11 +206,15 @@ pub fn complete(
             next.backoff_until_unix_seconds = None;
         }
         Err(failure) => {
-            if failure == ProbeFailure::Auth {
+            if failure.needs_login() {
                 next.auth_verified_unix_seconds = None;
             }
             next.failures = next.failures.saturating_add(1);
-            next.last_error = Some(failure);
+            // A later failed probe cannot establish that the registered
+            // identity matches again.
+            if current.last_error != Some(ProbeFailure::AccountMismatch) {
+                next.last_error = Some(failure);
+            }
             next.backoff_until_unix_seconds = Some(add(
                 now,
                 backoff(failure, next.failures, retry_after_seconds),
@@ -303,7 +307,7 @@ pub fn plan_tick_with_settings(
                     && d.accounts.as_ref().is_some_and(|a| a.len() == 1)
                     && !records.iter().any(|record| {
                         (record.auth_retry_pending
-                            || record.last_error == Some(ProbeFailure::Auth)
+                            || record.last_error.is_some_and(ProbeFailure::needs_login)
                             || record.auth_verified_unix_seconds.is_some())
                                 && d.accounts.as_ref().is_some_and(|accounts| {
                                     accounts.iter().any(|account| {
@@ -416,7 +420,7 @@ pub fn report(
         let age = record.snapshot.as_ref().map(|s| {
             u64::try_from(now.saturating_sub(s.observed_unix_seconds).max(0)).unwrap_or(u64::MAX)
         });
-        let auth_required = record.last_error == Some(ProbeFailure::Auth)
+        let auth_required = record.last_error.is_some_and(ProbeFailure::needs_login)
             || (!record
                 .auth_verified_unix_seconds
                 .is_some_and(|at| at <= now && now.saturating_sub(at) < 900)
@@ -915,6 +919,93 @@ mod tests {
         assert_eq!(row.error, Some(ProbeFailure::Auth));
         assert_eq!(row.snapshot.unwrap().observed_unix_seconds, 50);
         assert!(failed.check(Some(&r)).is_err());
+    }
+    #[test]
+    fn account_mismatch_reports_auth_required_with_its_own_error() {
+        let a = account();
+        let mut r = AccountRecord::empty(a.clone());
+        r.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: a.clone(),
+            revision: 0,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: 50,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![],
+        });
+        let intent = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&r),
+            &a,
+            400,
+            "claim",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap();
+        let current = intent.replacement.unwrap();
+        let failed = complete(
+            &current,
+            "claim",
+            420,
+            Err(ProbeFailure::AccountMismatch),
+            None,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let row = report(
+            crate::source::TEST_POLICIES,
+            std::slice::from_ref(&failed),
+            &[],
+            &QuotaQuery { adapter: None },
+            420,
+            "report.json".into(),
+        )
+        .unwrap()
+        .accounts
+        .remove(0);
+        assert_eq!(row.status, QuotaStatus::AuthRequired);
+        assert_eq!(row.error, Some(ProbeFailure::AccountMismatch));
+        assert_eq!(serde_json::to_value(row.error).unwrap(), "account_mismatch");
+        let claimed = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&failed),
+            &a,
+            2000,
+            "next",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let failed_again = complete(&claimed, "next", 2010, Err(ProbeFailure::Network), None)
+            .unwrap()
+            .replacement
+            .unwrap();
+        assert_eq!(failed_again.last_error, Some(ProbeFailure::AccountMismatch));
+        let claimed = reserve(
+            crate::source::TEST_POLICIES,
+            Some(&failed_again),
+            &a,
+            4000,
+            "verified",
+            Trigger::Manual,
+            Power::Ac,
+        )
+        .unwrap()
+        .replacement
+        .unwrap();
+        let mut snapshot = claimed.snapshot.clone().unwrap();
+        snapshot.observed_unix_seconds = 4000;
+        let verified = complete(&claimed, "verified", 4010, Ok(snapshot), None)
+            .unwrap()
+            .replacement
+            .unwrap();
+        assert_eq!(verified.last_error, None);
     }
 }
 

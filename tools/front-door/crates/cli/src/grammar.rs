@@ -499,6 +499,13 @@ pub enum Config {
         #[arg(long, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=500))]
         limit: u64,
     },
+    /// Rewrite retired routing timing keys to `schedule` in place after a
+    /// timestamped backup, dropping expired pacing overrides.
+    Migrate {
+        /// Report what would change without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Set `profile` (balanced, economy or rigorous) or a registry knob such
     /// as `lanes.max_concurrency`.
     Set {

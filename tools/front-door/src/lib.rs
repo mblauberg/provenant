@@ -432,6 +432,9 @@ enum ConfigAction<'a> {
         since: Option<jiff::Timestamp>,
         limit: usize,
     },
+    Migrate {
+        dry_run: bool,
+    },
 }
 fn read_patch(path: &std::path::Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     use std::io::Read;
@@ -493,6 +496,9 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
             }
             ConfigAction::History { since, limit } => {
                 serde_json::json!({ "entries": config::history(&roots, since, limit)? })
+            }
+            ConfigAction::Migrate { dry_run } => {
+                serde_json::to_value(config::migrate(&roots, sections, dry_run)?)?
             }
         })
     })();
@@ -793,26 +799,35 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Internal(provenant_cli::Internal::Settle { request }) => {
             // Recovery commits terminal state without a live guardian, so it
             // drains the settlement reactions itself.
-            let drained = provenant_run::settlement::ResumeRequest::parse(&request).map(|parsed| {
-                settlement::Subject {
+            let result = (|| -> Result<(), String> {
+                let parsed = provenant_run::settlement::ResumeRequest::parse(&request)
+                    .map_err(|error| error.to_string())?;
+                let mut inputs = provenant_core::RootInputs::new(
+                    parsed.roots().home.clone(),
+                    parsed.roots().checkout.clone(),
+                );
+                inputs.state_dir = Some(parsed.roots().state_root.clone());
+                let roots = inputs
+                    .resolve(&provenant_os::fs::SystemPathResolver)
+                    .map_err(|error| error.to_string())?;
+                let subject = settlement::Subject {
                     home: parsed.roots().home.clone(),
                     checkout: parsed.roots().checkout.clone(),
                     state_root: parsed.roots().state_root.clone(),
                     project: parsed.project(),
                     actor: parsed.actor(),
                     run: parsed.run(),
-                }
-            });
-            match provenant_run::settlement::resume(
-                &request,
-                &provenant_cli::run::Registry::default(),
-            )
-            .map_err(|error| error.to_string())
-            .and_then(|()| {
-                let subject = drained.map_err(|error| error.to_string())?;
+                };
+                let registry = provenant_cli::run::Registry {
+                    roots: Some(&roots),
+                    ..Default::default()
+                };
+                provenant_run::settlement::resume(&request, &registry)
+                    .map_err(|error| error.to_string())?;
                 fabric::settlement_reactions(&subject, None, process.workers())
                     .map_err(|error| error.to_string())
-            }) {
+            })();
+            match result {
                 Ok(()) => 0,
                 Err(error) => fail(&inv.leaf, Outcome::Error, "SETTLEMENT", &error, globals),
             }
@@ -880,6 +895,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             },
             globals,
         ),
+        Command::Config(provenant_cli::Config::Migrate { dry_run }) => {
+            config_command("config migrate", ConfigAction::Migrate { dry_run }, globals)
+        }
         Command::Config(provenant_cli::Config::Set { name, value }) => config_command(
             "config set",
             ConfigAction::Edit(if name == "profile" {

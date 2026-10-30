@@ -101,6 +101,106 @@ mod tests {
         );
     }
 
+    const RETIRED: &str = "\
+schema_version = 1
+# keep this comment
+[domains.routing]
+pacing_overrides = [
+  # far future
+  { provider = \"codex\", policy = \"pace\", expires_unix_seconds = 4102444800 },
+  { provider = \"claude\", policy = \"pace\", expires_unix_seconds = 100 },
+]
+
+[[domains.routing.model_policy.rules]]
+model = \"agy/gemini-3.8-flash\"
+starts_unix_seconds = 1700000000
+windows = [{ weekdays = [0], start_hour = 1, end_hour = 4 }]
+[domains.routing.model_policy.rules.policy.lane]
+read_only = true
+";
+
+    fn write_config(roots: &Roots, text: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        let path = roots.state.as_path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn retired_keys_block_writes_until_config_migrate_rewrites_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let path = write_config(&roots, RETIRED);
+        // The refusal names the repair.
+        let error = edit(&roots, json!({"domains.quota.max_parallel": 4}))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("moved_to_schedule"), "{error}");
+        assert!(error.contains("provenant config migrate"), "{error}");
+
+        // A dry run reports and writes nothing.
+        let preview = provenant_config::migrate(&roots, &SECTIONS, true).unwrap();
+        assert!(preview.dry_run && preview.backup.is_none());
+        assert_eq!(preview.migrations.len(), 3);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), RETIRED);
+
+        let report = provenant_config::migrate(&roots, &SECTIONS, false).unwrap();
+        let backup = report.backup.clone().unwrap();
+        assert!(backup.starts_with("config.toml.bak-"), "{backup}");
+        assert_eq!(
+            std::fs::read_to_string(roots.state.as_path().join(&backup)).unwrap(),
+            RETIRED
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("# keep this comment"), "{after}");
+        assert!(after.contains("# far future"), "{after}");
+        assert!(after.contains("schedule"), "{after}");
+        assert!(after.contains("2100-01-01T00:00:00Z"), "{after}");
+        assert!(after.contains("2023-11-14T22:13:20Z"), "{after}");
+        assert!(!after.contains("unix_seconds"), "{after}");
+        assert!(
+            !after.contains("claude"),
+            "expired override is dropped: {after}"
+        );
+        assert!(after.contains("codex"), "{after}");
+        assert!(after.contains("weekdays"), "{after}");
+
+        // The migrated file loads cleanly and accepts writes again.
+        let edited = edit(&roots, json!({"domains.quota.max_parallel": 4})).unwrap();
+        assert_eq!(edited.config.domains.quota.max_parallel, 4);
+        let rules = &edited.config.domains.routing.model_policy.rules;
+        assert_eq!(rules[0].schedule.windows.len(), 1);
+        assert_eq!(edited.config.domains.routing.pacing_overrides.len(), 1);
+
+        // Nothing left to migrate: no backup, no change.
+        let again = provenant_config::migrate(&roots, &SECTIONS, false).unwrap();
+        assert!(again.migrations.is_empty() && again.backup.is_none());
+    }
+
+    #[test]
+    fn migrate_refuses_a_conflicting_schedule_and_changes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let text = "schema_version = 1\n[domains.routing]\npacing_overrides = [{ provider = \"codex\", policy = \"pace\", expires_unix_seconds = 4102444800, schedule = { expires = \"2100-01-01T00:00:00Z\" } }]\n";
+        let path = write_config(&roots, text);
+        let error = provenant_config::migrate(&roots, &SECTIONS, false)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("schedule.expires"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert!(
+            std::fs::read_dir(roots.state.as_path())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".bak-"))
+        );
+    }
+
     #[test]
     fn calibration_entry_is_created_by_one_patch() {
         let temp = tempfile::tempdir().unwrap();

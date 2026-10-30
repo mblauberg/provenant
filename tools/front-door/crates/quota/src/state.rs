@@ -254,10 +254,19 @@ pub enum ProbeFailure {
     Network,
     RateLimited,
     Auth,
+    /// The CLI is signed in as a different account than the registered key.
+    AccountMismatch,
     MissingCli,
     ProbeDirectory,
     Disabled,
     Malformed,
+}
+impl ProbeFailure {
+    /// Failures only a login or re-registration repairs; the account is
+    /// reported as `auth_required` until then.
+    pub fn needs_login(self) -> bool {
+        matches!(self, Self::Auth | Self::AccountMismatch)
+    }
 }
 
 /// A compare-and-swap intent. The edge locks, re-reads, checks and publishes;

@@ -131,6 +131,9 @@ impl Admission<'_> {
             .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
         if let Some(r) = record {
             r.validate()?;
+            if r.last_error == Some(ProbeFailure::AccountMismatch) {
+                return Err(QuotaError::Refused("account mismatch; re-register"));
+            }
         }
         let free = free_pool(&route.adapter);
         // Only the adapter's own keyless free pool spans models.
@@ -445,6 +448,31 @@ mod admission_tests {
             }],
         });
         record
+    }
+    #[test]
+    fn account_mismatch_blocks_until_identity_verifies_again() {
+        let mut record = record(QuotaStatus::Available);
+        record.snapshot.as_mut().unwrap().windows.clear();
+        record.last_error = Some(ProbeFailure::AccountMismatch);
+        let check = |record: &AccountRecord, now| {
+            Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: now,
+                records: std::slice::from_ref(record),
+                pools: &[],
+            }
+            .check(&route())
+        };
+        assert!(matches!(
+            check(&record, 1000),
+            Err(QuotaError::Refused("account mismatch; re-register"))
+        ));
+        assert!(matches!(
+            check(&record, 9000),
+            Err(QuotaError::Refused("account mismatch; re-register"))
+        ));
+        record.last_error = None;
+        assert!(check(&record, 1000).is_ok());
     }
     #[test]
     fn go_calibration_is_rechecked_before_launch_without_free_pool_bindings() {
