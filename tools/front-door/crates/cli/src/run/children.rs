@@ -962,7 +962,7 @@ mod tests {
                 .state_root
                 .as_path()
                 .join(format!("runs/{}/request.json", admitted.run_id)),
-            serde_json::to_vec(&forged)?,
+            CanonicalV1::bytes(&forged)?.as_bytes(),
         )?;
         let mut record = admitted.clone();
         record.request_digest = forged.digest()?;
