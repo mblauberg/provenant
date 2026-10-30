@@ -21,6 +21,18 @@ pub const DOCTOR_PROTOCOL: u64 = 9;
 pub const CONSOLE_DETAIL_PROTOCOL: u64 = 10;
 pub const MAX_FRAME: usize = 1_048_576;
 
+/// The newest feature protocol level this release speaks. `PROTOCOL` is the
+/// base wire fence shared with every peer release; feature actions negotiate
+/// their own level per call, up to this ceiling. A release that adds a newer
+/// action family includes it here, and `hosts` reports the ceiling beside the
+/// base fence so that the base level cannot read as stale.
+pub fn newest_feature_protocol() -> u64 {
+    CONSOLE_PROTOCOL
+        .max(INBOX_PROTOCOL)
+        .max(DOCTOR_PROTOCOL)
+        .max(CONSOLE_DETAIL_PROTOCOL)
+}
+
 pub fn discover_ssh_executable(
     override_path: Option<&Path>,
 ) -> Result<std::path::PathBuf, PeerError> {
@@ -536,6 +548,10 @@ impl PeerRequest {
 pub struct HostHealth {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<u64>,
+    /// The newest feature level the exchange can negotiate, when the base
+    /// fence matched; feature calls still agree per action above the fence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<u64>,
     pub host: HostId,
     pub available: bool,
     /// Readiness requires the run owner; config presence alone proves nothing.
@@ -1110,6 +1126,15 @@ mod tests {
             decode_recorded_response(&serde_json::to_vec(&response).unwrap()),
             Err(PeerError::Version)
         ));
+    }
+
+    #[test]
+    fn hosts_report_a_feature_ceiling_beside_the_base_fence() {
+        // The base fence stays at 6 so peers on 1.4.2 stay compatible; `hosts`
+        // reports the newest feature level beside it, so 6 cannot read as
+        // stale. A new action family must raise the ceiling it negotiates.
+        assert_eq!(PROTOCOL, 6);
+        assert_eq!(newest_feature_protocol(), CONSOLE_DETAIL_PROTOCOL);
     }
 
     #[test]
@@ -1976,12 +2001,9 @@ mod tests {
         });
         let unprobed = serde_json::from_value::<HostHealth>(health.clone()).unwrap();
         assert_eq!(unprobed.protocol, None);
-        assert!(
-            serde_json::to_value(unprobed)
-                .unwrap()
-                .get("protocol")
-                .is_none()
-        );
+        let unprobed = serde_json::to_value(unprobed).unwrap();
+        assert!(unprobed.get("protocol").is_none());
+        assert!(unprobed.get("features").is_none());
         health["protocol"] = serde_json::json!("2");
         assert!(serde_json::from_value::<HostHealth>(health.clone()).is_err());
         health["protocol"] = serde_json::json!(PROTOCOL);
