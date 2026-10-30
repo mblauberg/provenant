@@ -654,7 +654,7 @@ fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
             "--set",
             "parameters.worktree=\".\"",
             "--set",
-            "parameters.risk_tier=\"high\"",
+            "parameters.risk_tier=\"crucial\"",
         ],
     )?;
     let verify = text
