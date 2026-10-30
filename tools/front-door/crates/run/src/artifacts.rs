@@ -220,6 +220,24 @@ pub(crate) fn artifact_path(attempt: provenant_core::AttemptId, name: &str) -> R
 }
 /// Opens of a sealed name that concurrent replacements may retire in a row.
 const REPLACED_OPENS: usize = 4;
+/// Counts durable reads on the calling thread so tests can prove which record
+/// path a consumer takes without relying on timing.
+#[cfg(test)]
+pub(crate) mod sync_probe {
+    use std::cell::Cell;
+    thread_local! {
+        static DURABLE_SYNCS: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(crate) fn reset() {
+        DURABLE_SYNCS.with(|count| count.set(0));
+    }
+    pub(crate) fn count() -> usize {
+        DURABLE_SYNCS.with(Cell::get)
+    }
+    pub(crate) fn record() {
+        DURABLE_SYNCS.with(|count| count.set(count.get() + 1));
+    }
+}
 pub(crate) fn read_sealed(dir: &Directory, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
     read_sealed_observing(dir, name, limit, || {})
 }
@@ -285,6 +303,8 @@ fn read_sealed_with(
         if durable {
             file.sync()?;
             dir.sync()?;
+            #[cfg(test)]
+            sync_probe::record();
         }
         return Ok(Some(bytes));
     }
