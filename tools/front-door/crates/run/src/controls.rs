@@ -2154,6 +2154,12 @@ impl RunStore {
         let fences = match self.writer_fences() {
             Ok(fences) => fences,
             Err(error) => {
+                for id in self.pending_reactions(run, call)? {
+                    let id = id.to_string();
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
                 let mut found = Vec::new();
                 for id in ids {
                     let id = AttemptId::parse(&id)

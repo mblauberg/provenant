@@ -1542,12 +1542,18 @@ mod writer_recovery_tests {
                     "launch interrupted: provider never spawned; private evidence retained",
                     &call,
                 )?;
-                store.reconcile(run.run_id, &crate::dispatch_tests::Fake::default(), &call)?;
+                let mut spawned = false;
+                store.queue_reconcile_with(run.run_id, &call, |argv, _| {
+                    assert_eq!(argv[1..3], ["internal", "settle"]);
+                    spawned = true;
+                    Ok(())
+                })?;
+                assert!(spawned, "{mode}: reconcile must queue recovery");
                 let queued = store.run_dir(run.run_id, false)?;
                 assert!(
                     crate::artifacts::read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
                         .is_some(),
-                    "{mode}: public reconcile must queue recovery"
+                    "{mode}: reconcile must queue recovery"
                 );
                 if mode == "no_summary_terminal_other_generation" {
                     continue;
