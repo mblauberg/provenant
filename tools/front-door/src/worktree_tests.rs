@@ -3200,6 +3200,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
             frames.as_bytes(),
             &config,
             &parent_context,
+            native_shell_probe_case(adapter, writer, publishing),
         )
         .map_err(|e| format!("confined {adapter} writer={writer}: {e}"))?;
     }
@@ -3356,6 +3357,14 @@ pub(crate) fn lane_provider() -> Result {
     Ok(())
 }
 
+/// Only the narrowest Claude profile that actually grants a shell can run the
+/// native cargo probe: read-only Claude has neither a worktree write nor cargo
+/// on PATH, so its probe would test a profile that cannot build. A successful
+/// confined build for a non-publishing writer covers the wider publishing row.
+fn native_shell_probe_case(adapter: &str, writer: bool, publishing: bool) -> bool {
+    adapter == "claude" && writer && !publishing
+}
+
 fn verify_lane_profile(
     launch: &mut provenant_run::PreparedLaunch,
     attempt: &Path,
@@ -3363,6 +3372,7 @@ fn verify_lane_profile(
     frames: &[u8],
     config: &dyn Fn(u8) -> String,
     parent: &provenant_run::HolderContext,
+    native_shell_probe: bool,
 ) -> Result {
     use provenant_confinement::permissions::{
         AccessMode, AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
@@ -3450,12 +3460,10 @@ fn verify_lane_profile(
         &parent.encode()?,
         &provenant_os::fs::Directory::open_anchor(attempt)?,
     )?;
-    let shell_writer = launch
-        .argv
-        .iter()
-        .any(|arg| arg == "Read,Grep,Glob,Edit,Write,Bash");
     // Native shell proof, separate from live provider/Bash/token-scrub proof.
-    if cfg!(target_os = "macos") && shell_writer {
+    // Read-only Claude has no cargo on PATH, so the narrowest probe-capable
+    // profile is a non-publishing writer.
+    if cfg!(target_os = "macos") && native_shell_probe {
         let scratch = &confinement.plan.permissions().scratch.path;
         let project = scratch.join("cargo-probe");
         fs::create_dir_all(project.join("src"))?;
@@ -4688,4 +4696,16 @@ fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
         2
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod predicate_tests {
+    #[test]
+    fn only_the_narrowest_probe_capable_claude_case_runs_the_native_shell_probe() {
+        assert!(super::native_shell_probe_case("claude", true, false));
+        assert!(!super::native_shell_probe_case("claude", false, false));
+        assert!(!super::native_shell_probe_case("claude", true, true));
+        assert!(!super::native_shell_probe_case("codex", true, false));
+        assert!(!super::native_shell_probe_case("codex", true, true));
+    }
 }

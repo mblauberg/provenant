@@ -1028,7 +1028,8 @@ fn terminal_retries_wait_until_the_holder_can_publish() {
     let elapsed = Cell::new(Duration::ZERO);
     let attempts = RefCell::new(Vec::new());
     let delays = RefCell::new(Vec::new());
-    assert!(retry_terminal(
+    assert!(retry_terminal_with(
+        PRODUCTION_TERMINAL_RETRY_MS,
         || {
             attempts.borrow_mut().push(elapsed.get());
             elapsed.get() >= Duration::from_secs(35)
@@ -1057,7 +1058,8 @@ fn terminal_retry_exhaustion_keeps_the_failure_bounded() {
     use std::cell::{Cell, RefCell};
     let attempts = Cell::new(0);
     let delays = RefCell::new(Vec::new());
-    assert!(!retry_terminal(
+    assert!(!retry_terminal_with(
+        PRODUCTION_TERMINAL_RETRY_MS,
         || {
             attempts.set(attempts.get() + 1);
             false
@@ -1307,6 +1309,37 @@ fn admission_configuration_and_guardian_failures_are_named() {
         super::AdmissionError::GuardianIdentity,
     ));
     assert!(guardian.contains("guardian process identity unavailable"));
+}
+
+#[test]
+fn production_terminal_retry_schedule_is_unchanged() {
+    assert_eq!(
+        PRODUCTION_TERMINAL_RETRY_MS,
+        [0, 5_000, 30_000, 120_000],
+        "production must keep its claim backoff"
+    );
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn fixture_terminal_retry_is_short_and_injected() {
+    assert_eq!(TERMINAL_RETRY_MS, [0, 50, 250, 1_000]);
+    let mut attempts = 0;
+    let mut waits = Vec::new();
+    let settled = retry_terminal(
+        || {
+            attempts += 1;
+            attempts == 2
+        },
+        |delay| waits.push(delay),
+    );
+    assert!(settled);
+    assert_eq!(attempts, 2, "terminal is retried exactly once more");
+    assert_eq!(
+        waits,
+        [Duration::from_millis(50)],
+        "fixture waits are injected, not slept"
+    );
 }
 
 #[test]
