@@ -498,7 +498,7 @@ ssh_executable = "/opt/homebrew/bin/ssh" # optional; empty selects system discov
 [domains.fabric.peers.workshop]
 host = "<peer host ID from fabric identity>"
 destination = "workshop"
-remote_executable = "/Users/user/.cargo/bin/provenant" # optional
+remote_executable = "/Users/alice/.cargo/bin/provenant" # optional
 connect_timeout_seconds = 10
 ```
 
