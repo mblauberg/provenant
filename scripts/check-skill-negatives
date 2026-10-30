@@ -3,7 +3,7 @@
 
 The strict trigger fixture format expresses should_trigger: false as
 relation: negative, tagged near-miss, with the target absent from both
-expected routes.
+expected routes. Checks skills/ and library/ unless root directories are given.
 """
 
 import argparse
@@ -14,15 +14,18 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    repo = Path(__file__).resolve().parent.parent
     parser.add_argument(
-        "skills", nargs="?", type=Path,
-        default=Path(__file__).resolve().parent.parent / "skills",
+        "roots", nargs="*", type=Path,
+        default=[repo / "skills", repo / "library"],
     )
-    root = parser.parse_args().skills
-    skills = sorted(root.glob("*/SKILL.md"))
+    skills = []
     failures = []
-    if not skills:
-        failures.append(f"{root}: no skills found")
+    for root in parser.parse_args().roots:
+        found = sorted(root.glob("*/SKILL.md"))
+        if not found:
+            failures.append(f"{root}: no skills found")
+        skills.extend(found)
     for entrypoint in skills:
         skill = entrypoint.parent.name
         fixture = entrypoint.parent / "evals/trigger_cases.json"

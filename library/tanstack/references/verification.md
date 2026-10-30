@@ -1,5 +1,7 @@
 # Query and table verification
 
+Version-sensitive guidance last checked 22 October 2026; verify against the installed package.
+
 Table tests render the component and assert on rows, header sort state and
 selection, not on `table` internals. Tests get a fresh `QueryClient` with
 `retry: false` and go through the public hook or component.

@@ -4,10 +4,20 @@ Owner: `crates/fabric-runtime`, `crates/cli`, `crates/fabric-mcp`
 Anchor: `tests/inbox.rs`, `crates/fabric-runtime/src/inbox/tests.rs`
 
 Use the inbox from a chair or a human-controlled session, with both apps closed.
-The records use the same project binding as Fabric. Worker lanes cannot mutate
-the inbox. List, show and answer also support configured peer owners; delivery uses the owner’s local Fabric mail.
+The records use the same project binding as Fabric. Worker lanes cannot post,
+answer, close or acknowledge requests; bounded viewer presentation updates are
+available through `provenant chair viewer set-request`. List, show and answer
+also support configured peer owners; delivery uses the owner’s local Fabric mail.
 The complete console specification and remaining delivery scope live in
 [#1968](https://github.com/mblauberg/provenant/issues/1968).
+
+## Decisions during continuing work
+
+The `session` skill owns mission continuation. Post unresolved one-way-door
+choices with a recommended option and the affected branch of work. Park that
+branch while independent authorised work continues. Reversible assumptions
+stay within the existing envelope. A checkpoint or rebinding does not transfer
+pending answers: preserve the original host, project, session and actor.
 
 ## Post and answer
 

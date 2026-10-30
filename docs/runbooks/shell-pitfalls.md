@@ -27,13 +27,13 @@ clean when the command in fact never ran, or ran on the wrong input.
   empty result looks exactly like a clean search that found nothing, which is
   the opposite of what happened. Always quote a glob passed as a flag value:
   `--include="*.ts"`.
-- **The last element of a compound command reports its own exit status, not
-  the status of the command whose result you actually want.** `cmd > log 2>&1;
-  echo "rc=$?"` and `cmd 2>&1 | tail -3` both report the exit status of the
-  trailing `echo` or `tail`, which is close to always zero. Capture the target
-  command's own output to a file, check its exit code immediately after it
-  runs, and read the log for the tool's own summary line before reporting a
-  result as green.
+- **A pipeline reports the status of its last command, not the one you
+  care about.** `cmd 2>&1 | tail -3` reports `tail`'s status, which is almost
+  always zero. Either start each shell call with `set -o pipefail` (every
+  harness call is a fresh shell, so it does not persist), or write the
+  command's output to a file and read `$?` straight after it:
+  `cmd >log 2>&1; echo "exit=$?"`. Then read the tool's own summary line
+  before reporting a result as green.
 - **A verification gate run inside a backgrounded command is not verification
   you have read.** Appending a check to a command launched to run in the
   background sends the check's output to that background task's own log

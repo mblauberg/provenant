@@ -1,7 +1,0 @@
-schema_version: 1
-target_skill: work-map
-cases:
-  - {id: lifecycle-work-map-positive, relation: positive, prompt: "Create a curated route linking this multi-session effort's specification and canonical work items without duplicating live task truth.", tags: [lifecycle-alignment, direct], expected: {primary_skill: work-map, companion_skills: []}}
-  - {id: lifecycle-work-map-negative, relation: negative, prompt: "Write the current substantial session handoff before compaction.", tags: [lifecycle-alignment, boundary], expected: {primary_skill: session, companion_skills: []}}
-  - {id: lifecycle-work-map-adjacent, relation: adjacent, prompt: "Orchestrate the multi-run effort while one chair serially curates its stable specification and work-item route links.", tags: [lifecycle-alignment, composition], expected: {primary_skill: orchestrate, companion_skills: [work-map]}}
-  - {id: lifecycle-work-map-portability, relation: portability, prompt: "With Console, Herdr and GitHub unavailable, rebuild the effort route from canonical project artifacts, not live task inference.", tags: [lifecycle-alignment, portable], adapters: {console: absent, herdr: absent, github: absent}, expected: {primary_skill: work-map, companion_skills: []}}

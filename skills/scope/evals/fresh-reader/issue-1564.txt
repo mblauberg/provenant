@@ -1,5 +1,0 @@
-# Run records do not show a lane's effective write grants
-
-A writer's request and attempt records name the worktree but not the effective grants added at launch, such as `[domains.run] writer_writes`, `--write-root` and the private toolchain caches. Answering "could this lane write X?" after the fact means reading the live host config, which may have changed since.
-
-Record the compiled grant set (or its digest plus the list) in `launch.json`, and show it in `provenant lanes --id ... --json`.

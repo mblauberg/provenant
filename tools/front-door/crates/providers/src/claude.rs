@@ -876,7 +876,21 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         } if message.role == "assistant" => {
             let mut events = vec![E::Session(session_id)];
             if error.is_none() && !is_api_error_message && message.model != "<synthetic>" {
-                events.push(E::Model(message.model));
+                let text: String = message
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        Content::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if !text.is_empty() {
+                    events.push(E::AnswerModel {
+                        model: message.model.clone(),
+                        digest: *provenant_records::CanonicalV1::file_digest(text.as_bytes())
+                            .bytes(),
+                    });
+                }
             }
             let failed = error.is_some() || is_api_error_message;
             if failed {
@@ -980,6 +994,60 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
 #[cfg(test)]
 mod overload_tests {
     use super::*;
+
+    #[test]
+    fn final_answer_identifies_its_model_despite_helper_messages() {
+        let run = |answering_model: &str| {
+            let mut stream = StreamState::new("claude", decode);
+            let input = format!(
+                "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"model\":\"helper\",\"content\":[{{\"type\":\"text\",\"text\":\"helper output\"}}]}},\"session_id\":\"s\",\"parent_tool_use_id\":null}}\n{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"model\":\"{answering_model}\",\"content\":[{{\"type\":\"text\",\"text\":\"final answer\"}}]}},\"session_id\":\"s\",\"parent_tool_use_id\":null}}\n{{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"final answer\"}}\n"
+            );
+            stream.observe(input.as_bytes()).unwrap();
+            stream
+                .finish(crate::ExitObservation {
+                    code: Some(0),
+                    timed_out: false,
+                })
+                .unwrap()
+                .model()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(run("requested"), "requested");
+        assert_eq!(run("substitute"), "substitute");
+    }
+
+    #[test]
+    fn recorded_final_answer_preserves_its_model() {
+        let mut stream = StreamState::new("claude", decode);
+        stream
+            .observe(include_bytes!(
+                "../../../tests/fixtures/providers/claude/live-read_only-fresh.jsonl"
+            ))
+            .unwrap();
+        let outcome = stream
+            .finish(crate::ExitObservation {
+                code: Some(0),
+                timed_out: false,
+            })
+            .unwrap();
+        assert_eq!(outcome.model(), Some("claude-haiku-5-5"));
+    }
+
+    #[test]
+    fn resumed_answer_rejects_substitution_after_a_helper() {
+        let mut stream = StreamState::new("claude", decode);
+        stream.bind_identity("s", "requested");
+        let input = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"helper\",\"content\":[{\"type\":\"text\",\"text\":\"helper\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"substitute\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"session_id\":\"s\",\"parent_tool_use_id\":null}\n",
+            "{\"type\":\"result\",\"session_id\":\"s\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"answer\"}\n"
+        );
+        assert!(matches!(
+            stream.observe(input.as_bytes()),
+            Err(ProviderError::IdentityMismatch)
+        ));
+    }
 
     #[test]
     fn result_529_is_typed_overload_with_provider_reason() {

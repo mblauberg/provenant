@@ -1,7 +1,7 @@
 schema_version: 1
-dataset_id: skill-portfolio-routing-holdout-20260719-v6
+dataset_id: skill-portfolio-routing-holdout-20260730-v7
 split: current-catalogue-holdout
-catalogue_owner_count: 25
+catalogue_owner_count: 28
 cases:
   - id: m01
     category: requirements-before-build
@@ -10,13 +10,13 @@ cases:
     expected:
       primary_skill: scope
       required_companion_skills: []
-      allowed_companion_skills: [engineering-docs, engineering-writing, grill-me, prototype]
+      allowed_companion_skills: [engineering-docs, engineering-writing, tracker]
   - id: m02
     category: first-failing-test
     critical: true
     prompt: Write the first failing public-interface test for this behaviour change, then stop at red so the implementation owner can take over.
     expected:
-      primary_skill: tdd
+      primary_skill: test-design
       required_companion_skills: []
       allowed_companion_skills: [implement]
   - id: m03
@@ -26,13 +26,13 @@ cases:
     expected:
       primary_skill: session
       required_companion_skills: []
-      allowed_companion_skills: [work-map]
+      allowed_companion_skills: [tracker]
   - id: m04
     category: effort-continuity
     critical: false
     prompt: This migration spans several sessions and agents. Create the durable effort-level map of completed work, active slice, blockers, ownership, evidence, and next steps.
     expected:
-      primary_skill: work-map
+      primary_skill: tracker
       required_companion_skills: []
       allowed_companion_skills: [orchestrate, session]
   - id: m05
@@ -58,7 +58,7 @@ cases:
     expected:
       primary_skill: refactor
       required_companion_skills: []
-      allowed_companion_skills: [code-review, tdd]
+      allowed_companion_skills: [code-review, test-design]
   - id: m08
     category: ui-read-only-audit
     critical: true
@@ -88,9 +88,9 @@ cases:
     critical: true
     prompt: Launch a durable autonomous mission for this open-ended programme, recover across sessions and crashes, preserve human gates, and keep making progress until I explicitly write STOP.
     expected:
-      primary_skill: autopilot
+      primary_skill: session
       required_companion_skills: []
-      allowed_companion_skills: [deliver, evaluate, orchestrate, session, work-map]
+      allowed_companion_skills: [deliver, evaluate, orchestrate, tracker]
   - id: m13
     category: material-skill-revision
     critical: true
@@ -133,7 +133,7 @@ cases:
     expected:
       primary_skill: implement
       required_companion_skills: [skill-craft]
-      allowed_companion_skills: [code-review, tdd]
+      allowed_companion_skills: [code-review, test-design]
   - id: m17
     category: audit-and-heldout-evaluation
     critical: true

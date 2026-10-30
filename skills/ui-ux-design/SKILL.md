@@ -1,60 +1,22 @@
 ---
 name: ui-ux-design
-description: "Use for UI/UX: read-only review by default (visual, accessibility, responsive, interaction), or design, redesign, and design systems. Pair changes with implement. Source-diff review: code-review."
+description: "Use for UI/UX review, design, design systems and the shadcn on Base UI starter. Review is read-only by default; pair changes with implement. Source review belongs to code-review."
 ---
 
 # UI/UX design
 
-Judge or shape frontend experiences against approved product intent, the
-project's current design owners, and observable UI evidence.
+Start from the approved outcome, existing components and tokens, supported users and actual rendered states. Preserve the existing visual language when the brief calls for it; change it deliberately when the outcome requires it. Read [craft](references/craft.md) for interaction, accessibility and visual proof.
 
-## Review or change
+Review is read-only: inspect source and rendered surfaces without changing project or external state. Store captures and reports outside the reviewed tree. If a browser is unavailable, mark the rendered surface not tested. Use playwright for browser inspection. For a requested change, implement owns delivery; review the rendered result afresh after repair.
 
-**Review** covers critique, audit, comparison, and advice without requested
-source changes. It is read-only. Inspect source and rendered state using
-non-mutating navigation, GETs, and screenshots, with any output or cache outside
-the reviewed project tree. Do not change project or external state. Write only
-an assigned report outside that tree. Load [review](references/review.md).
+Scale proof to the risk and changed surfaces. Choose representative viewports, states and input modes from the criteria. View every capture; screenshots alone do not establish keyboard operation, accessibility conformance or behaviour. Record the evidence path, what was tested and what was not. Separate observed facts from design judgement.
 
-**Design** covers directions and requested UI changes. Advice without source
-changes remains read-only. A request to build, redesign, fix, polish, or
-otherwise change the product uses `implement` as primary and this skill as its
-design companion. Use the existing `playwright` skill for browser inspection
-and the target app's own dev server for preview. When review and changes are
-combined, keep implementation primary and perform a fresh read-only review afterwards. An
-explicit read-only constraint wins; otherwise ambiguous intent defaults to
-review.
+For independent read-only capture lanes, use orchestrate and the `fan-out` preset. Inspect the plan before submission:
 
-## Ground and complete the work
+```sh
+provenant run --preset fan-out --prompt-file brief.md --set 'parameters.width=3' --explain
+```
 
-For design or changes, start with the approved outcome, canonical local
-components and tokens, rendered pixels and states, supported users, and
-viewports. Classify the work as preserve, extend, or overhaul; preserve serves
-the brief by default for an existing product, but never vetoes the stronger
-change a brief asks for. Load
-[reference grounding](references/reference-grounding.md) and
-[design](references/design.md), including its reuse and composition guidance.
+Retained visual prototypes live in the repository and are indexed through engineering-docs. A private Claude artifact can present an authorised prototype; the repository file remains the source. Uploads need authority.
 
-Load only the depth the request needs: [surfaces](references/surfaces.md),
-[visual system](references/visual-system.md), [design systems](references/design-systems.md),
-[interaction and states](references/interaction-states.md),
-[responsive accessibility](references/responsive-accessibility.md),
-[motion](references/motion.md), [content and conversion](references/content-conversion.md),
-[emotional design](references/emotional-design.md), or [visual QA](references/visual-qa.md).
-
-For a change to rendered UI, capture light and dark desktop views of the
-changed surfaces only, adding mobile where layout risk warrants, and look at
-every capture before judging; a capture nobody viewed is not evidence. When a pull request carries the change, a few viewed captures may go on it as optional evidence; never open a follow-up issue just to add captures later. Build an
-owner-facing prototype only for hard-to-describe UI, competing directions or on
-request. While it awaits the owner, continue other work. If it truly blocks,
-lies within granted authority and is not a `HARNESS.md` user gate, the chair
-may decide by council (`orchestrate`) for the owner to confirm later.
-
-Label evidence as `verified` or `judgement`, and each selected lane as `tested`,
-`failed`, `not tested`, or `not applicable`. Deterministic checks and delivery
-acceptance remain with the enclosing implementation lifecycle; design does not
-certify itself.
-
-Reference cases (not run by CI): [boundary](evals/boundary_cases.yaml),
-[craft quality](evals/craft_quality.yaml), and
-[reference disposition](evals/reference_disposition.yaml).
+For a new component system, the [shadcn on Base UI guide](references/shadcn-base-ui.md) and [starter](assets/shadcn-starter/) provide a starting point. Existing project rules and harvest boundaries take precedence.

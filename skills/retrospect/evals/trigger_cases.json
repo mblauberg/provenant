@@ -3,9 +3,9 @@
   "target_skill": "retrospect",
   "cases": [
     {
-      "id": "q208",
+      "id": "q1",
       "relation": "positive",
-      "prompt": "Run an evidence-backed retrospective on this completed delivery and propose regression gates.",
+      "prompt": "Review last week's runs for process changes backed by telemetry and propose gated fixes.",
       "tags": [
         "direct"
       ],
@@ -15,9 +15,9 @@
       }
     },
     {
-      "id": "q209",
+      "id": "q2",
       "relation": "positive",
-      "prompt": "Review the finished agent run for lessons in routing, context, cost, tools, and human rework.",
+      "prompt": "After the incident, work out which gate failed and which regression check would have caught it.",
       "tags": [
         "direct"
       ],
@@ -27,9 +27,9 @@
       }
     },
     {
-      "id": "q210",
+      "id": "q3",
       "relation": "positive",
-      "prompt": "After this completed evaluation, identify supported process improvements and how to verify them next cycle.",
+      "prompt": "Look at how many human corrections the unattended runs needed and propose what to change.",
       "tags": [
         "direct"
       ],
@@ -39,10 +39,24 @@
       }
     },
     {
-      "id": "q211",
+      "id": "q4",
       "relation": "negative",
-      "prompt": "Clean up this session handoff and context before compaction.",
+      "prompt": "Audit this skill's trigger fixtures and tidy its wording.",
       "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "skill-craft",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q5",
+      "relation": "negative",
+      "prompt": "Clean up this session's context and write a handoff.",
+      "tags": [
+        "near-miss",
         "adjacent"
       ],
       "expected": {
@@ -51,73 +65,9 @@
       }
     },
     {
-      "id": "q212",
+      "id": "q6",
       "relation": "negative",
-      "prompt": "Audit this one skill for false triggers and token cost.",
-      "tags": [
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "skill-craft",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q213",
-      "relation": "negative",
-      "prompt": "The active service defect still reproduces; find its root cause now.",
-      "tags": [
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "diagnose",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q214",
-      "relation": "boundary",
-      "prompt": "Retrospect on the completed migration and promote durable lessons into the owned engineering docs.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "retrospect",
-        "companion_skills": [
-          "engineering-docs"
-        ]
-      }
-    },
-    {
-      "id": "q215",
-      "relation": "boundary",
-      "prompt": "Use completed run evidence to retrospect on recurring skill misroutes, then perform a focused skill audit.",
-      "tags": [
-        "composition"
-      ],
-      "expected": {
-        "primary_skill": "retrospect",
-        "companion_skills": [
-          "skill-craft"
-        ]
-      }
-    },
-    {
-      "id": "q216",
-      "relation": "boundary",
-      "prompt": "The release has failed and impact is ongoing; diagnose the incident before holding the retrospective.",
-      "tags": [
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "diagnose",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q176130",
-      "relation": "negative",
-      "prompt": "The incident is still active; reproduce the current failure and isolate its cause before any retrospective.",
+      "prompt": "Find the root cause of the failing integration test.",
       "tags": [
         "near-miss",
         "adjacent"
@@ -128,16 +78,30 @@
       }
     },
     {
-      "id": "q176131",
+      "id": "q7",
       "relation": "negative",
-      "prompt": "Audit the skill's triggers for the misses reported in the retrospective; keep the audit read-only.",
+      "prompt": "Measure whether the new prompt beats the old one on the frozen task set.",
       "tags": [
         "near-miss",
         "adjacent"
       ],
       "expected": {
-        "primary_skill": "skill-craft",
+        "primary_skill": "evaluate",
         "companion_skills": []
+      }
+    },
+    {
+      "id": "q8",
+      "relation": "boundary",
+      "prompt": "Run a retrospective over the last twenty runs, fanning out one reader per run.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "retrospect",
+        "companion_skills": [
+          "orchestrate"
+        ]
       }
     }
   ]

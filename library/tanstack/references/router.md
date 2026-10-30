@@ -1,5 +1,7 @@
 # Router loaders with Query
 
+Version-sensitive guidance last checked 22 October 2026; verify against the installed package.
+
 Put `queryClient` in router context. In the loader, await
 `queryClient.query({ ...opts, staleTime: 'static' })` for data the route cannot
 render without. Start the rest without awaiting, using `.catch(noop)`. The

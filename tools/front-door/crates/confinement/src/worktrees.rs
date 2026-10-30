@@ -19,7 +19,7 @@ use crate::utility::{
 };
 use provenant_config::ProjectBinding;
 use provenant_core::Clock;
-use provenant_core::{CancelToken, GitOid, RelativePath, WaitBudget, hex};
+use provenant_core::{AttemptId, CancelToken, GitOid, RelativePath, WaitBudget, hex};
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, canonicalize};
 use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
@@ -55,6 +55,12 @@ pub enum WorktreeError {
     DetachedPrimary,
     #[error("detached HEAD at {head} is not merged into the integration branch")]
     DetachedUnmerged { head: GitOid },
+    #[error(
+        "detached HEAD at {head}; git switch -c BRANCH or remove --worktree and pass --mode read-only"
+    )]
+    DetachedWorktree { head: GitOid },
+    #[error("worktree writer is busy{}", .holder.as_ref().map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
+    WriterBusy { holder: Option<AttemptId> },
     #[error("branch name collides with existing ref {existing}")]
     BranchCollision { existing: String },
     #[error("worktree or branch was not found")]
@@ -144,7 +150,7 @@ impl WorktreeError {
             Self::LiveProcess(_) => {
                 "stop that process or change its directory out of the tree, then run `provenant worktree list` and retry"
             }
-            Self::LockBusy | Self::LiveWriter => {
+            Self::LockBusy | Self::LiveWriter | Self::WriterBusy { .. } => {
                 "run `provenant status` and wait for the writer holding the lock to finish, then retry"
             }
             Self::Dirty => {
@@ -6241,5 +6247,32 @@ mod lifecycle_tests {
             Some(&moved_oid)
         );
         Ok(())
+    }
+
+    #[test]
+    fn detached_worktree_names_the_head_and_both_fixes() -> Result<(), Box<dyn std::error::Error>> {
+        let head = GitOid::parse("0123456789abcdef0123456789abcdef01234567")?;
+        assert_eq!(
+            WorktreeError::DetachedWorktree { head }.to_string(),
+            "detached HEAD at 0123456789abcdef0123456789abcdef01234567; git switch -c BRANCH or remove --worktree and pass --mode read-only"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn writer_busy_names_the_holder_only_when_known() {
+        let holder = AttemptId::from_bytes([7; 16]);
+        let known = WorktreeError::WriterBusy {
+            holder: Some(holder),
+        }
+        .to_string();
+        assert!(
+            known.starts_with("worktree writer is busy, held by attempt "),
+            "{known}"
+        );
+        assert_eq!(
+            WorktreeError::WriterBusy { holder: None }.to_string(),
+            "worktree writer is busy"
+        );
     }
 }

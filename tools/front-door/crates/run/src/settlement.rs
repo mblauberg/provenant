@@ -193,8 +193,12 @@ impl Driver<'_> {
     pub(crate) fn phase(&self) -> Phase {
         self.journal.phase
     }
+    #[cfg(test)]
     pub(crate) fn attempts(&self) -> u32 {
         self.journal.attempts
+    }
+    pub(crate) fn exhausted(&self) -> bool {
+        self.journal.attempts >= LIMIT
     }
     /// Charge only a driver which has reached the actual object import.
     pub(crate) fn begin_import(&mut self) -> Result<()> {

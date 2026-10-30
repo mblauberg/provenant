@@ -5,6 +5,11 @@ pub enum ProviderEvent {
     Text(String),
     Session(String),
     Model(String),
+    /// Digest of Claude's assistant text and its model, pending the final result.
+    AnswerModel {
+        model: String,
+        digest: [u8; 32],
+    },
     Usage {
         input: u64,
         output: u64,
@@ -120,6 +125,7 @@ pub struct StreamState {
     model: Option<String>,
     model_conflict: bool,
     expected_model: Option<String>,
+    answer_models: Vec<(String, [u8; 32])>,
     terminal: bool,
     error: bool,
     transient_error: bool,
@@ -140,6 +146,7 @@ impl StreamState {
             model: None,
             model_conflict: false,
             expected_model: None,
+            answer_models: Vec::new(),
             terminal: false,
             error: false,
             transient_error: false,
@@ -221,7 +228,8 @@ impl StreamState {
         Ok(events)
     }
     fn line(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
-        let events = (self.decoder)(bytes)?;
+        let mut events = (self.decoder)(bytes)?;
+        let mut answer_model = None;
         for event in &events {
             match event {
                 ProviderEvent::Session(session) => {
@@ -247,6 +255,39 @@ impl StreamState {
                     }
                     self.model = Some(model.clone());
                 }
+                ProviderEvent::AnswerModel { model, digest } => {
+                    if model.is_empty() || model.len() > 4096 {
+                        return Err(ProviderError::Malformed);
+                    }
+                    if self.answer_models.len() == 1024 {
+                        self.answer_models.remove(0);
+                    }
+                    self.answer_models.push((model.clone(), *digest));
+                }
+                ProviderEvent::Text(text) if self.adapter == "claude" => {
+                    let digest =
+                        *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes();
+                    let mut models = self
+                        .answer_models
+                        .iter()
+                        .filter(|(_, answer)| *answer == digest)
+                        .map(|(model, _)| model);
+                    if let Some(model) = models.next() {
+                        if models.any(|other| other != model) {
+                            self.model_conflict = true;
+                        } else {
+                            if self
+                                .expected_model
+                                .as_ref()
+                                .is_some_and(|expected| expected != model)
+                            {
+                                return Err(ProviderError::IdentityMismatch);
+                            }
+                            self.model = Some(model.clone());
+                            answer_model = Some(model.clone());
+                        }
+                    }
+                }
                 ProviderEvent::Terminal => {
                     self.terminal = true;
                     self.transient_error = false;
@@ -261,6 +302,9 @@ impl StreamState {
                 ProviderEvent::AuthRequired => self.auth_required = true,
                 _ => {}
             }
+        }
+        if let Some(model) = answer_model {
+            events.push(ProviderEvent::Model(model));
         }
         Ok(events)
     }

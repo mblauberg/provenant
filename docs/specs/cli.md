@@ -41,7 +41,9 @@ locally or over the existing peer paging protocol. Peer tail scans share a
 
 The core verbs remain `run`, `status`, `land` and `quota`. `dispatch` is the
 advanced submission-only operation; `run` adds waiting and a result summary.
-Route resolution accepts a pool or exact model positionally. Account selection
+A `run` wait that ends before the run settles returns status `waiting` with exit
+0: the lanes keep running, and the human line names the command that keeps
+waiting. Route resolution accepts a pool or exact model positionally. Account selection
 uses `--account` on `run` or `dispatch`; peer output uses
 `output ATTEMPT --host HOST`. Nearby command and flag spellings receive a
 scoped suggestion, and common malformed forms receive an invocation example.

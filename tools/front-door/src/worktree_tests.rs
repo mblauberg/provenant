@@ -831,7 +831,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     let terminal = await_terminal(&store, attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::ReviewRequired)?;
     assert!(
-        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == "protected changes require review")
+        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == "protected changes require review; partial finish (handoff_missing)")
     );
     assert_eq!(
         git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?,
@@ -4456,7 +4456,7 @@ fn dispatch_refuses_low_disk_writers() -> Result {
             "--prompt-file",
             prompt.to_str().ok_or("prompt")?,
             "--model",
-            "codex/id",
+            "codex/gpt-6-luna",
             "--mode",
             "worktree-write",
             "--worktree",
@@ -4484,7 +4484,7 @@ fn dispatch_refuses_low_disk_writers() -> Result {
             "--prompt-file",
             prompt.to_str().ok_or("prompt")?,
             "--model",
-            "codex/id",
+            "codex/gpt-6-luna",
             "--operation-id",
             "low-disk-reader",
             "--json",

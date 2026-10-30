@@ -88,6 +88,25 @@ assurance. Empty model lists disable the corresponding advice. Optional `label`
 names the warning class; omitting it gives generic writer wording. The applied
 model is always excluded from its own alternatives.
 
+## Councils and retained evidence
+
+`orchestrate` owns when to pair primaries or convene a council; HARNESS owns
+which independent review legs count. The bundled pools include `utility`,
+`junior`, `senior`, `principal`, `writing` and `design`. A named pool is a
+weighted choice, not an ordered model list. Explicit route lists and
+zero-weight fallbacks have their own ordering semantics.
+
+Use `provenant run --preset review-council --prompt-file brief.md --explain`
+to inspect roles and sources before dispatch. Inspect the recorded separation
+and substitutions after dispatch. Different model names or requested families
+alone do not establish independent answering families. Bind the resolved
+`adapter/model@effort` from each attempt to the review evidence.
+
+Attempts live under `<state>/runs/<run>/attempts/<attempt>/`. The default
+state root is `~/.local/share/provenant/v1`; `.agent-run/` is a protected legacy
+root. Keep full provider output in the attempt and use `provenant output TARGET`
+for bounded reads. Prefer per-run controls to global configuration changes.
+
 ## Review shapes
 
 Review shapes describe groups of read-only reviewers. Each group names a
@@ -103,7 +122,7 @@ reviewers = [{ pool = "junior", count = 2, distinct_families = true }]
 
 [domains.routing.review.shapes.deep]
 reviewers = [
-  { pool = "junior", count = 4, lenses = ["correctness", "security", "failure-isolation", "tests"], distinct_families = true },
+  { pool = "junior", count = 4, lenses = ["correctness-spec", "security-privacy", "concurrency-data-errors", "tests"], distinct_families = true },
   { pool = "senior", count = 2, distinct_families = true },
 ]
 

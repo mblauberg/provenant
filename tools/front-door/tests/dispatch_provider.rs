@@ -328,7 +328,7 @@ fn policy_codex_fixture() -> Result<TestRig> {
     Ok(rig)
 }
 /// `settled` is the exit `run` gives when the whole retry chain settles
-/// inside its own wait; otherwise it times out (124) and `lanes` waits on.
+/// inside its own wait; otherwise it returns `waiting` (0) and `lanes` waits on.
 /// Which one happens depends on host speed, so both are accepted. A wait that
 /// starts while a successor is still pending counts only that successor, so
 /// once the chain has settled the run is read again: a wholly settled named
@@ -338,10 +338,7 @@ fn settled_policy_lanes(
     output: provenant_os::exec::ExecOutcome,
     settled: i64,
 ) -> Result<Value> {
-    assert!(
-        code(&output) == settled || code(&output) == 124,
-        "{output:?}"
-    );
+    assert!(code(&output) == settled || code(&output) == 0, "{output:?}");
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
     let run_id = output["data"]["run_id"].as_str().ok_or("run ID")?;
     // Keep each command below the rig's ten-second watchdog while allowing
@@ -1228,7 +1225,7 @@ fn codex_dispatch_observes_rollout() -> Result {
                 "--wait",
                 "1s",
             ])?;
-            assert_eq!(code(&slow), 124, "{slow:?}");
+            assert_eq!(code(&slow), 0, "{slow:?}");
             let text = String::from_utf8(slow.stdout.bytes)?;
             let id = text
                 .lines()
@@ -1513,7 +1510,7 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
         ("claude/claude-opus-5-5", true, true),
         ("claude/claude-opus-5-5", false, false),
         ("claude/claude-sonnet-5-5", true, false),
-        ("claude/claude-sonnet-5-6", false, false),
+        ("claude/claude-haiku-5-5", false, false),
     ] {
         let rig = claude_fixture()?;
         let cleanup = rig.process_cleanup();
@@ -2813,7 +2810,10 @@ fn cancel_wait_settles_stalled_import_with_durable_exit() -> Result {
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let lane = &lanes["data"]["lanes"][0];
     assert_eq!(lane["state"], "cancelled", "{lanes}");
-    assert_eq!(lane["reason"], "provider output is partial", "{lanes}");
+    assert_eq!(
+        lane["reason"], "cancelled: explicit_cancellation",
+        "{lanes}"
+    );
     Ok(())
 }
 

@@ -11,9 +11,9 @@ provenant run --prompt-file brief.md --route senior \
 ```
 
 `run` waits up to 240 seconds, then prints the state and a result tail. Use
-`--wait 30m` or `--wait 3600s` for a longer background wait. Timeout prints the
-attempt ID and exact command to keep waiting; follow it rather than submitting
-again. `provenant status` shows active lanes and the twenty newest settled
+`--wait 30m` or `--wait 3600s` for a longer background wait. A wait that ends
+before the run settles returns status `waiting` with exit 0 and prints the
+exact command to keep waiting; follow it rather than submitting again. `provenant status` shows active lanes and the twenty newest settled
 lanes, newest first. `--json` returns full records for the same selection.
 Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
 

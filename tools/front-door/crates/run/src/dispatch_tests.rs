@@ -2866,9 +2866,9 @@ impl Providers for Fake {
                 .answer
                 .clone()
                 .unwrap_or_else(|| String::from_utf8_lossy(stdout).into_owned()),
-            complete: self
-                .outcome
-                .is_none_or(|outcome| outcome == Outcome::Succeeded),
+            complete: self.outcome.is_none_or(|outcome| {
+                matches!(outcome, Outcome::Succeeded | Outcome::ReviewRequired)
+            }),
             observed_route: self.observed.clone(),
             usage: UsageRecord::default(),
             session: None,
@@ -2930,11 +2930,26 @@ fn settle_with(
     outcome: Option<Outcome>,
     signals: Vec<PartialSignal>,
 ) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
+    settle_with_role(answer, outcome, signals, None)
+}
+
+fn settle_with_role(
+    answer: &str,
+    outcome: Option<Outcome>,
+    signals: Vec<PartialSignal>,
+    role: Option<&str>,
+) -> std::result::Result<AttemptRecord, Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let run = input();
+    let mut run = input();
+    if let Some(role) = role {
+        run.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+            role: Some(role.into()),
+            ..Default::default()
+        });
+    }
     store.create(&run, &call)?;
     let id = run.attempts[0].attempt_id;
     store.mark_starting(
@@ -3153,9 +3168,14 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
     store.claim(id, &clock, &call)?.ok_or("not admitted")?;
     let dir = store.attempt_dir(run.run_id, id, false)?;
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
-    // The operator cancelled before the provider spawned, so the lane keeps
-    // that reason. An over-long `://` run makes the session scrub refuse a transcript.
-    artifacts::seal(&dir, "cancel.json", b"{}", RECORD_LIMIT)?;
+    // The operator cancelled before the provider spawned. An over-long `://`
+    // run makes the session scrub refuse a transcript.
+    artifacts::seal(
+        &dir,
+        "cancel.json",
+        br#"{"reason":"explicit_cancellation"}"#,
+        RECORD_LIMIT,
+    )?;
     let attempt = store
         .context
         .state_root
@@ -3191,7 +3211,7 @@ fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> Tes
     assert_eq!(*outcome, Outcome::Cancelled);
     assert_eq!(
         reason.as_deref(),
-        Some("cancelled before start: stopped by the operator; redaction failed; result withheld")
+        Some("cancelled: explicit_cancellation; redaction failed; result withheld")
     );
     Ok(())
 }
@@ -3293,12 +3313,15 @@ fn a_complete_finish_and_prose_about_remaining_work_are_not_flagged() -> TestRes
         format!("The contract says:\n{STOPPED_EARLY}\nI followed it and finished."),
     ] {
         let record = settle_with(&answer, Some(Outcome::Succeeded), Vec::new())?;
-        assert_eq!(record.partial_signals, [], "{answer}");
+        assert_eq!(
+            record.partial_signals,
+            [PartialSignal::HandoffMissing],
+            "{answer}"
+        );
         assert!(matches!(
             record.state,
             AttemptState::Terminal {
                 outcome: Outcome::Succeeded,
-                reason: None,
                 ..
             }
         ));
@@ -3313,14 +3336,139 @@ fn provider_stops_are_kept_and_failures_carry_no_flag() -> TestResult {
         Some(Outcome::Succeeded),
         vec![PartialSignal::ProviderStop],
     )?;
-    assert_eq!(record.partial_signals, [PartialSignal::ProviderStop]);
-    // A failed lane is already a failure; a partial flag would only repeat it.
+    assert_eq!(
+        record.partial_signals,
+        [PartialSignal::HandoffMissing, PartialSignal::ProviderStop]
+    );
     let record = settle_with(
         &format!("{STOPPED_EARLY}\n"),
         Some(Outcome::Failed),
         vec![PartialSignal::ProviderStop],
     )?;
-    assert_eq!(record.partial_signals, []);
+    assert_eq!(
+        record.partial_signals,
+        [PartialSignal::DeclaredStop, PartialSignal::ProviderStop]
+    );
+    Ok(())
+}
+
+#[test]
+fn handoff_missing_and_done_outcome_contradictions() -> TestResult {
+    let done = STOPPED_EARLY.replace("stopped_early", "done");
+    let success = settle_with(&done, Some(Outcome::Succeeded), Vec::new())?;
+    assert!(success.partial_signals.is_empty());
+    for outcome in [Outcome::Cancelled, Outcome::ReviewRequired] {
+        let record = settle_with(&done, Some(outcome), Vec::new())?;
+        let AttemptState::Terminal {
+            outcome: actual,
+            reason,
+            ..
+        } = record.state
+        else {
+            return Err("not terminal".into());
+        };
+        assert_eq!(actual, outcome);
+        assert!(reason.unwrap_or_default().contains("handoff declared done"));
+    }
+    Ok(())
+}
+
+#[test]
+fn identity_failure_names_requested_and_observed_models() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(RouteRecord {
+            model: Some("other/model".into()),
+            ..route()
+        }),
+        answer: Some("answer".into()),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(outcome, Outcome::Failed);
+    assert_eq!(
+        reason.as_deref(),
+        Some(
+            "provider identity was not observed: requested model fixture/model; observed model other/model"
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn runtime_deadline_reason_survives_a_cancellation_record() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"half an answer", CAPTURE_LIMIT)?;
+    artifacts::seal(
+        &dir,
+        "cancel.json",
+        br#"{"reason":"wall_deadline"}"#,
+        RECORD_LIMIT,
+    )?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    observed.termination = Some(Termination::Signal(9));
+    observed.stop_reason = Some(provenant_supervisor::machine::StopReason::WallDeadline);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        outcome: Some(Outcome::Failed),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let AttemptState::Terminal {
+        outcome, reason, ..
+    } = record.state
+    else {
+        return Err("not terminal".into());
+    };
+    assert_eq!(outcome, Outcome::Cancelled);
+    assert_eq!(
+        reason.as_deref(),
+        Some("runtime deadline exceeded: provider stopped after 3600s")
+    );
     Ok(())
 }
 

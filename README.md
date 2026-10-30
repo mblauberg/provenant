@@ -104,7 +104,7 @@ fit.
 | **Fabric** | Messages, shared tasks, claims and activity between sessions and agents, plus dispatch to configured peer hosts over SSH. |
 | **Records and history** | Every run, task and attempt is stored with its route, account, knobs and output. Lanes can be listed, read, resumed or cancelled later. |
 | **Telemetry** | Local cost and token reports, CLI and MCP usage counts, and timeline export for Perfetto, with no collector. |
-| **Skills** | 25 workflow skills (scope, implement, code review, diagnose, orchestrate and more) that install into each harness. |
+| **Skills** | 20 workflow skills (scope, implement, code review, diagnose, orchestrate and more) plus 8 library skills for specific tools and stacks, installed into each harness. |
 
 ## Requirements
 
@@ -280,7 +280,7 @@ find into process changes and repeatable evaluations.
 | [Telemetry](docs/runbooks/telemetry.md) | Usage, cost and trace export |
 | [Release notes](docs/release-notes/README.md) | Released versions and pending changes |
 | [Quota menu bar](apps/quota-menubar/README.md) | Build and run the macOS app |
-| [Skills](skills/) | The workflow skills installed into each harness |
+| [Skills](skills/) and [library](library/) | The workflow and tool skills installed into each harness |
 | [Glossary](docs/glossary.md) | Terms used across the docs |
 
 ## Contributing

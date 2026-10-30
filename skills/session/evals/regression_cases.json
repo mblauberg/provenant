@@ -5,58 +5,56 @@
     {
       "id": "r120",
       "relation": "positive",
-      "prompt": "Before this chair session compacts, save a bounded Markdown checkpoint for its exact host session key with authority, evidence pointers, next actions, and resume trigger.",
+      "prompt": "Before compaction save a bounded checkpoint for the exact host key, with authority, evidence and next actions.",
       "tags": [
-        "direct",
-        "chair-state"
+        "checkpoint"
       ],
       "expected": {
         "primary_skill": "session",
         "companion_skills": []
       },
-      "note": "Host-keyed session Markdown checkpoint before compaction."
+      "note": "Verify checkpoint behaviour against retained owner evidence; never infer authority or completion from status alone."
     },
     {
-      "id": "r121",
+      "id": "r235101",
       "relation": "positive",
-      "prompt": "Write compaction instructions for this project so the summary keeps the state file path, live lanes and next actions but drops tool output.",
+      "prompt": "This lane has committed but has one check left. Preserve remaining work in stopped_early for a bounded same-checkout continuation.",
       "tags": [
-        "direct",
-        "compaction"
+        "lane-handoff"
       ],
       "expected": {
         "primary_skill": "session",
         "companion_skills": []
       },
-      "note": "Compaction instructions belong to session."
+      "note": "Verify lane-handoff behaviour against retained owner evidence; never infer authority or completion from status alone."
     },
     {
-      "id": "r122",
-      "relation": "negative",
-      "prompt": "Keep the lanes refilled from the board and wait for completions without polling.",
+      "id": "r235102",
+      "relation": "positive",
+      "prompt": "One mission branch needs a reserved publication decision. Save that blocker and keep independent authorised work moving.",
       "tags": [
-        "adjacent"
+        "goal"
       ],
       "expected": {
-        "primary_skill": "orchestrate",
+        "primary_skill": "session",
         "companion_skills": []
       },
-      "note": "Lane scheduling is orchestration, not continuity."
+      "note": "Verify goal behaviour against retained owner evidence; never infer authority or completion from status alone."
     },
     {
       "id": "r123",
       "relation": "boundary",
-      "prompt": "Run this mission until I write STOP and make sure its state survives every compaction.",
+      "prompt": "The mission runs until STOP; preserve it across compaction and coordinate independent research waves.",
       "tags": [
         "composition"
       ],
       "expected": {
-        "primary_skill": "autopilot",
+        "primary_skill": "session",
         "companion_skills": [
-          "session"
+          "orchestrate"
         ]
       },
-      "note": "Mission conductor primary; session owns the compaction checkpoint."
+      "note": "Verify composition behaviour against retained owner evidence; never infer authority or completion from status alone."
     }
   ]
 }

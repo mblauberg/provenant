@@ -3583,7 +3583,7 @@ fn mcp_registry_matches_recorded_client_config_contracts() {
 fn install_links_manifest_skills_and_library_skills() {
     let f = Fixture::new();
     let skills = f.targets.harnesses[0].skills_dir.clone();
-    for relative in ["skills/autopilot", "library/playwright"] {
+    for relative in ["skills/session", "library/playwright"] {
         let dir = f.source.join(relative);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("SKILL.md"), "---\nname: retained\n---\n").unwrap();
@@ -3599,9 +3599,9 @@ fn install_links_manifest_skills_and_library_skills() {
     )
     .unwrap();
     assert!(
-        fs::read_link(skills.join("autopilot"))
+        fs::read_link(skills.join("session"))
             .unwrap()
-            .ends_with("skills/autopilot")
+            .ends_with("skills/session")
     );
     assert!(
         fs::read_link(skills.join("playwright"))

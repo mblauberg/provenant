@@ -1,7 +1,0 @@
-schema_version: 1
-target_skill: session
-cases:
-  - {id: lifecycle-session-positive, relation: positive, prompt: "Start a fresh substantial session from the digest-bound handoff, then checkpoint before compaction.", tags: [lifecycle-alignment, direct], expected: {primary_skill: session, companion_skills: []}}
-  - {id: lifecycle-session-negative, relation: negative, prompt: "Create the persistent project route across runs and leads rather than a session handoff.", tags: [lifecycle-alignment, boundary], expected: {primary_skill: work-map, companion_skills: []}}
-  - {id: lifecycle-session-adjacent, relation: adjacent, prompt: "Checkpoint this substantial implementation and preserve only safe provider-session continuity evidence.", tags: [lifecycle-alignment, composition], expected: {primary_skill: session, companion_skills: [implement]}}
-  - {id: lifecycle-session-portability, relation: portability, prompt: "With Console, Herdr and GitHub unavailable, resume from project artifacts and write the authorised durable handoff.", tags: [lifecycle-alignment, portable], adapters: {console: absent, herdr: absent, github: absent}, expected: {primary_skill: session, companion_skills: []}}

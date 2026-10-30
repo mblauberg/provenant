@@ -961,12 +961,13 @@ pub struct CiPollBackoff {
 
 impl CiPollBackoff {
     fn delay_seconds(self, pending_observations: u64) -> u64 {
-        let factor = 1_u64
-            .checked_shl(pending_observations.min(64) as u32)
-            .unwrap_or(u64::MAX);
-        self.initial_seconds
-            .saturating_mul(factor)
-            .min(self.max_seconds)
+        provenant_core::retry::Backoff::new(
+            std::time::Duration::from_secs(self.initial_seconds),
+            2,
+            std::time::Duration::from_secs(self.max_seconds),
+        )
+        .delay(pending_observations)
+        .as_secs()
     }
 }
 

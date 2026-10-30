@@ -1,73 +1,62 @@
-name: Feature request
-description: Something the project should handle and does not. Describe the problem.
-labels: ["enhancement"]
+name: Feature
+description: One user-visible outcome; this issue is the spec.
+type: Feature
 body:
   - type: markdown
     attributes:
       value: >-
-        This form asks for the problem, not the solution. A well-described
-        problem with no proposed fix is a good issue. A fix with no evidenced
-        problem is not.
+        The issue body is the spec and expires with the delivering pull request. Remove secrets and private material. Cite code as path#Symbol, never line numbers or scratch files. Set the parent as a native sub-issue, not in the body.
 
   - type: textarea
-    id: problem
+    id: outcome
     attributes:
-      label: The problem
+      label: Outcome
       description: >-
-        What went wrong in real work? Give the task you were doing, what the
-        project did, and what it cost you: a wrong result, a wasted run, a
-        gate that missed something, a review that should not have been
-        needed.
+        The user-visible result and why.
     validations:
       required: true
 
   - type: textarea
-    id: evidence
+    id: scope
     attributes:
-      label: Evidence
+      label: Scope and out of scope
       description: >-
-        Where this happened: sessions, receipts, repositories, transcripts. How
-        often. Redact secrets, personal data and private project names.
+        The bounded change and what stays untouched.
     validations:
       required: true
 
   - type: textarea
-    id: workaround
+    id: acceptance
     attributes:
-      label: What you do today
-      description: The workaround you currently use, and why it falls short.
+      label: Acceptance
+      description: >-
+        One observable statement per line, each tagged with how it is verified: [test], [command], [capture] or [review]. Implementers cannot weaken these.
     validations:
       required: true
 
   - type: textarea
-    id: direction
+    id: must-not-change
     attributes:
-      label: Possible direction
+      label: Must not change
       description: >-
-        Optional, and only if you have one. If you already know it changes
-        authority, a gate or a contract, say so: those need an approved spec
-        before any code.
+        Behaviour that has to survive.
     validations:
       required: false
 
   - type: textarea
-    id: visual
+    id: verify
     attributes:
-      label: Visual (optional)
+      label: Verify
       description: >-
-        Add a Mermaid diagram or table wherever it makes the problem, the flow
-        that broke, or the surfaces involved faster to grasp than prose — GitHub
-        renders Mermaid. Skip it only when prose is already clear; a diagram that
-        does not save the reader time is noise.
+        The command or check that proves it.
     validations:
-      required: false
+      required: true
 
-  - type: checkboxes
-    id: hygiene
+  - type: textarea
+    id: durable-home
     attributes:
-      label: Before you file
-      options:
-        - label: I understand that changes to authority, gates or contracts need an approved spec first.
-          required: true
-        - label: This is not a security vulnerability. Those go through SECURITY.md.
-          required: true
+      label: Durable home
+      description: >-
+        The doc that absorbs any settled rule in the same PR, or None.
+    validations:
+      required: true

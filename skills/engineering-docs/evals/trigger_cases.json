@@ -6,7 +6,9 @@
       "id": "q082",
       "relation": "positive",
       "prompt": "Amend the accepted ADR to the current storage decision, retire its superseded predecessor, and repair the decision index.",
-      "tags": ["direct"],
+      "tags": [
+        "direct"
+      ],
       "expected": {
         "primary_skill": "engineering-docs",
         "companion_skills": []
@@ -16,7 +18,9 @@
       "id": "q083",
       "relation": "positive",
       "prompt": "After a repeated crate-specific mistake, place a short nested AGENTS.md at that boundary and keep CLAUDE.md as its import.",
-      "tags": ["direct"],
+      "tags": [
+        "direct"
+      ],
       "expected": {
         "primary_skill": "engineering-docs",
         "companion_skills": []
@@ -26,7 +30,10 @@
       "id": "q084",
       "relation": "negative",
       "prompt": "Tighten the wording of this paragraph about generated reference and ADRs; preserve every path, decision and placement.",
-      "tags": ["adjacent", "near-miss"],
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
       "expected": {
         "primary_skill": "engineering-writing",
         "companion_skills": []
@@ -36,7 +43,10 @@
       "id": "q085",
       "relation": "negative",
       "prompt": "Audit the trigger description of this agent skill for overlap with neighbouring skills; do not change AGENTS.md or documentation placement.",
-      "tags": ["adjacent", "near-miss"],
+      "tags": [
+        "adjacent",
+        "near-miss"
+      ],
       "expected": {
         "primary_skill": "skill-craft",
         "companion_skills": []
@@ -58,18 +68,6 @@
       "id": "q074",
       "relation": "positive",
       "prompt": "Archive this retired runbook without deleting history and repair its live references.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "engineering-docs",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q075",
-      "relation": "positive",
-      "prompt": "Reorganise these engineering docs, colocate a one-use diagram with its owner, and remove obsolete pointer files.",
       "tags": [
         "direct"
       ],
@@ -145,15 +143,13 @@
     {
       "id": "q081",
       "relation": "boundary",
-      "prompt": "Finish this multi-session effort and archive its completed effort map under the project docs policy.",
+      "prompt": "Finish this multi-session effort: move its settled rules into the durable docs, retire the spec and archive the completed notes under the project docs.",
       "tags": [
         "composition"
       ],
       "expected": {
-        "primary_skill": "work-map",
-        "companion_skills": [
-          "engineering-docs"
-        ]
+        "primary_skill": "engineering-docs",
+        "companion_skills": []
       }
     }
   ]

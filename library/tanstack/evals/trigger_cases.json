@@ -41,9 +41,10 @@
     {
       "id": "q256",
       "relation": "negative",
-      "prompt": "Choose between useState and useReducer for this local form wizard.",
+      "prompt": "Choose between useState and useReducer for this local React form wizard, without TanStack Form.",
       "tags": [
-        "no-skill"
+        "no-skill",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": null,
@@ -53,9 +54,10 @@
     {
       "id": "q257",
       "relation": "negative",
-      "prompt": "Profile this React subtree for render churn and poor interaction latency.",
+      "prompt": "Profile render churn in a React view that uses TanStack Query; the cache is correct.",
       "tags": [
-        "adjacent"
+        "adjacent",
+        "near-miss"
       ],
       "expected": {
         "primary_skill": "react-performance",
@@ -85,7 +87,7 @@
         "primary_skill": "implement",
         "companion_skills": [
           "tanstack",
-          "tdd"
+          "test-design"
         ]
       }
     },
@@ -126,227 +128,6 @@
       ],
       "expected": {
         "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q263",
-      "relation": "positive",
-      "prompt": "Migrate this useReactTable v8 code to TanStack Table v9 tableFeatures.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q264",
-      "relation": "positive",
-      "prompt": "Virtualise a large TanStack Table with react-virtual and a sticky header.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q265",
-      "relation": "negative",
-      "prompt": "Why does this React component re-render on every keystroke? Profile it.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "react-performance",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q266",
-      "relation": "negative",
-      "prompt": "Memoise this data grid's cell renderers so scrolling stops dropping frames.",
-      "tags": [
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "react-performance",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1000",
-      "relation": "positive",
-      "prompt": "Build this TanStack Form with async validation, a debounce, and a submit button that reads canSubmit.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1001",
-      "relation": "positive",
-      "prompt": "Replace the deprecated useStore calls with useSelector and shallow compare in our TanStack Store state.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1002",
-      "relation": "positive",
-      "prompt": "Debounce the search box with TanStack Pacer and keep pending state without extra re-renders.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1003",
-      "relation": "positive",
-      "prompt": "Register keyboard shortcuts with TanStack Hotkeys, with a dialog scope that owns Escape.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1004",
-      "relation": "positive",
-      "prompt": "Set up TanStack Devtools with Query and Router panels so they are stripped from the production build.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1005",
-      "relation": "positive",
-      "prompt": "Add a file route with validateSearch and fix the router-plugin config and routeTree.gen.ts handling.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1006",
-      "relation": "positive",
-      "prompt": "Which TanStack Intent and CLI commands give version-matched docs for the installed packages without writing files?",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1007",
-      "relation": "positive",
-      "prompt": "Assess whether TanStack DB collections fit this app, given it is experimental.",
-      "tags": [
-        "direct"
-      ],
-      "expected": {
-        "primary_skill": "tanstack",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1008",
-      "relation": "negative",
-      "prompt": "Pick between Zustand and Redux Toolkit for this app's client state.",
-      "tags": [
-        "near-miss",
-        "no-skill"
-      ],
-      "expected": {
-        "primary_skill": null,
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1009",
-      "relation": "negative",
-      "prompt": "Add react-hook-form with a Zod resolver to this signup form.",
-      "tags": [
-        "near-miss",
-        "no-skill"
-      ],
-      "expected": {
-        "primary_skill": null,
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1010",
-      "relation": "negative",
-      "prompt": "Configure Vite chunk splitting and bundle analysis for the production build.",
-      "tags": [
-        "near-miss"
-      ],
-      "expected": {
-        "primary_skill": "react-performance",
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1011",
-      "relation": "negative",
-      "prompt": "Bind global keyboard shortcuts in this Electron main process menu.",
-      "tags": [
-        "near-miss",
-        "no-skill"
-      ],
-      "expected": {
-        "primary_skill": null,
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1012",
-      "relation": "negative",
-      "prompt": "Set up Next.js App Router file-based routes with layouts and loading states.",
-      "tags": [
-        "near-miss",
-        "no-skill"
-      ],
-      "expected": {
-        "primary_skill": null,
-        "companion_skills": []
-      }
-    },
-    {
-      "id": "q1013",
-      "relation": "negative",
-      "prompt": "Design a rate limiter for the backend API gateway.",
-      "tags": [
-        "near-miss",
-        "no-skill"
-      ],
-      "expected": {
-        "primary_skill": null,
         "companion_skills": []
       }
     }

@@ -1,93 +1,62 @@
 ---
 name: orchestrate
-description: "Use to coordinate bounded work across agents, research lanes or independent reviews. Use diagnose for coupled defects and autopilot for missions that continue until STOP. Not for a small, single-owner task."
+description: "Use for Fabric graphs, presets, fan-out, councils, repair loops and agent batches. Not for single-owner work or coupled defects (diagnose). Session owns continuing goals and STOP missions."
 ---
 
-# Multi-agent orchestration
+# Orchestrate
 
-## Start here
+Parallelise independent reads, reviews, hypotheses and disjoint writes. Keep
+coupled writes in one lane. Start with 3 to 5 lanes unless the work is
+mechanical; each lane needs a checkable return that earns its coordination cost.
 
-1. Preflight authority, independent tasks, writer isolation and return checks.
-   Use [native first](references/routing-and-tiers.md#native-first) for your own
-   provider when its native tool supports the work; use Fabric for other
-   providers, detached work and sandboxed worktree writers.
-2. Before dispatch or recovery, read
-   [dispatch-procedure.md](references/dispatch-procedure.md) for tool surfaces,
-   submission, claims, waiting, resume, cancellation and landing. Use its
-   Fabric brief template, including provenance for agent-filed issues.
-3. Review briefs carry the target and rubric, never the chair's hypothesis or
-   verdict ([review outcome](../code-review/references/finding-contract.md#review-outcome)).
-   Use [verification.md](references/verification.md) for independent checks.
+## Choose the graph
 
-## Always
+| Job | Preset | Key parameters under `parameters` |
+|---|---|---|
+| Map unfamiliar ground | `scout-swarm` | `width`, `external`, `read_roots` |
+| Reconcile independent views | `fan-out-synthesise` | `width`, `route` |
+| Gather independent returns | `fan-out` | `width`, `route` |
+| Scope, then build with authority | `scope-then-run` | `worktree`, `write_scope`, `spec` |
+| Implement one approved slice | `generator-evaluator` | `worktree`, `scope`, `lenses` |
+| Review a pinned subject | `review-council` | `subject.commit`, `risk_tier`, `risk_tags` |
+| Integrate several writer lanes | `big-batch` | `lanes`, `batch_worktree`, `integration_branch` |
+| Write through CI, repair and land | `deliver` | `worktree`, `max_iterations`, `land`, `decision_session` |
+| One bounded task or two sequential passes | `single`, `chain` | `route` |
 
-For an explicit human choice, the optional [human inbox](../../docs/runbooks/human-inbox.md)
-records decisions, assumptions and questions without an app. Bind the exact
-originating chair session, state the recommendation and affected work, and mark
-only blocking decisions as blocking. Reversible assumptions stay within existing
-authority. Record chat answers through the same revision-checked answer path.
-Consume correlated Fabric answers at normal execution boundaries, verify their
-host/project/session/actor and acknowledge each answer ID once before acting.
-Record consequences of a late override. Never poll the inbox with model turns;
-the current transport is queued mail, with no Claude hook injection.
+`scope-then-run` includes a writer: use it only when building is authorised.
+`deliver` opens a PR and can land by default; check those actions against the
+envelope. `single`, `chain` and the fan-out primitives default to read-only.
 
-For a CLI submission, use `provenant run --prompt-file BRIEF --route senior`: it
-waits up to 240 seconds and returns the state and result tail. On timeout,
-follow its printed wait command; do not submit again. Run longer waits in the
-background; never sleep or poll. Use `provenant status` after a restart. Full
-worker output stays in run files; return a digest and path. Record `adapter/model@effort` from the
-receipt.
+## How it runs
 
-## Rules
+Inspect `provenant preset list`, `provenant preset show P` and `provenant preset explain P`.
+Preview `provenant run --preset scout-swarm --prompt-file brief.md --set 'parameters.width=3' --explain`.
+Submit the same command without `--explain`; add `--params-file lanes.toml`, `--concurrency N` or `--wait 30m` as needed.
+Use `provenant status`, `provenant output TARGET` and the returned graph continuation command to collect evidence.
 
-- Use parallel agents only when the tasks are independent, have stable
-  interfaces and checkable outputs, and save more attention than coordination
-  costs. Keep coupled work serial.
-- Partition writers into separate registered worktrees, and name each writer
-  lane's write scope (files or directories) before fan-out. Lanes with
-  overlapping write scopes run serially, and dependent lanes merge in dependency
-  order. The chair owns authority, decisions, user communication and the final
-  synthesis. A worker's report is a claim: verify commits, counts and tests
-  against the live tree and transcript.
-- Use the [HARNESS.md](../../HARNESS.md) risk ladder for review. It also governs
-  provider choice and claim/ack; do not duplicate those policies here.
-- Send answer-bearing external work through Fabric request/reply when available.
-  If unavailable, mark `FABRIC-ROUNDTRIP-UNAVAILABLE` and keep the direct result
-  in a named artifact. Herdr observes and sends steering only.
-- Prefer per-dispatch flags. Editing global provider configuration requires
-  explicit authority.
-- Fabric lanes must keep the supplied `CARGO_TARGET_DIR`,
-  `CARGO_BUILD_BUILD_DIR` and `CARGO_HOME`. For lint-only runs, writer lanes
-  may set both build directories to `PROVENANT_LANE_CARGO_LINT_TARGET`.
-  Native unconfined agents should use one shared per-host Cargo target outside
-  worktrees, separate from Fabric lane caches.
+The CLI expands presets; MCP `fabric_graph` accepts graph documents, not preset
+names. Keep custom compositions in `.provenant/presets/*.toml`. See the
+[preset runbook](../../docs/runbooks/presets.md) for nodes and role overrides.
 
-## Adaptive loop
+## Brief and collect
 
-Dispatch independent waves, reduce their claims against objective evidence, and add only informative
-repair, verification or review waves. Parallel lanes stop ready to merge; the
-chair merges serially and reruns checks after the tree changes. Record missing
-review legs and substitutions. Objective checks and tier-required review meet
-delivery acceptance; the chair reports the outcome and the user may reject it.
-Explicit user acceptance is required only for `terminal` work or when the
-approved scope asks for it; a project may name its landing gate as acceptance.
-External actions retain their separate authority gates. For accepted ready
-issues, use
-[autonomous-implementation.md](references/autonomous-implementation.md);
-run-until-STOP missions use `autopilot`.
+Each brief states outcome, acceptance evidence, source revision, read roots,
+literal write scope, prohibited actions, authority, output location and stop
+conditions. Give independent reviewers the base, subject and spec, leaving the
+author's hypothesis out. `code-review` owns the rubric.
 
-## Depth on demand
+Register a separate worktree per writer. For `big-batch`, bind both lane
+worktrees and the serial batch worktree; integrate into the named branch before
+reviewing its combined head. Check returned commits, changed paths and tests
+against retained output. A fluent report or idle pane proves no criterion.
 
-Use [orchestration-contract.md](references/orchestration-contract.md) for worker
-contracts, [routing-and-tiers.md](references/routing-and-tiers.md) for routes,
-[tiered-council.md](references/tiered-council.md) for councils, and
-[lane-safety.md](references/lane-safety.md) for safeguards. For non-code work,
-read [domain adaptation](references/domain-adaptation.md); for scratch handling,
-read [memory and scratch](references/memory-scratchpad.md). Other references
-cover provider pairing, Herdr, verification and evaluation.
+Use deterministic gates for executable checks, bounded loops for repairs and
+councils for questions without a decisive oracle. Inspect recorded family
+separation before counting an independent review; HARNESS owns the ladder.
+Record unavailable legs and substitutions. The chair reconciles evidence and
+keeps authority, user communication and final acceptance.
 
-Keep the criteria, evidence and outcome in the existing project document or PR.
-
-Reference eval cases (not run by CI): [lifecycle](evals/lifecycle_cases.yaml),
-[contracts](evals/contract_cases.yaml), [discipline](evals/discipline_cases.yaml),
-and [topology value](evals/topology_value_cases.yaml).
+Load [dispatch](references/dispatch.md) for briefs, continuation and ready queues,
+[routing](references/routing-and-tiers.md) for councils and degradation, and
+[lane safety](references/lane-safety.md) for writer boundaries. Interactive pane
+operation belongs in the [Herdr runbook](../../docs/runbooks/herdr.md).

@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "target_skill": "vitest",
+  "cases": [
+    {
+      "id": "q1",
+      "relation": "positive",
+      "prompt": "Review vitest boundary behaviour.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "vitest",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q2",
+      "relation": "positive",
+      "prompt": "Update the vitest integration for its installed version.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "vitest",
+        "companion_skills": [
+          "implement"
+        ]
+      }
+    },
+    {
+      "id": "q3",
+      "relation": "negative",
+      "prompt": "Investigate the root cause of this vitest failure without fixing it.",
+      "tags": [
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "diagnose",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q4",
+      "relation": "negative",
+      "prompt": "Restructure this vitest code without changing behaviour.",
+      "tags": [
+        "near-miss"
+      ],
+      "expected": {
+        "primary_skill": "refactor",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q5",
+      "relation": "boundary",
+      "prompt": "Implement the approved change using vitest.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "implement",
+        "companion_skills": [
+          "vitest"
+        ]
+      }
+    },
+    {
+      "id": "q6",
+      "relation": "boundary",
+      "prompt": "Review the diff involving vitest without edits.",
+      "tags": [
+        "composition"
+      ],
+      "expected": {
+        "primary_skill": "code-review",
+        "companion_skills": [
+          "vitest"
+        ]
+      }
+    },
+    {
+      "id": "q7",
+      "relation": "positive",
+      "prompt": "Check a subtle vitest migration behaviour.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "vitest",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q8",
+      "relation": "negative",
+      "prompt": "Write visual design guidance for this page.",
+      "tags": [
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": []
+      }
+    }
+  ]
+}

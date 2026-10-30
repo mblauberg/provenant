@@ -203,13 +203,20 @@ impl Drop for PreparedStart {
 
 fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
     format!(
-        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Files in $TMPDIR are discarded when the attempt ends. Provider history and handoff progress are kept. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
+        "Durable output for this attempt: {result} (your final answer); {exit}, {stdout}, {stderr} (harness evidence). These are the only durable outputs. Put your report and evidence in your final answer; the harness writes these files. Keep scratch files under the provided $TMPDIR, not in the worktree. Files in $TMPDIR are discarded when the attempt ends. Provider history and handoff progress are kept. Files left in $TMPDIR are not deliverables.\n\n{handoff}\n\n{prompt}",
         handoff = crate::completion::guidance(),
         result = directory.join("result.md").display(),
         exit = directory.join("process-exit.json").display(),
         stdout = directory.join("stdout.log").display(),
         stderr = directory.join("stderr.log").display(),
     )
+}
+
+#[cfg(test)]
+#[test]
+fn output_prompt_directs_scratch_outside_worktree() {
+    let prompt = output_prompt(std::path::Path::new("/attempt"), "task");
+    assert!(prompt.contains("Keep scratch files under the provided $TMPDIR, not in the worktree."));
 }
 
 impl RunStore {
@@ -1286,7 +1293,10 @@ impl RunStore {
         runtime_seconds: u64,
         call: &Request<'_>,
     ) -> std::result::Result<(), HandOff> {
-        let local = |error: &dyn std::fmt::Display| HandOff::Local(error.to_string());
+        // Each failure names its phase, so the refusal says what was not ready.
+        let local = |phase: &str, error: &dyn std::fmt::Display| {
+            HandOff::Local(format!("{phase}: {error}"))
+        };
         let id = record.attempt_id;
         let scope = Scope {
             run: record.run_id,
@@ -1295,25 +1305,31 @@ impl RunStore {
         };
         let directory = || {
             self.attempt_dir(record.run_id, id, false)
-                .map_err(|e| local(&e))
+                .map_err(|e| local("attempt directory", &e))
         };
-        let mut holder_context = context(record, requester).map_err(|e| local(&e))?;
+        let mut holder_context =
+            context(record, requester).map_err(|e| local("launch context", &e))?;
         let reservation = PublicationReservation::prepare(
             directory()?,
             call.lock_budget(),
             call.cancel,
             call.clock,
         )
-        .map_err(|e| local(&e))?;
+        .map_err(|e| local("publication reservation", &e))?;
         // Clone before acquiring custody: failure leaves no writer reservation.
         let held = if self.sealed_requester.is_some() {
             Some((
                 custody::hold(
-                    reservation.directory().try_clone().map_err(|e| local(&e))?,
+                    reservation
+                        .directory()
+                        .try_clone()
+                        .map_err(|e| local("publication reservation", &e))?,
                     scope,
                     requester,
                 ),
-                reservation.custody_metadata().map_err(|e| local(&e))?,
+                reservation
+                    .custody_metadata()
+                    .map_err(|e| local("publication reservation", &e))?,
             ))
         } else {
             None
@@ -1322,14 +1338,14 @@ impl RunStore {
         if task.writer.as_ref().map(|w| w.worktree.as_path())
             != writer.as_ref().map(|w| w.worktree.path())
         {
-            return Err(local(&"writer confinement does not match the task"));
+            return Err(local("writer confinement", &"does not match the task"));
         }
         let mut lease = match writer {
             Some(writer) => {
                 let (directory, binding) = writer
                     .custody
                     .take()
-                    .ok_or_else(|| local(&"writer custody missing"))?;
+                    .ok_or_else(|| local("writer custody", &"missing"))?;
                 acquire_writer(directory, scope, binding)
             }
             // Readers take the same injected acquisition as writers, so a
@@ -1340,7 +1356,7 @@ impl RunStore {
             if matches!(e, custody::CustodyError::Busy) {
                 HandOff::Busy
             } else {
-                local(&e)
+                local("custody", &e)
             }
         })?;
         if record.retry_of.is_some()
@@ -1353,7 +1369,7 @@ impl RunStore {
             lease
                 .withdraw_unlaunched()
                 .map_err(|error| HandOff::Uncertain(error.to_string()))?;
-            return Err(local(&error));
+            return Err(local("writer lineage", &error));
         }
         // Reconcile may have withdrawn this attempt before the lease existed.
         match self.record(id, call) {
@@ -1365,13 +1381,13 @@ impl RunStore {
                 lease
                     .withdraw_unlaunched()
                     .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                return Err(local(&"attempt changed before handoff"));
+                return Err(local("attempt", &"changed before handoff"));
             }
             Err(error) => {
                 lease
                     .withdraw_unlaunched()
                     .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                return Err(local(&error));
+                return Err(local("attempt record", &error));
             }
         }
         if let Some(deliver) = &task.deliver {
@@ -1394,7 +1410,7 @@ impl RunStore {
                     lease
                         .withdraw_unlaunched()
                         .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                    return Err(local(&error));
+                    return Err(local("delivery", &error));
                 }
             }
         }
@@ -1407,14 +1423,14 @@ impl RunStore {
                     lease
                         .withdraw_unlaunched()
                         .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                    return Err(local(&error));
+                    return Err(local("Git setup", &error));
                 }
             };
             let writer_attempt = directory()?;
             if let Some(writer) = &confinement.writer
                 && let Err(error) = crate::objects::prepare_bound(
                     &provenant_os::git::git_executable()
-                        .ok_or_else(|| local(&"Git executable unavailable"))?,
+                        .ok_or_else(|| local("Git", &RunError::GitUnavailable))?,
                     writer.worktree.repo(),
                     &writer_attempt,
                     &confinement.plan.permissions().scratch.path,
@@ -1428,7 +1444,7 @@ impl RunStore {
                 lease
                     .withdraw_unlaunched()
                     .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                return Err(local(&error));
+                return Err(local("lane Git objects", &error));
             }
             match confinement.command(
                 &plan.argv,
@@ -1442,7 +1458,7 @@ impl RunStore {
                     lease
                         .withdraw_unlaunched()
                         .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                    return Err(local(&error));
+                    return Err(local("confinement command", &error));
                 }
             }
         }
@@ -1466,7 +1482,7 @@ impl RunStore {
                 lease
                     .withdraw_unlaunched()
                     .map_err(|e| HandOff::Uncertain(e.to_string()))?;
-                return Err(local(&error));
+                return Err(local("lane ports", &error));
             }
         };
         let command = ProviderCommand {
@@ -1493,7 +1509,7 @@ impl RunStore {
             holder_context,
             priority: record
                 .requested_priority
-                .ok_or_else(|| local(&"lane priority missing"))?,
+                .ok_or_else(|| local("lane priority", &"missing"))?,
         };
         let capture = capture_plan(task, runtime_seconds);
         // Held before launch: an unconfirmed handoff may still have a guardian.

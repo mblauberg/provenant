@@ -3392,7 +3392,7 @@ fn resumed_stream_rejects_session_or_answering_model_changes() -> Result<(), Pro
     let continuation = claude::Claude.continuation(&direct, &route, "grants")?;
     for changed in [
         b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"changed\",\"model\":\"selector\"}\n".as_slice(),
-        b"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"changed\",\"content\":[]},\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"parent_tool_use_id\":null}\n".as_slice(),
+        b"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"changed\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"parent_tool_use_id\":null}\n{\"type\":\"result\",\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"answer\"}\n".as_slice(),
     ] {
         let mut stream = claude::Claude.stream(Some(&continuation))?;
         assert!(matches!(claude::Claude.observe(&mut stream, changed), Err(ProviderError::IdentityMismatch)));

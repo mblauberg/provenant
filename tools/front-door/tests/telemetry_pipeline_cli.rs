@@ -37,7 +37,7 @@ fn offline_pipeline_preserves_unattributed_and_unmeasured_evidence() -> Result {
         &manifest,
         serde_json::to_vec(&json!({"schema_version":1,"tasks":[{
             "prompt":"Review a slice", "context":{"graph_id":"retained-graph","node_id":"review","pattern":"council","role":"correctness"},
-            "route":{"kind":"model","provider":"fixture","model":"fixture/model"}
+            "route":{"kind":"model","provider":"codex","model":"gpt-6-luna"}
         }]}))?,
     )?;
     let output = rig.command(&[
@@ -108,7 +108,7 @@ fn unreadable_graph_checkpoint_does_not_abort_pipeline() -> Result {
         &manifest,
         serde_json::to_vec(&json!({"schema_version":1,"tasks":[{
             "prompt":"Review a slice", "context":{"graph_id":"invalid/graph","node_id":"review"},
-            "route":{"kind":"model","provider":"fixture","model":"fixture/model"}
+            "route":{"kind":"model","provider":"codex","model":"gpt-6-luna"}
         }]}))?,
     )?;
     let output = rig.command(&[
@@ -143,7 +143,7 @@ fn repeated_node_labels_without_a_graph_preserve_each_unattributed_row() -> Resu
     let rig = rig()?;
     let manifest = rig.project.join("unattributed.json");
     let task = json!({"prompt":"Review a slice", "context":{"node_id":"review"},
-        "route":{"kind":"model","provider":"fixture","model":"fixture/model"}});
+        "route":{"kind":"model","provider":"codex","model":"gpt-6-luna"}});
     std::fs::write(
         &manifest,
         serde_json::to_vec(&json!({"schema_version":1,"tasks":[task,task]}))?,

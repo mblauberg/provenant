@@ -1,0 +1,44 @@
+name: Epic
+description: An outcome that needs at least two shippable features.
+type: Epic
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        An epic closes when its Done when holds. A new outcome gets a successor epic, not an expansion of this one.
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: >-
+        The result and why it matters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: done-when
+    attributes:
+      label: Done when
+      description: >-
+        The condition that closes this epic, checkable without reading its children.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and out of scope
+      description: >-
+        What the epic covers and what it must not absorb.
+    validations:
+      required: true
+
+  - type: textarea
+    id: backlog
+    attributes:
+      label: Backlog
+      description: >-
+        One line per feature not yet worked. Promote a line to an issue when it is about to be worked.
+    validations:
+      required: false

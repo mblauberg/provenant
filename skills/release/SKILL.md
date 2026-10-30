@@ -1,86 +1,53 @@
 ---
 name: release
-description: "Use for user-authorised promotion of an accepted artifact: deploy, publish, send, roll out, or observe. Not for implementation or drafting; use implement or the domain owner."
+description: "Use for owner-authorised promotion of an accepted artifact: deploy, publish, send, roll out and observe. Not for building it (implement), accepting non-software work (deliver) or drafting (the writing skills)."
 ---
 
 # Release
 
-Promote one pinned, accepted artifact to an authorised target. This skill
-owns the authority gate and evidence; runbooks and tools own mechanics.
+Promotion is a one-way door and is never automatic. Passing CI, delivery
+acceptance and broad session authority do not authorise it. The owner's grant
+must bind this artefact, this action, this target and an expiry.
 
-## Entry gate
+Release mechanics (version bump, branch, notes, publishing) come from the repo's
+own `AGENTS.md`, `CONTRIBUTING` and runbooks. Look there first.
 
-Require accepted delivery receipt, exact accepted-artifact
-`digest|git_revision`, typed action (`deploy`, `publish`, `share`, `send` or
-`activate`), target-bound release authority, owner, disclosure/data policy and
-project instructions. Implementation acceptance is not promotion authority.
-Delivery acceptance comes from objective checks and tier-required review, or
-the project's named landing gate. Explicit user acceptance is required for
-`terminal` work or when the approved scope asks for it.
-Broad project/session authority cannot release or deploy; the promotion grant
-must bind this artifact, action, target, expiry and applicable constraints.
+## Before asking
 
-Start from canonical
-[RELEASE.template.json](templates/RELEASE.template.json). The validator accepts
-schema-v2 core fields and semantic gates, but ignores unknown fields.
+Confirm and state in the request:
 
-## Readiness
+- the exact artefact (git revision or digest) equals the accepted one;
+- the action (`deploy`, `publish`, `send`, `activate`) and the target;
+- the disclosure and data impact, including anything public that cannot be
+  recalled once copied;
+- the reversal plan with an owner and a time bound, or an explicit statement
+  that the action is irreversible;
+- what proves success, where it will be observed, and for how long.
 
-Record and verify:
+Put the request, with a recommended default, through `provenant ask --file
+Q.md --session S`. Independent work continues while it waits.
 
-- action, target ID/kind, provider-independent tier and disclosure boundary;
-- authority covering the target, artifact, operations, expiry, secrets,
-  communication, public disclosure and irreversibility;
-- state/data impact: ordered steps, compatibility window and purpose-typed
-  evidence bound to passing checks;
-- bounded promotion plan, exposure cap and stop conditions;
-- realistic rollback, revocation, recall, deactivation, replacement or
-  containment plan, with owner and time bound;
-- proof requirements, evidence source, owner, close condition and observation
-  window when outcome needs time;
-- recipient/audience validation, retention and required communications.
+## Commands
 
-Public distribution can be copied after deletion. Mark residual risk
-irreversible, document reversal limits and require explicit authority. `none`
-reversal needs the same gate. Test production reversal regardless of provider
-naming. Keep domain migration/publication checks in project runbook/evidence;
-destructive or non-backward-compatible change still needs the global
-impact/authority gate.
+- Provenant itself: `provenant check release --base BASE --head HEAD` lists
+  blocking findings for the range; `scripts/collate-release-notes --check`
+  covers the notes; after the release lands, `provenant install --source DIR
+  --dry-run` plans the install without changing anything.
+- Other projects: follow their release runbook. This skill owns the gate, the
+  runbook owns the mechanics.
 
-Check the receipt before requesting promotion:
+## Promote and observe
 
-- the promoted `digest|git_revision` equals the accepted artifact on the live
-  delivery receipt;
-- unexpired authority binds this artifact, action, target and constraints;
-- reversal is named, owned and time bound, or residual risk is marked
-  irreversible;
-- proof requirements, evidence source and close condition predate the
-  operation.
-
-## Promote and verify
-
-1. Obtain explicit user approval for artifact, target and plan.
-2. Use one serial operator; reviewers cannot issue external actions.
-3. Execute only authorised command, connector or named user operation. Record
-   operation, actor, UTC interval, result/evidence; never expose secrets.
-4. Prove the target-visible outcome against predeclared requirements.
-5. On a stop condition, contain exposure and run the approved reversal or
+1. One serial operator executes only the authorised command or named user
+   operation. Reviewers never issue external actions.
+2. Record the operation, the actor, the UTC interval and the result. Never
+   record secrets.
+3. Prove the outcome at the target against the success measure declared before
+   the action. An operation that merely returned success is not the outcome.
+4. On a stop condition, contain exposure and run the approved reversal, or
    escalate. Do not improvise an irreversible recovery.
-6. Preserve the receipt, update project state and route defects to `diagnose` or
-   the domain incident process.
+5. Close only after the observation window passes. Route incidents to
+   `diagnose` and process lessons to `retrospect`.
 
-Recheck the same list against terminal evidence. `complete` means the outcome
-was proved, rather than that an operation merely succeeded. `reversed` and `failed`
-remain explicit outcomes with evidence and follow-up owners.
-
-## User gates
-
-Users own production promotion, external sending, public publication,
-irreversible disclosure or data changes, and acceptance of degraded safeguards.
-Agent may prepare and verify; it may execute only within explicit authority.
-
-## Portable artifact
-
-Keep the criteria, evidence and outcome in the existing project document or PR.
-
-Reference eval cases (not run by CI): [lifecycle cases](evals/lifecycle_cases.yaml).
+Report the end state plainly as `complete`, `reversed` or `failed`, with its
+evidence and follow-up owners.

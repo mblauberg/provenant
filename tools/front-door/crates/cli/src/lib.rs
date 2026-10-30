@@ -1683,12 +1683,14 @@ mod tests {
     }
     #[test]
     fn run_refuses_adapter_unsupported_flags_before_side_effects() {
+        // Models are catalogued, so an effort is refused only by the adapter
+        // (cursor) or by the catalogue entry, which records no effort (opencode).
         for (model, effort, refused) in [
-            ("claude/id", "high", false),
-            ("codex/id", "high", false),
-            ("agy/id", "high", false),
-            ("opencode/id", "high", false),
-            ("cursor/id", "high", true),
+            ("claude/claude-sonnet-5-5", "high", false),
+            ("codex/gpt-6-luna", "high", false),
+            ("agy/gemini-3.8-flash", "high", false),
+            ("opencode/opencode-go/glm-5.3-flash", "high", true),
+            ("cursor/gpt-5.3-codex-low", "high", true),
         ] {
             let invocation = valid(&[
                 "run",

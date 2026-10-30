@@ -52,7 +52,7 @@
         "adjacent"
       ],
       "expected": {
-        "primary_skill": "tdd",
+        "primary_skill": "test-design",
         "companion_skills": [
           "implement"
         ]
@@ -107,20 +107,8 @@
         "primary_skill": "implement",
         "companion_skills": [
           "refactor",
-          "tdd"
+          "test-design"
         ]
-      }
-    },
-    {
-      "id": "q198",
-      "relation": "boundary",
-      "prompt": "Assess this refactor proposal source-read-only; an attractive simplification alone is not a defect.",
-      "tags": [
-        "adjacent"
-      ],
-      "expected": {
-        "primary_skill": "code-review",
-        "companion_skills": []
       }
     },
     {
@@ -145,7 +133,7 @@
         "adjacent"
       ],
       "expected": {
-        "primary_skill": "tdd",
+        "primary_skill": "test-design",
         "companion_skills": []
       }
     }

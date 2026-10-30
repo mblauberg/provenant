@@ -1,79 +1,71 @@
 # Audit branch
 
-Read-only assessment of an existing Agent Skill: triggers, overlap,
-portability, token cost, security and effectiveness evidence. This branch is
-read-only: report evidence, never edit skills. Shared doctrine (four
-pillars, budgets, fixture taxonomy, failure vocabulary, provenance) lives in
-[../SKILL.md](../SKILL.md); this file carries only what audit does that
-authoring does not.
+Read-only assessment of an existing skill. Report evidence; never edit. The
+working rules in [../SKILL.md](../SKILL.md) apply. If the request also asks for
+a revision, the action-owning skill stays primary and this branch is its
+companion.
 
-When a request combines audit with revision, evaluation, export or
-documentation, the action-owning lifecycle remains primary and this branch is
-its companion.
+## Check
 
-## Evidence modes
-
-Default to static analysis and frozen routing fixtures. Do not inspect session
-history, private memory or project content merely because it exists.
-
-For personal work, a direct user request authorises read-only analysis of the
-named local histories. Do not require a second privacy receipt,
-redaction pass, retention date or minimum-cell suppression. Read histories in
-place; keep temporary excerpts local and run-owned; never commit raw transcripts
-or promote them to project truth. Ask only when roots or the useful time window
-are materially ambiguous. Unsupported or unattributable evidence is `N/A`,
+Run every dimension. Mark missing evidence `N/A`; an unsupported result is
 never zero.
 
-An aggregate or paraphrased report to the user in the same authorised
-session is local delivery, not sharing/export, and needs no second
-disclosure confirmation. Run-owned scratch is allowed. Separate
-authority is required before creating a persistent repository/shared artifact,
-sending raw excerpts to another provider, or disclosing to a new audience or
-external destination. When authorised, confirm with the user the audience,
-destination and whether excerpts are allowed; exclude secrets and out-of-scope
-third-party content.
+| Dimension | Evidence |
+|---|---|
+| Trigger selection | Selected over valid opportunities, from a frozen routing eval or explicit invocation. Loading a skill is not selection. |
+| Overtrigger | Balanced negatives selected in error. |
+| Undertrigger | Balanced positives missed. Production undertrigger needs an opportunity denominator. |
+| Cross-skill conflict | Confusion pairs with overlapping triggers, contradictory authority or competing completion gates. |
+| Workflow completion | Checkpoint stages reached over required stages. |
+| Static quality | Frontmatter holds only `name` and `description`. The first 250 characters carry the trigger and exclusion. Critical rules come early. The body is near 500 words, with depth in references. No dated history in the body. |
+| Environment | Referenced paths, tools and CLIs exist, or are capability-gated. |
+| Token cost | Always-loaded metadata and triggered body, against evidenced use. |
+| Catalogue exposure | Catalogue characters, truncated skills and duplicate triggers. |
+| Supply chain and authority | Source, version and licence. Scripts, hooks, binaries and network use. State writes and approval inheritance. |
 
-## Workflow
+Report each dimension as a finding, not a weighted score. Overtrigger, conflict
+and environment stay qualitative unless a versioned dataset gives a
+denominator.
 
-1. Resolve target skills from the canonical catalogue and deduplicate links.
-2. Check frontmatter/YAML, trigger and exclusion clarity,
-   adjacent-skill conflicts, broken paths/tools, instruction density, body size,
-   progressive disclosure, complete provider-rendered catalogue budget,
-   provider-sidecar parity, provenance/licence, authority/state writes, scripts,
-   hooks/MCP/network surfaces and deterministic fixtures.
-3. If local history analysis was requested, classify provenance before
-   calculating signals: user, platform metadata, notification, managed worker,
-   skill injection, command or unknown. Never infer selection from a skill
-   merely being loaded, and state small-sample limitations.
-4. When mining human corrections, cluster corrections by meaning and classify
-   each cluster as an existing-rule miss, trigger miss, weak steering, missing
-   procedure or gate, or local preference. Trigger misses, weak steering and
-   missing procedures may justify skill text; existing-rule misses belong in
-   fixtures or execution checks, and local preferences remain local. Literal
-   search can confirm known residue; it cannot establish semantic coverage.
-5. Use balanced, frozen routing evals for undertrigger and overtrigger claims.
-   Check fixtures and with-and-without evidence per the shared doctrine in
-   [../SKILL.md](../SKILL.md). A raw keyword match is only a candidate, not
-   ground truth.
-6. Report all dimensions from [method.md](method.md); mark missing evidence
-   `N/A` and keep static facts separate from behavioural estimates.
+Check static facts with the commands the skill names, not by reading alone.
+Confirm that `scripts/check-skill-negatives` passes for the skill.
 
-For a plugin/package intake, pin source and commit, inventory every component
-and digest, inspect manifests, installers, hooks, binaries, MCP/app endpoints,
-network/data retention, permissions, update/rollback and licence boundaries.
-Do not execute third-party code during static intake. Recommend a plugin only
-for a coherent distribution/runtime boundary; otherwise extract small licensed
-mechanisms into existing local owners.
+## Local histories
+
+Analyse session history only when the request names the roots and the time
+window. Read it in place, keep excerpts in run-owned scratch, and never commit
+raw transcripts. Report aggregates or paraphrases. A persistent shared
+artefact, raw excerpts sent to another provider, or a new audience needs a
+separate grant.
+
+Classify each user correction as an existing-rule miss (a fixture or check),
+a trigger miss, weak steering, a missing procedure or a local preference. Only
+trigger misses, weak steering and missing procedures justify skill text.
 
 ## Output
 
-Return a compact table with score, evidence and confidence, then P0/P1/P2
-findings. Every behavioural rate names its numerator, denominator, source,
-window and limitations. Suggested description changes must name the confusion
-case and a balanced regression fixture; build it with
-[author.md](author.md)'s fixture step. Prefer tiering detail into references;
-merge or split only when triggers, authority, artifacts and completion gates
-support a stable boundary (`MAINTAINING.md`).
+Return a compact table of dimension, finding, evidence and confidence. Then list
+P0, P1 and P2 findings. Every behavioural rate gives its numerator,
+denominator, source, window and limitations. A suggested description change
+names the confusion case and a balanced regression fixture.
 
-Do not cross into authoring from here; [../SKILL.md](../SKILL.md)'s
-audit → edit rule governs; a fix needs its own authority grant.
+Do not cross into authoring from here. A fix needs its own grant under the rule
+in [../SKILL.md](../SKILL.md).
+
+## Research basis
+
+Dated, most recent first. Weigh the 2026 sources above the older ones.
+
+- [MCP description quality](https://arxiv.org/abs/2602.18914), February 2026:
+  standard-compliant tool descriptions were selected 72% of the time in
+  competitive settings, against a 20% baseline. Supports front-loaded
+  descriptions.
+- [Memento-Skills](https://arxiv.org/abs/2603.18743), March 2026: stored skills
+  act as memory, and a router selects the relevant one. Supports fixtures that
+  test selection, not prose quality.
+- Anthropic's agent evaluation guidance (undated in this repository): balance
+  positive and negative cases, separate capability and regression suites, and
+  measure the model plus harness over repeated trials.
+- [Lost in the Middle](https://aclanthology.org/2024.tacl-1.9/), 2024, possibly
+  stale: model use of long context varies with position. Supports keeping hard
+  rules early.
