@@ -67,7 +67,8 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
 }
 
 /// OpenCode uses the user's configuration and stored provider accounts.
-/// Inline permissions deny edits and shell commands for read-only runs.
+/// Inline permissions deny edits and shell commands for read-only runs. Its
+/// built-in search tools still run ripgrep, which the profile grants by path.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -206,6 +207,14 @@ fn prepare(
     } else {
         Vec::new()
     };
+    if access == Access::ReadOnly {
+        // OpenCode's grep, glob and list tools execute ripgrep. It resolves
+        // `rg` from PATH, then from its cache bin ($XDG_CACHE_HOME/opencode/bin),
+        // and installs it there when absent. The lane sets XDG_CACHE_HOME to
+        // its private state, whose grant already covers the read, so grant
+        // exactly that binary for execution. No shell is enabled.
+        tool_exec_roots.push(exact(private.join("cache/opencode/bin/rg")));
+    }
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
@@ -863,6 +872,89 @@ mod tests {
     }
 
     #[test]
+    fn read_only_search_grants_only_ripgrep_in_the_lane_cache() {
+        use provenant_confinement::permissions::{PathGrant, PathScope};
+        use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+
+        let base = crate::tests::read_only_plan("/fixture", None);
+        let mut permissions = base.permissions().clone();
+        // Provider state is attempt-private and separate from the lane state
+        // root, as in the Seatbelt snapshot fixture.
+        permissions.private_state = Some(PathGrant {
+            path: "/fixture/provider-state".into(),
+            scope: PathScope::Subtree,
+        });
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+        .unwrap();
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let env = |key: &str| {
+            spec.env
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        let config: serde_json::Value = serde_json::from_str(
+            &env("OPENCODE_CONFIG_CONTENT")
+                .expect("inline config")
+                .to_string_lossy(),
+        )
+        .unwrap();
+        assert_eq!(config["permission"]["bash"], "deny");
+        assert_eq!(config["permission"]["edit"], "deny");
+
+        // OpenCode resolves ripgrep from PATH and then its cache bin, which is
+        // XDG_CACHE_HOME/opencode/bin under the lane's private state.
+        let rg = exact(std::path::Path::new(
+            "/fixture/provider-state/cache/opencode/bin/rg",
+        ));
+        assert_eq!(
+            spec.profile.spec.process_executables,
+            [exact(input.executable), exact(input.provenant.git)]
+        );
+        assert_eq!(spec.profile.spec.tool_exec_roots, std::slice::from_ref(&rg));
+        // No shell toolchain leaks into a read-only lane.
+        let path: Vec<_> = std::env::split_paths(&env("PATH").expect("PATH")).collect();
+        assert!(!path.contains(&input.home.join(".cargo/bin")), "{path:?}");
+        assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
+
+        let profile = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &spec.profile,
+            input.home,
+        )
+        .unwrap();
+        let exec = format!("(allow process-exec (literal \"{}\"))", rg.path.display());
+        assert!(profile.contains(&exec), "{exec}");
+        assert!(
+            !profile.contains("(allow process-exec (subpath"),
+            "read-only search must not grant an exec subtree"
+        );
+        // The private state grant is the read access ripgrep needs.
+        assert!(profile.contains("(allow file-read* (subpath \"/fixture/provider-state\"))"));
+    }
+
+    #[test]
     fn server_http_failure_cause_is_a_bounded_diagnostic() {
         let log = concat!(
             "timestamp=t level=INFO run=a message=\"watcher stopped\" path=/x http.span=1\n",
@@ -995,12 +1087,22 @@ mod tests {
                 link: bin.join("git"),
                 target: input.provenant.git.to_owned(),
             }));
-            // Read-only Git discovery must not enable other commands.
+            // Read-only discovery enables only OpenCode's search binary; a
+            // writer's toolchain roots follow the system and package roots.
             let roots = &spec.profile.spec.tool_exec_roots;
             if access == Access::ReadOnly {
-                assert!(roots.is_empty());
+                assert_eq!(
+                    roots,
+                    &[exact(
+                        plan.permissions()
+                            .private_state
+                            .as_ref()
+                            .unwrap()
+                            .path
+                            .join("cache/opencode/bin/rg")
+                    )]
+                );
             } else {
-                // The toolchain roots follow the system and package roots.
                 assert_eq!(
                     roots[..3],
                     [

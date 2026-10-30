@@ -77,6 +77,7 @@
 (allow file-read* (literal "/fixture/repo/.codex"))
 (allow process-exec (literal "/opt/homebrew/Cellar/provider/1.0/bin/provider"))
 (allow process-exec (literal "/fixture/git/bin/git"))
+(allow process-exec (literal "/fixture/provider-state/cache/opencode/bin/rg"))
 (allow process-fork)
 (allow file-read* (literal "/fixture/home/.local/share/opencode/opencode.db"))
 (allow file-write* (literal "/fixture/home/.local/share/opencode/opencode.db"))
