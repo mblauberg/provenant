@@ -107,6 +107,67 @@ fn unsafe_state_root_is_named_relative_to_itself() -> TestResult {
     );
     Ok(())
 }
+#[test]
+fn mutation_record_reads_sync_the_checkpoint_while_views_do_not() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    let run = store.create(&input, &call)?;
+    let record = store.record(id, &call)?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let checkpoint = serde_json::json!({
+        "schema_version": 1,
+        "scope": RunStore::scope(&record),
+    });
+    crate::artifacts::seal(
+        &attempt,
+        "process.json",
+        &serde_json::to_vec(&checkpoint)?,
+        RECORD_LIMIT,
+    )?;
+    crate::artifacts::seal(&attempt, "stderr.log", b"view output", CAPTURE_LIMIT)?;
+
+    // Mutation consumers read the checkpoint durably.
+    crate::artifacts::sync_probe::reset();
+    store.record(id, &call)?;
+    assert!(crate::artifacts::sync_probe::count() >= 1);
+
+    // Lane listings are a view: same checkpoint, no durable flush.
+    crate::artifacts::sync_probe::reset();
+    let page = store.lanes(
+        &LaneQuery {
+            targets: Vec::new(),
+            all: true,
+            limit: 10,
+            after: 0,
+            newest_first: false,
+            owner: None,
+            unseen_after: None,
+        },
+        &call,
+    )?;
+    assert_eq!(page.lanes.len(), 1);
+    assert_eq!(crate::artifacts::sync_probe::count(), 0);
+
+    // Output paging is a view too.
+    crate::artifacts::sync_probe::reset();
+    let chunk = store.read_output(
+        id,
+        ArtifactPart::Stderr,
+        ByteRange::default(),
+        &context,
+        &call,
+    )?;
+    assert_eq!(chunk.bytes, b"view output");
+    assert_eq!(crate::artifacts::sync_probe::count(), 0);
+    Ok(())
+}
+
 pub(super) fn context(
     base: &Path,
 ) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
