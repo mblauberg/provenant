@@ -1,4 +1,4 @@
 ## Fixes
 ### Graphs
 
-- Tick reports an undecodable graph checkpoint once with guidance to migrate or cancel it, instead of repeating the error on every tick (#2381).
+- Tick reports an unreadable graph checkpoint once per record; graph status identifies it and graph cancel retires the unreadable record (#2381).

@@ -1016,12 +1016,14 @@ pub(crate) fn tick_graphs(
                 Ok(false) => {}
                 Err(error) => {
                     let reason = error.to_string();
-                    let _ = FileJournal::set_advance_error(
-                        &resolved.roots.state,
-                        project,
-                        &id,
-                        Some(&reason),
-                    );
+                    if !error.is::<provenant_fabric_runtime::graph::UnreadableCheckpointNotice>() {
+                        let _ = FileJournal::set_advance_error(
+                            &resolved.roots.state,
+                            project,
+                            &id,
+                            Some(&reason),
+                        );
+                    }
                     report.errors.push(format!("{project}/{id}: {reason}"));
                 }
             }
@@ -5192,14 +5194,56 @@ impl Factory {
                 .graph_id
                 .as_str(),
         };
+        // An unreadable record has no trustworthy node or attempt state.
+        let unreadable_snapshot = |message: String| {
+            use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphRun, GraphStatus};
+            GraphRun {
+                status: GraphStatus::Paused,
+                checkpoint: GraphCheckpoint {
+                    extra: Default::default(),
+                    expansions: Vec::new(),
+                    remaining: None,
+                    instance_id: None,
+                    delivery_required: false,
+                    delivered: false,
+                    pull_request: None,
+                    integration_pin: None,
+                    cancelled: false,
+                    pause_reason: None,
+                    pause_code: None,
+                    unknown_usage: Vec::new(),
+                    unknown_usage_omitted: 0,
+                    usage_events: Vec::new(),
+                    usage_events_omitted: 0,
+                    settlements: 0,
+                    extensions: Vec::new(),
+                    asks: Vec::new(),
+                    ask_actor: None,
+                    wake_at: None,
+                    pause_asks: 0,
+                    limit_notes: Vec::new(),
+                    schema_version: 1,
+                    graph_id: id.to_owned(),
+                    plan_digest: String::new(),
+                    nodes: Vec::new(),
+                },
+                advance_error: Some(message),
+            }
+        };
         if matches!(input, GraphInput::Status { .. }) {
-            let mut checkpoint = FileJournal::read_checkpoint(
+            let mut checkpoint = match FileJournal::read_checkpoint(
                 &self.context.roots.state,
                 self.context.identity.project,
                 id,
-            )
-            .map_err(graph_journal_error)?
-            .ok_or(FacadeError::NotFound)?;
+            ) {
+                Ok(checkpoint) => checkpoint.ok_or(FacadeError::NotFound)?,
+                Err(error) if error.is_unreadable() => {
+                    return Ok(unreadable_snapshot(format!(
+                        "Graph record is unreadable ({error}); cancel it to retire the record. Active attempts and writer fences are not released."
+                    )));
+                }
+                Err(error) => return Err(graph_journal_error(error)),
+            };
             if let (Ok(boot), Ok(now)) = (
                 self.clock.boot_identity(),
                 self.clock.host_monotonic_micros(),
@@ -5215,6 +5259,21 @@ impl Factory {
             .map_err(|_| FacadeError::io("access graph journal"))?;
             run.advance_error = sidecar_error.or(run.advance_error);
             return Ok(run);
+        }
+        if matches!(input, GraphInput::Cancel { .. })
+            && FileJournal::retire_unreadable(
+                &self.context.roots.state,
+                self.context.identity.project,
+                id,
+                budget,
+                cancel,
+                &self.clock,
+            )
+            .map_err(graph_journal_error)?
+        {
+            return Ok(unreadable_snapshot(
+                "Unreadable graph record retired. Active attempts were not cancelled and writer fences were not released.".into(),
+            ));
         }
         let mut journal = FileJournal::open(
             &self.context.roots.state,
@@ -6977,6 +7036,177 @@ mod peer_tests {
     use provenant_confinement::worktrees;
     use provenant_core::{AttemptId, RunId, TaskId};
     use provenant_run::{AttemptState, Outcome, RunStore};
+
+    #[test]
+    fn tick_reports_unreadable_once_and_advances_another_graph()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph;
+        struct Seed {
+            actor: String,
+            at: provenant_core::WallTime,
+        }
+        impl graph::AttemptOwner for Seed {
+            type Error = FacadeError;
+            fn actor(&self) -> String {
+                self.actor.clone()
+            }
+            fn wall_now(&self) -> Option<provenant_core::WallTime> {
+                Some(self.at)
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> Result<graph::AttemptObservation, Self::Error> {
+                Err(FacadeError::OwnerUnavailable)
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
+        let project = context.identity.project;
+        let clock = SystemClock;
+        let now = clock.wall_now()?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 10)?;
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"b-good", "decision_session":"chair-session",
+            "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{
+                "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
+                "default":"hold", "timeout_seconds":60
+            }}]
+        }))?;
+        let mut journal =
+            graph::FileJournal::open(&roots.state, project, "b-good", budget, &cancel, &clock)?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            directory: rig.project.clone(),
+            document: document.clone(),
+        })?;
+        let mut seed = Seed {
+            actor: context.identity.inbox.actor.to_string(),
+            at: provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?,
+        };
+        let seeded = graph::advance_with_budget(
+            &document,
+            &mut seed,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        assert_eq!(seeded.checkpoint.nodes[0].state, graph::NodeState::Running);
+        drop(journal);
+        let directory = roots
+            .state
+            .as_path()
+            .join("fabric/graphs")
+            .join(project.to_string());
+        std::fs::write(directory.join("graph-a-bad.json"), b"invalid json")?;
+        let resolved = crate::roots::Resolved {
+            assets: rig.project.clone(),
+            home: rig.home.clone(),
+            project: rig.project.clone(),
+            roots: roots.clone(),
+            claude_config: None,
+            codex_home: None,
+        };
+        let first = tick_graphs(&resolved, now, &FreeWorkers)?;
+        assert_eq!(first.errors.len(), 1, "{:?}", first.errors);
+        assert!(first.errors[0].contains("a-bad"));
+        assert_eq!(first.advanced, 1);
+        let good = graph::FileJournal::read_checkpoint(&roots.state, project, "b-good")?
+            .ok_or("missing good graph")?;
+        assert_eq!(good.nodes[0].state, graph::NodeState::Succeeded);
+        let second = tick_graphs(&resolved, now, &FreeWorkers)?;
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert_eq!(second.advanced, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use provenant_fabric_runtime::graph::{FileJournal, GraphStatus};
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let project = factory.context.identity.project;
+        drop(FileJournal::open(
+            &roots.state,
+            project,
+            "broken",
+            budget,
+            &cancel,
+            &factory.clock,
+        )?);
+        let directory = roots
+            .state
+            .as_path()
+            .join("fabric/graphs")
+            .join(project.to_string());
+        std::fs::write(directory.join("graph-broken.json"), b"invalid json")?;
+        let status = factory.graph(
+            GraphInput::Status {
+                extra: Default::default(),
+                id: "broken".into(),
+            },
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(status.status, GraphStatus::Paused);
+        assert!(
+            status
+                .advance_error
+                .unwrap()
+                .contains("cancel it to retire")
+        );
+        let retired = factory.graph(
+            GraphInput::Cancel {
+                extra: Default::default(),
+                id: "broken".into(),
+            },
+            budget,
+            &cancel,
+        )?;
+        assert!(
+            retired
+                .advance_error
+                .unwrap()
+                .contains("Active attempts were not cancelled")
+        );
+        assert!(!directory.join("graph-broken.json").exists());
+        assert!(matches!(
+            factory.graph(
+                GraphInput::Status {
+                    extra: Default::default(),
+                    id: "broken".into()
+                },
+                budget,
+                &cancel
+            ),
+            Err(FacadeError::NotFound)
+        ));
+        Ok(())
+    }
 
     fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         if !provenant_cli::fabric::in_lane() {
