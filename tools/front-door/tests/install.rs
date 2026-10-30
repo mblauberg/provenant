@@ -881,13 +881,14 @@ fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
+    -w) format=$2; shift 2 ;;
     *) url=$1; shift ;;
   esac
 done
 case "$url" in
-  *.sha256) cp '{}/checksum' "$out" ;;
-  *.tar.gz) cp '{}/package.tar.gz' "$out" ;;
-  *) exit 99 ;;
+  */provenant-aarch64-apple-darwin.tar.gz.sha256) cp '{}/checksum' "$out"; [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 200 ;;
+  */provenant-aarch64-apple-darwin.tar.gz) cp '{}/package.tar.gz' "$out"; [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 200 ;;
+  *) [ "${{format:-}}" != '%{{http_code}}' ] || printf '%s' 404 ;;
 esac
 "#,
             fixtures.display(),
@@ -978,7 +979,10 @@ esac
         "{}",
         String::from_utf8_lossy(&rerun.stderr.bytes)
     );
-    assert!(rerun.stderr.bytes.is_empty());
+    assert_eq!(
+        rerun.stderr.bytes,
+        b"This release has no bundled app archive; upgrading Provenant without refreshing the app.\n"
+    );
     assert!(!fs::read_to_string(&recorded)?.contains("--harness"));
     fs::remove_file(&recorded)?;
     fs::remove_file(rig.state.join("install/receipt.json"))?;
@@ -1166,8 +1170,68 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
         .next()
         .ok_or("digest")?
         .to_owned();
+    let apps = rig.root.join("apps");
+    let app = "Provenant Console.app/Contents/MacOS";
+    fs::create_dir_all(apps.join(app))?;
+    for binary in ["provenant-console", "quota-menubar"] {
+        let path = apps.join(app).join(binary);
+        fs::write(&path, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    let apps_archive = rig.root.join("apps.tar.gz");
+    let tar = rig.execute_os(
+        Path::new("/usr/bin/tar"),
+        &[
+            "-czf".into(),
+            apps_archive.clone().into(),
+            "-C".into(),
+            apps.into(),
+            ".".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&tar), 0);
+    let hash = rig.execute_os(
+        Path::new("/usr/bin/shasum"),
+        &["-a".into(), "256".into(), apps_archive.clone().into()],
+        None,
+    )?;
+    let apps_digest = String::from_utf8(hash.stdout.bytes)?
+        .split_whitespace()
+        .next()
+        .ok_or("apps digest")?
+        .to_owned();
+    let home = rig
+        .env
+        .iter()
+        .find(|(key, _)| key == "HOME")
+        .ok_or("HOME")?
+        .1
+        .clone();
+    let home = PathBuf::from(home);
+    let installed_app = home.join("Applications/Provenant Console.app");
+    fs::create_dir_all(&installed_app)?;
+    fs::write(installed_app.join("old-build"), "stale")?;
+    let agent = home.join("Library/LaunchAgents/dev.provenant.quota-menubar.plist");
+    fs::create_dir_all(agent.parent().ok_or("agent parent")?)?;
+    if cfg!(target_os = "macos") {
+        fs::write(
+            &agent,
+            r#"<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>dev.provenant.quota-menubar</string><key>ProgramArguments</key><array><string>/old/build/quota-menubar</string><string>--kept</string></array></dict></plist>"#,
+        )?;
+    }
     let fake_bin = rig.root.join("fake-bin");
     fs::create_dir(&fake_bin)?;
+    let launch_log = rig.root.join("launchctl-log");
+    let launchctl = fake_bin.join("launchctl");
+    fs::write(
+        &launchctl,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\n",
+            launch_log.display(),
+        ),
+    )?;
+    fs::set_permissions(launchctl, fs::Permissions::from_mode(0o755))?;
     let ssh = fake_bin.join("ssh");
     let ssh_args = rig.root.join("ssh-args");
     fs::write(
@@ -1194,16 +1258,23 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
+    -w) format=$2; shift 2 ;;
     *) url=$1; shift ;;
   esac
 done
 case "$url" in
   */releases/latest) printf '%s\n' '{{"tag_name":"v9.8.7"}}' ;;
+  */download/v9.8.7/provenant-apps-aarch64-apple-darwin.tar.gz.sha256) printf '%s\n' "${{PROVENANT_TEST_APPS_CHECKSUM:-{apps_digest}}}" > "$out" ;;
+  */download/v9.8.7/provenant-apps-aarch64-apple-darwin.tar.gz)
+    if [ "${{PROVENANT_TEST_MISSING_APPS:-}}" = 1 ]; then printf '%s' 404; exit 0; fi
+    cp '{}' "$out"
+    [ -z "${{format:-}}" ] || printf '%s' 200 ;;
   */download/v9.8.7/*.sha256) printf '%s  package.tar.gz\n' "${{PROVENANT_TEST_CHECKSUM:-{digest}}}" > "$out" ;;
-  */download/v9.8.7/*.tar.gz) cp '{}' "$out" ;;
+  */download/v9.8.7/*.tar.gz) cp '{}' "$out"; [ -z "${{format:-}}" ] || printf '%s' 200 ;;
   *) exit 99 ;;
 esac
 "#,
+            apps_archive.display(),
             archive.display()
         ),
     )?;
@@ -1240,6 +1311,21 @@ esac
             .source_digest
     );
     rig.env.retain(|(key, _)| key != "PROVENANT_TEST_CHECKSUM");
+    rig.env
+        .push(("PROVENANT_TEST_APPS_CHECKSUM".into(), "0".repeat(64).into()));
+    let rejected = rig.command(&["upgrade", "--json"])?;
+    let rejected_value: serde_json::Value = serde_json::from_slice(&rejected.stdout.bytes)?;
+    assert_eq!(rejected_value["data"][0]["success"], false);
+    assert!(
+        rejected_value["data"][0]["output"]
+            .as_str()
+            .ok_or("output")?
+            .contains("Release checksum mismatch")
+    );
+    assert!(installed_app.join("old-build").exists());
+    assert!(!launch_log.exists());
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_APPS_CHECKSUM");
     let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
     assert_eq!(value["data"][0]["host"], "local", "{value}");
@@ -1251,6 +1337,48 @@ esac
     assert!(arguments.contains("worker.example\n"));
     assert!(arguments.contains("'--tag' 'v9.8.7'"));
     assert!(arguments.contains("-oBatchMode=yes"));
+    assert!(arguments.contains("provenant-apps-aarch64-apple-darwin.tar.gz"));
+    assert!(!installed_app.join("old-build").exists());
+    assert!(
+        installed_app
+            .join("Contents/MacOS/provenant-console")
+            .is_file()
+    );
+    assert!(installed_app.join("Contents/MacOS/quota-menubar").is_file());
+    if cfg!(target_os = "macos") {
+        let plist = fs::read_to_string(&agent)?;
+        let agent_path = agent.to_str().ok_or("agent")?;
+        assert!(
+            plist.contains(
+                installed_app
+                    .join("Contents/MacOS/quota-menubar")
+                    .to_str()
+                    .ok_or("agent path")?
+            )
+        );
+        assert!(plist.contains("--kept"));
+        let launches = fs::read_to_string(&launch_log)?;
+        assert!(launches.contains("bootout gui/"));
+        assert!(launches.contains("bootstrap gui/"));
+        assert!(
+            launches
+                .lines()
+                .filter(|line| line.starts_with("bootstrap gui/") && line.contains(agent_path))
+                .count()
+                >= 2
+        );
+        assert!(launches.contains("kickstart -k gui/"));
+        assert!(launches.contains(agent_path));
+    }
+    rig.env
+        .push(("PROVENANT_TEST_MISSING_APPS".into(), "1".into()));
+    let older = rig.command(&["upgrade", "--json"])?;
+    let older_value: serde_json::Value = serde_json::from_slice(&older.stdout.bytes)?;
+    assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
+    assert!(String::from_utf8_lossy(&older.stdout.bytes).contains("no bundled app archive"));
+    assert!(installed_app.join("Contents/MacOS/quota-menubar").is_file());
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_MISSING_APPS");
     let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(
         fs::read(rig.state.join("install/receipt.json"))?.as_slice(),
         provenant_records::Limits::CONFIG,

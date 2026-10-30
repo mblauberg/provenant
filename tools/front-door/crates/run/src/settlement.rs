@@ -905,6 +905,55 @@ mod tests {
     }
 
     #[test]
+    fn detached_process_budget_refusal_is_typed_and_clears_marker() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        let queued_lane = store.record(id, &call)?;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let result = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            Err(provenant_os::exec::ExecError::ProcessBudget {
+                used: 950,
+                limit: 1000,
+            })
+        });
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            RunError::Admission(AdmissionError::Processes {
+                used: 950,
+                limit: 1000
+            })
+        ));
+        assert_eq!(crate::ErrorKind::from(&error), crate::ErrorKind::Processes);
+        let waits = store.lane_waits_with_resources(&[queued_lane], &call, &crate::SystemResources);
+        assert_eq!(
+            waits[0].waiting_for,
+            "launch: last recovery worker refused: user process count 950 of 1000"
+        );
+        let mut retried = false;
+        store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            retried = true;
+            Ok(())
+        })?;
+        assert!(retried, "failed spawn must remove its queued marker");
+        assert!(store.recovery_process_wait(run.run_id, &call).is_none());
+        Ok(())
+    }
+
+    #[test]
     fn preclaim_failures_report_the_cause_bound_background_spawns_and_allow_explicit_retry()
     -> TestResult {
         use crate::{AttemptState, Reconciled, RunStore};
@@ -1294,6 +1343,39 @@ fn report_registry_error(run: provenant_core::RunId, error: &RunError) {
     eprintln!("warning: writer fence listing failed for {run}: {error}");
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerProcessRefusal {
+    schema_version: u64,
+    run: provenant_core::RunId,
+    expires: provenant_core::WallTime,
+    used: u64,
+    limit: u64,
+}
+
+impl crate::RunStore {
+    pub(crate) fn recovery_process_wait(
+        &self,
+        run: provenant_core::RunId,
+        call: &crate::Request<'_>,
+    ) -> Option<String> {
+        let directory = self.run_dir(run, false).ok()?;
+        let raw =
+            read_sealed(&directory, "settlement-process-refusal.json", RECORD_LIMIT).ok()??;
+        let refusal: WorkerProcessRefusal = crate::db::decode(&raw).ok()?;
+        if refusal.schema_version != 1
+            || refusal.run != run
+            || call.clock.wall_now().ok()? >= refusal.expires
+        {
+            return None;
+        }
+        Some(format!(
+            "launch: last recovery worker refused: user process count {} of {}",
+            refusal.used, refusal.limit
+        ))
+    }
+}
+
 impl crate::RunStore {
     pub(crate) fn queue_reconcile(
         &self,
@@ -1523,8 +1605,37 @@ impl crate::RunStore {
             drop(worker_lock);
             if let Err(error) = spawn(&argv, &checkout) {
                 queued.unlink(OsStr::new("settlement-queued.json"))?;
-                return Err(RunError::Io(std::io::Error::other(error)));
+                return Err(match error {
+                    provenant_os::exec::ExecError::ProcessBudget { used, limit } => {
+                        // The caller may discard this best-effort recovery error. Retain
+                        // a short-lived observation for queued lanes on the same run.
+                        if let Ok(expires) = wall
+                            .checked_add(provenant_core::DurationMicros::from_micros(60_000_000))
+                            && let Ok(bytes) = crate::db::bytes(&WorkerProcessRefusal {
+                                schema_version: 1,
+                                run,
+                                expires,
+                                used,
+                                limit,
+                            })
+                        {
+                            let _ = queued
+                                .atomic_write(
+                                    OsStr::new("settlement-process-refusal.json"),
+                                    ".settlement-refusal-",
+                                    &bytes,
+                                    PublishMode::Replace,
+                                )
+                                .and_then(|publication| publication.require_durable());
+                        }
+                        RunError::Admission(AdmissionError::Processes { used, limit })
+                    }
+                    other => RunError::Io(std::io::Error::other(other)),
+                });
             }
+            // The worker is already running; a stale diagnostic must not turn
+            // a successful spawn into a reported launch failure.
+            let _ = queued.unlink(OsStr::new("settlement-process-refusal.json"));
         }
         Ok(found
             .into_iter()

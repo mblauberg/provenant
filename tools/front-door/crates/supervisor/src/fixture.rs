@@ -39,8 +39,7 @@ pub fn acquire_reboot_recovery_with(
     )
 }
 
-/// A process recorded by the guardian is terminated if its owning test fails.
-/// Successful tests disarm the guard after proving normal settlement.
+/// Recorded custodians and their dependents are terminated when the guard drops.
 pub struct ProcessCleanupGuard {
     root: PathBuf,
     armed: bool,

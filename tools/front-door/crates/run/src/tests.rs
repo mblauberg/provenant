@@ -107,6 +107,67 @@ fn unsafe_state_root_is_named_relative_to_itself() -> TestResult {
     );
     Ok(())
 }
+#[test]
+fn mutation_record_reads_sync_the_checkpoint_while_views_do_not() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    let run = store.create(&input, &call)?;
+    let record = store.record(id, &call)?;
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let checkpoint = serde_json::json!({
+        "schema_version": 1,
+        "scope": RunStore::scope(&record),
+    });
+    crate::artifacts::seal(
+        &attempt,
+        "process.json",
+        &serde_json::to_vec(&checkpoint)?,
+        RECORD_LIMIT,
+    )?;
+    crate::artifacts::seal(&attempt, "stderr.log", b"view output", CAPTURE_LIMIT)?;
+
+    // Mutation consumers read the checkpoint durably.
+    crate::artifacts::sync_probe::reset();
+    store.record(id, &call)?;
+    assert!(crate::artifacts::sync_probe::count() >= 1);
+
+    // Lane listings are a view: same checkpoint, no durable flush.
+    crate::artifacts::sync_probe::reset();
+    let page = store.lanes(
+        &LaneQuery {
+            targets: Vec::new(),
+            all: true,
+            limit: 10,
+            after: 0,
+            newest_first: false,
+            owner: None,
+            unseen_after: None,
+        },
+        &call,
+    )?;
+    assert_eq!(page.lanes.len(), 1);
+    assert_eq!(crate::artifacts::sync_probe::count(), 0);
+
+    // Output paging is a view too.
+    crate::artifacts::sync_probe::reset();
+    let chunk = store.read_output(
+        id,
+        ArtifactPart::Stderr,
+        ByteRange::default(),
+        &context,
+        &call,
+    )?;
+    assert_eq!(chunk.bytes, b"view output");
+    assert_eq!(crate::artifacts::sync_probe::count(), 0);
+    Ok(())
+}
+
 pub(super) fn context(
     base: &Path,
 ) -> std::result::Result<ExecutionContext, Box<dyn std::error::Error>> {
@@ -130,6 +191,18 @@ pub(super) fn clock() -> TestClock {
 }
 pub(super) fn call<'a>(clock: &'a TestClock, cancel: &'a CancelToken) -> Request<'a> {
     Request { clock, cancel }
+}
+/// The provenance of a refused artifact. Any other outcome fails the test.
+pub(super) fn artifact_provenance<T>(result: Result<T>) -> ArtifactProvenance {
+    match result {
+        Err(RunError::ArtifactMismatch(provenance)) => provenance,
+        other => panic!("expected an artifact mismatch, got {:?}", other.err()),
+    }
+}
+/// The 12-digit prefix a digest comparison reports, built without the code under test.
+pub(super) fn digest_prefix(digest: impl std::fmt::Display) -> ArtifactValue {
+    let text = digest.to_string();
+    ArtifactValue::Digest(text.trim_start_matches("sha256:")[..12].to_string())
 }
 pub(super) fn input() -> PreparedRun {
     let task = TaskId::from_bytes([3; 16]);
@@ -726,11 +799,106 @@ fn streamed_result_is_verified_and_redacted_across_chunks() -> TestResult {
         );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
+    std::fs::write(&path, vec![b'x'; text.len() + 1])?;
+    assert_eq!(
+        artifact_provenance(store.stream_result(id, &call, None)),
+        ArtifactProvenance {
+            check: ArtifactCheck::RecordedLength,
+            artifact: "result.md".into(),
+            expected: Some(ArtifactValue::Length(text.len() as u64)),
+            actual: Some(ArtifactValue::Length(text.len() as u64 + 1)),
+        }
+    );
     std::fs::write(path, vec![b'x'; text.len()])?;
-    assert!(matches!(
-        store.stream_result(id, &call, None),
-        Err(RunError::ArtifactMismatch)
-    ));
+    assert_eq!(
+        artifact_provenance(store.stream_result(id, &call, None)),
+        ArtifactProvenance {
+            check: ArtifactCheck::RecordedDigest,
+            artifact: "result.md".into(),
+            expected: Some(digest_prefix(CanonicalV1::file_digest(text.as_bytes()))),
+            actual: Some(digest_prefix(CanonicalV1::file_digest(&vec![
+                b'x';
+                text.len()
+            ]))),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn appended_after_eof_names_the_recorded_and_final_lengths() -> TestResult {
+    use std::io::Write as _;
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let text = "sealed result";
+    let mut done = publication();
+    done.result = text;
+    store.publish_terminal(id, 1, &done, &exit(), &call)?;
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/result.md", input.run_id));
+    // Grow the file through a second handle between the streamed EOF and the
+    // final metadata check, so the streamed length and digest still match the
+    // record and only the final unchanged check can refuse.
+    let provenance = artifact_provenance(store.stream_result_observing(id, &call, None, || {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut handle| handle.write_all(b"appended"))
+            .unwrap();
+    }));
+    assert_eq!(
+        provenance,
+        ArtifactProvenance {
+            check: ArtifactCheck::Stream,
+            artifact: "result.md".into(),
+            expected: Some(ArtifactValue::Length(text.len() as u64)),
+            actual: Some(ArtifactValue::Length(text.len() as u64 + 8)),
+        }
+    );
+    let message = provenance.to_string();
+    assert!(message.contains(text.len().to_string().as_str()));
+    assert!(message.contains((text.len() as u64 + 8).to_string().as_str()));
+    Ok(())
+}
+
+#[test]
+fn tampered_request_names_the_request_digest_that_failed() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let stored = store.run(input.run_id, &call)?.request_digest;
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/request.json", input.run_id));
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    value["concurrency"] = 99.into();
+    let recomputed = serde_json::from_value::<CanonicalRequest>(value.clone())?.digest()?;
+    std::fs::write(&path, serde_json::to_vec(&value)?)?;
+    assert_eq!(
+        artifact_provenance(store.request(input.run_id, &call)),
+        ArtifactProvenance {
+            check: ArtifactCheck::RequestDigest,
+            artifact: "request.json".into(),
+            expected: Some(digest_prefix(stored)),
+            actual: Some(digest_prefix(recomputed)),
+        }
+    );
     Ok(())
 }
 
@@ -1476,10 +1644,19 @@ fn result_only_orphan_is_not_poisoned_by_different_recomputed_text() -> TestResu
     )?;
     let mut recomputed = publication();
     recomputed.result = "different text after restart";
-    assert!(matches!(
-        store.publish_terminal(id, 1, &recomputed, &exit(), &call),
-        Err(RunError::ArtifactMismatch)
-    ));
+    assert_eq!(
+        artifact_provenance(store.publish_terminal(id, 1, &recomputed, &exit(), &call)),
+        ArtifactProvenance {
+            check: ArtifactCheck::SealConflict,
+            artifact: "result.md".into(),
+            expected: Some(digest_prefix(CanonicalV1::file_digest(
+                publication().result.as_bytes()
+            ))),
+            actual: Some(digest_prefix(CanonicalV1::file_digest(
+                recomputed.result.as_bytes()
+            ))),
+        }
+    );
     store.recover_result_only(id, &recomputed, &exit(), &call)?;
     assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
     assert_eq!(

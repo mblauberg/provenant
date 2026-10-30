@@ -44,7 +44,6 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(CustodyLease, Custo
     )?;
     let command = ProviderCommand {
         priority: 0,
-        provider_lease: None,
         lane_ports: None,
         requester: provenant_core::ActorId::from_bytes([4; 16]),
         resolved_route: "fixture/provider".into(),

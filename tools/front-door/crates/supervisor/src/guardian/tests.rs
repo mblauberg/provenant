@@ -2,6 +2,233 @@ use super::*;
 use crate::census::{Census, ProcessFact};
 use std::collections::BTreeSet;
 
+#[cfg(all(feature = "fixture", target_os = "macos"))]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
+    use crate::census::{CensusError, ProcessObservation, ProcessObserver};
+    use provenant_core::{AttemptId, RunId, WaitBudget};
+    use provenant_os::clock::SystemClock;
+    use std::os::fd::{AsFd, AsRawFd};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    // Keep the group alive until the first publication attempt. This forces
+    // the unresolved path, rather than testing only an already empty group.
+    struct GatedObserver(Arc<AtomicBool>);
+    impl ProcessObserver for GatedObserver {
+        fn boot_identity(&self) -> std::result::Result<String, CensusError> {
+            crate::fixture::RecordedBootObserver.boot_identity()
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            crate::fixture::RecordedBootObserver.observe(pid)
+        }
+        fn census(&self, limit: usize) -> std::result::Result<Census, CensusError> {
+            if !self.0.load(Ordering::SeqCst) {
+                return Err(CensusError::InvalidRecord);
+            }
+            crate::fixture::RecordedBootObserver.census(limit)
+        }
+    }
+    struct Missing(Arc<AtomicBool>, PathBuf);
+    impl ExitPublisher for Missing {
+        fn publish(&self, _: &Directory, bytes: &[u8]) -> Result<Publication> {
+            let exit: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(
+                exit["unresolved_cleanup"], true,
+                "initial cleanup must be unresolved"
+            );
+            let pid: i64 = std::fs::read_to_string(&self.1)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(
+                matches!(crate::fixture::RecordedBootObserver.observe(pid), ProcessObservation::Present(fact) if !fact.zombie),
+                "group member must still be live at publication"
+            );
+            self.0.store(true, Ordering::SeqCst);
+            Err(provenant_os::fs::FsError::Io {
+                operation: "publish fixture exit",
+                path: "process-exit.json".into(),
+                source: io::Error::from_raw_os_error(libc::ENOENT),
+            }
+            .into())
+        }
+    }
+    const CHILD_ARGS: &str = "PROVENANT_TEST_SUPERVISE_FDS";
+    const CHILD_PID: &str = "PROVENANT_TEST_PROVIDER_PID_PATH";
+    // The guarded subprocess runs only this test in a fresh session. Its
+    // inherited descriptor marker selects supervise instead of spawning again.
+    if let Some(args) = std::env::var_os(CHILD_ARGS) {
+        let args: Vec<OsString> = args
+            .to_str()
+            .unwrap()
+            .split(',')
+            .map(OsString::from)
+            .collect();
+        let gate = Arc::new(AtomicBool::new(false));
+        let observer = GatedObserver(gate.clone());
+        let publisher = Missing(gate, std::env::var_os(CHILD_PID).unwrap().into());
+        supervise(
+            &args,
+            GuardianHooks {
+                observer: Some(&observer),
+                exit_publisher: Some(&publisher),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let writer_path = root.path().join("writer");
+    let attempt_path = root.path().join("attempt");
+    std::fs::create_dir(&writer_path).unwrap();
+    std::fs::create_dir(&attempt_path).unwrap();
+    let child_path = root.path().join("child.pid");
+    let clock = SystemClock::new();
+    let scope = Scope {
+        run: RunId::from_bytes([31; 16]),
+        attempt: AttemptId::from_bytes([32; 16]),
+        generation: 1,
+    };
+    let budget = WaitBudget::nonblocking(clock.mono_now());
+    let cancel = CancelToken::new();
+    let writer = crate::fixture::acquire_writer(
+        Directory::open_anchor(&writer_path).unwrap(),
+        scope,
+        budget,
+        &cancel,
+        &clock,
+    )
+    .unwrap();
+    let publication = PublicationReservation::prepare(
+        Directory::open_anchor(&attempt_path).unwrap(),
+        budget,
+        &cancel,
+        &clock,
+    )
+    .unwrap();
+    let capture = CapturePlan {
+        root_flush_ms: 50,
+        descendant_grace_ms: 100,
+        wall_ms: 5_000,
+        ..CapturePlan::default()
+    };
+    let message = LaunchMessage {
+        schema_version: 1,
+        priority: 0,
+        scope,
+        resolved_route: "fixture/provider".into(),
+        permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
+        task: provenant_core::TaskId::from_bytes([33; 16]),
+        requester: provenant_core::ActorId::from_bytes([34; 16]),
+        binding: writer.reservation.binding.clone(),
+        executable_snapshot: snapshot_executable(OsStr::new("/bin/sh")).unwrap(),
+        protected_commands: Vec::new(),
+        argv: vec![
+            b"/bin/sh".to_vec(),
+            b"-c".to_vec(),
+            b"/bin/sleep 2 >/dev/null 2>&1 & echo $! > \"$1\"".to_vec(),
+            b"fixture".to_vec(),
+            child_path.as_os_str().as_bytes().to_vec(),
+        ],
+        environment: Vec::new(),
+        lane_ports: None,
+        cwd: root.path().as_os_str().as_bytes().to_vec(),
+        stdin: Vec::new(),
+        secret_input: None,
+        holder_context: Vec::new(),
+        capture,
+    };
+    let (mut parent, child) = std::os::unix::net::UnixStream::pair().unwrap();
+    let descriptors = [
+        child.as_fd(),
+        writer.lock_directory.handoff_file().as_fd(),
+        publication.directory.handoff_file().as_fd(),
+        writer.lease.as_ref().unwrap().handoff_file().as_fd(),
+        publication.custody.handoff_file().as_fd(),
+    ];
+    let args = descriptors
+        .iter()
+        .map(|fd| fd.as_raw_fd().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut environment: Vec<_> = std::env::vars_os().collect();
+    environment.push((CHILD_ARGS.into(), args.into()));
+    environment.push((CHILD_PID.into(), child_path.as_os_str().to_owned()));
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args([
+        "--exact",
+        "guardian::tests::guardian_missing_attempt_finishes_unresolved_group_cleanup",
+        "--nocapture",
+    ]);
+    command.envs(environment.iter().cloned());
+    provenant_os::sys::child::configure_command(
+        &mut command,
+        &descriptors,
+        Some(&environment),
+        true,
+    )
+    .unwrap();
+    let mut guardian = crate::fixture::ChildGuard::new(command.spawn().unwrap());
+    drop(child);
+    crate::process_os::handoff::send(
+        &mut parent,
+        &serde_json::to_vec(&message).unwrap(),
+        Duration::from_secs(5),
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::process_os::handoff::receive(&mut parent, Duration::from_secs(5)).unwrap(),
+        b"custody-accepted-v1"
+    );
+    drop(writer);
+    drop(publication);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = guardian.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "supervise did not return after ENOENT"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "supervise fixture failed: {status}");
+    assert!(!attempt_path.join("process-exit.json").exists());
+    let child_pid: i64 = std::fs::read_to_string(&child_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        matches!(
+            crate::fixture::RecordedBootObserver.observe(child_pid),
+            ProcessObservation::Absent
+        ),
+        "group child survived cleanup"
+    );
+    let evidence =
+        crate::custody::attempt_evidence(&Directory::open_anchor(&writer_path).unwrap(), scope)
+            .unwrap();
+    let reservation: Reservation =
+        read_record(&evidence, "reservation.json", RECORD_LIMIT).unwrap();
+    let leader = reservation.provider.unwrap();
+    assert!(
+        matches!(
+            crate::fixture::RecordedBootObserver.observe(leader.pid),
+            ProcessObservation::Absent
+        ),
+        "provider leader was not reaped"
+    );
+}
+
 #[test]
 fn settlement_lock_clone_failure_retains_exclusion_and_returns_reconcile_hint() {
     use provenant_core::{AttemptId, Clock, RunId, WaitBudget};

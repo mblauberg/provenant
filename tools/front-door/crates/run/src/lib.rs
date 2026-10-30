@@ -195,6 +195,91 @@ impl From<&provenant_confinement::transport::TransportError> for TransportRefusa
     }
 }
 
+/// The comparison that refused an artifact. It names the check, never the bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtifactCheck {
+    /// The decoded request re-serialises to a different digest than its run record.
+    RequestDigest,
+    /// A recorded byte length differs from the file's length.
+    RecordedLength,
+    /// A recorded SHA-256 differs from the file's digest.
+    RecordedDigest,
+    /// A sealed artifact differs from the content proposed to replace it.
+    SealConflict,
+    /// A streamed artifact changed length or contents while it was read.
+    Stream,
+}
+impl ArtifactCheck {
+    fn name(self) -> &'static str {
+        match self {
+            Self::RequestDigest => "request digest",
+            Self::RecordedLength => "recorded length",
+            Self::RecordedDigest => "recorded digest",
+            Self::SealConflict => "seal conflict",
+            Self::Stream => "stream",
+        }
+    }
+}
+impl std::fmt::Display for ArtifactCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A non-secret value from an artifact comparison.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArtifactValue {
+    /// A byte length.
+    Length(u64),
+    /// The first 12 hex digits of a SHA-256 digest.
+    Digest(String),
+}
+impl ArtifactValue {
+    /// The short form of `digest`, which prints as `sha256:<hex>`.
+    pub fn digest(digest: impl std::fmt::Display) -> Self {
+        let text = digest.to_string();
+        let hex = text.strip_prefix("sha256:").unwrap_or(&text);
+        Self::Digest(hex.chars().take(12).collect())
+    }
+}
+impl std::fmt::Display for ArtifactValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Length(bytes) => write!(f, "{bytes}"),
+            Self::Digest(prefix) => f.write_str(prefix),
+        }
+    }
+}
+
+/// The artifact and comparison that failed. Only names and lengths or digest
+/// prefixes are kept, so the error can be shown without exposing artifact bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactProvenance {
+    pub check: ArtifactCheck,
+    /// The file name or path relative to the run or attempt directory.
+    pub artifact: String,
+    /// The recorded value. Absent when the check has no single value to show.
+    pub expected: Option<ArtifactValue>,
+    /// The value observed on disk or in the decoded request.
+    pub actual: Option<ArtifactValue>,
+}
+impl std::fmt::Display for ArtifactProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.expected, &self.actual) {
+            (Some(expected), Some(actual)) => write!(
+                f,
+                "{} {} expected {expected}, got {actual}",
+                self.artifact, self.check
+            ),
+            _ => write!(
+                f,
+                "{} {} changed while it was read",
+                self.artifact, self.check
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("{0}")]
@@ -276,8 +361,8 @@ pub enum RunError {
     GenerationConflict { current_generation: u64 },
     #[error("read or record exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
-    #[error("artifact digest or length does not match its record")]
-    ArtifactMismatch,
+    #[error("artifact digest or length does not match its record: {0}")]
+    ArtifactMismatch(ArtifactProvenance),
     #[error("terminal publication is already sealed; recover its original facts and result")]
     TerminalRecoveryRequired,
     #[error(transparent)]
@@ -338,6 +423,21 @@ impl RunError {
         check: PathCheck,
     ) -> Self {
         Self::unsafe_path(directory.anchored_path().join(name), check)
+    }
+    /// Refuse `artifact` because the comparison `check` failed. `expected` and
+    /// `actual` are the recorded and observed values, when the check has them.
+    pub(crate) fn artifact_mismatch(
+        check: ArtifactCheck,
+        artifact: impl Into<String>,
+        expected: Option<ArtifactValue>,
+        actual: Option<ArtifactValue>,
+    ) -> Self {
+        Self::ArtifactMismatch(ArtifactProvenance {
+            check,
+            artifact: artifact.into(),
+            expected,
+            actual,
+        })
     }
     pub fn code(&self) -> &'static str {
         ErrorKind::from(self).code()

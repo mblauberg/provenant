@@ -559,7 +559,7 @@ Accepted by every command, before or after the subcommand.
 
 ```json
 {
-  "description": "Rewrite retired routing timing keys to `schedule` in place after a timestamped backup, dropping expired pacing overrides",
+  "description": "Rewrite retired routing timing keys to `schedule` and remove retired fabric limits in place after a timestamped backup",
   "groups": [
     {
       "arguments": [
@@ -4903,6 +4903,7 @@ which may be reworded.
 | `WRITER_SCOPE` | The writer worktree scope was refused. |
 | `CONFINEMENT` | Confinement refused the requested access. |
 | `DISK_FLOOR` | Free disk space is below gc.free_floor; run `provenant gc --apply`. |
+| `HOST_PROCESSES` | The user process limit has insufficient headroom. |
 | `MEMORY_PRESSURE` | Host memory pressure is too high to admit a lane. |
 | `LANE_CAP` | The host or project writer lane cap is reached. |
 | `BUILD_SETTINGS` | The host lane build settings are invalid. |

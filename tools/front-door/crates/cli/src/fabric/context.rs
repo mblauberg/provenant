@@ -539,13 +539,14 @@ mod tests {
             &super::PeerError::ProtocolMismatch {
                 peer: "workshop".into(),
                 remote: 1,
+                expected: provenant_fabric_runtime::hosts::PROTOCOL,
             },
         );
         assert_eq!(failure.error.code(), "peer_version");
         assert_eq!(
             failure.error.to_string(),
             format!(
-                "peer workshop speaks protocol 1, this host speaks {}; upgrade both",
+                "peer workshop speaks protocol 1, this host expects protocol {}; upgrade both",
                 provenant_fabric_runtime::hosts::PROTOCOL
             )
         );

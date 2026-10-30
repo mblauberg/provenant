@@ -817,7 +817,6 @@ impl provenant_run::Providers for Indexed {
         _: Option<&provenant_run::AttemptRecord>,
     ) -> std::result::Result<provenant_run::PreparedLaunch, String> {
         Ok(provenant_run::PreparedLaunch {
-            provider_lease: None,
             argv: vec!["fixture".into()],
             environment: vec![],
             stdin: vec![],

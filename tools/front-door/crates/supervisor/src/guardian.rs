@@ -168,7 +168,6 @@ pub(crate) fn handoff(
         &publication.directory,
         owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
         &publication.custody,
-        owned.command.provider_lease.as_ref(),
         &owned.command.environment,
         &owned.command.config_environment,
         &payload,
@@ -239,15 +238,6 @@ pub trait DiskPressure {
 /// spawns, so a queued attempt waits for host admission inside its own
 /// guardian. An error publishes a never-spawned exit and still calls `terminal`.
 pub trait Holder {
-    /// Hold a provider's shared launch lease until provider cleanup completes.
-    /// The route comes from the host handoff, after fallback selection.
-    fn provider_lease(
-        &self,
-        _context: &[u8],
-        _resolved_route: &str,
-    ) -> Result<Option<provenant_os::fs::LockGuard>> {
-        Ok(None)
-    }
     fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
     /// Stop host-side submission services before descendant cleanup begins.
     /// Failure is bookkeeping evidence, never a provider stop reason.
@@ -468,8 +458,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         exit_publisher,
         holder: hooks.holder,
         holder_context: message.holder_context,
-        provider_lease: inherited.provider_lease,
-        resolved_route: message.resolved_route,
         lane_ports: message.lane_ports,
         secret_input: message.secret_input,
         priority: message.priority,
@@ -494,8 +482,6 @@ struct Driver<'a> {
     exit_publisher: Option<&'a dyn ExitPublisher>,
     holder: Option<&'a dyn Holder>,
     holder_context: Vec<u8>,
-    provider_lease: Option<provenant_os::fs::LockGuard>,
-    resolved_route: String,
     lane_ports: Option<provenant_os::lane_ports::Plan>,
     secret_input: Option<provenant_os::exec::SecretInput>,
     priority: u8,
@@ -591,18 +577,6 @@ impl Driver<'_> {
                 *omitted = omitted.saturating_add(1);
             }
         };
-        let provider_lease = if let Some(lease) = self.provider_lease.take() {
-            Some(lease)
-        } else {
-            match self
-                .holder
-                .map(|holder| holder.provider_lease(&self.holder_context, &self.resolved_route))
-                .transpose()
-            {
-                Ok(lease) => lease.flatten(),
-                Err(_) => return self.never_spawned("provider update busy; retry the lane"),
-            }
-        };
         if let Some(holder) = self.holder
             && let Err(error) = holder.admit(&self.holder_context, &self.attempt)
         {
@@ -644,10 +618,7 @@ impl Driver<'_> {
             cwd,
             input,
             plan,
-            [
-                provider_lease.as_ref(),
-                ports.as_ref().map(provenant_os::lane_ports::Lease::guard),
-            ],
+            ports.as_ref().map(provenant_os::lane_ports::Lease::guard),
         );
         let mut child = match spawn_result {
             Ok(child) => child,
@@ -762,7 +733,6 @@ impl Driver<'_> {
             }
             if exit.is_some() && !host_closed {
                 child.resume_builds();
-                drop(self.provider_lease.take());
                 host_closed = true;
                 if let Some(holder) = self.holder
                     && holder
@@ -1231,12 +1201,12 @@ impl Driver<'_> {
             warnings: warnings.clone(),
             omitted_warnings,
         };
-        self.publish_until_durable(&record, &mut state)?;
-        if cleanup_complete {
+        let published = self.publish_until_durable(&record, &mut state)?;
+        if cleanup_complete && published {
             self.release(&record)?;
         }
         if !cleanup_complete {
-            // The unresolved exit is durable. Keep the guardian (and the unreaped
+            // Keep the guardian (and the unreaped
             // leader) alive while group members remain: poll for cancellation
             // and for the group emptying, and republish a settled exit.
             let mut cancelled = false;
@@ -1250,7 +1220,9 @@ impl Driver<'_> {
                     &mut warnings,
                     &mut omitted_warnings,
                 ) {
-                    self.republish_settled(record, cancelled)?;
+                    if published {
+                        self.republish_settled(record, cancelled)?;
+                    }
                     break;
                 }
                 match self.reactor.wait(&[], Duration::from_millis(100)) {
@@ -1263,7 +1235,8 @@ impl Driver<'_> {
                             cancelled,
                             &mut warnings,
                             &mut omitted_warnings,
-                        ) {
+                        ) && published
+                        {
                             self.republish_settled(record, cancelled)?;
                         }
                         break;
@@ -1330,7 +1303,7 @@ impl Driver<'_> {
         cwd: &Path,
         input: &[u8],
         plan: CapturePlan,
-        leases: [Option<&provenant_os::fs::LockGuard>; 2],
+        ports: Option<&provenant_os::fs::LockGuard>,
     ) -> io::Result<crate::process_os::provider::ProviderGroup> {
         match argv.first() {
             Some(executable) => match snapshot_executable(executable.as_os_str()) {
@@ -1342,8 +1315,8 @@ impl Driver<'_> {
                             cwd,
                             input: !input.is_empty(),
                             secret_input: self.secret_input.as_ref(),
-                            inherited_lease: leases[0],
-                            inherited_ports: leases[1],
+                            inherited_lease: None,
+                            inherited_ports: ports,
                             process_group: false,
                             capture_stdout: plan.stdout.piped(),
                             capture_stderr: plan.stderr.piped(),
@@ -1381,8 +1354,10 @@ impl Driver<'_> {
             PublishMode::Replace,
         )?)?;
         let record = ProcessExit::never_spawned(self.reservation.scope, None, vec![warning.into()]);
-        self.publish_until_durable(&record, &mut State::never_spawned())?;
-        self.release(&record)
+        if self.publish_until_durable(&record, &mut State::never_spawned())? {
+            self.release(&record)?;
+        }
+        Ok(())
     }
     /// Hand the durable exit to the holder while retaining writer.lock through
     /// import, publication and verified terminal settlement.
@@ -1451,9 +1426,9 @@ impl Driver<'_> {
         }
         Ok(())
     }
-    /// Retry without a time limit: custody survives ENOSPC and signals until
-    /// the immutable exit is durable. process.json exposes publication_pending.
-    fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<()> {
+    /// Retry until the exit is durable or the attempt is gone. Custody survives
+    /// ENOSPC and signals; process.json exposes publication_pending.
+    fn publish_until_durable(&mut self, record: &ProcessExit, state: &mut State) -> Result<bool> {
         let bytes = record.bounded_bytes()?;
         if bytes.len() as u64 > EXIT_LIMIT {
             return Err(CustodyError::InvalidRecord);
@@ -1471,6 +1446,14 @@ impl Driver<'_> {
             } else {
                 exit_publisher.publish(&self.attempt, &bytes)
             };
+            if result
+                .as_ref()
+                .err()
+                .and_then(filesystem_error)
+                .is_some_and(provenant_os::fs::FsError::is_not_found)
+            {
+                return Ok(false);
+            }
             let mut tick = Tick::at(0);
             tick.publication = Some(match &result {
                 Ok(Publication::Durable) => machine::PublicationOutcome::Durable,
@@ -1491,7 +1474,7 @@ impl Driver<'_> {
             let (next, effects) = machine::step(state.clone(), Event::Silence, tick);
             *state = next;
             if state.phase() == Phase::Published {
-                return Ok(());
+                return Ok(true);
             }
             if effects.contains(&Effect::RetryPublishedDirectorySync) {
                 visible = true;

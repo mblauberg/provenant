@@ -69,6 +69,10 @@ pub enum AdmissionError {
     #[error("memory pressure is {level}; wait for host memory pressure to fall")]
     MemoryPressure { level: String },
     #[error(
+        "user process count {used} of {limit}; wait for processes to exit or raise the per-user process limit"
+    )]
+    Processes { used: u64, limit: u64 },
+    #[error(
         "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
         key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
     )]
@@ -632,8 +636,6 @@ impl PublicationReservation {
 pub struct ProviderCommand {
     /// Nice value inherited by the provider and its descendants.
     pub priority: u8,
-    /// Lease held continuously from provider preparation through completion.
-    pub provider_lease: Option<LockGuard>,
     pub resolved_route: String,
     pub permission_plan_digest: Digest,
     pub task: provenant_core::TaskId,

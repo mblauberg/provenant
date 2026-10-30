@@ -123,13 +123,6 @@ impl provenant_supervisor::NestedChildStore for HostHolder<'_> {
     }
 }
 impl Holder for HostHolder<'_> {
-    fn provider_lease(
-        &self,
-        context: &[u8],
-        resolved_route: &str,
-    ) -> custody::Result<Option<provenant_os::fs::LockGuard>> {
-        self.inner.provider_lease(context, resolved_route)
-    }
     fn admit(&self, raw: &[u8], attempt: &Directory) -> custody::Result<()> {
         self.inner.admit(raw, attempt)?;
         let context: run::HolderContext =
@@ -847,7 +840,6 @@ mod tests {
             ) -> Result<run::PreparedLaunch, String> {
                 self.0.set(task.access.network);
                 Ok(run::PreparedLaunch {
-                    provider_lease: None,
                     argv: vec!["fixture".into()],
                     environment: vec![],
                     stdin: vec![],
@@ -1474,7 +1466,6 @@ mod tests {
                 _: Option<&run::AttemptRecord>,
             ) -> Result<run::PreparedLaunch, String> {
                 Ok(run::PreparedLaunch {
-                    provider_lease: None,
                     argv: vec!["fixture".into()],
                     environment: vec![],
                     stdin: vec![],
