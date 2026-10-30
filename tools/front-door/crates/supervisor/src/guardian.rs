@@ -1045,8 +1045,10 @@ impl Driver<'_> {
                     stderr_bytes: u64,
                     last_output_ms: Option<u64>,
                     last_output_at: Option<WallTime>,
+                    observed_at: Option<WallTime>,
                     last_progress_ms: Option<u64>,
                     silent: bool,
+                    silent_for_ms: Option<u64>,
                     disk_paused: bool,
                     provider_cpu_micros: Option<u64>,
                     last_cpu_progress_ms: Option<u64>,
@@ -1063,8 +1065,12 @@ impl Driver<'_> {
                     stderr_bytes: err.outcome().total_bytes,
                     last_output_ms,
                     last_output_at,
+                    observed_at: wall_now(),
                     last_progress_ms: state.last_progress_ms(),
                     silent: plan.silent(now, state.last_progress_ms()),
+                    silent_for_ms: plan
+                        .silent(now, state.last_progress_ms())
+                        .then(|| now.saturating_sub(state.last_progress_ms().unwrap_or(0))),
                     disk_paused: disk_paused && exit.is_none() && stop_reason.is_none(),
                     provider_cpu_micros,
                     last_cpu_progress_ms,

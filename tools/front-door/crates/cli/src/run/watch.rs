@@ -5,7 +5,7 @@
 //! ID always counts, whenever it settled. A wholly settled named selection
 //! returns its terminal rows immediately. Both modes poll a `fetch` of the
 //! candidate lanes, so the local store and peers share one rule.
-use super::{Condition, ErrorKind, Fail, Status, condition_met, settled, state_name};
+use super::{Condition, ErrorKind, Fail, Status, condition_met, settled, silent_lane, state_name};
 use provenant_core::retry::{RetryCause, is_transient};
 use provenant_core::{AttemptId, Clock, HostId, WallTime};
 use provenant_os::clock::SystemClock;
@@ -302,6 +302,7 @@ pub(super) struct Waited {
     pub(super) lanes: Vec<run::AttemptRecord>,
     pub(super) met: bool,
     pub(super) ignored: usize,
+    pub(super) silent_lane: Option<AttemptId>,
 }
 /// Poll until the condition holds over the counted lanes or the budget passes.
 // A reader deadline is a real transport boundary.
@@ -320,14 +321,16 @@ pub(super) fn wait(
                 lanes: Vec::new(),
                 met: false,
                 ignored: 0,
+                silent_lane: None,
             });
         }
         result => result?,
     };
     let mut stale = None;
     loop {
+        let silent = silent_lane(&lanes);
         let met = condition_met(&lanes, condition);
-        if met || Instant::now() >= deadline {
+        if silent.is_some() || met || Instant::now() >= deadline {
             if let Some(fail) = stale.filter(|fail: &Fail| fail.kind != ErrorKind::Contention) {
                 return Err(fail);
             }
@@ -335,6 +338,7 @@ pub(super) fn wait(
                 lanes,
                 met,
                 ignored: armed.ignored(),
+                silent_lane: silent,
             });
         }
         refresh(&mut fetch, &armed, deadline, poll, &mut lanes, &mut stale)?;
@@ -344,6 +348,7 @@ pub(super) fn wait(
 pub(super) struct Watched {
     pub(super) lanes: Vec<run::AttemptRecord>,
     pub(super) settled: bool,
+    pub(super) silent_lane: Option<AttemptId>,
 }
 /// Report each counted lane's state, then every change, until all have
 /// settled or the budget passes. `emit` runs once per observed state.
@@ -362,6 +367,7 @@ pub(super) fn watch(
             return Ok(Watched {
                 lanes: Vec::new(),
                 settled: false,
+                silent_lane: None,
             });
         }
         result => result?,
@@ -377,13 +383,15 @@ pub(super) fn watch(
             }
         }
         let all_settled = lanes.iter().all(|lane| settled(&lane.state).0);
-        if all_settled || Instant::now() >= deadline {
+        let silent = silent_lane(&lanes);
+        if silent.is_some() || all_settled || Instant::now() >= deadline {
             if let Some(fail) = stale.filter(|fail: &Fail| fail.kind != ErrorKind::Contention) {
                 return Err(fail);
             }
             return Ok(Watched {
                 lanes,
                 settled: all_settled,
+                silent_lane: silent,
             });
         }
         refresh(&mut fetch, &armed, deadline, poll, &mut lanes, &mut stale)?;
@@ -424,7 +432,12 @@ pub(super) fn end_line(watched: &Watched) -> String {
         .iter()
         .filter(|lane| !settled(&lane.state).0)
         .count();
-    if watched.settled {
+    if let Some(id) = watched.silent_lane {
+        format!(
+            "end silent lane={id} lanes={} pending={pending}\n",
+            watched.lanes.len()
+        )
+    } else if watched.settled {
         format!("end settled lanes={}\n", watched.lanes.len())
     } else {
         format!(
@@ -527,6 +540,53 @@ mod tests {
         .unwrap();
         assert!(!waited.met);
         assert_eq!(waited.lanes.len(), 1);
+    }
+
+    #[test]
+    fn a_silent_lane_wakes_any_and_all_waits_without_settling() {
+        for condition in [Condition::Any, Condition::All] {
+            let mut lane = running(1);
+            lane.provider_silent_for_ms = Some(1_800_000);
+            let mut calls = 0;
+            let waited = wait(
+                |_| {
+                    calls += 1;
+                    Ok(vec![lane.clone()])
+                },
+                scope(&[1], None, true),
+                condition,
+                Duration::from_secs(5),
+                POLL,
+            )
+            .unwrap();
+            assert!(!waited.met);
+            assert_eq!(waited.silent_lane, Some(lane.attempt_id));
+            assert_eq!(waited.lanes[0].state, lane.state);
+            assert_eq!(calls, 1, "already-silent lane returns at arm time");
+        }
+    }
+
+    #[test]
+    fn a_lane_that_becomes_silent_wakes_an_armed_wait() {
+        let mut calls = 0;
+        let waited = wait(
+            |_| {
+                calls += 1;
+                let mut lane = running(1);
+                if calls > 1 {
+                    lane.provider_silent_for_ms = Some(1_800_000);
+                }
+                Ok(vec![lane])
+            },
+            scope(&[1], None, true),
+            Condition::All,
+            Duration::from_secs(5),
+            POLL,
+        )
+        .unwrap();
+        assert!(!waited.met);
+        assert_eq!(waited.silent_lane, Some(AttemptId::from_bytes([1; 16])));
+        assert_eq!(calls, 2);
     }
 
     #[test]

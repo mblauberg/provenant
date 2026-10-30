@@ -141,14 +141,18 @@ impl From<run::RunError> for Fail {
 /// A reply whose reader deadline expired still reports what it saw.
 fn reply_waited(command: &str, outcome: Result<(Value, String, bool), Fail>) -> Reply {
     let mut expired = false;
+    let mut silent = false;
     let mut out = reply(
         command,
         outcome.map(|(data, human, timed_out)| {
             expired = timed_out;
+            silent = data["reason"].is_string();
             (data, human)
         }),
     );
-    if expired {
+    if silent {
+        out.result.status = Status::Failed;
+    } else if expired {
         out.result.status = Status::Timeout;
     }
     out
@@ -4440,7 +4444,15 @@ fn render_lanes(
             let route_text = plain_text(&route, usize::MAX);
             // A lane that has not started says what it is waiting for.
             let wait = waits.iter().find(|w| w.attempt_id == lane.attempt_id);
-            let reason = reason.or_else(|| wait.map(|w| w.waiting_for.clone()));
+            let silence_reason = lane
+                .provider_silent_for_ms
+                .map(provenant_records::run::provider_silence_reason);
+            let reason = reason
+                .or_else(|| wait.map(|w| w.waiting_for.clone()))
+                .or_else(|| silence_reason.clone());
+            let waiting_for = wait
+                .map(|w| w.waiting_for.clone())
+                .or(silence_reason);
             let reason_text = reason
                 .as_deref()
                 .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
@@ -4615,7 +4627,7 @@ fn render_lanes(
                 "reason": reason,
                 "settlement": settlement,
                 "lane_class": wait.map(|w| w.lane_class),
-                "waiting_for": wait.map(|w| &w.waiting_for),
+                "waiting_for": waiting_for,
                 "requested_route": lane.requested_route,
                 "applied_route": lane.applied_route,
                 "skipped_routes": lane.skipped_routes,
@@ -4723,6 +4735,12 @@ fn condition_met(lanes: &[run::AttemptRecord], condition: Condition) -> bool {
                 states.iter().all(|(done, _)| *done) || states.iter().any(|(_, input)| *input)
             }
         }
+}
+pub(super) fn silent_lane(lanes: &[run::AttemptRecord]) -> Option<AttemptId> {
+    lanes
+        .iter()
+        .find(|lane| lane.provider_silent_for_ms.is_some())
+        .map(|lane| lane.attempt_id)
 }
 /// Snapshot every attempt the targets name. Without targets, the selection is
 /// `owner`'s nonterminal work; host caps bound it. With `seen`, terminal
@@ -4946,10 +4964,14 @@ fn waited_reply(session: &Session, waited: watch::Waited) -> Result<(Value, Stri
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
     let (mut data, human) = render_settled(session, &waited.lanes, lane_cooldown_view(&cooldowns))?;
     data["condition_met"] = json!(waited.met);
+    if let Some(id) = waited.silent_lane {
+        data["timed_out"] = json!(false);
+        data["reason"] = json!(format!("provider silent; lane {id} is still running"));
+    }
     if waited.ignored > 0 {
         data["ignored_settled"] = json!(waited.ignored);
     }
-    Ok((data, human, !waited.met))
+    Ok((data, human, !waited.met && waited.silent_lane.is_none()))
 }
 /// Wait for every lane a run, task or attempt names, settled or not: the
 /// whole named set, for commands that act on a lane they just created.
@@ -5055,12 +5077,20 @@ fn watched_reply(
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
     let (mut data, _) = render_settled(session, &watched.lanes, lane_cooldown_view(&cooldowns))?;
     data["condition_met"] = json!(watched.settled);
+    if let Some(id) = watched.silent_lane {
+        data["timed_out"] = json!(false);
+        data["reason"] = json!(format!("provider silent; lane {id} is still running"));
+    }
     let human = if json {
         String::new()
     } else {
         watch::end_line(watched)
     };
-    Ok((data, human, !watched.settled))
+    Ok((
+        data,
+        human,
+        !watched.settled && watched.silent_lane.is_none(),
+    ))
 }
 /// `lanes --watch`: a line for each state a counted lane enters, until all
 /// have settled or the budget passes.
@@ -12212,6 +12242,41 @@ mod tests {
             "read-only startup spacing: 1.2 s left of 2.0 s"
         );
         assert_eq!(row["reason"], row["waiting_for"]);
+        Ok(())
+    }
+    #[test]
+    fn render_lanes_surfaces_provider_silence_while_running()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let now = WallTime::from_micros(100)?;
+        let mut lane: run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": TaskId::from_bytes([4; 16]),
+            "operation_id": "silent-render",
+            "attempt_number": 1,
+            "revision": 1,
+            "generation": 1,
+            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
+            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
+            "queued_at": now,
+            "state": {"state":"running"},
+            "usage": {},
+            "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
+        }))?;
+        lane.provider_silent_for_ms = Some(1_800_000);
+        let (data, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
+        assert!(human.contains("provider silent for 1800s; provider still running"));
+        assert_eq!(
+            data["lanes"][0]["reason"],
+            "provider silent for 1800s; provider still running"
+        );
+        assert_eq!(
+            data["lanes"][0]["waiting_for"],
+            "provider silent for 1800s; provider still running"
+        );
+        assert_eq!(data["lanes"][0]["state"], "running");
         Ok(())
     }
     #[test]

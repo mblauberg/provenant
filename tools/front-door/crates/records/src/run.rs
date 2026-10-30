@@ -772,6 +772,14 @@ pub struct AttemptRecord {
     /// Most recent supervisor-observed stdout/stderr activity while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<WallTime>,
+    /// Transient guardian observation. It is carried over live peer reads but
+    /// is never stored in the durable attempt record.
+    #[serde(skip)]
+    pub provider_silent_for_ms: Option<u64>,
+    /// Whether the observation checkpoint was absent or could be read and
+    /// identity-checked. Used only for live coverage reporting.
+    #[serde(skip)]
+    pub process_observation_valid: bool,
     /// Custody evidence. None in older records must never authorise a writer retry.
     #[serde(default)]
     pub provider_launched: Option<bool>,
@@ -795,6 +803,11 @@ pub struct AttemptRecord {
     /// all unknown.
     #[serde(default)]
     pub trace: crate::Trace,
+}
+/// Human-readable, transient explanation for a guardian silence observation.
+pub fn provider_silence_reason(silent_for_ms: u64) -> String {
+    let seconds = silent_for_ms / 1_000;
+    format!("provider silent for {seconds}s; provider still running")
 }
 /// Why a settled attempt is flagged as a partial finish. A flag is advice for
 /// the chair, who decides whether to resume; it never changes the outcome.

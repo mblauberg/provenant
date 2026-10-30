@@ -278,7 +278,7 @@ fn malformed_authority_knobs_refuse_instead_of_granting_defaults() {
         Some(&b"schema_version=1\n[knobs]\n'lanes.silence_seconds'='soon'\n"[..]),
     )
     .unwrap();
-    assert_eq!(config.knobs["lanes.silence_seconds"].value, 300);
+    assert_eq!(config.knobs["lanes.silence_seconds"].value, 1800);
     assert!(
         config.warnings[0]
             .message

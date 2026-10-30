@@ -696,7 +696,7 @@ pub struct CapturePlan {
 }
 // Registry default for lanes.silence_seconds, expressed in milliseconds.
 fn default_silence_ms() -> u64 {
-    300_000
+    1_800_000
 }
 impl Default for CapturePlan {
     fn default() -> Self {

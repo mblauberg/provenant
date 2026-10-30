@@ -1249,6 +1249,49 @@ fn lanes_read_last_output_time_from_supervisor_checkpoint() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
+    for checkpoint in [
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": {"run": RunId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 9},
+            "silent": true,
+            "silent_for_ms": 1_800_000
+        }),
+        serde_json::json!({"schema_version": 1, "scope": "invalid", "silent": true}),
+        serde_json::json!({
+            "schema_version": 1,
+            "scope": {"run": RunId::from_bytes([4; 16]), "attempt": AttemptId::from_bytes([6; 16]), "generation": 0},
+            "observed_at": WallTime::from_micros(1_000_000)?,
+            "silent": true,
+            "silent_for_ms": 1_800_000
+        }),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = TestClock::new(WallTime::from_micros(10_000_000)?, MonoTime::from_micros(0));
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        let directory = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, true)?;
+        artifacts::seal(
+            &directory,
+            "process.json",
+            &serde_json::to_vec(&checkpoint)?,
+            RECORD_LIMIT,
+        )?;
+        assert!(
+            store
+                .record(input.attempts[0].attempt_id, &call)?
+                .provider_silent_for_ms
+                .is_none()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn read_only_open_works_without_directory_write_access_or_creating_files() -> TestResult {

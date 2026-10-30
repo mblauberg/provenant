@@ -627,6 +627,9 @@ fn poll_until(
     loop {
         let last = match watch::tick(&mut fetch, deadline)? {
             watch::Tick::Lanes(lanes) => {
+                if super::silent_lane(&lanes).is_some() {
+                    return Ok((lanes, false));
+                }
                 let met = condition_met(&lanes, condition);
                 if met || Instant::now() >= deadline {
                     return Ok((lanes, met));
@@ -912,6 +915,10 @@ pub(super) fn dispatch(
     data["host"] = json!(host);
     if let Some(met) = met {
         data["condition_met"] = json!(met);
+        if let Some(id) = super::silent_lane(&lanes) {
+            data["timed_out"] = json!(false);
+            data["reason"] = json!(format!("provider silent; lane {id} is still running"));
+        }
     }
     // Undelivered commits stay in the peer's worktree; say where.
     let human = match &receipt.worktree {
@@ -926,7 +933,11 @@ pub(super) fn dispatch(
         }
         None => human,
     };
-    Ok((data, format!("run {run_id}\n{human}"), met == Some(false)))
+    Ok((
+        data,
+        format!("run {run_id}\n{human}"),
+        met == Some(false) && super::silent_lane(&lanes).is_none(),
+    ))
 }
 
 /// Forward `lanes --id` when every target names a peer run.
@@ -1053,12 +1064,20 @@ fn armed(
             edge.roots.state.as_path(),
         );
         data["condition_met"] = json!(watched.settled);
+        if let Some(id) = watched.silent_lane {
+            data["timed_out"] = json!(false);
+            data["reason"] = json!(format!("provider silent; lane {id} is still running"));
+        }
         let human = if json {
             String::new()
         } else {
             watch::end_line(&watched)
         };
-        return Ok((data, human, !watched.settled));
+        return Ok((
+            data,
+            human,
+            !watched.settled && watched.silent_lane.is_none(),
+        ));
     }
     let seconds = command.wait.ok_or_else(corrupt)?;
     let waited = watch::wait(
@@ -1075,10 +1094,14 @@ fn armed(
         edge.roots.state.as_path(),
     );
     data["condition_met"] = json!(waited.met);
+    if let Some(id) = waited.silent_lane {
+        data["timed_out"] = json!(false);
+        data["reason"] = json!(format!("provider silent; lane {id} is still running"));
+    }
     if waited.ignored > 0 {
         data["ignored_settled"] = json!(waited.ignored);
     }
-    Ok((data, human, !waited.met))
+    Ok((data, human, !waited.met && waited.silent_lane.is_none()))
 }
 
 /// `lanes --host`: the peer's own lanes, read over the peer channel. The
@@ -1542,13 +1565,21 @@ pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -
             if let Some(seconds) = command.wait {
                 let (lanes, met) = peer.wait(&selected, Condition::All, seconds)?;
                 if !met && status == Status::Ok {
-                    status = Status::Timeout;
+                    status = if super::silent_lane(&lanes).is_some() {
+                        Status::Failed
+                    } else {
+                        Status::Timeout
+                    };
                 }
                 // No peer read after the wait's deadline.
                 let (rendered, text) =
                     render_with_waits(&lanes, &[], &selected, edge.roots.state.as_path());
                 data["lanes"] = rendered["lanes"].clone();
                 data["condition_met"] = json!(met);
+                if let Some(id) = super::silent_lane(&lanes) {
+                    data["timed_out"] = json!(false);
+                    data["reason"] = json!(format!("provider silent; lane {id} is still running"));
+                }
                 human.push_str(&text);
             }
             Ok((data, human))
@@ -2201,6 +2232,27 @@ mod tests {
         );
         assert!(matches!(out, Ok((_, true))));
         assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn peer_wait_returns_early_for_an_already_silent_lane() {
+        let mut lane = running(1);
+        lane.provider_silent_for_ms = Some(1_800_000);
+        let mut calls = 0;
+        let (lanes, met) = poll_until(
+            |_| {
+                calls += 1;
+                Ok(vec![lane.clone()])
+            },
+            Condition::All,
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        assert!(!met);
+        assert_eq!(super::super::silent_lane(&lanes), Some(lane.attempt_id));
+        assert_eq!(lanes[0].state, lane.state);
+        assert_eq!(calls, 1);
     }
 
     #[test]
