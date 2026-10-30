@@ -4903,6 +4903,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     capability: Vec::new(),
                 },
                 self.factory.context.roots.state.as_path(),
+                &self.factory.home,
             )
             .map_err(dispatch_refused)?;
             let legacy_input = prepared_without_request.then(|| {
@@ -9358,6 +9359,7 @@ mod peer_tests {
                 capability: vec!["bogus".to_owned()],
             },
             Path::new("never-opened-state"),
+            Path::new("/fixture/host-home"),
         )
         .err()
         .ok_or("unknown capability refuses")?;

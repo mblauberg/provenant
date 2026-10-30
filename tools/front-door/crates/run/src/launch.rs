@@ -435,6 +435,7 @@ fn child_access_within(
     parent: &TaskRequest,
     child: &TaskRequest,
     state_root: &std::path::Path,
+    home: Option<&std::path::Path>,
 ) -> Result<()> {
     let reach = |network| match network {
         NetworkAccess::Provider => 0,
@@ -467,7 +468,9 @@ fn child_access_within(
         // Apply the same subtree rule as the confinement compiler.
         if provenant_os::fs::canonicalize(root)
             .ok()
-            .is_some_and(|canonical| provenant_confinement::refuses_lane_root(&canonical, read))
+            .is_some_and(|canonical| {
+                provenant_confinement::refuses_lane_root(&canonical, read, home)
+            })
         {
             return Err(RunError::Confinement(
                 provenant_confinement::permissions::PermissionError::CredentialRoot,
@@ -516,24 +519,26 @@ mod release_root_tests {
             "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin/bin",
         );
         assert!(
-            !provenant_confinement::refuses_lane_root(shape, true),
+            !provenant_confinement::refuses_lane_root(shape, true, None),
             "reads pass entry"
         );
         assert!(
-            provenant_confinement::refuses_lane_root(shape, false),
+            provenant_confinement::refuses_lane_root(shape, false, None),
             "writes stay strict"
         );
         // Against a machine's real home: build a temp release and walk it
         // through `child_access_within`. A lane can seal `~/.codex`; then the
         // fixture cannot exist and the filesystem part is skipped silently.
-        let Some(home) = std::env::var_os("HOME") else {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
             return Ok(());
         };
-        let releases = std::path::Path::new(&home).join(".codex/packages/standalone/releases");
+        let releases = home.join(".codex/packages/standalone/releases");
         if std::fs::create_dir_all(&releases).is_err() {
             return Ok(());
         }
-        let temp = tempfile::tempdir_in(&releases)?;
+        let Ok(temp) = tempfile::tempdir_in(&releases) else {
+            return Ok(());
+        };
         let release = std::fs::canonicalize(temp.path())?;
         let state_dir = tempfile::tempdir()?;
         let state = std::fs::canonicalize(state_dir.path())?.join("state");
@@ -543,12 +548,12 @@ mod release_root_tests {
         child.access.read_roots = vec![release.clone()];
         child.access.write_roots = vec![];
         assert!(
-            child_access_within(&parent, &child, &state).is_ok(),
+            child_access_within(&parent, &child, &state, Some(&home)).is_ok(),
             "reads in a standalone release pass entry"
         );
         child.access.write_roots = vec![release.clone()];
         child.access.read_roots = vec![];
-        let error = child_access_within(&parent, &child, &state).unwrap_err();
+        let error = child_access_within(&parent, &child, &state, Some(&home)).unwrap_err();
         assert!(error.to_string().contains(
             &provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
         ));
@@ -578,8 +583,13 @@ mod release_root_tests {
                 let mut child = parent.clone();
                 child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
                 child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
-                let error =
-                    child_access_within(&parent, &child, &temp.path().join("state")).unwrap_err();
+                let error = child_access_within(
+                    &parent,
+                    &child,
+                    &temp.path().join("state"),
+                    Some(Path::new("/fixture/host-home")),
+                )
+                .unwrap_err();
                 assert!(matches!(
                     error,
                     RunError::Confinement(
@@ -595,6 +605,7 @@ mod release_root_tests {
     fn child_root_table_matches_confinement() {
         let standalone =
             "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
+        let home = Path::new("/fixture/host-home");
         for (path, read_allowed, write_allowed) in [
             ("/Users/alice/.ssh", false, false),
             ("/Users/alice/.config", false, false),
@@ -606,12 +617,73 @@ mod release_root_tests {
                 ("--write-root", false, write_allowed),
             ] {
                 assert_eq!(
-                    !provenant_confinement::refuses_lane_root(Path::new(path), read),
+                    !provenant_confinement::refuses_lane_root(Path::new(path), read, Some(home)),
                     allowed,
                     "{flag} {path}"
                 );
             }
         }
+        // An injected nonconventional home is refused, matching compile.
+        let home = Path::new("/srv/team/alice");
+        for (path, read_allowed, write_allowed) in [
+            ("/srv/team", false, false),
+            ("/srv/team/alice", false, false),
+            ("/srv/team/alice/.config", false, false),
+            ("/srv/team/alice/project", true, true),
+        ] {
+            for (flag, read, allowed) in [
+                ("--read-root", true, read_allowed),
+                ("--write-root", false, write_allowed),
+            ] {
+                assert_eq!(
+                    !provenant_confinement::refuses_lane_root(Path::new(path), read, Some(home)),
+                    allowed,
+                    "{flag} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn child_refuses_a_root_enclosing_an_injected_nonconventional_home()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let team = temp.path().join("srv/team");
+        let home = team.join("alice");
+        let project = home.join("project");
+        let config = home.join(".config");
+        std::fs::create_dir_all(&project)?;
+        std::fs::create_dir_all(&config)?;
+        let team = std::fs::canonicalize(team)?;
+        let home = std::fs::canonicalize(home)?;
+        let project = std::fs::canonicalize(project)?;
+        let config = std::fs::canonicalize(config)?;
+        let state = temp.path().join("state");
+        for root in [&team, &home, &config] {
+            for read in [true, false] {
+                let mut parent = crate::tests::input().request.tasks.remove(0);
+                parent.access.read_roots = vec![root.clone()];
+                parent.access.write_roots = vec![root.clone()];
+                let mut child = parent.clone();
+                child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
+                child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
+                let error = child_access_within(&parent, &child, &state, Some(&home)).unwrap_err();
+                assert!(matches!(
+                    error,
+                    RunError::Confinement(
+                        provenant_confinement::permissions::PermissionError::CredentialRoot
+                    )
+                ));
+            }
+        }
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.read_roots = vec![project.clone()];
+        parent.access.write_roots = vec![project.clone()];
+        let mut child = parent.clone();
+        child.access.read_roots = vec![project.clone()];
+        child.access.write_roots = vec![project];
+        assert!(child_access_within(&parent, &child, &state, Some(&home)).is_ok());
+        Ok(())
     }
 
     #[test]
@@ -629,13 +701,29 @@ mod release_root_tests {
         parent.access.read_roots = vec![release.clone()];
         let mut child = parent.clone();
         child.access.read_roots = vec![skills.clone()];
-        assert!(child_access_within(&parent, &child, &state).is_ok());
+        assert!(
+            child_access_within(
+                &parent,
+                &child,
+                &state,
+                Some(Path::new("/fixture/host-home"))
+            )
+            .is_ok()
+        );
         let other = state
             .join("releases")
             .join(provenant_records::SourceDigest::from_bytes([2; 32]).to_string());
         std::fs::create_dir_all(&other)?;
         child.access.read_roots = vec![other];
-        assert!(child_access_within(&parent, &child, &state).is_err());
+        assert!(
+            child_access_within(
+                &parent,
+                &child,
+                &state,
+                Some(Path::new("/fixture/host-home"))
+            )
+            .is_err()
+        );
         for root in [
             state.join("releases"),
             state.join("projects"),
@@ -646,12 +734,28 @@ mod release_root_tests {
             std::fs::create_dir_all(&root)?;
             parent.access.read_roots = vec![root.clone()];
             child.access.read_roots = vec![root];
-            assert!(child_access_within(&parent, &child, &state).is_err());
+            assert!(
+                child_access_within(
+                    &parent,
+                    &child,
+                    &state,
+                    Some(Path::new("/fixture/host-home"))
+                )
+                .is_err()
+            );
         }
         parent.access.write_roots = vec![release];
         child.access.read_roots.clear();
         child.access.write_roots = vec![skills];
-        assert!(child_access_within(&parent, &child, &state).is_err());
+        assert!(
+            child_access_within(
+                &parent,
+                &child,
+                &state,
+                Some(Path::new("/fixture/host-home"))
+            )
+            .is_err()
+        );
         Ok(())
     }
 }
@@ -794,6 +898,7 @@ impl RunStore {
                 parent_task,
                 &validated.effective_task(task),
                 self.context.state_root.as_path(),
+                self.host_home.as_deref(),
             )?;
         }
         Ok(validated)
