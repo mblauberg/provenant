@@ -139,6 +139,104 @@ pub fn memory() -> io::Result<MemorySample> {
     })
 }
 
+/// The user's process table: how many processes the uid holds against the
+/// `RLIMIT_NPROC` soft limit. A `limit` of `u64::MAX` means unlimited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessBudget {
+    pub used: u64,
+    pub limit: u64,
+}
+
+impl ProcessBudget {
+    pub const UNLIMITED: Self = Self {
+        used: 0,
+        limit: u64::MAX,
+    };
+
+    /// Processes kept free for the user's own tools and for the recovery that
+    /// ends a runaway: a tenth of the limit, and never fewer than 64.
+    pub fn headroom(&self) -> u64 {
+        (self.limit / 10).max(64)
+    }
+
+    /// Whether a new lane or worker may start while leaving the headroom.
+    pub fn has_room(&self) -> bool {
+        self.used.saturating_add(self.headroom()) < self.limit
+    }
+}
+
+/// Sample this user's process count and limit. One probe costs about one
+/// sysctl on macOS and a `/proc` walk on Linux, so callers probe at admission
+/// and detached spawns, never per command.
+pub fn process_budget() -> io::Result<ProcessBudget> {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::zeroed();
+    // SAFETY: limit is a live, writable rlimit and the kernel retains no pointer.
+    let result = unsafe { libc::getrlimit(libc::RLIMIT_NPROC, limit.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a successful getrlimit initialised the record.
+    let limit = unsafe { limit.assume_init() }.rlim_cur;
+    let limit = if limit == libc::RLIM_INFINITY {
+        u64::MAX
+    } else {
+        #[allow(clippy::useless_conversion)]
+        u64::from(limit)
+    };
+    Ok(ProcessBudget {
+        used: user_process_count()?,
+        limit,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn user_process_count() -> io::Result<u64> {
+    /// `PROC_UID_ONLY` from `<libproc.h>`; the libc crate does not export it.
+    const PROC_UID_ONLY: u32 = 4;
+    // SAFETY: getuid has no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    // SAFETY: a null buffer with size 0 asks only for the byte count the
+    // kernel would return; no memory is written.
+    let bytes = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
+    if bytes < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let bytes = u64::try_from(bytes).map_err(|_| io::Error::other("invalid process list size"))?;
+    Ok(bytes / std::mem::size_of::<libc::pid_t>() as u64)
+}
+
+/// Linux counts tasks, because `RLIMIT_NPROC` does: every thread of a process
+/// the user owns uses an entry.
+#[cfg(target_os = "linux")]
+fn user_process_count() -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid has no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let mut tasks = 0_u64;
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !name
+            .to_str()
+            .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            continue;
+        }
+        // A process can exit between the listing and these reads.
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.uid() != uid {
+            continue;
+        }
+        let Ok(threads) = std::fs::read_dir(entry.path().join("task")) else {
+            continue;
+        };
+        tasks = tasks.saturating_add(threads.filter(Result::is_ok).count() as u64);
+    }
+    Ok(tasks)
+}
+
 /// Bytes available to this unprivileged user on the filesystem holding `file`.
 pub(crate) fn available_bytes(file: &File) -> io::Result<u64> {
     let stats = filesystem(file)?;
@@ -215,6 +313,25 @@ mod tests {
         let available = super::available_bytes(&file).unwrap();
         let total = super::total_bytes(&file).unwrap();
         assert!(available > 0 && available <= total);
+    }
+
+    #[test]
+    fn process_budget_counts_this_users_processes() {
+        let budget = super::process_budget().unwrap();
+        assert!(budget.used > 0, "this test process is in the count");
+        assert!(budget.limit >= budget.used);
+        assert!(super::ProcessBudget::UNLIMITED.has_room());
+    }
+
+    #[test]
+    fn headroom_is_a_tenth_of_the_limit_and_at_least_sixty_four() {
+        let at = |used, limit| super::ProcessBudget { used, limit }.has_room();
+        assert!(at(0, 2666));
+        assert!(at(2399, 2666), "headroom 266");
+        assert!(!at(2400, 2666));
+        assert!(at(99, 200), "headroom is 64 for a small limit");
+        assert!(!at(136, 200));
+        assert!(!at(10, 10));
     }
 
     #[test]

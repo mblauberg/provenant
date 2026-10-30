@@ -22,6 +22,27 @@ fn detached_worker_refuses_to_relaunch_a_test_harness() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn detached_worker_refuses_near_the_process_limit() {
+    let near = |used, limit| check_process_budget(Ok(ProcessBudget { used, limit }));
+    assert!(matches!(
+        near(2601, 2666),
+        Err(ExecError::ProcessBudget {
+            used: 2601,
+            limit: 2666
+        })
+    ));
+    assert!(matches!(
+        near(2400, 2666),
+        Err(ExecError::ProcessBudget { .. })
+    ));
+    assert!(near(2399, 2666).is_ok());
+    assert!(near(100, 2666).is_ok());
+    assert!(check_process_budget(Ok(ProcessBudget::UNLIMITED)).is_ok());
+    // An unreadable budget does not stop a worker the kernel would allow.
+    assert!(check_process_budget(Err(io::Error::other("probe"))).is_ok());
+}
+
+#[test]
 fn detached_worker_returns_before_its_work_finishes() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{Clock, DurationMicros, WaitBudget};
     let temp = tempfile::tempdir()?;

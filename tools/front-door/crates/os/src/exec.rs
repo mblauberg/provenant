@@ -3,7 +3,7 @@ use crate::capture::{FrameDelivery, StreamCapture};
 #[cfg(test)]
 pub(crate) use crate::capture::{Frames, Pump};
 use crate::identity::Signal;
-use crate::sys::{raw_exec::OwnedPid as RawChild, reaper::Reaper};
+use crate::sys::{raw_exec::OwnedPid as RawChild, reaper::Reaper, resources::ProcessBudget};
 use provenant_core::CancelToken;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -211,6 +211,10 @@ pub enum ExecError {
     CleanupPending,
     #[error("refusing to start a detached worker from a test harness")]
     TestHarness,
+    #[error(
+        "user process count {used} of {limit}; wait for processes to exit before starting a worker"
+    )]
+    ProcessBudget { used: u64, limit: u64 },
     #[error("utility {operation} failed")]
     Io {
         operation: &'static str,
@@ -254,6 +258,7 @@ pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
     {
         return Err(ExecError::TestHarness);
     }
+    check_process_budget(crate::sys::resources::process_budget())?;
     crate::sys::raw_exec::verify_child_wait_policy().map_err(ExecError::ChildWaitPolicy)?;
     let reaper = Reaper::new(1).map_err(io_error("start reaper"))?;
     let permit = reaper.reserve().ok_or(ExecError::Busy)?;
@@ -275,6 +280,19 @@ pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
     .map_err(io_error("spawn detached worker"))?;
     drop(child); // Transfer custody without waiting or signalling the worker.
     Ok(())
+}
+
+/// Refuse a detached worker when the user's process table has no headroom. A
+/// failed probe does not block: the limit is unknown, and the spawn itself
+/// still fails if the table is full.
+fn check_process_budget(probe: io::Result<ProcessBudget>) -> Result<(), ExecError> {
+    match probe {
+        Ok(budget) if !budget.has_room() => Err(ExecError::ProcessBudget {
+            used: budget.used,
+            limit: budget.limit,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Cargo places test executables, and only those, in a profile's `deps`.
