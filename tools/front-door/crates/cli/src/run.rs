@@ -489,8 +489,7 @@ fn assess_model_result(
         )
         && (failed_check || decoded.outcome == run::Outcome::Failed)
     {
-        let retry = if task.writer.is_none()
-            && task.access.write_roots.is_empty()
+        let retry = if !run::Service::has_writes(task.writer.is_some(), &task.access.write_roots)
             && record.continuation.as_deref() != Some("policy_fallback")
         {
             // Caller alternatives take precedence over the bundled fallback.
@@ -1465,10 +1464,21 @@ enum AccessError {
     MissingDirectory { flag: &'static str, path: PathBuf },
     #[error("{flag} {} overlaps the Provenant state root", path.display())]
     StateOverlap { flag: &'static str, path: PathBuf },
-    #[error("credential root requires a selected fixture-backed mechanism")]
-    CredentialRoot,
+    #[error(
+        "{flag} {} is a credential root: {}",
+        path.display(),
+        provenant_confinement::permissions::PermissionError::CredentialRoot
+    )]
+    CredentialRoot { flag: &'static str, path: PathBuf },
     #[error("--write-root {} overlaps the --worktree; worktree-write already grants the worktree", .0.display())]
     WorktreeOverlap(PathBuf),
+}
+
+/// The rule compile and entry share: a credential root is refused unless it
+/// is a Codex standalone package granted for reads. Writes stay strict.
+fn credential_root_refused(canonical: &Path, read: bool) -> bool {
+    provenant_confinement::is_credential_root(canonical)
+        && !(read && provenant_confinement::is_codex_standalone_package(canonical))
 }
 
 fn lane_access_checked(
@@ -1489,6 +1499,7 @@ fn lane_access_checked(
     let state =
         provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
     let resolve = |paths: &[PathBuf], flag: &'static str| {
+        let read = flag == "--read-root";
         paths
             .iter()
             .map(|path| {
@@ -1499,8 +1510,14 @@ fn lane_access_checked(
                         flag,
                         path: path.clone(),
                     })?;
-                if provenant_confinement::is_credential_root(&canonical) {
-                    return Err(AccessError::CredentialRoot);
+                // Entry agrees with the compile-time read/exec grant check
+                // (`credential_root_refused`); writes keep the plain
+                // credential-root refusal.
+                if credential_root_refused(&canonical, read) {
+                    return Err(AccessError::CredentialRoot {
+                        flag,
+                        path: path.clone(),
+                    });
                 }
                 if !run::access_root_allowed(&canonical, &state, flag == "--read-root") {
                     return Err(AccessError::StateOverlap {
@@ -12340,7 +12357,10 @@ mod tests {
         let root = temp.path().join(".ssh").join("nested");
         std::fs::create_dir_all(&root)?;
         let root = std::fs::canonicalize(root)?;
+        let message =
+            provenant_confinement::permissions::PermissionError::CredentialRoot.to_string();
         for read in [true, false] {
+            let flag = if read { "--read-root" } else { "--write-root" };
             let access = crate::Access {
                 mode: Some(Mode::ReadOnly),
                 worktree: None,
@@ -12352,9 +12372,65 @@ mod tests {
             let fail = lane_access(&access, &temp.path().join("state")).unwrap_err();
             assert_eq!(
                 fail.message,
-                provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
+                format!("{flag} {} is a credential root: {message}", root.display())
             );
         }
+        Ok(())
+    }
+
+    /// Entry agrees with compile: a read root in a Codex standalone release
+    /// passes the credential-root refusal, while a write root there stays
+    /// refused with the flag and the root named.
+    #[test]
+    fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::error::Error>> {
+        // The rule is lexical, so check it without the filesystem first.
+        let shape = Path::new(
+            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin/bin",
+        );
+        assert!(!credential_root_refused(shape, true), "reads pass entry");
+        assert!(credential_root_refused(shape, false), "writes stay strict");
+        // Against a machine's real home: build a temp release and walk it
+        // through `lane_access`. A lane can seal `~/.codex`; then the fixture
+        // cannot exist and the filesystem part is skipped silently.
+        let Some(home) = std::env::var_os("HOME") else {
+            return Ok(());
+        };
+        let releases = Path::new(&home).join(".codex/packages/standalone/releases");
+        if std::fs::create_dir_all(&releases).is_err() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir_in(&releases)?;
+        let release = std::fs::canonicalize(temp.path())?;
+        let state = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(state.path())?;
+        let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+            mode: Some(Mode::ReadOnly),
+            worktree: None,
+            read_root,
+            write_root,
+            network: None,
+            capability: vec![],
+        };
+        let granted = lane_access(
+            &access(vec![release.clone()], vec![]),
+            &state.join("grants"),
+        )
+        .map_err(|fail| fail.message)?;
+        assert_eq!(granted.read_roots, vec![release.clone()]);
+        let fail = lane_access(
+            &access(vec![], vec![release.clone()]),
+            &state.join("writes"),
+        )
+        .unwrap_err();
+        let message =
+            provenant_confinement::permissions::PermissionError::CredentialRoot.to_string();
+        assert_eq!(
+            fail.message,
+            format!(
+                "--write-root {} is a credential root: {message}",
+                release.display()
+            )
+        );
         Ok(())
     }
 
