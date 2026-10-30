@@ -29,6 +29,9 @@ struct Fixture {
 #[derive(Default)]
 struct FixtureUse {
     current_matches: BTreeSet<Fixture>,
+    // Only entries for tracked paths can be judged stale; other repositories
+    // scanned by `check release` do not contain this project's fixtures.
+    tracked: BTreeSet<String>,
     suppressed: usize,
 }
 
@@ -164,6 +167,7 @@ pub(super) fn inspect(
     let fixtures = fixtures()?;
     let mut fixture_use = FixtureUse::default();
     for (path, mode) in tracked {
+        fixture_use.tracked.insert(path.clone());
         path_rules(&mut scan, &path)?;
         let mut symlink = mode == "120000";
         match read_file(git.repo.root_dir(), Path::new(&path), MAX_FILE)? {
@@ -546,9 +550,9 @@ fn stale_fixtures<'a>(
     fixtures: &'a [Fixture],
     usage: &FixtureUse,
 ) -> impl Iterator<Item = &'a Fixture> {
-    fixtures
-        .iter()
-        .filter(|fixture| !usage.current_matches.contains(*fixture))
+    fixtures.iter().filter(|fixture| {
+        usage.tracked.contains(&fixture.path) && !usage.current_matches.contains(*fixture)
+    })
 }
 fn emit_stale_fixtures(
     scan: &mut Scan,
@@ -712,11 +716,14 @@ mod tests {
             rule: "release.github-token",
             digest: line_digest(&fake_token(b'a')),
         };
-        let usage = FixtureUse::default();
+        let mut usage = FixtureUse::default();
         let mut scan = Scan {
             findings: Vec::new(),
             evidence: Vec::new(),
         };
+        emit_stale_fixtures(&mut scan, std::slice::from_ref(&fixture), &usage).unwrap();
+        assert!(scan.findings.is_empty(), "untracked paths are not judged");
+        usage.tracked.insert(fixture.path.clone());
         emit_stale_fixtures(&mut scan, std::slice::from_ref(&fixture), &usage).unwrap();
         assert_eq!(scan.findings[0].rule, "release.fixture-stale");
         note_fixture_suppressions(&mut scan, 3);
