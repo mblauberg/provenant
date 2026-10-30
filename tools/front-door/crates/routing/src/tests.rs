@@ -3854,6 +3854,15 @@ fn quota_pool_is_validated_and_limited_to_grouped_adapters()
         bundled.quota_pool(&ModelId::parse("agy/gemini-3.8-flash")?),
         Some("gemini")
     );
+    // Uncatalogued models take the pool their family names, or none.
+    for (model, pool) in [
+        ("agy/gemini-9-pro", Some("gemini")),
+        ("agy/claude-opus-9", Some("claude")),
+        ("agy/other-1", None),
+        ("codex/gemini-1", None),
+    ] {
+        assert_eq!(bundled.quota_pool(&ModelId::parse(model)?), pool, "{model}");
+    }
     for (model, pool, valid) in [
         ("agy/claude-sonnet-4-6", Some("claude"), true),
         ("agy/claude-sonnet-4-6", None, true),
@@ -3919,6 +3928,44 @@ fn agy_exhaustion_follows_the_models_serving_windows() -> Result<(), Box<dyn std
     ];
     assert!(ready(claude, QuotaStatus::Exhausted, lapsed.clone())?);
     assert!(!ready(gemini, QuotaStatus::Exhausted, lapsed)?);
+    Ok(())
+}
+
+#[test]
+fn agy_shared_claude_pool_exhaustion_skips_only_the_claude_models()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let window = |pool: &str, used, reset| QuotaWindow {
+        pool: pool.into(),
+        window_seconds: Some(604_800),
+        used_basis_points: used,
+        resets_unix_seconds: Some(reset),
+    };
+    // The reported registration: the gemini windows have headroom while the
+    // shared Claude pool is spent, so gemini lanes must stay ready and only
+    // the agy Claude models may be skipped.
+    let windows = vec![
+        window("gemini.weekly", 2_256, 604_900),
+        window("gemini.5h", 1_701, 4_900),
+        window("claude.weekly", 10_000, 604_900),
+    ];
+    let ready = |model: &str| -> Result<bool, Box<dyn std::error::Error>> {
+        let config: RoutingConfig = serde_json::from_value(
+            serde_json::json!({"pacing":{"accounts":{"agy-host":{"policy":"max"}}}}),
+        )?;
+        let route = profile_preview_with_status(
+            config,
+            model,
+            "agy-host",
+            windows.clone(),
+            vec![],
+            QuotaStatus::Available,
+        )?;
+        Ok(matches!(route.readiness, RouteReadiness::Ready { .. }))
+    };
+    assert!(ready("agy/gemini-3.8-flash")?);
+    assert!(!ready("agy/claude-sonnet-4-6")?);
+    assert!(!ready("agy/claude-opus-4-6-thinking")?);
     Ok(())
 }
 #[test]

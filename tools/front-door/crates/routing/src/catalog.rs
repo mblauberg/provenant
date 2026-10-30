@@ -1197,9 +1197,19 @@ impl Catalogue {
     pub fn model(&self, id: &ModelId) -> Option<&ModelEntry> {
         self.models.iter().find(|row| row.model == *id)
     }
-    /// The single owner of a model's quota pool group.
+    /// The single owner of a model's quota pool group. An uncatalogued model
+    /// draws on the catalogued pool its family prefix names, so
+    /// `agy/gemini-4-pro` follows the gemini windows; an unknown family keeps
+    /// every window.
     pub fn quota_pool(&self, id: &ModelId) -> Option<&str> {
-        self.model(id)?.quota_pool.as_deref()
+        if let Some(row) = self.model(id) {
+            return row.quota_pool.as_deref();
+        }
+        let family = id.model().split('-').next()?;
+        self.models
+            .iter()
+            .filter(|row| row.model.adapter() == id.adapter())
+            .find_map(|row| row.quota_pool.as_deref().filter(|pool| *pool == family))
     }
     pub fn has_pool(&self, name: &str) -> bool {
         self.pools.contains_key(name)

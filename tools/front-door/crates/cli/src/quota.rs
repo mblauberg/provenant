@@ -1453,6 +1453,9 @@ fn quota_human(report: &QuotaReport) -> String {
                     window.used_basis_points % 100
                 ));
             }
+            if let Some(note) = shared_pool_exhaustions(snapshot) {
+                human.push_str(&format!("; {note}"));
+            }
         }
         if let Some(error) = row.error {
             let reason = serde_json::to_value(error)
@@ -1480,9 +1483,9 @@ fn quota_human(report: &QuotaReport) -> String {
     human.push_str(&format!("Report: {}\n", report.report_path));
     human
 }
-/// Per-pool state for an account with more than one pool, for example
-/// `gemini exhausted, claude 40%`. A pool is exhausted when any of its windows is.
-fn pool_states(snapshot: &provenant_quota::QuotaSnapshot) -> Option<String> {
+/// Per-pool peak use in first-seen order, grouping each window by the pool
+/// prefix before its `.` separator.
+fn pool_usage(snapshot: &provenant_quota::QuotaSnapshot) -> Vec<(&str, u64)> {
     let mut pools: Vec<(&str, u64)> = Vec::new();
     for window in &snapshot.windows {
         let pool = window
@@ -1494,6 +1497,13 @@ fn pool_states(snapshot: &provenant_quota::QuotaSnapshot) -> Option<String> {
             None => pools.push((pool, window.used_basis_points)),
         }
     }
+    pools
+}
+
+/// Per-pool state for an account with more than one pool, for example
+/// `gemini exhausted, claude 40%`. A pool is exhausted when any of its windows is.
+fn pool_states(snapshot: &provenant_quota::QuotaSnapshot) -> Option<String> {
+    let pools = pool_usage(snapshot);
     (pools.len() > 1).then(|| {
         pools
             .iter()
@@ -1507,6 +1517,25 @@ fn pool_states(snapshot: &provenant_quota::QuotaSnapshot) -> Option<String> {
             .collect::<Vec<_>>()
             .join(", ")
     })
+}
+/// The exhausted pools of a grouped adapter, for example
+/// `claude pool exhausted (shared)`. Each pool of a grouped adapter is shared
+/// by its own model family, so a spent pool refuses only those models and the
+/// account itself stays available; the note names the pool instead of letting
+/// the account read as wholly exhausted.
+fn shared_pool_exhaustions(snapshot: &provenant_quota::QuotaSnapshot) -> Option<String> {
+    let grouped = provenant_records::AdapterSpec::get(&snapshot.account.adapter)
+        .is_some_and(|spec| spec.grouped_quota_pools);
+    let pools = pool_usage(snapshot);
+    if !grouped || pools.len() <= 1 {
+        return None;
+    }
+    let exhausted: Vec<String> = pools
+        .iter()
+        .filter(|(_, used)| *used >= 10_000)
+        .map(|(pool, _)| format!("{} pool exhausted (shared)", pool.escape_debug()))
+        .collect();
+    (!exhausted.is_empty()).then(|| exhausted.join(", "))
 }
 /// Counts by state, then the accounts that need attention, then the command
 /// that shows the rest.
@@ -1540,12 +1569,21 @@ fn quota_summary(report: &QuotaReport) -> crate::Summary {
         report
             .accounts
             .iter()
-            .filter(|row| !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly))
+            .filter(|row| {
+                !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly)
+                    || row
+                        .snapshot
+                        .as_ref()
+                        .and_then(shared_pool_exhaustions)
+                        .is_some()
+            })
             .map(|row| {
                 let pools = row
                     .snapshot
                     .as_ref()
-                    .and_then(pool_states)
+                    .and_then(|snapshot| {
+                        shared_pool_exhaustions(snapshot).or_else(|| pool_states(snapshot))
+                    })
                     .map_or_else(String::new, |pools| format!(" ({pools})"));
                 format!(
                     "{} [{}]: {}{}",
@@ -1778,6 +1816,118 @@ mod tests {
         );
         let single = snapshot(serde_json::json!([window("weekly", 10_000)]))?;
         assert_eq!(pool_states(&single), None);
+        Ok(())
+    }
+
+    #[test]
+    fn account_line_names_the_exhausted_shared_pool_without_exhausting_the_account()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = |adapter: &str,
+                        status: &str,
+                        windows: serde_json::Value|
+         -> Result<_, serde_json::Error> {
+            serde_json::from_value::<provenant_quota::QuotaSnapshot>(serde_json::json!({
+                "schema_version": 1,
+                "account": {"adapter": adapter, "account_key": "k", "label": "agy"},
+                "revision": 1, "status": status, "observed_unix_seconds": 1,
+                "source_ref": "t", "authority_ref": null, "windows": windows,
+            }))
+        };
+        let window = |pool: &str, used: u64| serde_json::json!({"pool": pool, "used_basis_points": used, "resets_unix_seconds": null});
+        // The reported registration: the gemini windows have headroom while
+        // the shared Claude pool is spent.
+        let mixed = snapshot(
+            "agy",
+            "available",
+            serde_json::json!([
+                window("gemini.weekly", 2_256),
+                window("gemini.5h", 1_701),
+                window("claude.weekly", 10_000),
+            ]),
+        )?;
+        assert_eq!(
+            shared_pool_exhaustions(&mixed).as_deref(),
+            Some("claude pool exhausted (shared)")
+        );
+        let spent = snapshot(
+            "agy",
+            "exhausted",
+            serde_json::json!([
+                window("gemini.weekly", 10_000),
+                window("claude.weekly", 10_000),
+            ]),
+        )?;
+        assert_eq!(
+            shared_pool_exhaustions(&spent).as_deref(),
+            Some("gemini pool exhausted (shared), claude pool exhausted (shared)")
+        );
+        // A single pool is the account status's own business; ungrouped
+        // adapters have no shared pools to name.
+        let single = snapshot(
+            "agy",
+            "exhausted",
+            serde_json::json!([window("claude.weekly", 10_000)]),
+        )?;
+        assert_eq!(shared_pool_exhaustions(&single), None);
+        let ungrouped = snapshot(
+            "claude",
+            "exhausted",
+            serde_json::json!([window("weekly", 10_000)]),
+        )?;
+        assert_eq!(shared_pool_exhaustions(&ungrouped), None);
+        let row = |snapshot, status| AccountRow {
+            account: AccountScope {
+                adapter: "agy".into(),
+                account_key: "k".into(),
+                label: "agy".into(),
+            },
+            snapshot,
+            status,
+            age_seconds: Some(7),
+            next_due_unix_seconds: None,
+            refreshing: false,
+            error: None,
+            capacity_cooldowns: vec![],
+            display: None,
+        };
+        let report = QuotaReport {
+            schema_version: 1,
+            generated_unix_seconds: 0,
+            accounts: vec![row(Some(mixed), QuotaStatus::Available)],
+            sources: vec![],
+            coverage: Coverage { total: 1, known: 1 },
+            refreshing_ids: vec![],
+            next_due_unix_seconds: None,
+            report_path: String::new(),
+            display: Default::default(),
+            display_icon_warning: None,
+        };
+        let human = quota_human(&report);
+        assert!(human.contains("agy [agy]: AVAILABLE"), "{human}");
+        assert!(
+            human.contains("; claude pool exhausted (shared)"),
+            "{human}"
+        );
+        assert!(!human.contains("EXHAUSTED"), "{human}");
+        let summary = quota_summary(&report);
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line == "agy [agy]: available (claude pool exhausted (shared))"),
+            "{summary:?}"
+        );
+        let report = QuotaReport {
+            accounts: vec![row(Some(spent), QuotaStatus::Exhausted)],
+            ..report
+        };
+        let human = quota_human(&report);
+        assert!(
+            human.contains("; gemini pool exhausted (shared), claude pool exhausted (shared)"),
+            "{human}"
+        );
+        let summary = quota_summary(&report);
+        assert!(summary.lines.iter().any(|line| line == "agy [agy]: exhausted (gemini pool exhausted (shared), claude pool exhausted (shared))"), "{summary:?}");
         Ok(())
     }
 
