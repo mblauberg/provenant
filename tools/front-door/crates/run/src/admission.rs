@@ -231,7 +231,7 @@ impl RunStore {
                                 budget.used, budget.limit
                             ),
                             Err(error) => format!(
-                                "host capacity: process budget probe failed: {}",
+                                "launch: not yet handed to a guardian; process budget probe failed, not holding the lane: {}",
                                 probe_error(&error)
                             ),
                             _ => "launch: not yet handed to a guardian".to_owned(),
@@ -269,31 +269,46 @@ impl RunStore {
                             Ok(Some(pressure)) if pressure_threshold.defers(pressure) => {
                                 format!("host capacity: memory pressure {pressure:?}")
                             }
-                            Err(pressure) => match resources.process_budget() {
-                                Err(budget) => format!(
-                                    "host capacity: memory pressure probe failed: {}; process budget probe failed: {}",
-                                    probe_error(&pressure),
-                                    probe_error(&budget)
-                                ),
-                                _ => format!(
-                                    "host capacity: memory pressure probe failed: {}",
-                                    probe_error(&pressure)
-                                ),
-                            },
-                            Ok(_) => match resources.process_budget() {
-                                Ok(budget) if !budget.has_room() => format!(
-                                    "host capacity: user process count {} of {}",
-                                    budget.used, budget.limit
-                                ),
-                                Err(budget) => format!(
-                                    "host capacity: process budget probe failed: {}",
-                                    probe_error(&budget)
-                                ),
-                                _ => {
+                            pressure => {
+                                let budget = resources.process_budget();
+                                let pressure_error = pressure.as_ref().err();
+                                let budget_error = budget.as_ref().err();
+                                let full = budget.as_ref().ok().filter(|budget| !budget.has_room());
+                                if let Some(budget) = full {
+                                    let mut reason = format!(
+                                        "host capacity: user process count {} of {}",
+                                        budget.used, budget.limit
+                                    );
+                                    if let Some(error) = pressure_error {
+                                        reason.push_str(
+                                            "; memory pressure probe failed, not holding the lane: ",
+                                        );
+                                        reason.push_str(&probe_error(error));
+                                    }
+                                    reason
+                                } else if let (Some(pressure), Some(budget)) =
+                                    (pressure_error, budget_error)
+                                {
+                                    format!(
+                                        "host capacity: probes failed, not holding the lane: memory pressure: {}; process budget: {}",
+                                        probe_error(pressure),
+                                        probe_error(budget)
+                                    )
+                                } else if let Some(error) = pressure_error {
+                                    format!(
+                                        "host capacity: memory pressure probe failed, not holding the lane: {}",
+                                        probe_error(error)
+                                    )
+                                } else if let Some(error) = budget_error {
+                                    format!(
+                                        "host capacity: process budget probe failed, not holding the lane: {}",
+                                        probe_error(error)
+                                    )
+                                } else {
                                     "host capacity: active lane caps and memory or disk floors"
                                         .to_owned()
                                 }
-                            },
+                            }
                         }
                     }
                 };
@@ -541,7 +556,10 @@ impl RunStore {
             let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)
                 .and_then(|settings| settings.free_floor_bytes(&self.writer_registry));
             let pressure = resources.pressure().unwrap_or_else(|error| {
-                eprintln!("admission: memory pressure probe failed: {error}");
+                eprintln!(
+                    "admission: memory pressure probe failed: {}",
+                    probe_error(&error)
+                );
                 None
             });
             // Build slots gate builds inside lanes, not admission, and range
@@ -558,7 +576,12 @@ impl RunStore {
             // not hold the lane: the limit is unknown, not exceeded.
             let processes = resources
                 .process_budget()
-                .inspect_err(|error| eprintln!("admission: process budget probe failed: {error}"))
+                .inspect_err(|error| {
+                    eprintln!(
+                        "admission: process budget probe failed: {}",
+                        probe_error(error)
+                    );
+                })
                 .ok()
                 .filter(|budget| !budget.has_room());
             let fits = match (
@@ -757,31 +780,90 @@ impl RunStore {
         })
     }
 }
-/// A failed resource probe as one bounded line. Control characters become
-/// spaces and long messages are cut, so a wait reason stays readable and
-/// cannot be inflated by the probe's error.
+/// A failed resource probe as one bounded line. Control and Unicode format
+/// characters (including bidi controls) become spaces, runs of whitespace
+/// collapse, and the text is capped as it is written, so the reason stays
+/// within the bound however long the probe's error is.
 fn probe_error(error: &std::io::Error) -> String {
+    use std::fmt::Write as _;
+
     const LIMIT: usize = 200;
-    let raw: String = error
-        .to_string()
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
+    struct Bounded {
+        text: String,
+        pending_space: bool,
+        truncated: bool,
+    }
+    impl std::fmt::Write for Bounded {
+        fn write_str(&mut self, input: &str) -> std::fmt::Result {
+            for character in input.chars() {
+                if self.truncated {
+                    return Ok(());
+                }
+                let character = if character.is_control() || is_format_character(character) {
+                    ' '
+                } else {
+                    character
+                };
+                if character.is_whitespace() {
+                    self.pending_space = !self.text.is_empty();
+                    continue;
+                }
+                let separator = usize::from(self.pending_space && !self.text.is_empty());
+                if self.text.len() + separator + character.len_utf8() > LIMIT {
+                    self.truncated = true;
+                    return Ok(());
+                }
+                if separator == 1 {
+                    self.text.push(' ');
+                }
+                self.pending_space = false;
+                self.text.push(character);
             }
-        })
-        .collect();
-    let mut text = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.is_empty() {
-        text.push_str("unknown error");
+            Ok(())
+        }
     }
-    if text.len() > LIMIT {
-        text.truncate(text.floor_char_boundary(LIMIT));
-        text.push_str("...");
+    let mut bounded = Bounded {
+        text: String::with_capacity(LIMIT + 3),
+        pending_space: false,
+        truncated: false,
+    };
+    let _ = write!(bounded, "{error}");
+    if bounded.text.is_empty() {
+        bounded.text.push_str("unknown error");
     }
-    text
+    if bounded.truncated {
+        bounded.text.push_str("...");
+    }
+    bounded.text
+}
+
+/// True for Unicode `Cf` (format) characters, including bidi controls and
+/// zero-width characters, which can reorder or hide text in a terminal.
+fn is_format_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }
 fn class_name(class: LaneClass) -> &'static str {
     match class {
@@ -860,10 +942,17 @@ mod process_wait_tests {
         Ok(())
     }
 
-    /// A probe source whose errors are the named failures under test.
+    /// The process budget a probe source reports.
+    #[derive(Clone, Copy)]
+    enum Budget {
+        Unlimited,
+        Full { used: u64, limit: u64 },
+        Failed(&'static str),
+    }
+    /// A probe source whose results are the cases under test.
     struct Probes {
         pressure: Option<&'static str>,
-        budget: Option<&'static str>,
+        budget: Budget,
     }
     impl Resources for Probes {
         fn memory(&self) -> std::io::Result<MemorySample> {
@@ -880,8 +969,9 @@ mod process_wait_tests {
         }
         fn process_budget(&self) -> std::io::Result<resources::ProcessBudget> {
             match self.budget {
-                Some(message) => Err(std::io::Error::other(message)),
-                None => Ok(resources::ProcessBudget::UNLIMITED),
+                Budget::Unlimited => Ok(resources::ProcessBudget::UNLIMITED),
+                Budget::Full { used, limit } => Ok(resources::ProcessBudget { used, limit }),
+                Budget::Failed(message) => Err(std::io::Error::other(message)),
             }
         }
     }
@@ -919,12 +1009,13 @@ mod process_wait_tests {
             &call,
             &Probes {
                 pressure: None,
-                budget: Some("unavailable"),
+                budget: Budget::Failed("unavailable"),
             },
         );
         assert_eq!(
             waits[0].waiting_for,
-            "host capacity: process budget probe failed: unavailable"
+            "launch: not yet handed to a guardian; process budget probe failed, \
+             not holding the lane: unavailable"
         );
         Ok(())
     }
@@ -943,12 +1034,12 @@ mod process_wait_tests {
             &call,
             &Probes {
                 pressure: None,
-                budget: Some("unavailable"),
+                budget: Budget::Failed("unavailable"),
             },
         );
         assert_eq!(
             waits[0].waiting_for,
-            "host capacity: process budget probe failed: unavailable"
+            "host capacity: process budget probe failed, not holding the lane: unavailable"
         );
         Ok(())
     }
@@ -967,12 +1058,40 @@ mod process_wait_tests {
             &call,
             &Probes {
                 pressure: Some("unavailable"),
-                budget: None,
+                budget: Budget::Unlimited,
             },
         );
         assert_eq!(
             waits[0].waiting_for,
-            "host capacity: memory pressure probe failed: unavailable"
+            "host capacity: memory pressure probe failed, not holding the lane: unavailable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn starting_lane_names_full_process_budget_when_pressure_probe_fails()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let lane = starting_lane(&store, &call)?;
+        let waits = store.lane_waits_with_resources(
+            &[lane],
+            &call,
+            &Probes {
+                pressure: Some("unavailable"),
+                budget: Budget::Full {
+                    used: 512,
+                    limit: 512,
+                },
+            },
+        );
+        assert_eq!(
+            waits[0].waiting_for,
+            "host capacity: user process count 512 of 512; memory pressure probe failed, \
+             not holding the lane: unavailable"
         );
         Ok(())
     }
@@ -991,13 +1110,13 @@ mod process_wait_tests {
             &call,
             &Probes {
                 pressure: Some("unreadable"),
-                budget: Some("exhausted"),
+                budget: Budget::Failed("exhausted"),
             },
         );
         assert_eq!(
             waits[0].waiting_for,
-            "host capacity: memory pressure probe failed: unreadable; \
-             process budget probe failed: exhausted"
+            "host capacity: probes failed, not holding the lane: memory pressure: unreadable; \
+             process budget: exhausted"
         );
         Ok(())
     }
@@ -1009,5 +1128,25 @@ mod process_wait_tests {
         assert!(!text.contains('\n'));
         assert!(text.ends_with("..."));
         assert!(text.len() <= 203);
+    }
+
+    #[test]
+    fn probe_failure_reason_strips_format_characters() {
+        let error = std::io::Error::other("a\u{202E}b\u{200B}c\u{FEFF}d");
+        assert_eq!(probe_error(&error), "a b c d");
+    }
+
+    #[test]
+    fn probe_error_cuts_multibyte_text_on_a_character_boundary() {
+        // Cap at 200 bytes, so a 3-byte or 4-byte character that would cross
+        // the cap is dropped whole and the ellipsis is appended.
+        for unit in ["€", "😀"] {
+            for prefix in [199, 200, 201] {
+                let error =
+                    std::io::Error::other(format!("{}{}", "a".repeat(prefix), unit.repeat(8)));
+                let text = probe_error(&error);
+                assert_eq!(text, format!("{}{}", "a".repeat(prefix.min(200)), "..."));
+            }
+        }
     }
 }
