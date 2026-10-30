@@ -128,7 +128,7 @@ pub(super) fn read(
         for lane in &mut page.lanes {
             lane.attempt.last_output_at = None;
             lane.attempt.priority = None;
-            lane.attempt.provider_silent_for_ms = None;
+            lane.attempt.provider_silent_for_ms.0 = None;
         }
         let mut waits = Vec::new();
         let projects: std::collections::BTreeSet<_> =
@@ -146,8 +146,8 @@ pub(super) fn read(
                     {
                         lane.attempt.last_output_at = record.last_output_at;
                         lane.attempt.priority = record.priority;
-                        lane.attempt.provider_silent_for_ms = record.provider_silent_for_ms;
-                        if record.process_observation_valid {
+                        lane.attempt.provider_silent_for_ms.0 = record.provider_silent_for_ms.0;
+                        if record.process_observation_valid.0 {
                             observed.insert(record.attempt_id);
                         }
                     }

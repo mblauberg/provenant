@@ -1286,6 +1286,7 @@ fn invalid_or_stale_process_checkpoint_has_unknown_silence() -> TestResult {
             store
                 .record(input.attempts[0].attempt_id, &call)?
                 .provider_silent_for_ms
+                .0
                 .is_none()
         );
     }

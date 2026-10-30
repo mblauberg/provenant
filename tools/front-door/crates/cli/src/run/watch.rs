@@ -546,7 +546,7 @@ mod tests {
     fn a_silent_lane_wakes_any_and_all_waits_without_settling() {
         for condition in [Condition::Any, Condition::All] {
             let mut lane = running(1);
-            lane.provider_silent_for_ms = Some(1_800_000);
+            lane.provider_silent_for_ms.0 = Some(1_800_000);
             let mut calls = 0;
             let waited = wait(
                 |_| {
@@ -574,7 +574,7 @@ mod tests {
                 calls += 1;
                 let mut lane = running(1);
                 if calls > 1 {
-                    lane.provider_silent_for_ms = Some(1_800_000);
+                    lane.provider_silent_for_ms.0 = Some(1_800_000);
                 }
                 Ok(vec![lane])
             },

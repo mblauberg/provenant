@@ -555,9 +555,9 @@ impl RunStore {
             Err(RunError::Filesystem(error)) if error.is_not_found() => (None, true),
             Err(_) => (None, false),
         };
-        record.process_observation_valid = checkpoint_readable;
+        record.process_observation_valid.0 = checkpoint_readable;
         if let Some(bytes) = checkpoint {
-            record.process_observation_valid = false;
+            record.process_observation_valid.0 = false;
             #[derive(serde::Deserialize)]
             struct ProcessCheckpoint {
                 schema_version: u64,
@@ -582,7 +582,7 @@ impl RunStore {
                         generation: record.generation,
                     })
             {
-                record.process_observation_valid = true;
+                record.process_observation_valid.0 = true;
                 record.last_output_at = observation.last_output_at;
                 record.priority = observation.priority;
                 let fresh = observation
@@ -597,7 +597,7 @@ impl RunStore {
                     && fresh
                     && matches!(record.state, AttemptState::Running { .. })
                 {
-                    record.provider_silent_for_ms = observation.silent_for_ms;
+                    record.provider_silent_for_ms.0 = observation.silent_for_ms;
                 }
             }
         }

@@ -124,7 +124,7 @@ fn encode_attempt(record: &AttemptRecord) -> Result<serde_json::Value, serde_jso
     })?;
     object.remove("provider_ms");
     object.insert("provider_seconds".into(), serde_json::to_value(seconds)?);
-    if let Some(silent_for_ms) = record.provider_silent_for_ms {
+    if let Some(silent_for_ms) = record.provider_silent_for_ms.0 {
         object.insert(
             "provider_silent_for_ms".into(),
             serde_json::json!(silent_for_ms),
@@ -164,7 +164,7 @@ fn decode_attempt(mut value: serde_json::Value) -> Result<AttemptRecord, String>
     );
     let mut record: AttemptRecord =
         serde_json::from_value(value).map_err(|error| error.to_string())?;
-    record.provider_silent_for_ms = silent_for_ms;
+    record.provider_silent_for_ms.0 = silent_for_ms;
     Ok(record)
 }
 
@@ -298,7 +298,11 @@ mod tests {
     #[test]
     fn live_wire_carries_silence_without_persisting_it() {
         let mut record = attempt();
-        record.provider_silent_for_ms = Some(1_800_000);
+        record.provider_silent_for_ms.0 = Some(1_800_000);
+        let mut other_read = record.clone();
+        other_read.provider_silent_for_ms.0 = None;
+        other_read.process_observation_valid.0 = true;
+        assert_eq!(record, other_read);
         assert!(
             serde_json::to_value(&record)
                 .unwrap()
@@ -308,7 +312,7 @@ mod tests {
         let wire = encode_attempt(&record).unwrap();
         assert_eq!(wire["provider_silent_for_ms"], 1_800_000);
         assert_eq!(
-            decode_attempt(wire).unwrap().provider_silent_for_ms,
+            decode_attempt(wire).unwrap().provider_silent_for_ms.0,
             Some(1_800_000)
         );
     }

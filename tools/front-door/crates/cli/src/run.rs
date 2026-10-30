@@ -4445,7 +4445,7 @@ fn render_lanes(
             // A lane that has not started says what it is waiting for.
             let wait = waits.iter().find(|w| w.attempt_id == lane.attempt_id);
             let silence_reason = lane
-                .provider_silent_for_ms
+                .provider_silent_for_ms.0
                 .map(provenant_records::run::provider_silence_reason);
             let reason = reason
                 .or_else(|| wait.map(|w| w.waiting_for.clone()))
@@ -4739,7 +4739,7 @@ fn condition_met(lanes: &[run::AttemptRecord], condition: Condition) -> bool {
 pub(super) fn silent_lane(lanes: &[run::AttemptRecord]) -> Option<AttemptId> {
     lanes
         .iter()
-        .find(|lane| lane.provider_silent_for_ms.is_some())
+        .find(|lane| lane.provider_silent_for_ms.0.is_some())
         .map(|lane| lane.attempt_id)
 }
 /// Snapshot every attempt the targets name. Without targets, the selection is
@@ -12265,7 +12265,7 @@ mod tests {
             "usage": {},
             "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},"digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
         }))?;
-        lane.provider_silent_for_ms = Some(1_800_000);
+        lane.provider_silent_for_ms.0 = Some(1_800_000);
         let (data, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
         assert!(human.contains("provider silent for 1800s; provider still running"));
         assert_eq!(

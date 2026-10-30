@@ -2237,7 +2237,7 @@ mod tests {
     #[test]
     fn peer_wait_returns_early_for_an_already_silent_lane() {
         let mut lane = running(1);
-        lane.provider_silent_for_ms = Some(1_800_000);
+        lane.provider_silent_for_ms.0 = Some(1_800_000);
         let mut calls = 0;
         let (lanes, met) = poll_until(
             |_| {

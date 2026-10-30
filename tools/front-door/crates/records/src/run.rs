@@ -775,11 +775,11 @@ pub struct AttemptRecord {
     /// Transient guardian observation. It is carried over live peer reads but
     /// is never stored in the durable attempt record.
     #[serde(skip)]
-    pub provider_silent_for_ms: Option<u64>,
+    pub provider_silent_for_ms: Transient<Option<u64>>,
     /// Whether the observation checkpoint was absent or could be read and
     /// identity-checked. Used only for live coverage reporting.
     #[serde(skip)]
-    pub process_observation_valid: bool,
+    pub process_observation_valid: Transient<bool>,
     /// Custody evidence. None in older records must never authorise a writer retry.
     #[serde(default)]
     pub provider_launched: Option<bool>,
@@ -804,6 +804,19 @@ pub struct AttemptRecord {
     #[serde(default)]
     pub trace: crate::Trace,
 }
+/// A live-only value that is deliberately absent from durable identity and
+/// equality. It can decorate a record read without making two reads of that
+/// record compare differently.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Transient<T>(pub T);
+impl<T> PartialEq for Transient<T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl<T> Eq for Transient<T> {}
+
 /// Human-readable, transient explanation for a guardian silence observation.
 pub fn provider_silence_reason(silent_for_ms: u64) -> String {
     let seconds = silent_for_ms / 1_000;
