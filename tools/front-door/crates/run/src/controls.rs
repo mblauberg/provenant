@@ -182,6 +182,8 @@ pub enum UncertainReason {
     ExitWithoutLaunchSummary,
     /// The guardian is neither alive nor finished as far as can be seen.
     GuardianNotObservable,
+    /// A recorded supervisor is stuck in uninterruptible sleep.
+    HostStalled,
     /// A launch was handed to a writer whose custody is unconfirmed.
     WriterCustodyUnconfirmed { reservation: std::path::PathBuf },
     /// A writer reservation outlived the attempt's terminal commit.
@@ -235,6 +237,9 @@ impl std::fmt::Display for UncertainReason {
             Self::CustodyNotProvablyAbsent => f.write_str("launch custody is not provably absent"),
             Self::ExitWithoutLaunchSummary => f.write_str("exit exists without a launch summary"),
             Self::GuardianNotObservable => f.write_str("guardian is not observable"),
+            Self::HostStalled => {
+                f.write_str("host_stalled: supervisor is in uninterruptible sleep")
+            }
             Self::WriterCustodyUnconfirmed { reservation } => write!(
                 f,
                 "writer custody is unconfirmed; reservation retained at {}; chair recovery required",
@@ -2167,7 +2172,14 @@ impl RunStore {
                     }))
                 });
             if let Some(state) = state {
-                if let Reconciled::Uncertain { reason } = &state {
+                if matches!(
+                    &state,
+                    Reconciled::Uncertain {
+                        reason: UncertainReason::HostStalled
+                    }
+                ) {
+                    // A transient host stall must not consume recovery attempts.
+                } else if let Reconciled::Uncertain { reason } = &state {
                     crate::settlement::blocked(
                         &self.attempt_dir(run, id, false)?,
                         Self::scope(&self.record(id, call)?),
@@ -2536,6 +2548,12 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         let record = self.record(id, call)?;
+        if self.supervisor_stalled(
+            &self.attempt_dir(record.run_id, id, false)?,
+            Self::scope(&record),
+        ) {
+            return Ok(Some(Reconciled::uncertain(UncertainReason::HostStalled)));
+        }
         if matches!(record.state, AttemptState::Terminal { .. }) {
             return self.reconcile_terminal_temporary(&record, call, observer);
         }

@@ -15,6 +15,21 @@ const LIMIT: u32 = 3;
 const UNKNOWN_OWNER_LIMIT_MS: u64 = 10 * 60 * 1000;
 const CLAIM_BACKOFF: Backoff = Backoff::new(Duration::from_secs(5), 6, Duration::from_secs(120));
 
+#[cfg(test)]
+thread_local! {
+    static TEST_PROCESS_STATE: std::cell::Cell<Option<provenant_os::pid::ProcessState>> = const { std::cell::Cell::new(None) };
+}
+
+fn process_state(
+    pid: i64,
+) -> std::result::Result<provenant_os::pid::ProcessState, provenant_os::pid::PidError> {
+    #[cfg(test)]
+    if let Some(state) = TEST_PROCESS_STATE.with(|state| state.get()) {
+        return Ok(state);
+    }
+    provenant_os::pid::process_state(pid)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
@@ -130,6 +145,89 @@ fn alive(owner: &ProcessIdentity, since_ms: u64, now_ms: u64) -> bool {
         since_ms,
         now_ms,
     )
+}
+
+/// Attribute a state only when the recorded identity matches on both sides of the probe.
+fn identity_stalled_with(
+    identity: &ProcessIdentity,
+    observe: &dyn Fn(i64) -> ProcessObservation,
+    probe: &dyn Fn(
+        i64,
+    ) -> std::result::Result<
+        provenant_os::pid::ProcessState,
+        provenant_os::pid::PidError,
+    >,
+) -> bool {
+    let matches = || matches!(observe(identity.pid), ProcessObservation::Present(fact) if fact.identity == *identity && !fact.zombie);
+    matches()
+        && matches!(
+            probe(identity.pid),
+            Ok(provenant_os::pid::ProcessState::Uninterruptible)
+        )
+        && matches()
+}
+
+pub(crate) fn host_stalled(attempt: &Directory, scope: Scope) -> bool {
+    let observer = |pid| SystemProcessObserver.observe(pid);
+    let probe = process_state;
+    if read(attempt, scope)
+        .ok()
+        .and_then(|journal| journal.owner)
+        .is_some_and(|owner| identity_stalled_with(&owner, &observer, &probe))
+    {
+        return true;
+    }
+    let Some(raw) = read_sealed(attempt, "process.json", RECORD_LIMIT)
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    #[derive(Deserialize)]
+    struct Checkpoint {
+        scope: Scope,
+        guardian: Option<ProcessIdentity>,
+    }
+    let Ok(checkpoint) = crate::db::decode::<Checkpoint>(&raw) else {
+        return false;
+    };
+    checkpoint.scope == scope
+        && checkpoint
+            .guardian
+            .as_ref()
+            .is_some_and(|guardian| identity_stalled_with(guardian, &observer, &probe))
+}
+
+impl crate::RunStore {
+    /// Only recorded identities can be checked; a worker stalled before publishing
+    /// its identity retains the existing queued-marker expiry behavior.
+    pub(crate) fn supervisor_stalled(&self, attempt: &Directory, scope: Scope) -> bool {
+        if host_stalled(attempt, scope) {
+            return true;
+        }
+        let observer = |pid| SystemProcessObserver.observe(pid);
+        let probe = process_state;
+        let check = |directory: &Directory| {
+            provenant_supervisor::custody::reservation_guardian(directory, scope)
+                .ok()
+                .flatten()
+                .is_some_and(|identity| identity_stalled_with(&identity, &observer, &probe))
+        };
+        if check(attempt) {
+            return true;
+        }
+        self.writer_fences()
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter(|fence| fence.scope == scope)
+            .filter_map(|fence| {
+                fence
+                    .custody_directory()
+                    .and_then(|path| Directory::open_anchor(path).ok())
+            })
+            .any(|directory| check(&directory))
+    }
 }
 
 fn observed_alive(
@@ -379,6 +477,246 @@ mod tests {
     }
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn stalled_probe_requires_matching_identity_before_and_after() {
+        use provenant_supervisor::census::ProcessFact;
+        let identity = ProcessIdentity {
+            boot: "fixture".into(),
+            pid: 42,
+            native_start: 1,
+            group_id: 42,
+            session_id: 42,
+        };
+        let fact = ProcessFact {
+            identity: identity.clone(),
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let probe = |_| Ok(provenant_os::pid::ProcessState::Uninterruptible);
+        assert!(identity_stalled_with(
+            &identity,
+            &|_| ProcessObservation::Present(fact.clone()),
+            &probe
+        ));
+        let calls = std::cell::Cell::new(0);
+        assert!(!identity_stalled_with(
+            &identity,
+            &|_| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    ProcessObservation::Present(fact.clone())
+                } else {
+                    ProcessObservation::Absent
+                }
+            },
+            &probe
+        ));
+        assert!(!identity_stalled_with(
+            &identity,
+            &|_| ProcessObservation::Present(fact.clone()),
+            &|_| Ok(provenant_os::pid::ProcessState::Running)
+        ));
+    }
+
+    #[test]
+    fn stalled_supervisor_is_not_retried_and_is_rechecked() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let scope = crate::RunStore::scope(&store.record(id, &call)?);
+        for explicit in [false, true] {
+            let found = store.queue_reconcile_mode_with_probe(
+                run.run_id,
+                &call,
+                |_, _| panic!("stalled worker must not spawn"),
+                explicit,
+                &|_, _| true,
+            )?;
+            assert!(matches!(
+                found.as_slice(),
+                [(
+                    _,
+                    crate::Reconciled::Uncertain {
+                        reason: crate::UncertainReason::HostStalled
+                    }
+                )]
+            ));
+            assert_eq!(read(&attempt, scope)?.recovery_failures, 0);
+        }
+        let mut spawned = false;
+        store.queue_reconcile_mode_with_probe(
+            run.run_id,
+            &call,
+            |_, _| {
+                spawned = true;
+                Ok(())
+            },
+            false,
+            &|_, _| false,
+        )?;
+        assert!(spawned, "recovery resumes on a later tick");
+        Ok(())
+    }
+
+    #[test]
+    fn stalled_checkpoint_reports_lane_and_retains_custody() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = crate::RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let lane = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let scope = crate::RunStore::scope(&lane);
+        let lease = provenant_supervisor::custody::acquire_reader(
+            attempt.try_clone()?,
+            scope,
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?;
+        let identity = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+            ProcessObservation::Present(fact) => fact.identity,
+            _ => return Err("missing fixture identity".into()),
+        };
+        crate::artifacts::seal(
+            &attempt,
+            "process.json",
+            &serde_json::to_vec(
+                &serde_json::json!({"schema_version":1, "scope":scope, "guardian":identity}),
+            )?,
+            RECORD_LIMIT,
+        )?;
+        TEST_PROCESS_STATE
+            .with(|state| state.set(Some(provenant_os::pid::ProcessState::Uninterruptible)));
+        assert!(
+            host_stalled(&attempt, scope),
+            "checkpoint identifies stalled guardian"
+        );
+        assert!(matches!(
+            lane.state,
+            crate::AttemptState::Running { .. } | crate::AttemptState::Starting { .. }
+        ));
+        let waits = store.lane_waits(std::slice::from_ref(&lane), &call);
+        assert_eq!(
+            waits[0].waiting_for,
+            "host_stalled: supervisor is in uninterruptible sleep"
+        );
+        let queued = store.queue_reconcile_with(run.run_id, &call, |_, _| {
+            panic!("stalled worker must not spawn")
+        })?;
+        assert!(matches!(
+            queued.as_slice(),
+            [(
+                _,
+                crate::Reconciled::Uncertain {
+                    reason: crate::UncertainReason::HostStalled
+                }
+            )]
+        ));
+        let reconciled = store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(
+            reconciled.as_slice(),
+            [(
+                _,
+                crate::Reconciled::Uncertain {
+                    reason: crate::UncertainReason::HostStalled
+                }
+            )]
+        ));
+        assert!(provenant_supervisor::custody::reservation_present(
+            &attempt, scope
+        )?);
+        assert!(
+            attempt
+                .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
+                .is_err()
+        );
+        assert_eq!(read(&attempt, scope)?.recovery_failures, 0);
+        // The guardian can be recorded in custody before its first checkpoint.
+        let evidence = provenant_supervisor::custody::attempt_evidence(&attempt, scope)?;
+        let mut reservation: serde_json::Value = serde_json::from_slice(
+            &read_sealed(&evidence, "reservation.json", RECORD_LIMIT)?
+                .ok_or("missing reservation")?,
+        )?;
+        let mut guardian = identity.clone();
+        guardian.group_id = guardian.pid;
+        guardian.session_id = guardian.pid;
+        let metadata = attempt.metadata()?;
+        reservation["guardian"] = serde_json::to_value(&guardian)?;
+        reservation["launch_state"] = serde_json::json!("handing_off");
+        reservation["attempt_device"] = serde_json::json!(metadata.device);
+        reservation["attempt_inode"] = serde_json::json!(metadata.inode);
+        evidence
+            .atomic_write(
+                OsStr::new("reservation.json"),
+                ".fixture-",
+                &serde_json::to_vec(&reservation)?,
+                PublishMode::Replace,
+            )?
+            .require_durable()?;
+        attempt.unlink(OsStr::new("process.json"))?;
+        assert_eq!(
+            provenant_supervisor::custody::reservation_guardian(&attempt, scope)?,
+            Some(guardian)
+        );
+        assert!(store.supervisor_stalled(&attempt, scope));
+        assert!(matches!(
+            store
+                .reconcile_with_observer(
+                    run.run_id,
+                    &crate::dispatch_tests::Fake::default(),
+                    &call,
+                    &SystemProcessObserver
+                )?
+                .as_slice(),
+            [(
+                _,
+                crate::Reconciled::Uncertain {
+                    reason: crate::UncertainReason::HostStalled
+                }
+            )]
+        ));
+        assert!(provenant_supervisor::custody::reservation_present(
+            &attempt, scope
+        )?);
+        TEST_PROCESS_STATE.with(|state| state.set(None));
+        drop(lease);
+        Ok(())
+    }
 
     #[test]
     fn detached_process_budget_refusal_is_typed_and_clears_marker() -> TestResult {
@@ -875,6 +1213,22 @@ impl crate::RunStore {
         ) -> std::result::Result<(), provenant_os::exec::ExecError>,
         explicit: bool,
     ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
+        self.queue_reconcile_mode_with_probe(run, call, spawn, explicit, &|directory, scope| {
+            self.supervisor_stalled(directory, scope)
+        })
+    }
+
+    fn queue_reconcile_mode_with_probe(
+        &self,
+        run: provenant_core::RunId,
+        call: &crate::Request<'_>,
+        spawn: impl FnOnce(
+            &[std::ffi::OsString],
+            &std::path::Path,
+        ) -> std::result::Result<(), provenant_os::exec::ExecError>,
+        explicit: bool,
+        stalled: &dyn Fn(&Directory, Scope) -> bool,
+    ) -> Result<Vec<(provenant_core::AttemptId, crate::Reconciled)>> {
         self.run(run, call)?;
         let attempts = self.pending_attempts(run, call)?;
         let wall = call
@@ -894,6 +1248,9 @@ impl crate::RunStore {
             let directory = self.attempt_dir(run, attempt.attempt_id, false)?;
             let scope = Self::scope(attempt);
             let journal = read(&directory, scope)?;
+            if stalled(&directory, scope) {
+                continue;
+            }
             if !explicit
                 && (journal.recovery_failures >= LIMIT
                     || (journal.blocking_reason.is_some() && now < journal.retry_after_ms))
@@ -1039,6 +1396,17 @@ impl crate::RunStore {
                         crate::AttemptState::Queued { .. } => crate::Reconciled::Queued,
                         crate::AttemptState::Terminal { .. } => crate::Reconciled::Finished,
                         _ => {
+                            if self
+                                .attempt_dir(run, attempt.attempt_id, false)
+                                .is_ok_and(|directory| stalled(&directory, Self::scope(&attempt)))
+                            {
+                                return (
+                                    attempt.attempt_id,
+                                    crate::Reconciled::Uncertain {
+                                        reason: crate::UncertainReason::HostStalled,
+                                    },
+                                );
+                            }
                             let journal =
                                 self.attempt_dir(run, attempt.attempt_id, false).and_then(
                                     |directory| read(&directory, crate::RunStore::scope(&attempt)),
@@ -1144,7 +1512,7 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
             store.reconcile_with_observer(request.run, providers, &call, &SystemProcessObserver)?;
         if !found
             .iter()
-            .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { .. }))
+            .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { reason } if !matches!(reason, crate::UncertainReason::HostStalled)))
         {
             break;
         }

@@ -220,7 +220,12 @@ impl RunStore {
             .filter_map(|lane| {
                 let ticket = self.ticket(&self.db, lane.attempt_id).ok()?;
                 let class = ticket.lane_class;
-                let waiting_for = if matches!(lane.state, AttemptState::Running { .. }) {
+                let stalled = self
+                    .attempt_dir(lane.run_id, lane.attempt_id, false)
+                    .is_ok_and(|attempt| self.supervisor_stalled(&attempt, Self::scope(lane)));
+                let waiting_for = if stalled {
+                    "host_stalled: supervisor is in uninterruptible sleep".to_owned()
+                } else if matches!(lane.state, AttemptState::Running { .. }) {
                     self.disk_pause_wait(lane)
                         .or_else(|| self.build_slot_wait(lane, call))?
                 } else if matches!(lane.state, AttemptState::Queued { .. }) {

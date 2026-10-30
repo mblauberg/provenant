@@ -1,7 +1,177 @@
-use crate::pid::{CwdObservation, PidError, ProcessSignal};
+use crate::pid::{CwdObservation, PidError, ProcessSignal, ProcessState};
 use std::io;
 
 const MAX_EINTR_RETRIES: u64 = 8;
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_thread_state(states: &[i32]) -> io::Result<ProcessState> {
+    // These values are from Darwin's mach/thread_info.h; 5 is HALTED.
+    const RUNNING: i32 = 1;
+    const UNINTERRUPTIBLE: i32 = 4;
+    if states.is_empty() || states.iter().any(|state| !(1..=5).contains(state)) {
+        return Err(io::Error::other("invalid thread states"));
+    }
+    Ok(
+        if states.contains(&UNINTERRUPTIBLE) && !states.contains(&RUNNING) {
+            ProcessState::Uninterruptible
+        } else {
+            ProcessState::Running
+        },
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_thread_states(pid: i32) -> io::Result<ProcessState> {
+    // A full buffer may have been truncated. Do not infer a stall from an incomplete census.
+    const MAX_THREADS: usize = 16_384;
+    const PROC_PIDLISTTHREADS: i32 = 6;
+    let mut threads = vec![0u64; MAX_THREADS];
+    let size = i32::try_from(threads.len() * std::mem::size_of::<u64>())
+        .map_err(|_| io::Error::other("thread buffer too large"))?;
+    // SAFETY: the vector supplies writable storage of size bytes, retained by the caller.
+    let count = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDLISTTHREADS,
+            0,
+            threads.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if count <= 0 || count >= size || !(count as usize).is_multiple_of(std::mem::size_of::<u64>()) {
+        return Err(io::Error::other("thread list unavailable or incomplete"));
+    }
+    threads.truncate(count as usize / std::mem::size_of::<u64>());
+    let mut states = Vec::with_capacity(threads.len());
+    let requested = std::mem::size_of::<libc::proc_threadinfo>() as i32;
+    for thread in threads {
+        let mut info = std::mem::MaybeUninit::<libc::proc_threadinfo>::uninit();
+        // SAFETY: info supplies writable ABI-sized storage and libproc does not retain it.
+        let returned = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTHREADINFO,
+                thread,
+                info.as_mut_ptr().cast(),
+                requested,
+            )
+        };
+        if returned != requested {
+            return Err(io::Error::other("thread state unavailable"));
+        }
+        // SAFETY: a full-size successful call initialised the record.
+        states.push(unsafe { info.assume_init() }.pth_run_state);
+    }
+    darwin_thread_state(&states)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_stat_state(stat: &str) -> io::Result<ProcessState> {
+    // comm is parenthesised and may itself contain spaces or parentheses.
+    let (_, tail) = stat
+        .rsplit_once(')')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid proc stat"))?;
+    let state = tail
+        .strip_prefix(' ')
+        .and_then(|tail| tail.split_whitespace().next())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing proc state"))?;
+    match state {
+        "D" => Ok(ProcessState::Uninterruptible),
+        "T" | "t" => Ok(ProcessState::Stopped),
+        "Z" | "X" | "x" => Ok(ProcessState::Gone),
+        "R" | "S" | "I" | "W" | "P" => Ok(ProcessState::Running),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unknown proc state",
+        )),
+    }
+}
+
+pub(crate) fn process_state(pid: i32) -> io::Result<ProcessState> {
+    #[cfg(target_os = "linux")]
+    {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => linux_stat_state(&stat),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ProcessState::Gone),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let requested = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+        // SAFETY: info is writable storage of the requested ABI size; libproc retains no pointer.
+        let returned = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                requested,
+            )
+        };
+        if returned == 0 {
+            return Err(io::Error::other("process status unavailable"));
+        }
+        if returned != requested {
+            return Err(io::Error::other("short process status record"));
+        }
+        // SAFETY: a full-size successful call initialised the record.
+        let info = unsafe { info.assume_init() };
+        if info.pbsi_status == libc::SZOMB {
+            return Ok(ProcessState::Gone);
+        }
+        let threads = darwin_thread_states(pid)?;
+        Ok(if threads == ProcessState::Uninterruptible {
+            threads
+        } else if info.pbsi_status == libc::SSTOP {
+            ProcessState::Stopped
+        } else {
+            threads
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "process state unsupported",
+        ))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn classifies_darwin_thread_states() {
+    assert_eq!(
+        darwin_thread_state(&[4, 3]).unwrap(),
+        ProcessState::Uninterruptible
+    );
+    assert_eq!(darwin_thread_state(&[4, 1]).unwrap(), ProcessState::Running);
+    assert_eq!(darwin_thread_state(&[5, 3]).unwrap(), ProcessState::Running);
+    assert!(darwin_thread_state(&[]).is_err());
+    assert!(darwin_thread_state(&[4, 99]).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn parses_linux_stat_states_with_complex_names() {
+    for (state, expected) in [
+        ("D", ProcessState::Uninterruptible),
+        ("T", ProcessState::Stopped),
+        ("t", ProcessState::Stopped),
+        ("S", ProcessState::Running),
+        ("R", ProcessState::Running),
+        ("Z", ProcessState::Gone),
+    ] {
+        assert_eq!(
+            linux_stat_state(&format!("123 (name ) with spaces) {state} 1 2 3")).unwrap(),
+            expected
+        );
+    }
+    assert!(linux_stat_state("123 (broken").is_err());
+    assert!(linux_stat_state("123 (name) ? 1").is_err());
+}
 
 pub(crate) fn uid(pid: i32) -> Option<u32> {
     #[cfg(target_os = "linux")]

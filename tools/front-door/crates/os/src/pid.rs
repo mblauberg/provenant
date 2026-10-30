@@ -3,6 +3,23 @@ use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// An observed process state. Errors remain distinct from a vanished process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessState {
+    Running,
+    Stopped,
+    Uninterruptible,
+    Gone,
+}
+
+pub fn process_state(pid: i64) -> Result<ProcessState, PidError> {
+    if pid <= 0 {
+        return Err(PidError::Refused { pid });
+    }
+    let pid = i32::try_from(pid).map_err(|_| PidError::NumberOutOfRange { pid })?;
+    crate::sys::pid::process_state(pid).map_err(|source| PidError::Io { pid, source })
+}
+
 #[derive(Debug, Error)]
 pub enum PidError {
     #[error("refusing PID {pid}")]
