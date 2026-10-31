@@ -350,9 +350,20 @@ and [semaphore](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0
 implementations place the `shmget`/`semget` MAC permission checks on existing
 object lookup, not the new-object branch. This source corroborates the test;
 it is not a claim that the published revision matches the running kernel.
-There is consequently no established pre-allocation deny or enforceable
-supervisor-assigned key namespace here. A naming convention cannot prevent
-direct allocation with another key or `IPC_PRIVATE`.
+Those IPC hooks do not establish a pre-allocation deny or enforceable
+supervisor-assigned key namespace. A naming convention cannot prevent direct
+allocation with another key or `IPC_PRIVATE`.
+
+Generic syscall filtering is a separate candidate: `(deny syscall-unix
+(syscall-number 265) (syscall-number 255))` compiles, using the SDK's `shmget`
+and `semget` numbers. This does not demonstrate that allocation is denied at
+runtime. The confined writer cannot apply a nested sandbox: a minimal
+`sandbox-exec` probe fails with `sandbox_apply: Operation not permitted` before
+execution. A host-side probe must establish whether syscall filtering blocks
+creation before allocation, including alternate `shmsys`/`semsys` entry points,
+without allocating unjournalled objects. The IPC hook placement above does not
+rule out filtering before syscall entry. No such prevention mechanism is
+verified by this investigation.
 
 The test-only `SysvAudit` interposer records successful exclusive creations
 after the syscall returns. Arbitrary lane code can bypass it, and a kill
