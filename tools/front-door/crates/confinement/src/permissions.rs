@@ -94,6 +94,9 @@ const DYLD_BOOTSTRAP_RULES: &str = r#"
 const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
+(allow ipc-sysv-shm)
+(allow ipc-sysv-sem)
+(allow ipc-posix-shm* (ipc-posix-name-regex #"^/PostgreSQL\.[0-9]+$"))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.cfprefsd.daemon")
@@ -2425,6 +2428,8 @@ mod tests {
     use super::*;
     use provenant_os::exec::SystemExecutor;
 
+    mod ipc;
+
     #[test]
     fn git_control_link_refusal_names_the_file_and_the_recovery() {
         let error = PermissionError::GitControlHardLinked("/repo/.git/config".into());
@@ -2793,6 +2798,21 @@ mod tests {
                 writer.then_some(&git),
                 Path::new("/fixture/home"),
             )?)?;
+            // PostgreSQL's interlock and semaphores are SysV on macOS;
+            // dynamic shared memory uses the PostgreSQL. POSIX namespace.
+            // Both access modes can check databases, but no other IPC opens.
+            assert_eq!(
+                rendered
+                    .lines()
+                    .filter(|line| line.starts_with("(allow ipc-"))
+                    .collect::<Vec<_>>(),
+                [
+                    "(allow ipc-posix-shm-read* (ipc-posix-name-prefix \"apple.cfprefs.\"))",
+                    "(allow ipc-sysv-shm)",
+                    "(allow ipc-sysv-sem)",
+                    r##"(allow ipc-posix-shm* (ipc-posix-name-regex #"^/PostgreSQL\.[0-9]+$"))"##,
+                ]
+            );
             let exec = format!("(allow process-exec (subpath \"{scratch}\"))");
             assert_eq!(rendered.lines().any(|line| line == exec), writer);
             assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));
@@ -4276,6 +4296,31 @@ mod tests {
             directories: &directories,
             worktree: Some((&linked, &selected_ref)),
         };
+        let executor = SystemExecutor::new(2)?;
+        let cancel = CancelToken::new();
+        let env = [
+            ("HOME".into(), home.into_os_string()),
+            ("PROVENANT_STATE_DIR".into(), state.clone().into_os_string()),
+            ("XDG_CONFIG_HOME".into(), xdg.into_os_string()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ];
+        let (baseline, baseline_diagnostic) = probe_sandbox_with_diagnostic(&BackendContext {
+            executor: &fixture.executor,
+            cancel: &CancelToken::new(),
+            env: &env,
+        })?;
+        if !matches!(baseline, Availability::Available { .. }) {
+            let diagnostic = baseline_diagnostic
+                .as_deref()
+                .unwrap_or("no command outcome was captured");
+            assert_ne!(
+                std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
+                Ok("1"),
+                "the required native sandbox baseline is unavailable: {baseline:?}; {diagnostic}"
+            );
+            return Ok(());
+        }
         let backend = MacOsSandboxBackend { ready: true };
         // Existing hard links in the scratch, the worktree and its ignored
         // build and dependency trees do not refuse the launch: the sandbox
@@ -4336,31 +4381,6 @@ mod tests {
                 .compile(&read_only_plan, &profile, &read_only_anchors)?
                 .profile,
         )?;
-        let executor = SystemExecutor::new(2)?;
-        let cancel = CancelToken::new();
-        let env = [
-            ("HOME".into(), home.into_os_string()),
-            ("PROVENANT_STATE_DIR".into(), state.clone().into_os_string()),
-            ("XDG_CONFIG_HOME".into(), xdg.into_os_string()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-        ];
-        let (baseline, baseline_diagnostic) = probe_sandbox_with_diagnostic(&BackendContext {
-            executor: &fixture.executor,
-            cancel: &CancelToken::new(),
-            env: &env,
-        })?;
-        if !matches!(baseline, Availability::Available { .. }) {
-            let diagnostic = baseline_diagnostic
-                .as_deref()
-                .unwrap_or("no command outcome was captured");
-            assert_ne!(
-                std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
-                Ok("1"),
-                "the required native sandbox baseline is unavailable: {baseline:?}; {diagnostic}"
-            );
-            return Ok(());
-        }
         let run_in = |sbpl: &str, program: &Path, args: &[&Path]| {
             let mut argv = vec![
                 OsString::from(SANDBOX_EXEC),
@@ -4413,6 +4433,39 @@ mod tests {
                 outcome.termination,
                 String::from_utf8_lossy(&outcome.stderr.bytes)
             );
+            let outcome = run_in(
+                sbpl,
+                &executables[6],
+                &[
+                    Path::new("-MIPC::SysV=IPC_PRIVATE,IPC_CREAT,IPC_RMID"),
+                    Path::new("-e"),
+                    Path::new(
+                        r#"my ($shm, $sem);
+END {
+    shmctl($shm, IPC_RMID, 0) or die "shmctl: $!\n" if defined $shm;
+    semctl($sem, 0, IPC_RMID, 0) or die "semctl: $!\n" if defined $sem;
+}
+$shm = shmget(IPC_PRIVATE, 56, IPC_CREAT | 0600);
+die "shmget: $!\n" unless defined $shm;
+shmwrite($shm, "ok", 0, 2) or die "shmwrite: $!\n";
+shmread($shm, my $value, 0, 2) or die "shmread: $!\n";
+die "shared memory contents\n" unless $value eq "ok";
+$sem = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
+die "semget: $!\n" unless defined $sem;
+semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
+"#,
+                    ),
+                ],
+            );
+            assert!(
+                successful_probe(&outcome),
+                "{name} SysV IPC: {:?}; {}",
+                outcome.termination,
+                String::from_utf8_lossy(&outcome.stderr.bytes)
+            );
+            let outside = root.join("outside-write-roots");
+            assert!(denied_probe(&run_in(sbpl, &executables[0], &[&outside])));
+            assert!(!outside.exists(), "{name} wrote outside its writable roots");
         }
 
         let shell_outcome = run(&executables[3], &[Path::new("-c"), Path::new("printf ok")]);

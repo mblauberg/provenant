@@ -237,6 +237,40 @@ Rendered profiles are pinned by
 `crates/providers/src/seatbelt_snapshots.rs::seatbelt_profiles_match_snapshots`.
 The rules below are what every profile must keep.
 
+### Database IPC shares the host namespace
+
+Writer and read-only lane profiles allow `ipc-sysv-shm` and `ipc-sysv-sem`.
+Read-only reviewers need the same IPC to run database checks against scratch
+data; read-only refers to repository writes, not to kernel IPC. The separate
+backend availability probe keeps its minimal launch-only profile.
+
+PostgreSQL 18 always uses a small SysV shared-memory interlock, including with
+`shared_memory_type=mmap`. Its [Darwin configuration](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/template/darwin)
+selects SysV semaphores on supported macOS versions, so POSIX semaphores remain
+denied. Its [dynamic shared-memory implementation](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/storage/ipc/dsm_impl.c)
+uses POSIX objects named `/PostgreSQL.<number>`; the lane allows
+`ipc-posix-shm*` only for names matching `^/PostgreSQL\.[0-9]+$`. No general POSIX IPC
+or SysV message-queue access is granted.
+
+This is a security-relevant confinement trade-off: macOS SysV IPC is
+host-global and Seatbelt cannot restrict these operations to a lane's own
+segments or semaphore sets. A lane may discover keys and access another
+process's objects when ordinary Unix IPC permissions allow it, including
+objects owned by the same user. Other users' objects remain protected under
+normal restrictive permissions. The POSIX namespace is also shared by PostgreSQL
+servers belonging to the same user; it is not a lane-private namespace.
+File confinement still restricts database files to existing writable roots,
+and process, signal and network rules retain their existing limits. Database
+clients need the existing local or open network policy for loopback access.
+Use a separate OS user or a VM when isolation from same-user IPC is required.
+
+- Why: PostgreSQL startup and database checks need kernel IPC without broader
+  file, process or network authority.
+- Test: `crates/confinement/src/permissions.rs::writer_test_grants_stay_within_the_attempt_and_mode`;
+  `::native_sandbox_blocks_path_escape_probes`;
+  `crates/confinement/src/permissions/tests/ipc.rs::postgres_initialises_serves_a_read_only_query_and_stops_in_writer_profile`
+- Owner: `crates/confinement/src/permissions.rs`
+
 ### Plans refuse unsafe roots
 
 Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)` from
