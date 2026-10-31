@@ -274,21 +274,23 @@ The explicit database capability accepts that exposure; it does not create a
 lane-private SysV namespace. Other users' objects remain protected under normal
 restrictive permissions. Profiles without the capability cannot mutate or
 remove the host's objects, including those owned by the same user.
-However, the existing IPC sandbox rules do not prevent SysV creation. Even a
-lane without database authority can allocate a segment or semaphore set and then
-be refused permission to remove its own allocation. Repeated failed database
-starts can exhaust host-global IPC limits such as `kern.sysv.shmmni`.
-Capability-off therefore does not guarantee freedom from IPC resource exhaustion.
+macOS checks SysV segment and semaphore authority only when an existing
+object is looked up, after creation has already succeeded, so the `ipc-sysv-*`
+rules cannot stop a lane allocating an object it is then refused permission to
+remove. Profiles without the capability therefore deny the creating system calls
+instead; see [SysV object creation is denied without database
+authority](#sysv-object-creation-is-denied-without-database-authority).
+A lane with the capability can still exhaust host-global IPC limits such as
+`kern.sysv.shmmni` with its own objects, and a failed database start can leave
+them behind. That exposure is part of the accepted capability.
 
-Every SysV-touching native test records host `ipcs -m -s` inventories before
+Every SysV-touching native test records host `ipcs -m -s -q` inventories before
 and after. Trusted test code journals exact newly created IDs; a host-side
 guard removes only those IDs and asserts that none remain. PostgreSQL tests
 audit allocations across initdb's subprocesses, including failed starts.
 Cleanup never deletes an unowned inventory difference or a pre-existing object.
-General lane-end reclamation remains unavailable; [the ownership limitation
-below](#sysv-reclamation-requires-allocation-proof) records why the test journal
-and process-tree sampler cannot provide it. A forced kill between allocation
-and journal append can still leave an unrecorded test object.
+A forced kill between allocation and journal append can still leave an
+unrecorded test object.
 File confinement still restricts database files to existing writable roots,
 and executable, Mach and network rules retain their existing limits. Database
 clients need the existing local or open network policy for loopback access.
@@ -312,84 +314,69 @@ authority.
   `crates/confinement/src/permissions/tests/ipc.rs::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`;
   `::postgres_without_database_ipc_refuses_initdb`;
   `::database_off_cannot_mutate_or_remove_foreign_sysv_objects`;
+  `::database_off_cannot_create_sysv_objects`;
+  `::database_on_creates_and_removes_own_sysv_segments_and_semaphores`;
   `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`
 - Owner: `crates/confinement/src/permissions.rs`
 
-### SysV reclamation requires allocation proof
+### SysV object creation is denied without database authority
 
-The supervisor does not sweep SysV IPC at lane end. No mechanism established
-for #2454 proves ownership of both shared-memory segments and semaphore sets
-created by arbitrary lane processes, including exited children. Ambiguous
-objects remain untouched, even when that leaves lane-created resources behind.
-UID matching, a global before/after inventory difference and stale PID ancestry
-never authorise removal: each can include same-user host or peer-lane objects.
+Every profile without `allow_database_ipc` renders
 
-A native C layout probe on macOS 27.0.1 with the macOS 27.0 SDK confirms that
-`shmid_ds` exposes `shm_cpid`, `shm_lpid`, permissions and times, but no creator
-process start time. `semid_ds` exposes permissions, count and operation/change times;
-it has no creator PID. `GETPID` describes the last semaphore operation, not
-creation. A recorded sandbox membership and process start time can distinguish
-live process identities, but cannot turn these fields into a complete
-allocation ledger. The process-tree sampler misses children that exit between
-observations and drops reparented descendants; its latest snapshot is neither
-a history of identities nor evidence that a particular semaphore was created
-by the lane. Matching a surviving `shm_cpid` to a previously observed PID alone
-does not exclude a later allocation by a reused host PID.
+```scheme
+(deny syscall-unix (syscall-number SYS_shmget SYS_semget SYS_shmsys SYS_semsys))
+```
 
-Native `sandbox_compile_string` probes accept the existing
-`ipc-sysv-shm`/`ipc-sysv-sem` deny rules, while the candidate operations
-`ipc-sysv-shm-create`, `ipc-sysv-sem-create` and their `-write-create` forms
-are unbound symbols. Candidate filters `ipc-sysv-key`, `ipc-sysv-shm-key`,
-`ipc-sysv-sem-key` and `ipc-key` are also unbound. `ipc-posix-name` and
-`target same-sandbox` compile with these operations; compilation alone does
-not demonstrate a key restriction or a check before allocation. The existing
-native `database_off_creates_but_cannot_remove_own_sysv_objects` test covers
-capability-off allocation and removal denial for both kinds of object.
-Apple's published XNU [shared-memory](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/sysv_shm.c)
-and [semaphore](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/sysv_sem.c)
-implementations place the `shmget`/`semget` MAC permission checks on existing
-object lookup, not the new-object branch. This source corroborates the test;
-it is not a claim that the published revision matches the running kernel.
-Those IPC hooks do not establish a pre-allocation deny or enforceable
-supervisor-assigned key namespace. A naming convention cannot prevent direct
-allocation with another key or `IPC_PRIVATE`.
+so a lane without database authority cannot allocate a shared-memory segment or
+semaphore set at all: `shmget` and `semget` fail with `EPERM` before the kernel
+allocates anything, for `IPC_PRIVATE` and for keyed requests alike, in every
+process the lane starts. The legacy multiplexed `shmsys` and `semsys` entry
+points still reach the same allocation code on macOS 27 and are denied with
+them. Calling the system call directly, including through `syscall(2)` or a
+raw trap, meets the same filter. Because no object is created, there is nothing
+to reclaim, and no ownership evidence is needed: the supervisor does not
+inspect, sweep or remove SysV objects at lane end, and a UID match, a global
+before-and-after inventory difference or process ancestry never authorises a
+removal.
 
-Generic syscall filtering is a separate candidate: `(deny syscall-unix
-(syscall-number 265) (syscall-number 255))` compiles, using the SDK's `shmget`
-and `semget` numbers. This does not demonstrate that allocation is denied at
-runtime. The confined writer cannot apply a nested sandbox: a minimal
-`sandbox-exec` probe fails with `sandbox_apply: Operation not permitted` before
-execution. A host-side probe must establish whether syscall filtering blocks
-creation before allocation, including alternate `shmsys`/`semsys` entry points,
-without allocating unjournalled objects. The IPC hook placement above does not
-rule out filtering before syscall entry. No such prevention mechanism is
-verified by this investigation.
+Every profile, with or without the capability, also renders
 
-The test-only `SysvAudit` interposer records successful exclusive creations
-after the syscall returns. Arbitrary lane code can bypass it, and a kill
-between allocation and append loses the record. Making that journal writable
-by the lane also makes it unsuitable as host removal authority. A mandatory
-supervisor broker would need a non-bypassable allocation boundary, authenticated
-lane requests and protected ownership records. It must also resolve the
-broker's own allocation-to-record interruption window and prevent stale object
-IDs from authorising removal after reuse. Moving the same append into another
-process does not by itself supply those guarantees.
+```scheme
+(deny syscall-unix (syscall-number SYS_msgget SYS_msgsys))
+```
 
-Until such a boundary is demonstrated, production cleanup is deferred rather
-than implemented with weaker evidence. Database capability and all IPC, file,
-process and network policies retain their existing scope. The layout and SBPL
-probes allocate no IPC; they do not verify normal-exit or killed-lane cleanup,
-host/peer survival, or bounded and idempotent settlement. Those native tests,
-under `PROVENANT_CONFINEMENT_REQUIRED=1` in required macOS CI, remain acceptance
-criteria for a future implementation of #2454.
+because no profile grants SysV message queues and creation has the same
+create-but-cannot-remove behaviour. The two rules are the only change; the
+`ipc-sysv-shm` and `ipc-sysv-sem` grants, POSIX shared-memory access to
+`apple.cfprefs.*`, and every file, process and network rule are unchanged.
+The creation denial is rendered only when the capability is absent, so
+`provenant run --capability postgres` lanes behave as before.
 
-- Evidence: SDK `sys/shm.h::shmid_ds`, `sys/sem.h::semid_ds`;
-  `crates/confinement/src/permissions/tests/ipc.rs::database_off_creates_but_cannot_remove_own_sysv_objects`;
-  `crates/confinement/src/permissions/tests/sysv_audit.rs::INTERPOSER`;
-  `crates/supervisor/src/process_tree.rs::Sampler`, `::walk`;
-  `crates/supervisor/src/process_os/census.rs::darwin_in_attempt_sandbox`
-- Owner: `crates/supervisor/src/process_tree.rs`,
-  `crates/confinement/src/permissions.rs`
+Remaining limits:
+
+- A lane with the database capability can create segments and semaphore sets,
+  as PostgreSQL requires, and can leave them behind if killed. Reclaiming those
+  would need ownership proof that macOS does not provide: `semid_ds` has no
+  creator PID, `shm_cpid` carries no process start identity, and a sampled
+  process tree misses exited children. No such sweep exists.
+- Objects allocated before this rule, or by processes outside any lane, are not
+  touched.
+- Syscall filtering is checked by the native tests below under
+  `PROVENANT_CONFINEMENT_REQUIRED=1`; a macOS release that renumbers or removes
+  the system calls fails them rather than silently allowing creation.
+
+- Why: macOS permits SysV creation before its IPC authority check, so a
+  capability-off lane could exhaust host-global IPC objects it cannot remove.
+- Test: `crates/confinement/src/permissions.rs::writer_test_grants_stay_within_the_attempt_and_mode`;
+  `crates/confinement/src/permissions/tests/ipc.rs::database_off_cannot_create_sysv_objects`
+  (shared memory, semaphores and message queues, private and keyed, library and
+  raw and legacy entry points, writer and read-only; asserts no allocation and no
+  surviving keyed object);
+  `::database_on_creates_and_removes_own_sysv_segments_and_semaphores`;
+  `::postgres_without_database_ipc_refuses_initdb`;
+  `::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`;
+  `crates/providers/tests/snapshots/seatbelt/`
+- Owner: `crates/confinement/src/permissions.rs`
 
 ### Lane process-tree memory interface
 
