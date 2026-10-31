@@ -25,7 +25,7 @@ use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, can
 use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
 use provenant_records::{PathWire, PathWireError};
 use provenant_supervisor::census::{
-    Ancestry, ObservationIssue, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
+    Ancestry, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
     SystemProcessObserver, current_process,
 };
 use provenant_supervisor::custody::WriterBinding;
@@ -572,15 +572,11 @@ fn observe_worker_holders(
     // Custody is decided per root. A gap that could hide a process anywhere
     // (an incomplete or truncated listing, or a process that could not be
     // described or placed) leaves every root that is not positively live
-    // unknown. Permission denial alone cannot exclude a same-user writer:
-    // Linux processes can disable dumpability and hide their cwd.
+    // unknown. Current credentials and permissions cannot disprove a retained
+    // cwd, including one acquired before a permission or credential change.
     for (&pid, &issue) in census.unknown_pids() {
         let detail = format!("process {pid}: {issue:?}");
-        if issue == ObservationIssue::PermissionDenied {
-            record_denied_process(&mut states, &mut details, cwd_observer.uid(pid), &detail);
-        } else {
-            record_unknown_all(&mut states, &mut details, &detail);
-        }
+        record_unknown_all(&mut states, &mut details, &detail);
     }
     // Exclude the caller's verified ancestors. A walk that stops early leaves
     // the remaining ancestors in the census, where one inside a root still
@@ -609,14 +605,6 @@ fn observe_worker_holders(
         }
         match observe_same_process(observer, cwd_observer, fact) {
             NativeCwd::Gone => {}
-            NativeCwd::Denied(category) => {
-                record_denied_process(
-                    &mut states,
-                    &mut details,
-                    cwd_observer.uid(fact.identity.pid),
-                    &format!("process {}: {category}", fact.identity.pid),
-                );
-            }
             NativeCwd::Unknown(category) => record_unknown_all(
                 &mut states,
                 &mut details,
@@ -676,8 +664,6 @@ fn canonical_cwd(path: &Path) -> Option<PathBuf> {
 enum NativeCwd {
     Path(PathBuf),
     Gone,
-    /// Denial needs independent credentials and root permissions to exclude access.
-    Denied(&'static str),
     Unknown(String),
 }
 
@@ -696,32 +682,6 @@ fn record_unknown_all(
     }
 }
 
-fn record_denied_process(
-    states: &mut BTreeMap<PathBuf, WorkerState>,
-    details: &mut BTreeMap<PathBuf, String>,
-    uid: Option<u32>,
-    detail: &str,
-) {
-    for (root, state) in states {
-        if *state != WorkerState::Free {
-            continue;
-        }
-        // Conservatively ignore group membership: either group or other write
-        // permission prevents exclusion under the tree's discretionary permissions.
-        let excluded = uid.is_some_and(|uid| {
-            Directory::open_anchor(root)
-                .and_then(|directory| directory.metadata())
-                .is_ok_and(|metadata| metadata.uid != uid && metadata.mode & 0o022 == 0)
-        });
-        if !excluded {
-            *state = WorkerState::Unknown;
-            details
-                .entry(root.clone())
-                .or_insert_with(|| detail.to_owned());
-        }
-    }
-}
-
 fn observe_same_process(
     process_observer: &dyn ProcessObserver,
     cwd_observer: &dyn CwdObserver,
@@ -730,16 +690,13 @@ fn observe_same_process(
     match process_observer.observe(expected.identity.pid) {
         ProcessObservation::Present(before) if before.identity == expected.identity => {}
         ProcessObservation::Absent => return NativeCwd::Gone,
-        ProcessObservation::Unknown(ObservationIssue::PermissionDenied) => {
-            return NativeCwd::Denied("PermissionDenied");
-        }
         ProcessObservation::Present(_) => return NativeCwd::Unknown("identity race".into()),
         ProcessObservation::Unknown(issue) => return NativeCwd::Unknown(format!("{issue:?}")),
     }
     let observed = match cwd_observer.cwd(expected.identity.pid) {
         Ok(CwdObservation::Path(path)) => NativeCwd::Path(path),
         Ok(CwdObservation::Gone) => return NativeCwd::Gone,
-        Ok(CwdObservation::PermissionDenied) => NativeCwd::Denied("cwd unreadable"),
+        Ok(CwdObservation::PermissionDenied) => NativeCwd::Unknown("cwd unreadable".into()),
         Ok(CwdObservation::Unsupported) => return NativeCwd::Unknown("cwd unsupported".into()),
         Err(_) => return NativeCwd::Unknown("cwd unreadable".into()),
     };
@@ -2611,6 +2568,7 @@ mod lifecycle_tests {
     use provenant_core::Clock;
     use provenant_os::clock::SystemClock;
     use provenant_os::fs::Directory;
+    use provenant_supervisor::census::ObservationIssue;
     use std::error::Error;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -3148,6 +3106,118 @@ mod lifecycle_tests {
         save_owner(&tree, &owner)?;
         assert!(save_lane_owner_when_free(&context, &tree, &next, &cancel()).is_err());
         assert_eq!(load_owner(&tree)?, Some(owner));
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::print_stderr)] // Native fixture skips must explain missing host evidence.
+    fn native_unreadable_windowserver_keeps_a_merged_clean_tree() -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, CensusError};
+
+        // Select the real bystander to isolate its effect on cleanup, but
+        // retain native identity rechecks and cwd observation.
+        struct WindowServerWorkers {
+            census: Census,
+            current: ProcessFact,
+        }
+        impl ProcessObserver for WindowServerWorkers {
+            fn boot_identity(&self) -> Result<String, CensusError> {
+                SystemProcessObserver::boot_identity()
+            }
+            fn observe(&self, pid: i64) -> ProcessObservation {
+                SystemProcessObserver.observe(pid)
+            }
+            fn census(&self, _: usize) -> Result<Census, CensusError> {
+                Ok(self.census.clone())
+            }
+        }
+        impl WorkerObserver for WindowServerWorkers {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+                self.observe_roots_with_details(roots).0
+            }
+            fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+                observe_worker_roots(roots, self, &SystemCwdObserver, &self.current, true)
+            }
+            fn requires_complete_census(&self) -> bool {
+                true
+            }
+        }
+        let census = match SystemProcessObserver.census(65_536) {
+            Ok(census) => census,
+            Err(error) => {
+                eprintln!("SKIP: native process census unavailable: {error}");
+                return Ok(());
+            }
+        };
+        let Some(windowserver) = census
+            .facts()
+            .find(|fact| fact.command.as_deref() == Some("WindowServer") && !fact.zombie)
+        else {
+            eprintln!("SKIP: live WindowServer not visible in native process census");
+            return Ok(());
+        };
+        let pid = windowserver.identity.pid;
+        let Some(uid) = SystemCwdObserver.uid(pid) else {
+            eprintln!("SKIP: WindowServer credentials unavailable or mixed");
+            return Ok(());
+        };
+        if uid == 0 || uid == provenant_os::fs::effective_uid() {
+            eprintln!("SKIP: WindowServer is not a foreign nonroot process");
+            return Ok(());
+        }
+        if SystemCwdObserver.cwd(pid)? != CwdObservation::PermissionDenied {
+            eprintln!("SKIP: WindowServer cwd is not unreadable for this caller");
+            return Ok(());
+        }
+        let ProcessObservation::Present(current) =
+            SystemProcessObserver.observe(i64::from(std::process::id()))
+        else {
+            return Err("native caller identity unavailable".into());
+        };
+        let workers = WindowServerWorkers {
+            census: Census::from_observations(
+                [current.clone(), windowserver.clone()],
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?,
+            current,
+        };
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-M", "main"])?;
+        let test_context = TestContext::new(&fixture)?;
+        let created = create(
+            &test_context.context(),
+            WorktreeCreate {
+                branch: "landed".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::set_permissions(&created.path, fs::Permissions::from_mode(0o700))?;
+        let result = remove(
+            &WorktreeContext {
+                workers: &workers,
+                ..test_context.context()
+            },
+            WorktreeRemove::Name {
+                name: "landed".into(),
+                discard: false,
+                integration: None,
+                expected_head: None,
+            },
+            &cancel(),
+        );
+        assert!(
+            matches!(&result, Err(WorktreeError::IncompleteCensus { detail })
+                if detail == &format!("process {pid}: cwd unreadable")),
+            "{result:?}"
+        );
+        assert!(created.path.exists());
+        assert!(branch_exists(&fixture, "landed"));
         Ok(())
     }
 
@@ -4462,7 +4532,7 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn worker_census_detail_excludes_foreign_denial_and_reports_unplaceable_process()
+    fn worker_census_detail_reports_foreign_denial_before_other_unplaceable_processes()
     -> Result<(), Box<dyn Error>> {
         use provenant_supervisor::census::{Census, ProcessIdentity};
         let fixture = Fixture::new()?;
@@ -4505,7 +4575,7 @@ mod lifecycle_tests {
             false,
         );
         assert_eq!(states[&root], WorkerState::Unknown);
-        assert_eq!(details[&root], "process 200: cwd unsupported");
+        assert_eq!(details[&root], "process 1: cwd unreadable");
         Ok(())
     }
 
@@ -4546,7 +4616,8 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn denied_same_user_writer_keeps_the_tree_unknown() -> Result<(), Box<dyn Error>> {
+    fn denied_process_credentials_and_permissions_never_prove_non_occupancy()
+    -> Result<(), Box<dyn Error>> {
         use provenant_supervisor::census::{Census, ProcessIdentity};
         use std::os::unix::fs::PermissionsExt;
         let fixture = Fixture::new()?;
@@ -4588,26 +4659,20 @@ mod lifecycle_tests {
                 current: fact(100),
                 uids: BTreeMap::new(),
             };
-            for uid in [None, Some(owner)] {
+            // Even equal real/effective/saved UIDs describe only current
+            // credentials, not credentials when the process entered the tree.
+            for uid in [None, Some(owner), Some(0), Some(owner + 1)] {
                 observer.uids = uid
                     .map(|uid| BTreeMap::from([(200, uid)]))
                     .unwrap_or_default();
-                assert_eq!(
-                    observer.observe_roots(std::slice::from_ref(&root))[&root],
-                    WorkerState::Unknown
-                );
-            }
-            observer.uids.insert(200, owner + 1);
-            for mode in [0o755, 0o775, 0o757] {
-                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode))?;
-                assert_eq!(
-                    observer.observe_roots(std::slice::from_ref(&root))[&root],
-                    if mode == 0o755 {
-                        WorkerState::Free
-                    } else {
-                        WorkerState::Unknown
-                    }
-                );
+                for mode in [0o700, 0o755, 0o710, 0o701, 0o775, 0o757] {
+                    fs::set_permissions(&root, fs::Permissions::from_mode(mode))?;
+                    assert_eq!(
+                        observer.observe_roots(std::slice::from_ref(&root))[&root],
+                        WorkerState::Unknown,
+                        "denied_fact={denied_fact}, uid={uid:?}, mode={mode:o}"
+                    );
+                }
             }
         }
         Ok(())
@@ -4680,7 +4745,7 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn unreadable_foreign_process_does_not_block_pruning_a_merged_clean_tree()
+    fn only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree()
     -> Result<(), Box<dyn Error>> {
         use provenant_supervisor::census::{Census, ProcessIdentity};
         let fixture = Fixture::new()?;
@@ -4782,16 +4847,39 @@ mod lifecycle_tests {
         ));
         assert!(created.path.exists());
 
-        // Independent foreign credentials and unwritable root permissions
-        // exclude these denied processes from this tree.
+        // Foreign credentials and unwritable root permissions cannot prove
+        // where an unreadable process has its cwd.
         let foreign = observer(ObservationIssue::PermissionDenied, None)?;
         assert_eq!(
             foreign.observe_roots(std::slice::from_ref(&created.path))[&created.path],
-            WorkerState::Free
+            WorkerState::Unknown
         );
+        assert!(matches!(
+            remove_named(&foreign, "landed"),
+            Err(WorktreeError::IncompleteCensus { ref detail }) if detail == "process 400: PermissionDenied"
+        ));
+        assert!(created.path.exists());
+
+        // A complete, identity-checked cwd observation outside the tree
+        // provides the positive non-occupancy evidence credentials cannot.
+        let placed = InjectedCensus {
+            census: Census::from_observations(
+                [fact(100), fact(200), fact(300), fact(400)],
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?,
+            cwds: [200, 300, 400]
+                .into_iter()
+                .map(|pid| (pid, CwdObservation::Path(outside.clone())))
+                .collect(),
+            ..foreign
+        };
         let listed = list(
             &WorktreeContext {
-                workers: &foreign,
+                workers: &placed,
                 ..test_context.context()
             },
             &cancellation,
@@ -4801,7 +4889,7 @@ mod lifecycle_tests {
                 .iter()
                 .any(|entry| entry.path == created.path && entry.writer == WriterState::Free)
         );
-        remove_named(&foreign, "landed")?;
+        remove_named(&placed, "landed")?;
         assert!(!created.path.exists());
         Ok(())
     }

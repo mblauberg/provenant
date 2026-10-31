@@ -700,6 +700,65 @@ optional branch by canonical path under writer custody.
   `::detached_removal_keeps_dirty_unmerged_and_live_work`
 - Owner: `crates/confinement/src/worktrees.rs`
 
+### Unreadable processes need positive non-occupancy evidence
+
+A live process whose cwd cannot be read remains unplaceable, including a
+foreign-uid process, a root process and a same-user process. Unknown credentials,
+mixed credentials, unsupported queries and other observation failures also
+remain unplaceable. Landing and other callers requiring a complete census keep
+every root that is not positively observed live `Unknown`; a positively placed
+occupant still makes its root `Live`. An unreadable process is never `Gone`.
+The Darwin cwd seam reports absence only after an absence probe proves `ESRCH`;
+the worker observer also accepts a verified process disappearance. A changed
+identity stays unknown.
+
+The implemented non-occupancy rule uses a cwd observed outside the canonical
+root, with the process identity checked before and after the observation.
+That places the process at the observation time. Caller and verified ancestors
+through its session leader retain their separate landing exclusion. No
+credential or directory-permission shortcut excludes an unreadable process.
+
+**Why current permissions cannot prove absence.** Consider two processes with
+the same current real, effective and saved foreign nonroot UIDs. One has always
+been outside the tree. The other entered while permitted, before an ancestor
+became unsearchable. Both have the same observable credentials and permission
+snapshot; the second still has its cwd inside. Checking every ancestor, even
+with complete current ACL and group information, cannot distinguish them.
+
+- A retained cwd survives permission changes. An open directory fd can also
+  survive, be inherited or be passed to another process. Darwin's `fchdir`
+  checks search access on the referenced directory, without resolving its
+  pathname ancestors. Denying search on an ancestor cannot revoke that access.
+- Equality of real, effective and saved UIDs only describes current credentials.
+  A privileged process can enter first, then permanently drop all three UIDs.
+  Setuid/setgid changes do not establish cwd history. Group search, including
+  effective and supplementary groups, and other search bits can allow entry;
+  absence of write bits says nothing about search or occupancy.
+- ACL grants can permit search despite mode bits. An unobserved ACL cannot be
+  assumed empty. Even a complete current access denial does not revoke a cwd
+  acquired earlier, so neither ACL nor mode inspection supplies this proof.
+- Root can bypass discretionary search restrictions and must always remain
+  unplaceable when its cwd is unreadable. A foreign UID, including WindowServer's
+  service UID, conveys no exception to this rule.
+
+These conclusions follow from Apple's [directory-change implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c),
+[credential transitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_prot.c)
+and [process-query policy](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c).
+The latter permits short credential queries while restricting foreign cwd and
+descriptor queries. No complete unprivileged alternative proof is implemented.
+In particular, cleanup with an unreadable WindowServer remains refused. Enabling
+it needs independent evidence of actual non-occupancy; the UID/ancestor-mode
+proposal in #2458 is insufficient. The native test records this refusal and
+skips with a reason when an unreadable foreign WindowServer is unavailable;
+it does not claim the requested cleanup-success criterion has been met.
+
+- Test: `crates/confinement/src/worktrees.rs::denied_process_credentials_and_permissions_never_prove_non_occupancy`;
+  `::worker_census_detail_reports_foreign_denial_before_other_unplaceable_processes`;
+  `::only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree`;
+  `::unreadable_occupant_cwd_keeps_the_tree_for_removal`;
+  `::native_unreadable_windowserver_keeps_a_merged_clean_tree`
+- Owner: `crates/confinement/src/worktrees.rs`, `crates/os/src/sys/pid.rs`
+
 ### Pruning and rollback need proof
 
 `worktree remove --merged` proves a merge by ancestry, or a squash by a
