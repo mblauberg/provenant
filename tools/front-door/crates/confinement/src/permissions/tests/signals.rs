@@ -123,6 +123,61 @@ test "$notified" = yes
             denied_host.termination,
             String::from_utf8_lossy(&denied_host.stderr.bytes)
         );
+        // Independent sandbox-exec calls must not share signal authority even
+        // when their profile text is byte-identical (no attempt-name shortcut).
+        let peer_pid_file = plan.scratch.path.join(format!("peer-{writer}.pid"));
+        let peer_stop = CancelToken::new();
+        struct StopPeer<'a>(&'a CancelToken);
+        impl Drop for StopPeer<'_> {
+            fn drop(&mut self) {
+                self.0.cancel();
+            }
+        }
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let peer = scope.spawn(|| {
+                let argv = [
+                    SANDBOX_EXEC,
+                    "-p",
+                    &source,
+                    "/bin/sh",
+                    "-c",
+                    "printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 5",
+                    "peer",
+                    peer_pid_file.to_str().expect("UTF-8 peer PID path"),
+                ]
+                .map(OsString::from);
+                let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(6));
+                options.env = Some(&env);
+                options.cancel = Some(&peer_stop);
+                options.stdout = StreamPolicy::Capture { limit: 1024 };
+                options.stderr = StreamPolicy::Capture { limit: 1024 };
+                executor.execute(options)
+            });
+            let _stop = StopPeer(&peer_stop);
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let peer_pid = loop {
+                if let Ok(text) = std::fs::read_to_string(&peer_pid_file)
+                    && let Ok(pid) = text.parse::<u32>()
+                {
+                    break pid.to_string();
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "peer sandbox did not start"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let denied_peer = run(&source, "kill -CONT \"$1\"", &peer_pid)?;
+            assert!(
+                denied_probe(&denied_peer),
+                "writer={writer}: byte-identical independent sandbox signal: {:?}; {}",
+                denied_peer.termination,
+                String::from_utf8_lossy(&denied_peer.stderr.bytes)
+            );
+            peer_stop.cancel();
+            let _expected_cancel = peer.join().expect("peer sandbox thread");
+            Ok(())
+        })?;
     }
     Ok(())
 }

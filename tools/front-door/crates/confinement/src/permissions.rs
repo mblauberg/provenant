@@ -95,9 +95,6 @@ const DYLD_BOOTSTRAP_RULES: &str = r#"
 const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
-(allow ipc-sysv-shm)
-(allow ipc-sysv-sem)
-(allow ipc-posix-shm* (ipc-posix-name-regex #"^/PostgreSQL\.[0-9]+$"))
 (allow signal (target same-sandbox))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
@@ -280,6 +277,8 @@ pub struct ProviderProfileSpec {
     pub process_executables: Vec<PathGrant>,
     /// Forking is broad process authority and requires an explicit profile grant.
     pub allow_process_fork: bool,
+    /// Host-global SysV IPC for explicitly declared database lanes only.
+    pub allow_database_ipc: bool,
     /// Deny keychain IPC and its CLI even when a tool can execute system programs.
     pub deny_keychain_access: bool,
     /// Deny all known credential stores, including networked GitHub access.
@@ -1658,6 +1657,9 @@ fn render_profile(
     // launch prerequisites and provider profiles aligned.
     source.push_str(DYLD_BOOTSTRAP_RULES);
     source.push_str(RUNTIME_BASELINE_RULES);
+    if profile.spec.allow_database_ipc {
+        source.push_str("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n");
+    }
     for grant in reads.iter().chain(&profile.spec.discovery_reads) {
         push_rule(&mut source, "allow", "file-read*", &grant.path, grant.scope)?;
     }
@@ -2798,20 +2800,33 @@ mod tests {
                 writer.then_some(&git),
                 Path::new("/fixture/home"),
             )?)?;
-            // PostgreSQL's interlock and semaphores are SysV on macOS;
-            // dynamic shared memory uses the PostgreSQL. POSIX namespace.
-            // Both access modes can check databases, but no other IPC opens.
+            // Every ordinary writer/reviewer profile keeps database IPC denied.
             assert_eq!(
                 rendered
                     .lines()
                     .filter(|line| line.starts_with("(allow ipc-"))
                     .collect::<Vec<_>>(),
-                [
-                    "(allow ipc-posix-shm-read* (ipc-posix-name-prefix \"apple.cfprefs.\"))",
-                    "(allow ipc-sysv-shm)",
-                    "(allow ipc-sysv-sem)",
-                    r##"(allow ipc-posix-shm* (ipc-posix-name-regex #"^/PostgreSQL\.[0-9]+$"))"##,
-                ]
+                ["(allow ipc-posix-shm-read* (ipc-posix-name-prefix \"apple.cfprefs.\"))",]
+            );
+            let mut database = ProviderProfile {
+                spec: profile.spec.clone(),
+                observations: BTreeMap::new(),
+            };
+            database.spec.allow_database_ipc = true;
+            let opted_in = String::from_utf8(render_profile(
+                &plan,
+                &database,
+                &[],
+                &[],
+                writer.then_some(&git),
+                Path::new("/fixture/home"),
+            )?)?;
+            assert!(opted_in.contains("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n"));
+            assert_eq!(
+                opted_in
+                    .replace("(allow ipc-sysv-shm)\n", "")
+                    .replace("(allow ipc-sysv-sem)\n", ""),
+                rendered
             );
             let exec = format!("(allow process-exec (subpath \"{scratch}\"))");
             assert_eq!(rendered.lines().any(|line| line == exec), writer);
@@ -4172,6 +4187,7 @@ mod tests {
                 }],
                 deny_keychain_access: true,
                 allow_process_fork: true,
+                allow_database_ipc: true,
                 runtime_reads: vec![PathGrant {
                     path: cargo.clone(),
                     scope: PathScope::Subtree,

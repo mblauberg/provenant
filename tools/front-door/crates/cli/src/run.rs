@@ -1551,6 +1551,7 @@ fn lane_access_checked(
     Ok(run::LaneAccess {
         extra: Default::default(),
         network,
+        database_ipc: postgres,
         read_roots: resolve(&access.read_root, "--read-root")?,
         write_roots,
     })
@@ -12703,6 +12704,16 @@ mod tests {
         };
         assert_eq!(network(Mode::WorktreeWrite, None, &[]), Ok(None));
         assert_eq!(network(Mode::ReadOnly, None, &["postgres"]), Ok(None));
+        for mode in [Mode::ReadOnly, Mode::WorktreeWrite] {
+            for (capability, expected) in [(Vec::new(), false), (vec!["postgres"], true)] {
+                let declared = lane_access_checked(
+                    &access(mode, None, &capability, Vec::new()),
+                    &state,
+                    Path::new("/fixture/host-home"),
+                )?;
+                assert_eq!(declared.database_ipc, expected);
+            }
+        }
         assert_eq!(
             network(Mode::WorktreeWrite, Some(Switch::Off), &["postgres"]),
             Ok(Some(run::NetworkAccess::Local))

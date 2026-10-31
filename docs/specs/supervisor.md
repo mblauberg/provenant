@@ -239,26 +239,41 @@ The rules below are what every profile must keep.
 
 ### Database IPC shares the host namespace
 
-Writer and read-only lane profiles allow `ipc-sysv-shm` and `ipc-sysv-sem`.
-Read-only reviewers need the same IPC to run database checks against scratch
-data; read-only refers to repository writes, not to kernel IPC. The separate
-backend availability probe keeps its minimal launch-only profile.
+Database IPC is denied by default in both writer and read-only profiles.
+Only an explicit `provenant run --capability postgres` declaration grants
+`ipc-sysv-shm` and `ipc-sysv-sem`. The CLI preserves this in the sealed
+`LaneAccess.database_ipc` field; both provider and configured-command launchers
+copy it to `ProviderProfileSpec.allow_database_ipc` before compilation. Network
+access, writer mode, provider identity and loopback-server support never imply
+database authority. Ordinary MCP, preset and undeclared reviewer lanes stay
+off. Host child validation refuses database authority beyond the parent, and
+unvalidated sealed requests cannot add it. The separate backend availability
+probe keeps its minimal launch-only profile.
 
 PostgreSQL 18 always uses a small SysV shared-memory interlock, including with
 `shared_memory_type=mmap`. Its [Darwin configuration](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/template/darwin)
 selects SysV semaphores on supported macOS versions, so POSIX semaphores remain
-denied. Its [dynamic shared-memory implementation](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/storage/ipc/dsm_impl.c)
-uses POSIX objects named `/PostgreSQL.<number>`; the lane allows
-`ipc-posix-shm*` only for names matching `^/PostgreSQL\.[0-9]+$`. No general POSIX IPC
-or SysV message-queue access is granted.
+denied. Configure dynamic shared memory to use files in the confined database
+directory, including during initialisation:
+
+```sh
+initdb -D "$TMPDIR/pgdata" -c dynamic_shared_memory_type=mmap
+postgres -D "$TMPDIR/pgdata" -c dynamic_shared_memory_type=mmap
+```
+
+This avoids PostgreSQL's host-global POSIX shared-memory namespace entirely.
+No PostgreSQL POSIX shared-memory, POSIX semaphore or SysV message-queue grant
+is added, even for a database-enabled lane.
 
 This is a security-relevant confinement trade-off: macOS SysV IPC is
 host-global and Seatbelt cannot restrict these operations to a lane's own
 segments or semaphore sets. A lane may discover keys and access another
 process's objects when ordinary Unix IPC permissions allow it, including
-objects owned by the same user. Other users' objects remain protected under
-normal restrictive permissions. The POSIX namespace is also shared by PostgreSQL
-servers belonging to the same user; it is not a lane-private namespace.
+objects owned by the same user, including mutation and `IPC_RMID` removal.
+The explicit database capability accepts that exposure; it does not create a
+lane-private SysV namespace. Other users' objects remain protected under normal
+restrictive permissions. Profiles without the capability cannot mutate or
+remove the host's objects, including those owned by the same user.
 File confinement still restricts database files to existing writable roots,
 and executable, Mach and network rules retain their existing limits. Database
 clients need the existing local or open network policy for loopback access.
@@ -269,7 +284,8 @@ backends need to notify their postmaster parent and sibling processes; the
 former writer-only `children` target denied child-to-parent signals and left
 client queries and clean shutdown hanging. The same-sandbox rule replaces that
 target and permits communication only among processes in the same Seatbelt
-sandbox. Signals to the outside supervisor and unsandboxed host processes
+sandbox. Signals to the outside supervisor, host processes and independently
+launched sandboxes with byte-identical profiles
 remain denied. It grants no additional execution, file, Mach, network or IPC
 authority.
 
@@ -278,7 +294,9 @@ authority.
   and clean shutdown.
 - Test: `crates/confinement/src/permissions.rs::writer_test_grants_stay_within_the_attempt_and_mode`;
   `::native_sandbox_blocks_path_escape_probes`;
-  `crates/confinement/src/permissions/tests/ipc.rs::postgres_initialises_serves_a_read_only_query_and_stops_in_writer_profile`;
+  `crates/confinement/src/permissions/tests/ipc.rs::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`;
+  `::postgres_without_database_ipc_refuses_initdb`;
+  `::database_off_cannot_mutate_or_remove_foreign_sysv_objects`;
   `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`
 - Owner: `crates/confinement/src/permissions.rs`
 

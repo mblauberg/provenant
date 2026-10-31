@@ -51,9 +51,6 @@
 (allow sysctl-read)
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
-(allow ipc-sysv-shm)
-(allow ipc-sysv-sem)
-(allow ipc-posix-shm* (ipc-posix-name-regex #"^/PostgreSQL\.[0-9]+$"))
 (allow signal (target same-sandbox))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
