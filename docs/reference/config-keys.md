@@ -215,6 +215,17 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"A higher count keeps a longer audit trail but a larger history file."` |
 | `type` | `"int"` |
 
+## `confinement.census_host_list_complete`
+
+| Field | Value |
+|---|---|
+| `default` | `false` |
+| `effect` | `"Host-owner declaration that unreadable daemon exceptions are complete. Enables the native clean-Free acceptance assertion; grants no census exception or cleanup authority. Set only after listing the host's daemons."` |
+| `host_only` | `true` |
+| `status` | `"wired"` |
+| `strict` | `true` |
+| `type` | `"bool"` |
+
 ## `confinement.census_ignore_unreadable`
 
 | Field | Value |

@@ -17,6 +17,39 @@ fn roots() -> Roots {
 }
 
 #[test]
+fn census_host_list_complete_is_strict_host_only_and_defaults_false() {
+    let name = "confinement.census_host_list_complete";
+    let defaults = load::<&[u8]>(&roots(), None).unwrap();
+    assert!(!defaults.census_host_list_complete().unwrap());
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["schema_version"] = toml_edit::value(1);
+    KnobEdit::Set {
+        name,
+        value: "true",
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let configured = load(&roots(), Some(doc.to_string().as_bytes())).unwrap();
+    assert!(configured.census_host_list_complete().unwrap());
+    for value in ["true", "false"] {
+        assert!(
+            configured
+                .dispatch_profile(&[format!("{name}={value}")])
+                .is_err()
+        );
+    }
+    let malformed = format!("schema_version=1\n[knobs]\n'{name}'='true'\n");
+    assert!(load(&roots(), Some(malformed.as_bytes())).is_err());
+    KnobEdit::Unset(name).apply(&mut doc).unwrap();
+    assert!(
+        !load(&roots(), Some(doc.to_string().as_bytes()))
+            .unwrap()
+            .census_host_list_complete()
+            .unwrap()
+    );
+}
+
+#[test]
 fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_malformed_authority() {
     let name = "confinement.census_ignore_unreadable";
     let defaults = load::<&[u8]>(&roots(), None).unwrap();

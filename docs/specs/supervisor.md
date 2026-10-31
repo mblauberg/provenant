@@ -782,6 +782,24 @@ retained directory access; a matching team identifies its signer, not safe cwd
 behaviour. See [configuration](../runbooks/configuration.md#unreadable-process-census-exceptions)
 for entry syntax and validation.
 
+The host owner sets the strict host-only boolean
+`confinement.census_host_list_complete = true` after listing their host's
+unreadable daemons. Its default is `false`; the declaration grants no exception
+and changes no runtime custody decision. Without complete host coverage, land
+cleanup is expected to report the first unlisted daemon rather than remove the
+worktree. Non-platform diagnostics include `CS_OPS_TEAMID` (or `unavailable`),
+so the owner can configure an exact executable/signer pair.
+
+Native acceptance always audits every unplaceable process from the actual
+census pass, printing its pid, executable path, euid, signing flags, team and
+failed built-in condition. A missing/incomplete census fails that audit. A
+same-user `/bin/sleep` inside the root must still be placed and refused. Only
+when the host declares its list complete does native acceptance additionally
+assert that the clean merged root is Free. Otherwise it explicitly logs that
+the Free assertion was skipped because host coverage is undeclared. CI retains
+its usbmuxd/platform host entry to exercise the knob, leaves completeness false,
+and audits other runner daemons without adding exceptions for them.
+
 Readable cwd placement checks process identity before and after observation,
 then compares each root's device and inode with those of the cwd's ancestors.
 This handles both `/Users/...` and `/System/Volumes/Data/Users/...` spellings

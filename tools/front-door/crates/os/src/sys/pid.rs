@@ -221,27 +221,37 @@ pub(crate) fn ignored_unreadable_euid(
     pid: i32,
     entries: &[crate::pid::CensusIgnoreEntry],
 ) -> Option<u32> {
+    unreadable_policy_euid(pid, entries).ok()
+}
+
+pub(crate) fn unreadable_policy_euid(
+    pid: i32,
+    entries: &[crate::pid::CensusIgnoreEntry],
+) -> Result<u32, crate::pid::UnreadablePolicyFailure> {
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let before = darwin_effective_uid(pid)?;
-        let flags = darwin_signing_status(pid)?;
+        let before = darwin_effective_uid(pid).ok_or("effective uid unavailable")?;
+        let flags = darwin_signing_status(pid).ok_or("live signing state unavailable")?;
         if !darwin_valid_signature(flags) {
-            return None;
+            return Err("valid signed image without untrusted flags required".into());
         }
-        let path = darwin_executable_path(pid)?;
+        let path = darwin_executable_path(pid).ok_or("kernel executable path unavailable")?;
         let executable = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)
-            .ok()?;
-        if !executable.metadata().ok()?.is_file() {
-            return None;
+            .map_err(|_| "O_NOFOLLOW executable open failed")?;
+        if !executable
+            .metadata()
+            .map_err(|_| "executable metadata unavailable")?
+            .is_file()
+        {
+            return Err("regular executable file required".into());
         }
-        let builtin = before < 500
-            && darwin_platform_signature(flags)
-            && darwin_daemon_path(&path)
-            && darwin_on_sealed_system_volume(&executable) == Some(true);
+        let builtin = darwin_builtin_condition(before, flags, &path, || {
+            darwin_on_sealed_system_volume(&executable)
+        });
         let team = if entries
             .iter()
             .any(|entry| entry.path.as_os_str() == path.as_os_str() && entry.team_id != "platform")
@@ -251,21 +261,94 @@ pub(crate) fn ignored_unreadable_euid(
             None
         };
         let listed = listed_image_matches(entries, &path, flags, team.as_deref());
-        if (!builtin && !listed)
-            || darwin_executable_path(pid)?.as_os_str() != path.as_os_str()
-            || darwin_signing_status(pid)? != flags
-            || darwin_effective_uid(pid)? != before
-            || (listed && team.is_some() && darwin_team_id(pid) != team)
-        {
-            return None;
+        if !listed {
+            builtin?;
         }
-        Some(before)
+        if darwin_executable_path(pid)
+            .ok_or("executable path recheck unavailable")?
+            .as_os_str()
+            != path.as_os_str()
+        {
+            return Err("stable executable path required".into());
+        }
+        if darwin_signing_status(pid).ok_or("signing state recheck unavailable")? != flags {
+            return Err("stable signing state required".into());
+        }
+        if darwin_effective_uid(pid).ok_or("effective uid recheck unavailable")? != before {
+            return Err("stable effective uid required".into());
+        }
+        if listed && team.is_some() && darwin_team_id(pid) != team {
+            return Err(crate::pid::UnreadablePolicyFailure {
+                condition: "stable signing team required",
+                builtin_condition: builtin.err(),
+            });
+        }
+        Ok(before)
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (pid, entries);
-        None
+        Err("macOS signing evidence unavailable".into())
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_builtin_condition(
+    euid: u32,
+    flags: u32,
+    path: &std::path::Path,
+    sealed: impl FnOnce() -> Option<bool>,
+) -> Result<(), &'static str> {
+    if euid >= 500 {
+        return Err("system effective uid below 500 required");
+    }
+    if !darwin_platform_signature(flags) {
+        return Err("valid signed platform binary required");
+    }
+    if !darwin_daemon_path(path) {
+        return Err("approved daemon directory required");
+    }
+    match sealed() {
+        Some(true) => Ok(()),
+        Some(false) => Err("sealed read-only root volume required"),
+        None => Err("sealed read-only root volume evidence unavailable"),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn builtin_condition_names_each_failed_gate_and_accepts_complete_evidence() {
+    use std::path::Path;
+    let daemon = Path::new("/usr/libexec/daemon");
+    let flags = 0x2400_0001;
+    assert_eq!(
+        darwin_builtin_condition(0, flags, daemon, || Some(true)),
+        Ok(())
+    );
+    assert_eq!(
+        darwin_builtin_condition(500, flags, daemon, || Some(true)),
+        Err("system effective uid below 500 required")
+    );
+    assert_eq!(
+        darwin_builtin_condition(0, 0x2000_0001, daemon, || Some(true)),
+        Err("valid signed platform binary required")
+    );
+    assert_eq!(
+        darwin_builtin_condition(0, flags | 4, daemon, || Some(true)),
+        Err("valid signed platform binary required")
+    );
+    assert_eq!(
+        darwin_builtin_condition(0, flags, Path::new("/usr/bin/login"), || Some(true)),
+        Err("approved daemon directory required")
+    );
+    assert_eq!(
+        darwin_builtin_condition(0, flags, daemon, || Some(false)),
+        Err("sealed read-only root volume required")
+    );
+    assert_eq!(
+        darwin_builtin_condition(0, flags, daemon, || None),
+        Err("sealed read-only root volume evidence unavailable")
+    );
 }
 
 pub(crate) fn process_details(pid: i32) -> String {
@@ -275,14 +358,19 @@ pub(crate) fn process_details(pid: i32) -> String {
             .map_or_else(|| "unavailable".into(), |path| format!("{path:?}"));
         let uid =
             darwin_effective_uid(pid).map_or_else(|| "unavailable".into(), |uid| uid.to_string());
-        let flags = darwin_signing_status(pid)
-            .map_or_else(|| "unavailable".into(), |flags| format!("0x{flags:08x}"));
-        format!("path={path}, euid={uid}, cs_flags={flags}")
+        let status = darwin_signing_status(pid);
+        let flags = status.map_or_else(|| "unavailable".into(), |flags| format!("0x{flags:08x}"));
+        let team = if status.is_some_and(|flags| flags & 0x0400_0000 != 0) {
+            "platform".into()
+        } else {
+            darwin_team_id(pid).map_or_else(|| "unavailable".into(), |team| format!("{team:?}"))
+        };
+        format!("path={path}, euid={uid}, cs_flags={flags}, team_id={team}")
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = pid;
-        "path=unavailable, euid=unavailable, cs_flags=unavailable".into()
+        "path=unavailable, euid=unavailable, cs_flags=unavailable, team_id=unavailable".into()
     }
 }
 

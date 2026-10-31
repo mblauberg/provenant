@@ -615,6 +615,13 @@ fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> WorkerObservations
 
 struct PolicyCwdObserver<'a>(&'a [CensusIgnoreEntry]);
 impl CwdObserver for PolicyCwdObserver<'_> {
+    fn unreadable_policy_euid(
+        &self,
+        pid: i64,
+        _: &[CensusIgnoreEntry],
+    ) -> Result<u32, provenant_os::pid::UnreadablePolicyFailure> {
+        SystemCwdObserver.unreadable_policy_euid(pid, self.0)
+    }
     fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
         SystemCwdObserver.cwd(pid)
     }
@@ -687,6 +694,30 @@ fn observe_worker_holders(
     BTreeMap<PathBuf, ObservedProcess>,
     BTreeMap<PathBuf, String>,
 ) {
+    observe_worker_holders_with_audit(
+        roots,
+        observer,
+        cwd_observer,
+        current,
+        ancestors,
+        &mut |_, _| {},
+    )
+}
+
+/// Audit the same decisions that produce custody, without a second census or
+/// diagnostic re-query deciding why an image failed the policy.
+fn observe_worker_holders_with_audit(
+    roots: &[PathBuf],
+    observer: &dyn ProcessObserver,
+    cwd_observer: &dyn CwdObserver,
+    current: &ProcessFact,
+    ancestors: bool,
+    unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
+) -> (
+    BTreeMap<PathBuf, WorkerState>,
+    BTreeMap<PathBuf, ObservedProcess>,
+    BTreeMap<PathBuf, String>,
+) {
     let mut states: BTreeMap<_, _> = roots
         .iter()
         .cloned()
@@ -700,6 +731,7 @@ fn observe_worker_holders(
     let census = match observer.census(65_536) {
         Ok(census) => census,
         Err(error) => {
+            unplaceable(None, Some("complete process census unavailable"));
             let unknown = roots
                 .iter()
                 .cloned()
@@ -730,6 +762,7 @@ fn observe_worker_holders(
     // unknown. Current credentials and permissions cannot disprove a retained
     // cwd, including one acquired before a permission or credential change.
     for (&pid, &issue) in census.unknown_pids() {
+        unplaceable(Some(pid), Some("stable process identity unavailable"));
         let detail = process_detail(cwd_observer, pid, &format!("{issue:?}"));
         record_unknown_all(&mut states, &mut details, &detail);
     }
@@ -766,6 +799,12 @@ fn observe_worker_holders(
                 for (root, state) in &mut states {
                     let excluded =
                         std::fs::metadata(root).is_ok_and(|metadata| euid != metadata.uid());
+                    if !excluded {
+                        unplaceable(
+                            Some(fact.identity.pid),
+                            Some("effective uid differs from root owner not established"),
+                        );
+                    }
                     if !excluded && *state != WorkerState::Live {
                         *state = WorkerState::Unknown;
                         details.entry(root.clone()).or_insert_with(|| {
@@ -774,13 +813,38 @@ fn observe_worker_holders(
                     }
                 }
             }
-            NativeCwd::Unknown(category) => record_unknown_all(
-                &mut states,
-                &mut details,
-                &process_detail(cwd_observer, fact.identity.pid, &category),
-            ),
+            NativeCwd::PolicyRejected(failure) => {
+                unplaceable(Some(fact.identity.pid), failure.builtin_condition);
+                let condition = failure.condition;
+                record_unknown_all(
+                    &mut states,
+                    &mut details,
+                    &process_detail(
+                        cwd_observer,
+                        fact.identity.pid,
+                        &format!("cwd unreadable; policy_condition={condition}"),
+                    ),
+                );
+            }
+            NativeCwd::Unknown(category) => {
+                let condition = if category.starts_with("cwd ") {
+                    "actual cwd EPERM required"
+                } else {
+                    "stable process identity unavailable"
+                };
+                unplaceable(Some(fact.identity.pid), Some(condition));
+                record_unknown_all(
+                    &mut states,
+                    &mut details,
+                    &process_detail(cwd_observer, fact.identity.pid, &category),
+                );
+            }
             NativeCwd::Path(path) => {
                 let Some(canonical) = canonical_cwd(&path) else {
+                    unplaceable(
+                        Some(fact.identity.pid),
+                        Some("actual cwd EPERM required (readable cwd placement failed)"),
+                    );
                     record_unknown_all(
                         &mut states,
                         &mut details,
@@ -788,7 +852,16 @@ fn observe_worker_holders(
                     );
                     continue;
                 };
-                let placed = record_live_path(&mut states, &canonical);
+                let mut placement_failed = false;
+                let placed = record_live_path_with_audit(&mut states, &canonical, &mut || {
+                    placement_failed = true
+                });
+                if placement_failed {
+                    unplaceable(
+                        Some(fact.identity.pid),
+                        Some("actual cwd EPERM required (directory identity placement failed)"),
+                    );
+                }
                 for (root, state) in &states {
                     if *state == WorkerState::Unknown {
                         details.entry(root.clone()).or_insert_with(|| {
@@ -813,6 +886,7 @@ fn observe_worker_holders(
         }
     }
     if !census.listing_is_complete() {
+        unplaceable(None, Some("complete process listing required"));
         record_unknown_all(
             &mut states,
             &mut details,
@@ -846,6 +920,7 @@ enum NativeCwd {
     Path(PathBuf),
     Gone,
     PolicyExcluded(u32),
+    PolicyRejected(provenant_os::pid::UnreadablePolicyFailure),
     Unknown(String),
 }
 
@@ -888,9 +963,9 @@ fn observe_same_process(
         Ok(CwdObservation::Path(path)) => NativeCwd::Path(path),
         Ok(CwdObservation::Gone) => return NativeCwd::Gone,
         Ok(CwdObservation::PermissionDenied) => cwd_observer
-            .ignored_unreadable_euid(expected.identity.pid, &[])
+            .unreadable_policy_euid(expected.identity.pid, &[])
             .map(NativeCwd::PolicyExcluded)
-            .unwrap_or_else(|| NativeCwd::Unknown("cwd unreadable".into())),
+            .unwrap_or_else(NativeCwd::PolicyRejected),
         Ok(CwdObservation::Unsupported) => NativeCwd::Unknown("cwd unsupported".into()),
         Err(_) => NativeCwd::Unknown("cwd query failed".into()),
     };
@@ -905,7 +980,16 @@ fn observe_same_process(
 /// Place by directory identity, including the nearest extant ancestor of a
 /// deleted cwd. Darwin's Data firmlink can give one directory two canonical
 /// path spellings; textual prefix comparisons cannot establish occupancy.
+#[cfg(test)]
 fn record_live_path(states: &mut BTreeMap<PathBuf, WorkerState>, cwd: &Path) -> Vec<PathBuf> {
+    record_live_path_with_audit(states, cwd, &mut || {})
+}
+
+fn record_live_path_with_audit(
+    states: &mut BTreeMap<PathBuf, WorkerState>,
+    cwd: &Path,
+    unplaceable: &mut dyn FnMut(),
+) -> Vec<PathBuf> {
     let ancestors = cwd.ancestors().try_fold(BTreeSet::new(), |mut ids, path| {
         match std::fs::metadata(path) {
             Ok(metadata) if metadata.is_dir() => {
@@ -930,8 +1014,12 @@ fn record_live_path(states: &mut BTreeMap<PathBuf, WorkerState>, cwd: &Path) -> 
                 placed.push(root.clone());
             }
             Some(false) => {}
-            None if *state != WorkerState::Live => *state = WorkerState::Unknown,
-            None => {}
+            None => {
+                unplaceable();
+                if *state != WorkerState::Live {
+                    *state = WorkerState::Unknown;
+                }
+            }
         }
     }
     placed
@@ -2780,6 +2868,11 @@ mod tests {
 
 #[cfg(test)]
 mod lifecycle_tests {
+    fn builtin_audit_has_only_rejections(
+        conditions: impl IntoIterator<Item = Option<&'static str>>,
+    ) -> bool {
+        conditions.into_iter().all(|condition| condition.is_some())
+    }
     use super::*;
     use crate::test_support::{
         Fixture, add_poisoned_gitlink, assert_raw_git_runs_poison_filter, fixture_env,
@@ -3361,13 +3454,49 @@ mod lifecycle_tests {
         inputs.environment_state_dir =
             std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
         let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let complete = provenant_config::read(&host_roots)?.census_host_list_complete()?;
         let workers = CensusPolicyWorkers::from_roots(&SystemWorkerObserver, &host_roots)?;
-        let (clean, clean_details) =
-            workers.observe_roots_for_land_with_details(std::slice::from_ref(&root));
+        let ProcessObservation::Present(current) = current_process() else {
+            return Err("native audit requires caller identity".into());
+        };
+        let mut unplaceable = BTreeMap::new();
+        let mut incomplete = Vec::new();
+        let (clean, _, clean_details) = observe_worker_holders_with_audit(
+            std::slice::from_ref(&root),
+            &SystemProcessObserver,
+            &PolicyCwdObserver(&workers.entries),
+            &current,
+            true,
+            &mut |pid, condition| {
+                if let Some(pid) = pid {
+                    let detail = process_detail(
+                        &SystemCwdObserver,
+                        pid,
+                        condition.unwrap_or("ADMISSIBLE under built-in policy"),
+                    );
+                    unplaceable.insert(pid, (condition, detail));
+                } else {
+                    incomplete.push(condition.unwrap_or("unclassified census failure"));
+                }
+            },
+        );
         let first = clean_details.get(&root).map_or("none", String::as_str);
         eprintln!(
             "FULL_CENSUS: clean merged worktree {:?}; first unplaceable detail: {first}",
             clean[&root]
+        );
+        for (_, detail) in unplaceable.values() {
+            eprintln!("UNPLACEABLE: {detail}");
+        }
+        assert!(
+            incomplete.is_empty(),
+            "native census audit incomplete: {incomplete:?}"
+        );
+        assert!(
+            builtin_audit_has_only_rejections(
+                unplaceable.values().map(|(condition, _)| *condition)
+            ),
+            "every unplaceable process must fail a named built-in condition"
         );
         let mut child = Child(
             std::process::Command::new("/bin/sleep")
@@ -3389,17 +3518,6 @@ mod lifecycle_tests {
             occupied[&root],
             occupied_details.get(&root)
         );
-        if clean[&root] != WorkerState::Free
-            && std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref() != Ok("1")
-        {
-            eprintln!("SKIP: native clean full census unavailable: {first}");
-            return Ok(());
-        }
-        assert_eq!(
-            clean[&root],
-            WorkerState::Free,
-            "native clean full census: {first}"
-        );
         // A readable occupant is positively Live, a stronger refusal than
         // Unknown. Never weaken that existing refusal to satisfy the fixture.
         assert_eq!(occupied[&root], WorkerState::Live);
@@ -3408,8 +3526,23 @@ mod lifecycle_tests {
             format!("process {pid}: cwd inside root")
         );
         eprintln!(
-            "ASSERTED: native full census clean merged worktree Free; same-user sleep {pid} Live with placement detail"
+            "ASSERTED: native full census audited {} unplaceable processes with named built-in failures; same-user sleep {pid} Live with placement detail",
+            unplaceable.len()
         );
+        if complete {
+            assert_eq!(
+                clean[&root],
+                WorkerState::Free,
+                "native clean full census: {first}"
+            );
+            eprintln!(
+                "ASSERTED: native full census clean merged worktree Free (host list declared complete)"
+            );
+        } else {
+            eprintln!(
+                "SKIP: clean-Free assertion: confinement.census_host_list_complete=false; host exceptions are not declared complete; land cleanup may report the first unlisted daemon: {first}"
+            );
+        }
         Ok(())
     }
 
@@ -5012,7 +5145,8 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn worker_census_detail_keeps_the_first_unplaceable_process() -> Result<(), Box<dyn Error>> {
+    fn worker_census_audit_keeps_all_unplaceable_processes_and_first_detail()
+    -> Result<(), Box<dyn Error>> {
         use provenant_supervisor::census::{Census, ProcessIdentity};
         let fixture = Fixture::new()?;
         let root = canonicalize(&fixture.root)?;
@@ -5046,15 +5180,59 @@ mod lifecycle_tests {
             current: fact(100),
             platform_euids: BTreeMap::new(),
         };
-        let (states, details) = observe_worker_roots(
+        let mut audit = BTreeMap::new();
+        let (states, _, details) = observe_worker_holders_with_audit(
             std::slice::from_ref(&root),
             &observer,
             &observer,
             &observer.current,
             false,
+            &mut |pid, condition| {
+                audit.insert(pid, condition);
+            },
         );
         assert_eq!(states[&root], WorkerState::Unknown);
-        assert_eq!(details[&root], "process 1: cwd unreadable");
+        assert_eq!(
+            details[&root],
+            "process 1: cwd unreadable; policy_condition=image policy evidence unavailable"
+        );
+        assert_eq!(
+            audit.keys().copied().collect::<Vec<_>>(),
+            vec![Some(1), Some(200)]
+        );
+        assert!(builtin_audit_has_only_rejections(audit.values().copied()));
+        // An unplaceable record with fully admissible built-in evidence must
+        // fail acceptance, even when other records have real refusals.
+        struct ListedOnlyFailure;
+        impl CwdObserver for ListedOnlyFailure {
+            fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+                Ok(CwdObservation::PermissionDenied)
+            }
+            fn unreadable_policy_euid(
+                &self,
+                _: i64,
+                _: &[CensusIgnoreEntry],
+            ) -> Result<u32, provenant_os::pid::UnreadablePolicyFailure> {
+                Err(provenant_os::pid::UnreadablePolicyFailure {
+                    condition: "stable signing team required",
+                    builtin_condition: None,
+                })
+            }
+        }
+        audit.clear();
+        let (states, _, _) = observe_worker_holders_with_audit(
+            std::slice::from_ref(&root),
+            &observer,
+            &ListedOnlyFailure,
+            &observer.current,
+            false,
+            &mut |pid, condition| {
+                audit.insert(pid, condition);
+            },
+        );
+        assert_eq!(states[&root], WorkerState::Unknown);
+        assert_eq!(audit.len(), 2);
+        assert!(!builtin_audit_has_only_rejections(audit.values().copied()));
         Ok(())
     }
 
@@ -5082,15 +5260,21 @@ mod lifecycle_tests {
             current,
             platform_euids: BTreeMap::new(),
         };
-        let (states, details) = observe_worker_roots(
+        let mut audit = Vec::new();
+        let (states, _, details) = observe_worker_holders_with_audit(
             std::slice::from_ref(&root),
             &observer,
             &observer,
             &observer.current,
             false,
+            &mut |pid, condition| audit.push((pid, condition)),
         );
         assert_eq!(states[&root], WorkerState::Unknown);
         assert_eq!(details[&root], "process listing truncated or incomplete");
+        assert_eq!(
+            audit,
+            vec![(None, Some("complete process listing required"))]
+        );
         Ok(())
     }
 
@@ -5477,7 +5661,7 @@ mod lifecycle_tests {
             &cancellation,
         );
         assert!(
-            matches!(&refused, Err(WorktreeError::IncompleteCensus { detail }) if detail == "process 200: cwd unreadable"),
+            matches!(&refused, Err(WorktreeError::IncompleteCensus { detail }) if detail == "process 200: cwd unreadable; policy_condition=image policy evidence unavailable"),
             "{refused:?}"
         );
         assert!(created.path.exists());

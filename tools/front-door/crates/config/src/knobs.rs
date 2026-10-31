@@ -69,6 +69,15 @@ pub enum KnobEdit<'a> {
 }
 
 impl<D> crate::ResolvedConfig<D> {
+    /// Host acceptance declaration only; never changes runtime census policy.
+    pub fn census_host_list_complete(&self) -> Result<bool, ConfigError> {
+        let name = "confinement.census_host_list_complete";
+        self.knobs
+            .get(name)
+            .and_then(|knob| knob.value.as_bool())
+            .ok_or_else(|| invalid(name, "type"))
+    }
+
     /// Host-owned process exceptions. Never read from a task/profile stamp.
     pub fn census_ignore_unreadable(
         &self,

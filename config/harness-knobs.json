@@ -114,6 +114,14 @@
     }
   },
   "knobs": {
+    "confinement.census_host_list_complete": {
+        "type": "bool",
+        "default": false,
+        "strict": true,
+        "host_only": true,
+        "status": "wired",
+        "effect": "Host-owner declaration that unreadable daemon exceptions are complete. Enables the native clean-Free acceptance assertion; grants no census exception or cleanup authority. Set only after listing the host's daemons."
+    },
     "confinement.census_ignore_unreadable": {
         "type": "census_ignore_list",
         "default": [],

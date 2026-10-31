@@ -90,6 +90,24 @@ pub struct CensusIgnoreEntry {
     pub team_id: String,
 }
 
+/// A refusal captured from the image observations that decided policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnreadablePolicyFailure {
+    pub condition: &'static str,
+    /// None means the built-in checks passed, even if a listing-specific check
+    /// failed. Native acceptance must reject an unplaceable image in that case.
+    pub builtin_condition: Option<&'static str>,
+}
+
+impl From<&'static str> for UnreadablePolicyFailure {
+    fn from(condition: &'static str) -> Self {
+        Self {
+            condition,
+            builtin_condition: Some(condition),
+        }
+    }
+}
+
 impl CensusIgnoreEntry {
     pub fn is_valid(&self) -> bool {
         let path = &self.path;
@@ -129,6 +147,17 @@ pub trait CwdObserver: Send + Sync {
         self.sealed_platform_euid(pid).filter(|uid| *uid < 500)
     }
 
+    /// Same authority as `ignored_unreadable_euid`, retaining the failed image
+    /// condition for diagnostics. The caller must first observe actual EPERM.
+    fn unreadable_policy_euid(
+        &self,
+        pid: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Result<u32, UnreadablePolicyFailure> {
+        self.ignored_unreadable_euid(pid, entries)
+            .ok_or_else(|| "image policy evidence unavailable".into())
+    }
+
     /// Diagnostic only; failure to read any field cannot grant the exception.
     fn process_details(&self, _pid: i64) -> Option<String> {
         None
@@ -137,6 +166,18 @@ pub trait CwdObserver: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemCwdObserver;
 impl CwdObserver for SystemCwdObserver {
+    fn unreadable_policy_euid(
+        &self,
+        pid: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Result<u32, UnreadablePolicyFailure> {
+        let pid = i32::try_from(pid)
+            .ok()
+            .filter(|pid| *pid > 0)
+            .ok_or("positive OS pid unavailable")?;
+        crate::sys::pid::unreadable_policy_euid(pid, entries)
+    }
+
     fn sealed_platform_euid(&self, pid: i64) -> Option<u32> {
         let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
         crate::sys::pid::sealed_platform_euid(pid)

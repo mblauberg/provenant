@@ -76,6 +76,7 @@ daemon census policy cannot exclude. Configure the strict knob
   { path = "/Library/Example/daemon", team_id = "TEAM123456" },
   { path = "/usr/bin/login", team_id = "platform" },
 ]
+"confinement.census_host_list_complete" = false
 ```
 
 Use `provenant config set confinement.census_ignore_unreadable` with the same
@@ -103,6 +104,21 @@ root or other foreign-user processes, may name `/bin` or `/usr/bin` tools, and
 do not require a sealed volume. Keep the list limited to executable/signer
 pairs whose occupancy risk the host owner accepts. A readable occupant and
 every same-owner process retain their existing refusal.
+
+After listing this host's unreadable daemons, the host owner can set
+`provenant config set confinement.census_host_list_complete true`. This strict
+host-only boolean defaults to `false`; unset restores that default. It declares
+coverage for native acceptance and grants no process exception or cleanup
+authority. Native tests always audit every unplaceable process and check a
+same-user sleep occupant; they assert clean-Free only when this flag is true.
+With the default they print why that Free assertion was skipped. CI deliberately
+leaves the flag false while retaining its usbmuxd/platform entry.
+
+Land cleanup still refuses an incomplete census and reports the first unlisted
+daemon. Its diagnostic includes pid, path, euid, CS flags and, for non-platform
+images, the kernel's `CS_OPS_TEAMID` or `unavailable`. Use that information to
+choose an exact path/team pair whose occupancy risk you accept; the completeness
+declaration does not make an unlisted process admissible.
 
 Batch concurrency resolves from the profile by batch class. A batch with any
 `worktree-write` lane uses `lanes.max_concurrency` (registry default 8); a
