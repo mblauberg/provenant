@@ -300,6 +300,26 @@ authority.
   `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`
 - Owner: `crates/confinement/src/permissions.rs`
 
+### Process information stays inside the sandbox
+
+Every lane profile allows `(allow process-info* (target same-sandbox))` so
+memory guards can inspect their own process tree, including resident memory.
+The existing `sysctl-read` rule covers enumeration, not per-process libproc
+queries. The native test compares `proc_pidinfo(PROC_PIDTASKALLINFO)` with no
+process-info rule, with only `process-info-pidinfo`, and with the final scoped
+wildcard. It separately runs `ps -A -o pid=,ppid=,pgid=,rss=` and requires the
+lane's own processes to have nonzero RSS. An outside same-user host PID must
+remain denied or invisible to libproc and have no readable RSS in `ps`.
+
+This does not grant process information about host processes or independently
+launched sandboxes. It also cannot override a separate enclosing sandbox's
+refusal to execute the platform's privileged `ps` binary: an `execve` denial
+occurs before any process-info lookup. The test distinguishes these failures
+instead of treating every `EPERM` as a libproc denial.
+
+- Test: `crates/confinement/src/permissions/tests/process_info.rs::process_info_is_same_sandbox_and_ps_reports_own_rss`
+- Owner: `crates/confinement/src/permissions.rs`
+
 ### Plans refuse unsafe roots
 
 Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)` from

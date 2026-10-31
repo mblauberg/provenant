@@ -4,6 +4,8 @@
 use super::*;
 
 #[test]
+// Native process readiness is an explicit real-time boundary, not simulated time.
+#[allow(clippy::disallowed_methods)]
 fn same_sandbox_signals_reach_parents_but_cannot_reach_host_processes()
 -> Result<(), Box<dyn std::error::Error>> {
     let executor = SystemExecutor::new(2)?;
