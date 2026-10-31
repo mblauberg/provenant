@@ -2434,6 +2434,7 @@ mod tests {
 
     mod ipc;
     mod process_info;
+    mod process_tree;
     mod signals;
     mod sysctl;
     mod sysv_audit;

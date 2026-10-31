@@ -577,6 +577,18 @@ fn with_lane_ports(
     );
     out
 }
+
+fn with_process_tree_path(
+    env: &[(OsString, OsString)],
+    path: Option<&Path>,
+) -> Vec<(OsString, OsString)> {
+    let mut env = env.to_vec();
+    env.retain(|(name, _)| name != crate::process_tree::ENV);
+    if let Some(path) = path {
+        env.push((crate::process_tree::ENV.into(), path.as_os_str().to_owned()));
+    }
+    env
+}
 impl Driver<'_> {
     // The guardian owns process lifecycle and its elapsed-time budgets.
     #[allow(clippy::disallowed_methods)]
@@ -622,6 +634,13 @@ impl Driver<'_> {
         } else {
             env
         };
+        // Replace any caller value with this guardian's own held attempt path.
+        let memory_path = crate::process_tree::snapshot_path(&self.attempt).ok();
+        let env = with_process_tree_path(env, memory_path.as_deref());
+        if memory_path.is_some() {
+            let _ = crate::process_tree::publish(&self.attempt, None);
+        }
+        let env = env.as_slice();
         let started = Instant::now();
         let system = provenant_os::clock::SystemClock::new();
         #[cfg(feature = "fixture")]
@@ -666,6 +685,16 @@ impl Driver<'_> {
         }
         self.reservation.launch_state = LaunchState::Spawned;
         self.reservation.provider = child.identity().cloned();
+        let mut memory = memory_path
+            .as_ref()
+            .and(self.reservation.provider.as_ref())
+            .and_then(|root| {
+                crate::process_tree::Sampler::start(
+                    &self.attempt,
+                    root,
+                    self.reservation.scope.attempt,
+                )
+            });
         if write_record(
             &self.writer_dir,
             "reservation.json",
@@ -753,6 +782,7 @@ impl Driver<'_> {
                 ),
             }
             if exit.is_some() && !host_closed {
+                drop(memory.take());
                 child.resume_builds();
                 host_closed = true;
                 if let Some(holder) = self.holder

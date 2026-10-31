@@ -1320,6 +1320,34 @@ fn production_terminal_retry_schedule_is_unchanged() {
     );
 }
 
+#[test]
+fn process_tree_path_replaces_foreign_environment_and_clears_it_when_unavailable() {
+    let input = [
+        ("PATH".into(), "/bin".into()),
+        (
+            crate::process_tree::ENV.into(),
+            "/foreign/process-tree.json".into(),
+        ),
+        (
+            crate::process_tree::ENV.into(),
+            "/another/process-tree.json".into(),
+        ),
+    ];
+    let path = Path::new("/own/attempt/process-tree.json");
+    let env = super::with_process_tree_path(&input, Some(path));
+    assert_eq!(
+        env,
+        [
+            (OsString::from("PATH"), OsString::from("/bin")),
+            (crate::process_tree::ENV.into(), path.as_os_str().to_owned())
+        ]
+    );
+    assert_eq!(
+        super::with_process_tree_path(&input, None),
+        [(OsString::from("PATH"), OsString::from("/bin"))]
+    );
+}
+
 #[cfg(feature = "fixture")]
 #[test]
 fn fixture_terminal_retry_is_short_and_injected() {

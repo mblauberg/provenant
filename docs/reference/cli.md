@@ -89,6 +89,32 @@ Accepted by every command, before or after the subcommand.
 }
 ```
 
+## `provenant process-tree`
+
+Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid`, `pgid` and `rss_bytes`, with a shared RFC 3339 `sampled_at`. Unavailable or older-than-five-second samples exit 4 with `PROCESS_TREE_UNAVAILABLE` and null data. [Sampling, freshness and confinement contract](../specs/supervisor.md#lane-process-tree-memory-interface).
+
+| Argument | Contract |
+|---|---|
+| `--root` | `{"description": "PID of the supervised command inside this lane", "name": "root", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Read a fresh resident-memory sample of an owned lane process tree",
+  "groups": [
+    {
+      "arguments": [
+        "root"
+      ],
+      "multiple": true,
+      "name": "ProcessTree",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant ask`
 
 | Argument | Contract |

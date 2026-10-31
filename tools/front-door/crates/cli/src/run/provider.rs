@@ -896,6 +896,7 @@ fn prepare_candidates(
             }
         };
         spec.profile.spec.allow_database_ipc = task.access.database_ipc;
+        configure_process_tree(&mut spec, paths)?;
         let build_settings = config.domains.fabric.lanes.build_settings();
         configure_build_slots(
             &mut spec,
@@ -1212,6 +1213,7 @@ fn prepare_command(
         })
         .map_err(|error| error.to_string())?;
     spec.profile.spec.allow_database_ipc = task.access.database_ipc;
+    configure_process_tree(&mut spec, paths)?;
     let settings = config.domains.fabric.lanes.build_settings();
     configure_build_slots(
         &mut spec,
@@ -1298,6 +1300,20 @@ fn nested_policy_fallback(
     }
     task.fallback.clear();
     Ok(task)
+}
+
+fn configure_process_tree(
+    spec: &mut provenant_providers::LaunchSpec,
+    paths: &run::LaunchPaths,
+) -> Result<(), String> {
+    let attempt = paths.scratch.parent().ok_or("attempt directory missing")?;
+    let directory = Directory::open_anchor(attempt).map_err(|error| error.to_string())?;
+    spec.profile.spec.runtime_reads.push(PathGrant {
+        path: provenant_supervisor::process_tree::snapshot_path(&directory)
+            .map_err(|error| error.to_string())?,
+        scope: PathScope::Exact,
+    });
+    Ok(())
 }
 
 fn configure_build_slots(

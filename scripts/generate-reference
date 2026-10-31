@@ -87,6 +87,13 @@ def cli_reference(data):
         text += "\n"
     for command in data["commands"]:
         text += f"## `{command['command']}`\n\n"
+        if command["command"] == "provenant process-tree":
+            text += ("Inside a macOS lane, `--root PID --json` returns an owned subtree's "
+                     "`pid`, `ppid`, `pgid` and `rss_bytes`, with a shared RFC 3339 "
+                     "`sampled_at`. Unavailable or older-than-five-second samples exit 4 "
+                     "with `PROCESS_TREE_UNAVAILABLE` and null data. "
+                     "[Sampling, freshness and confinement contract]"
+                     "(../specs/supervisor.md#lane-process-tree-memory-interface).\n\n")
         if command["command"] == "provenant console search":
             text += ("Search is local only; peers are not searched. Only the first match "
                      "per artifact is returned, and each cursor page rescans.\n\n")
