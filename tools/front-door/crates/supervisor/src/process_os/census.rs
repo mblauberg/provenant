@@ -977,11 +977,16 @@ pub(crate) fn darwin_in_attempt_sandbox(
     // SAFETY: a null operation with filter type 0 asks only whether the pid is
     // sandboxed; sandbox_check reads no pointer and retains none.
     let sandboxed = unsafe { sandbox_check(pid, std::ptr::null(), 0) };
-    match (sandboxed, lookup(lookup_name), lookup(CONTROL_NAME)) {
-        (1, 0, 1) => Ok(true),
-        (0..=1, 0..=1, 0..=1) => Ok(false),
-        _ => Err(io::Error::other("sandbox membership unavailable")),
-    }
+    // Capture errno immediately after each failing check: a subsequent lookup
+    // must not replace ESRCH (process churn) with an unrelated diagnostic.
+    let checked = |value| match value {
+        0 | 1 => Ok(value),
+        _ => Err(io::Error::last_os_error()),
+    };
+    let sandboxed = checked(sandboxed)?;
+    let permitted = checked(lookup(lookup_name))?;
+    let control = checked(lookup(CONTROL_NAME))?;
+    Ok((sandboxed, permitted, control) == (1, 0, 1))
 }
 
 #[cfg(target_os = "macos")]

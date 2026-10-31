@@ -6,7 +6,8 @@ use crate::process_tree::{NativeProcess, ObservationError, ObservationResult};
 #[cfg(target_os = "macos")]
 pub(crate) fn member(pid: u32, name: &std::ffi::CStr) -> ObservationResult<bool> {
     let pid = i32::try_from(pid).map_err(|_| ObservationError::Unavailable)?;
-    super::census::darwin_in_attempt_sandbox(pid, name).map_err(|_| ObservationError::Unavailable)
+    super::census::darwin_in_attempt_sandbox(pid, name)
+        .map_err(|error| query_error(error.raw_os_error()))
 }
 
 #[cfg(target_os = "macos")]

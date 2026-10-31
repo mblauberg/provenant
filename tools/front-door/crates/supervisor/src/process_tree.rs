@@ -213,6 +213,19 @@ fn deadline(
     Ok(())
 }
 
+fn within_deadline<T>(
+    now: &mut impl FnMut() -> ObservationResult<u64>,
+    started: u64,
+    query: impl FnOnce() -> ObservationResult<T>,
+) -> ObservationResult<T> {
+    deadline(now, started)?;
+    let result = query();
+    // A slow query can both overrun and report churn. The limit takes priority
+    // so the refresh cannot retry merely because the native read failed.
+    deadline(now, started)?;
+    result
+}
+
 fn walk(
     root: &ProcessIdentity,
     mut snapshot: Snapshot,
@@ -229,14 +242,13 @@ fn walk(
         if processes.len() >= MAX_PROCESSES {
             return Err(ObservationError::SizeLimit);
         }
-        deadline(&mut now, started)?;
-        if !source.member(pid)? {
+        if !within_deadline(&mut now, started, || source.member(pid))? {
             if parent.is_none() {
                 return Err(ObservationError::Unavailable);
             }
             continue;
         }
-        let native = source.process(pid)?;
+        let native = within_deadline(&mut now, started, || source.process(pid))?;
         if parent.is_none() && native.start != root.native_start {
             return Err(ObservationError::Unavailable);
         }
@@ -245,7 +257,7 @@ fn walk(
         {
             return Err(ObservationError::Churn);
         }
-        let children = source.children(pid)?;
+        let children = within_deadline(&mut now, started, || source.children(pid))?;
         child_lists.insert(pid, children.iter().copied().collect::<BTreeSet<_>>());
         for child in children {
             if pending.len() + processes.len() >= MAX_PROCESSES {
@@ -258,14 +270,11 @@ fn walk(
     // Revalidate every link after traversal. Never publish a recycled PID's
     // RSS or a tree whose parent changed while it was being walked.
     for old in &processes {
-        deadline(&mut now, started)?;
-        let fresh = source.process(old.pid)?;
-        deadline(&mut now, started)?;
+        let fresh = within_deadline(&mut now, started, || source.process(old.pid))?;
         if Some(&fresh.start) != starts.get(&old.pid) || fresh.memory.ppid != old.ppid {
             return Err(ObservationError::Churn);
         }
-        let children = source
-            .children(old.pid)?
+        let children = within_deadline(&mut now, started, || source.children(old.pid))?
             .into_iter()
             .collect::<BTreeSet<_>>();
         deadline(&mut now, started)?;
@@ -487,6 +496,19 @@ mod tests {
             );
             assert_eq!(attempts, 1, "must not retry {error:?}");
         }
+        let now = Cell::new(1_000_000);
+        let mut attempts = 0;
+        assert!(
+            observe_refresh::<()>(|| {
+                attempts += 1;
+                within_deadline(&mut || Ok(now.get()), 1_000_000, || {
+                    now.set(1_000_000 + MAX_SAMPLE_MICROS + 1);
+                    Err(ObservationError::Churn)
+                })
+            })
+            .is_none()
+        );
+        assert_eq!(attempts, 1, "a query overrun takes priority over churn");
         let mut attempts = 0;
         assert_eq!(
             observe_refresh(|| {
