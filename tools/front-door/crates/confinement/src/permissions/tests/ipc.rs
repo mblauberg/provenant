@@ -134,6 +134,7 @@ printf 'outside-root write denied\n'
         ("TMPDIR".into(), scratch.into_os_string()),
         ("PGBIN".into(), bin.into_os_string()),
         ("PGPORT".into(), port.into()),
+        ("PGCONNECT_TIMEOUT".into(), "1".into()),
         (
             "PGOPTIONS".into(),
             "-c default_transaction_read_only=on".into(),
@@ -147,12 +148,15 @@ printf 'outside-root write denied\n'
     options.stdout = StreamPolicy::Capture { limit: 8192 };
     options.stderr = StreamPolicy::Capture { limit: 8192 };
     let outcome = executor.execute(options)?;
+    let server_log = std::fs::read_to_string(root.join("scratch/postgres.log"))
+        .unwrap_or_else(|error| format!("PostgreSQL log unavailable: {error}"));
     assert!(
         successful_probe(&outcome),
-        "PostgreSQL smoke: {:?}; {}; {}",
+        "PostgreSQL smoke: {:?}; {}; {}; server log: {}",
         outcome.termination,
         String::from_utf8_lossy(&outcome.stdout.bytes),
-        String::from_utf8_lossy(&outcome.stderr.bytes)
+        String::from_utf8_lossy(&outcome.stderr.bytes),
+        server_log,
     );
     assert!(!outside.exists());
     Ok(())
