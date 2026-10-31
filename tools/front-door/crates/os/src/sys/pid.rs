@@ -1031,15 +1031,18 @@ mod tests {
         assert!(!root_owned_mode(501, 0o755));
         assert!(!root_owned_mode(0, 0o775), "group-writable ancestor");
         assert!(!root_owned_mode(0, 0o757), "other-writable ancestor");
-        let path = std::path::Path::new("/usr/bin/true");
-        let file = crate::sys::fs::open_source(path)?;
+        // Linux runners may install coreutils entry points as symlinks. Select
+        // the real regular fixture before exercising the strict no-follow walk.
+        let path = std::fs::canonicalize("/usr/bin/true")?;
+        let file = crate::sys::fs::open_source(&path)?;
         assert!(
-            root_owned_executable_chain(path, &file),
+            root_owned_executable_chain(&path, &file),
             "real root-owned chain"
         );
-        let different = crate::sys::fs::open_source(std::path::Path::new("/usr/bin/false"))?;
+        let different_path = std::fs::canonicalize("/bin/sh")?;
+        let different = crate::sys::fs::open_source(&different_path)?;
         assert!(
-            !root_owned_executable_chain(path, &different),
+            !root_owned_executable_chain(&path, &different),
             "must match original fd identity"
         );
         let temp = tempfile::tempdir()?;
