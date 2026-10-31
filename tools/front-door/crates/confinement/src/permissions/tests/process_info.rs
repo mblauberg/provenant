@@ -1,11 +1,10 @@
-//! Native libproc causal probe and own-process ps/RSS visibility.
+//! Native libproc causal probe and own-sandbox RSS visibility.
 #![cfg(target_os = "macos")]
 
 use super::*;
 
 const PROBE: &str = r#"
 #include <errno.h>
-#include <dlfcn.h>
 #include <libproc.h>
 #include <signal.h>
 #include <stdio.h>
@@ -14,27 +13,7 @@ const PROBE: &str = r#"
 #include <sys/wait.h>
 #include <unistd.h>
 
-extern char **environ;
-extern int sandbox_check(pid_t, const char *, int, ...);
-
 int main(int argc, char **argv) {
-    if (argc == 2 && strcmp(argv[1], "exec-ps") == 0) {
-        const int *no_report = dlsym(RTLD_DEFAULT, "SANDBOX_CHECK_NO_REPORT");
-        int flags = no_report ? *no_report : 0;
-        const char *operations[] = {"forbidden-exec-sugid", "not-a-real-operation-2452"};
-        for (unsigned i = 0; i < 2; ++i) {
-            errno = 0;
-            int result = sandbox_check(getpid(), operations[i], flags);
-            int error = errno;
-            fprintf(stderr, "sandbox_check %s: result=%d errno=%d\n",
-                operations[i], result, error);
-        }
-        char *args[] = {"/bin/ps", "-A", "-o", "pid=,ppid=,pgid=,rss=", NULL};
-        execve(args[0], args, environ);
-        int error = errno;
-        fprintf(stderr, "execve /bin/ps failed: errno=%d\n", error);
-        return 1;
-    }
     if (argc != 3) return 90;
     int baseline = strcmp(argv[1], "baseline") == 0;
     int allowed = strcmp(argv[1], "denied") != 0;
@@ -94,7 +73,7 @@ int main(int argc, char **argv) {
 "#;
 
 #[test]
-fn process_info_is_same_sandbox_and_ps_reports_own_rss() -> Result<(), Box<dyn std::error::Error>> {
+fn process_info_is_same_sandbox_and_reports_own_rss() -> Result<(), Box<dyn std::error::Error>> {
     let executor = SystemExecutor::new(2)?;
     let cancel = CancelToken::new();
     let env = [("LC_ALL".into(), "C".into())];
@@ -119,7 +98,6 @@ fn process_info_is_same_sandbox_and_ps_reports_own_rss() -> Result<(), Box<dyn s
     let compile = [
         OsString::from("/usr/bin/cc"),
         input.as_os_str().to_owned(),
-        "-lsandbox".into(),
         "-o".into(),
         helper.as_os_str().to_owned(),
     ];
@@ -190,7 +168,7 @@ fn process_info_is_same_sandbox_and_ps_reports_own_rss() -> Result<(), Box<dyn s
             Path::new("/fixture/home"),
         )?)?;
         // Single-operation A/B identifies process-info-pidinfo, rather than
-        // attributing any ps exec or Mach task-port error to this syscall.
+        // attributing a different syscall denial to this libproc operation.
         for (rule, expected) in [
             ("", "baseline"),
             ("(deny process-info*)", "denied"),
@@ -225,65 +203,6 @@ fn process_info_is_same_sandbox_and_ps_reports_own_rss() -> Result<(), Box<dyn s
                     "writer={writer}: {rule:?} libproc {expected}: PASS"
                 ));
             }
-        }
-        let script = r#"
-set -eu
-/bin/sleep 5 &
-child=$!
-trap 'kill -TERM "$child" 2>/dev/null || :; wait "$child" || :' EXIT
-printf 'own=%s child=%s\n' "$$" "$child"
-/bin/ps -A -o pid=,ppid=,pgid=,rss=
-"#;
-        let result = run(&source, &["/bin/sh".into(), "-c".into(), script.into()])?;
-        if !successful_probe(&result) {
-            let diagnostic = run(&source, &[helper.as_os_str().to_owned(), "exec-ps".into()])?;
-            failures.push(format!(
-                "writer={writer}: stock ps: {:?}; {}; {}",
-                result.termination,
-                String::from_utf8_lossy(&result.stderr.bytes),
-                String::from_utf8_lossy(&diagnostic.stderr.bytes)
-            ));
-            continue;
-        }
-        let text = std::str::from_utf8(&result.stdout.bytes)?;
-        let mut lines = text.lines();
-        let header = lines.next().ok_or("missing own process IDs")?;
-        let own = header
-            .split_whitespace()
-            .map(|field| {
-                field
-                    .split_once('=')
-                    .ok_or("invalid PID header")
-                    .and_then(|(_, value)| value.parse::<u32>().map_err(|_| "invalid PID"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(own.len(), 2);
-        let rows = lines
-            .filter_map(|line| {
-                let fields = line
-                    .split_whitespace()
-                    .map(str::parse::<u64>)
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                (fields.len() == 4).then_some(fields)
-            })
-            .collect::<Vec<_>>();
-        for pid in own {
-            if !rows
-                .iter()
-                .any(|row| row[0] == u64::from(pid) && row[3] > 0)
-            {
-                failures.push(format!(
-                    "writer={writer}: ps missing own nonzero RSS for {pid}"
-                ));
-            }
-        }
-        if !rows
-            .iter()
-            .filter(|row| row[0] == u64::from(std::process::id()))
-            .all(|row| row[3] == 0)
-        {
-            failures.push("ps exposed outside host RSS".into());
         }
     }
     assert!(

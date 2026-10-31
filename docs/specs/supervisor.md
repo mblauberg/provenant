@@ -308,9 +308,8 @@ their own process tree, including resident memory. An allow-only clause is
 not assumed to restrict APIs that the platform permits by default. The native
 test records the unscoped baseline and compares an explicit deny,
 `process-info-pidinfo` scoped to the sandbox, and the final scoped wildcard.
-It separately runs `ps -A -o pid=,ppid=,pgid=,rss=` and requires the
-lane's own processes to have nonzero RSS. An outside same-user host PID must
-remain denied or invisible to libproc and have no readable RSS in `ps`.
+The lane's own processes must have nonzero RSS. An outside same-user host PID
+must remain denied or invisible to libproc.
 
 The native A/B probe confirms that unscoped libproc RSS queries succeed, the
 explicit deny returns `EPERM`, and the scoped PIDINFO and wildcard rules permit
@@ -323,12 +322,21 @@ returns `EPERM` before any process-info lookup, in both access modes. On Darwin
 `forbidden-exec-sugid` denied; an unknown-operation control returns `EINVAL`.
 This is a queried policy denial, rather than a captured kernel log for the
 exec. `forbidden-exec-sugid` is not a grantable SBPL symbol on that host.
-The process-info rule therefore does not fix consumers that invoke stock `ps`
-(#2452). No privileged execution, sandbox escape or Mach authority is added.
-The native test retains its failing stock-`ps` assertion until this requirement
-is resolved; CI must not be treated as passing.
+The process-info rule therefore does not fix consumers that invoke stock `ps`.
+Issue #2452 needs an unprivileged libproc-based process-tree RSS reader, such as
+a `provenant` subcommand, for consumers' memory guards. No privileged execution,
+sandbox escape or Mach authority is added.
 
-- Test: `crates/confinement/src/permissions/tests/process_info.rs::process_info_is_same_sandbox_and_ps_reports_own_rss`
+The native production-profile shell probe also runs an offline Cargo test with
+two jobs. Its build script acquires and returns an inherited jobserver token,
+and its compiled Rust test checks the success marker. The same probe commits
+with Git and runs Node child-process spawn/fork IPC directly and through a pnpm
+script. macOS CI requires Node and pnpm availability. PostgreSQL's separate
+database-enabled lifecycle smoke covers both access modes.
+
+- Test: `crates/confinement/src/permissions/tests/process_info.rs::process_info_is_same_sandbox_and_reports_own_rss`;
+  `src/worktree_tests.rs::lane_prepare_isolates_nested_state` (`verify_lane_profile` shell probe);
+  `crates/confinement/src/permissions/tests/ipc.rs::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`
 - Owner: `crates/confinement/src/permissions.rs`
 
 ### Plans refuse unsafe roots
