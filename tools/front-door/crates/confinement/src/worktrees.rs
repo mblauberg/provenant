@@ -3111,6 +3111,7 @@ mod lifecycle_tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[allow(clippy::print_stderr)] // Native fixture skips must explain missing host evidence.
     fn native_unreadable_windowserver_keeps_a_merged_clean_tree() -> Result<(), Box<dyn Error>> {
         use provenant_supervisor::census::{Census, CensusError};
 
