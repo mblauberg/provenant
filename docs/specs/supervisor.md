@@ -274,8 +274,8 @@ The explicit database capability accepts that exposure; it does not create a
 lane-private SysV namespace. Other users' objects remain protected under normal
 restrictive permissions. Profiles without the capability cannot mutate or
 remove the host's objects, including those owned by the same user.
-However, macOS does not sandbox-check the SysV creation path. Even a lane
-without database authority can allocate a segment or semaphore set and then
+However, the existing IPC sandbox rules do not prevent SysV creation. Even a
+lane without database authority can allocate a segment or semaphore set and then
 be refused permission to remove its own allocation. Repeated failed database
 starts can exhaust host-global IPC limits such as `kern.sysv.shmmni`.
 Capability-off therefore does not guarantee freedom from IPC resource exhaustion.
