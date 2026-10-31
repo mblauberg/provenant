@@ -96,6 +96,7 @@ const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
 (allow signal (target same-sandbox))
+(deny process-info*)
 (allow process-info* (target same-sandbox))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
@@ -2854,6 +2855,10 @@ mod tests {
                 .filter(|line| line.starts_with("(allow signal"))
                 .collect();
             assert_eq!(signals, ["(allow signal (target same-sandbox))"]);
+            assert!(
+                rendered
+                    .contains("(deny process-info*)\n(allow process-info* (target same-sandbox))")
+            );
             assert_eq!(
                 rendered
                     .lines()

@@ -302,17 +302,19 @@ authority.
 
 ### Process information stays inside the sandbox
 
-Every lane profile allows `(allow process-info* (target same-sandbox))` so
-memory guards can inspect their own process tree, including resident memory.
-The existing `sysctl-read` rule covers enumeration, not per-process libproc
-queries. The native test compares `proc_pidinfo(PROC_PIDTASKALLINFO)` with no
-process-info rule, with only `process-info-pidinfo`, and with the final scoped
-wildcard. It separately runs `ps -A -o pid=,ppid=,pgid=,rss=` and requires the
+Every lane profile explicitly denies the process-info family before allowing
+`(allow process-info* (target same-sandbox))`, so memory guards can inspect
+their own process tree, including resident memory. An allow-only clause is
+not assumed to restrict APIs that the platform permits by default. The native
+test records the unscoped baseline and compares an explicit deny,
+`process-info-pidinfo` scoped to the sandbox, and the final scoped wildcard.
+It separately runs `ps -A -o pid=,ppid=,pgid=,rss=` and requires the
 lane's own processes to have nonzero RSS. An outside same-user host PID must
 remain denied or invisible to libproc and have no readable RSS in `ps`.
 
-This does not grant process information about host processes or independently
-launched sandboxes. It also cannot override a separate enclosing sandbox's
+The test requires libproc RSS queries against the outside host to be denied;
+it does not claim separate peer-sandbox process-info coverage. The policy also
+cannot override a separate enclosing sandbox's
 refusal to execute the platform's privileged `ps` binary: an `execve` denial
 occurs before any process-info lookup. The test distinguishes these failures
 instead of treating every `EPERM` as a libproc denial.

@@ -170,6 +170,7 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
         let argv = [SANDBOX_EXEC, "-p", &source, "/bin/sh", "-c", script].map(OsString::from);
         let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(30));
         options.env = Some(&env);
+        options.process_group = true;
         options.stdout = StreamPolicy::Capture { limit: 8192 };
         options.stderr = StreamPolicy::Capture { limit: 8192 };
         let outcome = executor.execute(options)?;
@@ -208,6 +209,55 @@ fn postgres_database_ipc_allows_mmap_lifecycle_in_both_modes()
     postgres_case(true)
 }
 
+/// Cleanup is owned by the unconfined test supervisor, not the timed sandbox.
+struct SysvObjects<'a> {
+    executor: &'a SystemExecutor,
+    ids: Option<[String; 2]>,
+}
+impl SysvObjects<'_> {
+    fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(ids) = &self.ids else {
+            return Ok(());
+        };
+        let script = r#"
+my @errors;
+push @errors, "shm cleanup: $!\n"
+    if !shmctl($ARGV[0], IPC_RMID, 0) && !$!{EINVAL} && !$!{EIDRM};
+push @errors, "sem cleanup: $!\n"
+    if !semctl($ARGV[1], 0, IPC_RMID, 0) && !$!{EINVAL} && !$!{EIDRM};
+die join("", @errors) if @errors;
+"#;
+        let argv = [
+            "/usr/bin/perl",
+            "-MIPC::SysV=IPC_RMID",
+            "-MErrno=EINVAL,EIDRM",
+            "-e",
+            script,
+            &ids[0],
+            &ids[1],
+        ]
+        .map(OsString::from);
+        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
+        options.process_group = true;
+        options.stderr = StreamPolicy::Capture { limit: 1024 };
+        let result = self.executor.execute(options)?;
+        if !successful_probe(&result) {
+            return Err(format!(
+                "supervisor IPC cleanup: {}",
+                String::from_utf8_lossy(&result.stderr.bytes)
+            )
+            .into());
+        }
+        self.ids = None;
+        Ok(())
+    }
+}
+impl Drop for SysvObjects<'_> {
+    fn drop(&mut self) {
+        let _retry_on_failure = self.cleanup();
+    }
+}
+
 #[test]
 fn database_off_cannot_mutate_or_remove_foreign_sysv_objects()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -215,13 +265,15 @@ fn database_off_cannot_mutate_or_remove_foreign_sysv_objects()
     if !native_available(&executor)? {
         return Ok(());
     }
-    let host = r#"
-my ($shm, $sem);
+    // Setup performs only nonblocking local IPC calls. Its END guard owns a
+    // partially allocated pair; once it returns, the Rust supervisor owns both.
+    let allocate = r#"
+my ($shm, $sem, $transferred);
 END {
-    my @errors;
-    push @errors, "cleanup shm: $!\n" if defined $shm && !shmctl($shm, IPC_RMID, 0);
-    push @errors, "cleanup sem: $!\n" if defined $sem && !semctl($sem, 0, IPC_RMID, 0);
-    die join("", @errors) if @errors;
+    if (!$transferred) {
+        shmctl($shm, IPC_RMID, 0) if defined $shm;
+        semctl($sem, 0, IPC_RMID, 0) if defined $sem;
+    }
 }
 $shm = shmget(IPC_PRIVATE, 56, IPC_CREAT | 0600);
 die "host shmget: $!\n" unless defined $shm;
@@ -229,19 +281,20 @@ shmwrite($shm, "safe", 0, 4) or die "host shmwrite: $!\n";
 $sem = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
 die "host semget: $!\n" unless defined $sem;
 semctl($sem, 0, SETVAL, 1) or die "host SETVAL: $!\n";
-my $probe = q{
-    sub denied { die "foreign object operation was not denied: $!\n" unless !$_[0] && $! == EPERM; }
-    denied(shmwrite($ARGV[0], "bad!", 0, 4));
-    denied(shmctl($ARGV[0], IPC_RMID, 0));
-    denied(semop($ARGV[1], pack("s!3", 0, 1, 0)));
-    denied(semctl($ARGV[1], 0, IPC_RMID, 0));
-};
-system("/usr/bin/sandbox-exec", "-p", $ARGV[0], "/usr/bin/perl",
-    "-MIPC::SysV=IPC_RMID", "-MErrno=EPERM", "-e", $probe, $shm, $sem) == 0
-    or die "confined foreign-object probe failed\n";
-shmread($shm, my $value, 0, 4) or die "host shmread: $!\n";
-die "host shared memory was changed\n" unless $value eq "safe";
-die "host semaphore was changed\n" unless semctl($sem, 0, GETVAL, 0) == 1;
+printf "%d %d\n", $shm, $sem;
+$transferred = 1;
+"#;
+    let probe = r#"
+sub denied { die "foreign operation was not denied: $!\n" unless !$_[0] && $! == EPERM; }
+denied(shmwrite($ARGV[0], "bad!", 0, 4));
+denied(shmctl($ARGV[0], IPC_RMID, 0));
+denied(semop($ARGV[1], pack("s!3", 0, 1, 0)));
+denied(semctl($ARGV[1], 0, IPC_RMID, 0));
+"#;
+    let verify = r#"
+shmread($ARGV[0], my $value, 0, 4) or die "host shmread: $!\n";
+die "host shared memory changed\n" unless $value eq "safe";
+die "host semaphore changed\n" unless semctl($ARGV[1], 0, GETVAL, 0) == 1;
 "#;
     for writer in [false, true] {
         let temp = crate::test_support::tempdir()?;
@@ -249,21 +302,67 @@ die "host semaphore was changed\n" unless semctl($sem, 0, GETVAL, 0) == 1;
         let source = database_profile(&root, Path::new("/usr/bin"), writer, false)?;
         let argv = [
             "/usr/bin/perl",
-            "-MIPC::SysV=IPC_PRIVATE,IPC_CREAT,IPC_RMID,SETVAL,GETVAL",
+            "-MIPC::SysV=IPC_PRIVATE,IPC_CREAT,IPC_RMID,SETVAL",
             "-e",
-            host,
-            &source,
+            allocate,
         ]
         .map(OsString::from);
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(10));
+        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
         options.stdout = StreamPolicy::Capture { limit: 1024 };
-        options.stderr = StreamPolicy::Capture { limit: 4096 };
-        let outcome = executor.execute(options)?;
+        options.stderr = StreamPolicy::Capture { limit: 1024 };
+        let allocated = executor.execute(options)?;
         assert!(
-            successful_probe(&outcome),
-            "writer={writer}: foreign SysV: {:?}; {}",
+            successful_probe(&allocated),
+            "host IPC setup: {}",
+            String::from_utf8_lossy(&allocated.stderr.bytes)
+        );
+        let ids = std::str::from_utf8(&allocated.stdout.bytes)?
+            .split_whitespace()
+            .map(|value| value.parse::<u32>().map(|id| id.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut objects = SysvObjects {
+            executor: &executor,
+            ids: Some(ids.try_into().map_err(|_| "expected two IPC object IDs")?),
+        };
+        let ids = objects.ids.as_ref().ok_or("IPC ownership")?;
+        let argv = [
+            SANDBOX_EXEC,
+            "-p",
+            &source,
+            "/usr/bin/perl",
+            "-MIPC::SysV=IPC_RMID",
+            "-MErrno=EPERM",
+            "-e",
+            probe,
+            &ids[0],
+            &ids[1],
+        ]
+        .map(OsString::from);
+        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(5));
+        options.process_group = true;
+        options.stderr = StreamPolicy::Capture { limit: 2048 };
+        let outcome = executor.execute(options)?;
+        let argv = [
+            "/usr/bin/perl",
+            "-MIPC::SysV=GETVAL",
+            "-e",
+            verify,
+            &ids[0],
+            &ids[1],
+        ]
+        .map(OsString::from);
+        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
+        options.stderr = StreamPolicy::Capture { limit: 1024 };
+        let unchanged = executor.execute(options)?;
+        // Cleanup runs in the Rust-owned host context even if the sandbox
+        // timed out; Drop retries it if any earlier operation returns/panics.
+        objects.cleanup()?;
+        assert!(
+            successful_probe(&outcome) && successful_probe(&unchanged),
+            "writer={writer}: foreign SysV: {:?}; {}; {}",
             outcome.termination,
-            String::from_utf8_lossy(&outcome.stderr.bytes)
+            String::from_utf8_lossy(&outcome.stderr.bytes),
+            String::from_utf8_lossy(&unchanged.stderr.bytes)
         );
     }
     Ok(())

@@ -52,6 +52,7 @@
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
 (allow signal (target same-sandbox))
+(deny process-info*)
 (allow process-info* (target same-sandbox))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")

@@ -15,7 +15,8 @@ const PROBE: &str = r#"
 
 int main(int argc, char **argv) {
     if (argc != 3) return 90;
-    int allowed = strcmp(argv[1], "allowed") == 0;
+    int baseline = strcmp(argv[1], "baseline") == 0;
+    int allowed = strcmp(argv[1], "denied") != 0;
     pid_t host = (pid_t)strtol(argv[2], NULL, 10);
     int ready[2];
     if (pipe(ready) != 0) return 91;
@@ -59,7 +60,8 @@ int main(int argc, char **argv) {
     errno = 0;
     count = proc_pidinfo(host, PROC_PIDTASKINFO, 0, &outside, sizeof(outside));
     query_errno = errno;
-    if (count != 0 || (query_errno != EPERM && query_errno != ESRCH)) {
+    if (baseline ? (count != sizeof(outside) || outside.pti_resident_size == 0) :
+        (count != 0 || (query_errno != EPERM && query_errno != ESRCH))) {
         fprintf(stderr, "outside proc_pidinfo(PROC_PIDTASKINFO): count=%d errno=%d\n",
             count, query_errno);
         failed = 1;
@@ -127,12 +129,14 @@ fn process_info_is_same_sandbox_and_ps_reports_own_rss() -> Result<(), Box<dyn s
         observations: BTreeMap::new(),
     };
     let host_pid = std::process::id().to_string();
+    let mut failures = Vec::new();
     let run = |source: &str, args: &[OsString]| {
         let mut argv = [SANDBOX_EXEC, "-p", source].map(OsString::from).to_vec();
         argv.extend_from_slice(args);
         let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(8));
         options.env = Some(&env);
         options.cancel = Some(&cancel);
+        options.process_group = true;
         options.stdout = StreamPolicy::Capture { limit: 256 * 1024 };
         options.stderr = StreamPolicy::Capture { limit: 4096 };
         executor.execute(options)
@@ -165,27 +169,35 @@ fn process_info_is_same_sandbox_and_ps_reports_own_rss() -> Result<(), Box<dyn s
         // Single-operation A/B identifies process-info-pidinfo, rather than
         // attributing any ps exec or Mach task-port error to this syscall.
         for (rule, expected) in [
-            ("", "denied"),
+            ("", "baseline"),
+            ("(deny process-info*)", "denied"),
             (
-                "(allow process-info-pidinfo (target same-sandbox))",
+                "(deny process-info*)\n(allow process-info-pidinfo (target same-sandbox))",
                 "allowed",
             ),
-            ("(allow process-info* (target same-sandbox))", "allowed"),
+            (
+                "(deny process-info*)\n(allow process-info* (target same-sandbox))",
+                "allowed",
+            ),
         ] {
-            let variant = source.replace("(allow process-info* (target same-sandbox))", rule);
+            let variant = source.replace(
+                "(deny process-info*)\n(allow process-info* (target same-sandbox))",
+                rule,
+            );
             let args = [
                 helper.as_os_str().to_owned(),
                 expected.into(),
                 host_pid.clone().into(),
             ];
             let result = run(&variant, &args)?;
-            assert!(
-                successful_probe(&result),
-                "writer={writer}: {rule:?} libproc causal/foreign probe: {:?}; {}; {}",
-                result.termination,
-                String::from_utf8_lossy(&result.stdout.bytes),
-                String::from_utf8_lossy(&result.stderr.bytes)
-            );
+            if !successful_probe(&result) {
+                failures.push(format!(
+                    "writer={writer}: {rule:?} libproc: {:?}; {}; {}",
+                    result.termination,
+                    String::from_utf8_lossy(&result.stdout.bytes),
+                    String::from_utf8_lossy(&result.stderr.bytes)
+                ));
+            }
         }
         let script = r#"
 set -eu
@@ -196,12 +208,14 @@ printf 'own=%s child=%s\n' "$$" "$child"
 /bin/ps -A -o pid=,ppid=,pgid=,rss=
 "#;
         let result = run(&source, &["/bin/sh".into(), "-c".into(), script.into()])?;
-        assert!(
-            successful_probe(&result),
-            "writer={writer}: stock ps: {:?}; {}",
-            result.termination,
-            String::from_utf8_lossy(&result.stderr.bytes)
-        );
+        if !successful_probe(&result) {
+            failures.push(format!(
+                "writer={writer}: stock ps: {:?}; {}",
+                result.termination,
+                String::from_utf8_lossy(&result.stderr.bytes)
+            ));
+            continue;
+        }
         let text = std::str::from_utf8(&result.stdout.bytes)?;
         let mut lines = text.lines();
         let header = lines.next().ok_or("missing own process IDs")?;
@@ -226,18 +240,27 @@ printf 'own=%s child=%s\n' "$$" "$child"
             })
             .collect::<Vec<_>>();
         for pid in own {
-            assert!(
-                rows.iter()
-                    .any(|row| row[0] == u64::from(pid) && row[3] > 0),
-                "writer={writer}: ps must expose nonzero own RSS for {pid}"
-            );
+            if !rows
+                .iter()
+                .any(|row| row[0] == u64::from(pid) && row[3] > 0)
+            {
+                failures.push(format!(
+                    "writer={writer}: ps missing own nonzero RSS for {pid}"
+                ));
+            }
         }
-        assert!(
-            rows.iter()
-                .filter(|row| row[0] == u64::from(std::process::id()))
-                .all(|row| row[3] == 0),
-            "ps exposed outside host RSS"
-        );
+        if !rows
+            .iter()
+            .filter(|row| row[0] == u64::from(std::process::id()))
+            .all(|row| row[3] == 0)
+        {
+            failures.push("ps exposed outside host RSS".into());
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "process-info causal matrix failed:\n{}",
+        failures.join("\n")
+    );
     Ok(())
 }
