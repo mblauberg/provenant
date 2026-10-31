@@ -3590,6 +3590,7 @@ if (process.argv[2] === 'child') {
         )].map(OsString::from);
         let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
         let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
+        options.process_group = true;
         let mut tool_env = launch.environment.clone();
         let tools_required = std::env::var("PROVENANT_LANE_TOOLS_REQUIRED").as_deref() == Ok("1");
         tool_env.push((
