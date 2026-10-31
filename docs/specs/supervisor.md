@@ -269,7 +269,7 @@ backends need to notify their postmaster parent and sibling processes; the
 former writer-only `children` target denied child-to-parent signals and left
 client queries and clean shutdown hanging. The same-sandbox rule replaces that
 target and permits communication only among processes in the same Seatbelt
-sandbox. Signals to the outside supervisor, host processes and other lanes
+sandbox. Signals to the outside supervisor and unsandboxed host processes
 remain denied. It grants no additional execution, file, Mach, network or IPC
 authority.
 
