@@ -82,7 +82,7 @@ Use `provenant config set confinement.census_ignore_unreadable` with the same
 list encoded as JSON, or `config apply` with an array of these objects.
 `config show` and `config schema` expose its value and source; `config unset`
 restores the empty list. Up to 128 entries are accepted, each with exactly
-`path` and `team_id`. Paths are exact absolute normalized spellings (at most
+`path` and `team_id`. Paths are exact absolute normalised spellings (at most
 4096 bytes), not prefixes, globs or aliases. Duplicate paths, unknown fields,
 control characters, empty identities and malformed entries refuse the whole
 configuration. A team identifier is at most 64 ASCII alphanumeric bytes;
