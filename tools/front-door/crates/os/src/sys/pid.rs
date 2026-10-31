@@ -212,68 +212,165 @@ fn parses_linux_stat_states_with_complex_names() {
     assert!(linux_stat_state("123 (name) ? 1").is_err());
 }
 
-pub(crate) fn uid(pid: i32) -> Option<u32> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::Read;
-        // /proc/PID ownership can change to root for a nondumpable process;
-        // status instead reports its real, effective, saved and filesystem UIDs.
-        const LIMIT: u64 = 65_536;
-        let file = std::fs::File::open(format!("/proc/{pid}/status")).ok()?;
-        let mut status = String::new();
-        file.take(LIMIT + 1).read_to_string(&mut status).ok()?;
-        if status.len() as u64 > LIMIT {
-            return None;
-        }
-        linux_status_uid(&status)
-    }
+/// No credentials-only fallback exists on other platforms.
+pub(crate) fn sealed_platform_euid(pid: i32) -> Option<u32> {
     #[cfg(target_os = "macos")]
     {
-        let requested = i32::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).ok()?;
-        let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
-        // SAFETY: info is aligned writable storage of the exact ABI size.
-        // libproc borrows it for this call and retains no pointer.
-        let returned = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDT_SHORTBSDINFO,
-                0,
-                info.as_mut_ptr().cast(),
-                requested,
-            )
-        };
-        if returned != requested {
+        let before = darwin_effective_uid(pid)?;
+        if !darwin_platform_signature(darwin_signing_status(pid)?) {
             return None;
         }
-        // SAFETY: the exact-size successful read initialised the whole record.
-        let info = unsafe { info.assume_init() };
-        (info.pbsi_pid == pid as u32
-            && info.pbsi_uid == info.pbsi_ruid
-            && info.pbsi_uid == info.pbsi_svuid)
-            .then_some(info.pbsi_uid)
+        let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: path is writable storage of the supplied size, not retained.
+        let size = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        if size <= 0 {
+            return None;
+        }
+        let end = path.iter().position(|byte| *byte == 0)?;
+        use std::os::unix::ffi::OsStrExt;
+        let executable = std::fs::File::open(std::ffi::OsStr::from_bytes(&path[..end])).ok()?;
+        if !darwin_on_sealed_system_volume(&executable)?
+            || !darwin_platform_signature(darwin_signing_status(pid)?)
+            || darwin_effective_uid(pid)? != before
+        {
+            return None;
+        }
+        Some(before)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = pid;
         None
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn linux_status_uid(status: &str) -> Option<u32> {
-    let mut records = status.lines().filter_map(|line| line.strip_prefix("Uid:"));
-    let record = records.next()?;
-    if records.next().is_some() {
+#[cfg(any(target_os = "macos", test))]
+fn darwin_platform_signature(flags: u32) -> bool {
+    // XNU osfmk/kern/cs_blobs.h. CS_PLATFORM_PATH alone is deliberately
+    // insufficient; ad-hoc or debugged code cannot earn this exception.
+    const CS_VALID: u32 = 0x0000_0001;
+    const CS_PLATFORM_BINARY: u32 = 0x0400_0000;
+    const CS_SIGNED: u32 = 0x2000_0000;
+    const UNTRUSTED: u32 = 0x0000_0002 | 0x0000_0020 | 0x1000_0000;
+    let required = CS_VALID | CS_PLATFORM_BINARY | CS_SIGNED;
+    flags & required == required && flags & UNTRUSTED == 0
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_sealed_root_volume(flags: u32, valid: u32, capabilities: u32) -> bool {
+    // XNU bsd/sys/{mount,attr}.h: read-only root filesystem and a valid seal.
+    const REQUIRED_MOUNT: u32 = 0x0000_0001 | 0x0000_4000;
+    const SEALED: u32 = 0x0200_0000;
+    flags & REQUIRED_MOUNT == REQUIRED_MOUNT && valid & SEALED != 0 && capabilities & SEALED != 0
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_signing_status(pid: i32) -> Option<u32> {
+    unsafe extern "C" {
+        fn csops(
+            pid: libc::pid_t,
+            ops: libc::c_uint,
+            buffer: *mut libc::c_void,
+            size: usize,
+        ) -> libc::c_int;
+    }
+    const CS_OPS_STATUS: u32 = 0;
+    let mut flags = 0u32;
+    // SAFETY: CS_OPS_STATUS writes one u32 to aligned, live storage and
+    // retains no pointer. A denied/failed query supplies no evidence.
+    let result = unsafe {
+        csops(
+            pid,
+            CS_OPS_STATUS,
+            (&mut flags as *mut u32).cast(),
+            std::mem::size_of::<u32>(),
+        )
+    };
+    (result == 0).then_some(flags)
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_effective_uid(pid: i32) -> Option<u32> {
+    let requested = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+    // SAFETY: aligned writable storage has the exact ABI size; no pointer is retained.
+    let returned = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            requested,
+        )
+    };
+    if returned != requested {
         return None;
     }
-    let mut fields = record.split_whitespace();
-    let uid = fields.next()?.parse::<u32>().ok()?;
-    for _ in 0..3 {
-        if fields.next()?.parse::<u32>().ok()? != uid {
-            return None;
-        }
+    // SAFETY: the exact-size successful read initialised the whole record.
+    let info = unsafe { info.assume_init() };
+    (info.pbsi_pid == pid as u32).then_some(info.pbsi_uid)
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_on_sealed_system_volume(executable: &std::fs::File) -> Option<bool> {
+    use std::os::fd::AsRawFd;
+    let mut volume = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: volume supplies aligned ABI-sized storage for this borrowed fd.
+    if unsafe { libc::fstatfs(executable.as_raw_fd(), volume.as_mut_ptr()) } != 0 {
+        return None;
     }
-    fields.next().is_none().then_some(uid)
+    // SAFETY: fstatfs successfully initialised the record.
+    let volume = unsafe { volume.assume_init() };
+    let required = (libc::MNT_RDONLY | libc::MNT_ROOTFS) as u32;
+    if volume.f_flags & required != required {
+        return Some(false);
+    }
+    // Query the executable's mount point, supplied by fstatfs, rather than
+    // guessing trust from its pathname (which may traverse a Data firmlink).
+    let mut attrs = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_CAPABILITIES,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    #[repr(C)]
+    struct Capabilities {
+        length: u32,
+        capabilities: libc::vol_capabilities_attr_t,
+    }
+    let mut capabilities = Capabilities {
+        length: 0,
+        capabilities: libc::vol_capabilities_attr_t {
+            capabilities: [0; 4],
+            valid: [0; 4],
+        },
+    };
+    // SAFETY: the kernel's mount-point array is NUL-terminated; attrs and
+    // result are aligned ABI-sized storage and no pointers are retained.
+    let result = unsafe {
+        libc::getattrlist(
+            volume.f_mntonname.as_ptr(),
+            (&mut attrs as *mut libc::attrlist).cast(),
+            (&mut capabilities as *mut Capabilities).cast(),
+            std::mem::size_of::<Capabilities>(),
+            0,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    if capabilities.length as usize != std::mem::size_of::<Capabilities>() {
+        return None;
+    }
+    let format = libc::VOL_CAPABILITIES_FORMAT;
+    Some(darwin_sealed_root_volume(
+        volume.f_flags,
+        capabilities.capabilities.valid[format],
+        capabilities.capabilities.capabilities[format],
+    ))
 }
 
 pub(crate) fn signal_process(pid: i32, signal: ProcessSignal) -> io::Result<()> {
@@ -511,22 +608,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uid_observation_requires_complete_matching_credentials() {
-        assert_eq!(
-            linux_status_uid("Name:\twriter\nUid:\t1000\t1000\t1000\t1000\n"),
-            Some(1000)
-        );
-        for status in [
-            "",
-            "Uid:\t1000\t1000\t1000",
-            "Uid:\t1000\t1001\t1000\t1000",
-            "Uid:\t1000\t1000\t0\t1000",
-            "Uid:\t1000\t1000\t1000\t0",
-            "Uid:\t1000\t1000\t1000\t1000\t1000",
-            "Uid:\t1000\t1000\tinvalid\t1000",
-            "Uid:\t1000\t1000\t1000\t1000\nUid:\t1000\t1000\t1000\t1000",
-        ] {
-            assert_eq!(linux_status_uid(status), None, "{status}");
+    fn platform_policy_requires_valid_signed_platform_code() {
+        let required = 0x2000_0000 | 0x0400_0000 | 1;
+        assert!(darwin_platform_signature(required));
+        for missing in [1, 0x0400_0000, 0x2000_0000] {
+            assert!(!darwin_platform_signature(required & !missing));
+        }
+        for untrusted in [2, 0x20, 0x1000_0000] {
+            assert!(!darwin_platform_signature(required | untrusted));
+        }
+        assert!(!darwin_platform_signature(0x0800_0001)); // path is not signing evidence
+    }
+
+    #[test]
+    fn platform_policy_requires_a_valid_seal_on_the_readonly_root_volume() {
+        for flags in [0, 1, 0x4000, 0x4001] {
+            for valid in [0, 0x0200_0000] {
+                for capabilities in [0, 0x0200_0000] {
+                    assert_eq!(
+                        darwin_sealed_root_volume(flags, valid, capabilities),
+                        flags == 0x4001 && valid != 0 && capabilities != 0
+                    );
+                }
+            }
         }
     }
 

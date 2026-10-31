@@ -81,17 +81,19 @@ pub enum CwdObservation {
 pub trait CwdObserver: Send + Sync {
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError>;
 
-    /// Independent credentials; mixed or unreadable credentials stay unknown.
-    fn uid(&self, _pid: i64) -> Option<u32> {
+    /// Effective uid only after kernel signing status and sealed system-volume
+    /// checks establish Apple platform code. Missing evidence returns None.
+    /// This supports a caller's explicit risk policy, not non-occupancy proof.
+    fn sealed_platform_euid(&self, _pid: i64) -> Option<u32> {
         None
     }
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemCwdObserver;
 impl CwdObserver for SystemCwdObserver {
-    fn uid(&self, pid: i64) -> Option<u32> {
+    fn sealed_platform_euid(&self, pid: i64) -> Option<u32> {
         let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
-        crate::sys::pid::uid(pid)
+        crate::sys::pid::sealed_platform_euid(pid)
     }
 
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError> {
@@ -166,5 +168,8 @@ mod tests {
             SystemCwdObserver.cwd(0),
             Err(PidError::Refused { .. })
         ));
+        for pid in [-1, 0, i64::MAX] {
+            assert_eq!(SystemCwdObserver.sealed_platform_euid(pid), None);
+        }
     }
 }

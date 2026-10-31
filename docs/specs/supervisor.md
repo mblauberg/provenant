@@ -702,21 +702,51 @@ optional branch by canonical path under writer custody.
 
 ### Unreadable processes need positive non-occupancy evidence
 
-A live process whose cwd cannot be read remains unplaceable, including a
-foreign-uid process, a root process and a same-user process. Unknown credentials,
-mixed credentials, unsupported queries and other observation failures also
-remain unplaceable. Landing and other callers requiring a complete census keep
-every root that is not positively observed live `Unknown`; a positively placed
-occupant still makes its root `Live`. An unreadable process is never `Gone`.
-The Darwin cwd seam reports absence only after an absence probe proves `ESRCH`;
-the worker observer also accepts a verified process disappearance. A changed
-identity stays unknown.
+A live process whose cwd cannot be read remains unplaceable unless it meets
+the explicit Apple-code policy below. Root (effective uid 0), same-owner and
+non-platform processes remain unplaceable. Missing credentials or signing
+state, unsupported queries, identity races and other failures cannot establish
+the exception. Landing and other callers requiring a complete census keep every
+root that is not positively observed live `Unknown`; a placed occupant makes
+its root `Live`. An unreadable process is never `Gone`. The Darwin cwd seam
+reports absence only after an absence probe proves `ESRCH`; the worker observer
+also accepts a verified process disappearance. Ordinary manual removal uses
+writer custody without requiring a complete census, but still refuses a
+positively placed occupant.
 
-The implemented non-occupancy rule uses a cwd observed outside the canonical
-root, with the process identity checked before and after the observation.
-That places the process at the observation time. Caller and verified ancestors
-through its session leader retain their separate landing exclusion. No
-credential or directory-permission shortcut excludes an unreadable process.
+**Accepted-risk policy for sealed Apple code.** An unreadable process may be
+ignored for a root only when its effective uid is nonzero and differs from
+that root's owner, and the OS observer establishes all of the following:
+
+- Kernel `csops(CS_OPS_STATUS)` reports `CS_VALID`, `CS_SIGNED` and
+  `CS_PLATFORM_BINARY`, without ad-hoc, invalid-allowed or debugged flags.
+  A pathname or `CS_PLATFORM_PATH` alone never establishes platform code.
+- The executable reported by `proc_pidpath` is opened and `fstatfs` identifies
+  its volume as the read-only root filesystem. The volume capability query
+  reports `VOL_CAP_FMT_SEALED` in both the valid and capabilities masks.
+- Signing status and effective uid are rechecked after the volume query, and
+  process identity matches the census before and after these observations.
+  An undescribed census PID lacks this identity evidence and stays unknown.
+
+This is policy, not proof of non-occupancy. The accepted assumption is that
+sealed, SIP-protected Apple code does not enter user worktrees. A compromised
+Apple daemon, inherited or passed directory access, later cwd/credential/exec
+changes, or a weakened host security policy can violate that assumption. The
+census does not inspect all directory descriptors or provide an atomic process
+snapshot. WindowServer's effective uid 88 qualifies even when its real and saved
+uids are 0; those two uids do not decide the exception. Every failed evidence
+query leaves the process unplaceable.
+
+Readable cwd placement checks process identity before and after observation,
+then compares each root's device and inode with those of the cwd's ancestors.
+This handles both `/Users/...` and `/System/Volumes/Data/Users/...` spellings
+of a Data-volume directory, including deleted descendants placed by their
+nearest existing ancestor. Failed identity lookup stays unknown. A cwd outside
+the root places only the cwd at observation time: it is not full non-occupancy
+evidence, because a held directory fd can still refer inside the root and allow
+`fchdir` back. Caller and verified ancestors through its session leader retain
+their separate landing exclusion. No UID or directory-permission shortcut
+alone excludes an unreadable process.
 
 **Why current permissions cannot prove absence.** Consider two processes with
 the same current real, effective and saved foreign nonroot UIDs. One has always
@@ -737,26 +767,28 @@ with complete current ACL and group information, cannot distinguish them.
 - ACL grants can permit search despite mode bits. An unobserved ACL cannot be
   assumed empty. Even a complete current access denial does not revoke a cwd
   acquired earlier, so neither ACL nor mode inspection supplies this proof.
-- Root can bypass discretionary search restrictions and must always remain
-  unplaceable when its cwd is unreadable. A foreign UID, including WindowServer's
-  service UID, conveys no exception to this rule.
+- Root can bypass discretionary search restrictions and remains unplaceable
+  when its cwd is unreadable. A foreign UID, including WindowServer's service
+  UID, supplies no non-occupancy proof; the exception above rests on Apple code.
 
 These conclusions follow from Apple's [directory-change implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c),
 [credential transitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_prot.c)
 and [process-query policy](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c).
 The latter permits short credential queries while restricting foreign cwd and
-descriptor queries. No complete unprivileged alternative proof is implemented.
-In particular, cleanup with an unreadable WindowServer remains refused. Enabling
-it needs independent evidence of actual non-occupancy; the UID/ancestor-mode
-proposal in #2458 is insufficient. The native test records this refusal and
-skips with a reason when an unreadable foreign WindowServer is unavailable;
-it does not claim the requested cleanup-success criterion has been met.
+descriptor queries. The policy also uses XNU's [code-signing flags](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/cs_blobs.h)
+and [sealed-volume capability](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/attr.h).
+The native WindowServer test asserts successful merged-clean land cleanup and
+branch deletion with the real unreadable daemon running. Missing native evidence
+is a failure under `PROVENANT_CONFINEMENT_REQUIRED=1`; optional local runs report
+a skip reason. CI prints the marker emitted after the cleanup assertions.
 
-- Test: `crates/confinement/src/worktrees.rs::denied_process_credentials_and_permissions_never_prove_non_occupancy`;
-  `::worker_census_detail_reports_foreign_denial_before_other_unplaceable_processes`;
+- Test: `crates/confinement/src/worktrees.rs::unreadable_process_policy_requires_sealed_platform_code_and_a_foreign_nonroot_euid`;
+  `::unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns`;
+  `::native_worker_census_places_both_data_firmlink_spellings`;
+  `::worker_census_detail_keeps_the_first_unplaceable_process`;
   `::only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree`;
   `::unreadable_occupant_cwd_keeps_the_tree_for_removal`;
-  `::native_unreadable_windowserver_keeps_a_merged_clean_tree`
+  `::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree`
 - Owner: `crates/confinement/src/worktrees.rs`, `crates/os/src/sys/pid.rs`
 
 ### Pruning and rollback need proof

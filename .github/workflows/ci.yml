@@ -289,7 +289,9 @@ jobs:
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
           PROVENANT_POSTGRES_REQUIRED: "1"
-        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os)'
+        run: |
+          cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E '(package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os)) & !test(=worktrees::lifecycle_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree)'
+          cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --success-output immediate -E 'package(=provenant-confinement) & test(=worktrees::lifecycle_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree)'
       - name: Run macOS Cargo seed tests
         working-directory: tools/front-door
         run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-run) & test(cargo_seed)'

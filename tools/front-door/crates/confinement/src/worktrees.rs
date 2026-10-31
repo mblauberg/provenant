@@ -35,6 +35,7 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -605,6 +606,20 @@ fn observe_worker_holders(
         }
         match observe_same_process(observer, cwd_observer, fact) {
             NativeCwd::Gone => {}
+            NativeCwd::PolicyExcluded(euid) => {
+                // Accepted risk for sealed Apple code, applied per root owner.
+                // Root and same-owner processes never earn this exception.
+                for (root, state) in &mut states {
+                    let excluded = std::fs::metadata(root)
+                        .is_ok_and(|metadata| euid != 0 && euid != metadata.uid());
+                    if !excluded && *state != WorkerState::Live {
+                        *state = WorkerState::Unknown;
+                        details.entry(root.clone()).or_insert_with(|| {
+                            format!("process {}: cwd unreadable", fact.identity.pid)
+                        });
+                    }
+                }
+            }
             NativeCwd::Unknown(category) => record_unknown_all(
                 &mut states,
                 &mut details,
@@ -619,14 +634,22 @@ fn observe_worker_holders(
                     );
                     continue;
                 };
-                record_live_path(&mut states, &canonical);
-                for root in roots.iter().filter(|root| canonical.starts_with(root)) {
-                    holders
-                        .entry(root.clone())
-                        .or_insert_with(|| ObservedProcess {
-                            pid: fact.identity.pid,
-                            command: fact.command.clone(),
+                let placed = record_live_path(&mut states, &canonical);
+                for (root, state) in &states {
+                    if *state == WorkerState::Unknown {
+                        details.entry(root.clone()).or_insert_with(|| {
+                            format!(
+                                "process {}: cwd or root identity unreadable",
+                                fact.identity.pid
+                            )
                         });
+                    }
+                }
+                for root in placed {
+                    holders.entry(root).or_insert_with(|| ObservedProcess {
+                        pid: fact.identity.pid,
+                        command: fact.command.clone(),
+                    });
                 }
             }
         }
@@ -664,6 +687,7 @@ fn canonical_cwd(path: &Path) -> Option<PathBuf> {
 enum NativeCwd {
     Path(PathBuf),
     Gone,
+    PolicyExcluded(u32),
     Unknown(String),
 }
 
@@ -696,9 +720,11 @@ fn observe_same_process(
     let observed = match cwd_observer.cwd(expected.identity.pid) {
         Ok(CwdObservation::Path(path)) => NativeCwd::Path(path),
         Ok(CwdObservation::Gone) => return NativeCwd::Gone,
-        Ok(CwdObservation::PermissionDenied) => NativeCwd::Unknown("cwd unreadable".into()),
-        Ok(CwdObservation::Unsupported) => return NativeCwd::Unknown("cwd unsupported".into()),
-        Err(_) => return NativeCwd::Unknown("cwd unreadable".into()),
+        Ok(CwdObservation::PermissionDenied) | Err(_) => cwd_observer
+            .sealed_platform_euid(expected.identity.pid)
+            .map(NativeCwd::PolicyExcluded)
+            .unwrap_or_else(|| NativeCwd::Unknown("cwd unreadable".into())),
+        Ok(CwdObservation::Unsupported) => NativeCwd::Unknown("cwd unsupported".into()),
     };
     match process_observer.observe(expected.identity.pid) {
         ProcessObservation::Present(after) if after.identity == expected.identity => observed,
@@ -708,12 +734,39 @@ fn observe_same_process(
     }
 }
 
-fn record_live_path(states: &mut BTreeMap<PathBuf, WorkerState>, cwd: &Path) {
+/// Place by directory identity, including the nearest extant ancestor of a
+/// deleted cwd. Darwin's Data firmlink can give one directory two canonical
+/// path spellings; textual prefix comparisons cannot establish occupancy.
+fn record_live_path(states: &mut BTreeMap<PathBuf, WorkerState>, cwd: &Path) -> Vec<PathBuf> {
+    let ancestors = cwd.ancestors().try_fold(BTreeSet::new(), |mut ids, path| {
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_dir() => {
+                ids.insert((metadata.dev(), metadata.ino()));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return None,
+        }
+        Some(ids)
+    });
+    let mut placed = Vec::new();
     for (root, state) in states {
-        if cwd == root.as_path() || cwd.starts_with(root) {
-            *state = WorkerState::Live;
+        let inside = ancestors.as_ref().and_then(|ids| {
+            let metadata = std::fs::metadata(root).ok()?;
+            metadata
+                .is_dir()
+                .then(|| ids.contains(&(metadata.dev(), metadata.ino())))
+        });
+        match inside {
+            Some(true) => {
+                *state = WorkerState::Live;
+                placed.push(root.clone());
+            }
+            Some(false) => {}
+            None if *state != WorkerState::Live => *state = WorkerState::Unknown,
+            None => {}
         }
     }
+    placed
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3112,7 +3165,8 @@ mod lifecycle_tests {
     #[cfg(target_os = "macos")]
     #[test]
     #[allow(clippy::print_stderr)] // Native fixture skips must explain missing host evidence.
-    fn native_unreadable_windowserver_keeps_a_merged_clean_tree() -> Result<(), Box<dyn Error>> {
+    fn native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree()
+    -> Result<(), Box<dyn Error>> {
         use provenant_supervisor::census::{Census, CensusError};
 
         // Select the real bystander to isolate its effect on cleanup, but
@@ -3143,32 +3197,35 @@ mod lifecycle_tests {
                 true
             }
         }
+        let unavailable = |reason: String| -> Result<(), Box<dyn Error>> {
+            if std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref() == Ok("1") {
+                Err(reason.into())
+            } else {
+                eprintln!("SKIP: {reason}");
+                Ok(())
+            }
+        };
         let census = match SystemProcessObserver.census(65_536) {
             Ok(census) => census,
             Err(error) => {
-                eprintln!("SKIP: native process census unavailable: {error}");
-                return Ok(());
+                return unavailable(format!("native process census unavailable: {error}"));
             }
         };
         let Some(windowserver) = census
             .facts()
             .find(|fact| fact.command.as_deref() == Some("WindowServer") && !fact.zombie)
         else {
-            eprintln!("SKIP: live WindowServer not visible in native process census");
-            return Ok(());
+            return unavailable("live WindowServer not visible in native process census".into());
         };
         let pid = windowserver.identity.pid;
-        let Some(uid) = SystemCwdObserver.uid(pid) else {
-            eprintln!("SKIP: WindowServer credentials unavailable or mixed");
-            return Ok(());
-        };
-        if uid == 0 || uid == provenant_os::fs::effective_uid() {
-            eprintln!("SKIP: WindowServer is not a foreign nonroot process");
-            return Ok(());
-        }
-        if SystemCwdObserver.cwd(pid)? != CwdObservation::PermissionDenied {
-            eprintln!("SKIP: WindowServer cwd is not unreadable for this caller");
-            return Ok(());
+        match SystemCwdObserver.cwd(pid) {
+            Ok(CwdObservation::PermissionDenied) => {}
+            Ok(observation) => {
+                return unavailable(format!(
+                    "WindowServer cwd is not unreadable: {observation:?}"
+                ));
+            }
+            Err(error) => return unavailable(format!("WindowServer cwd query failed: {error}")),
         }
         let ProcessObservation::Present(current) =
             SystemProcessObserver.observe(i64::from(std::process::id()))
@@ -3211,13 +3268,19 @@ mod lifecycle_tests {
             },
             &cancel(),
         );
+        assert!(result.is_ok(), "WindowServer {pid}: {result:?}");
+        assert!(!created.path.exists());
+        assert!(!branch_exists(&fixture, "landed"));
         assert!(
-            matches!(&result, Err(WorktreeError::IncompleteCensus { detail })
-                if detail == &format!("process {pid}: cwd unreadable")),
-            "{result:?}"
+            matches!(
+                observe_same_process(&SystemProcessObserver, &SystemCwdObserver, windowserver),
+                NativeCwd::PolicyExcluded(euid) if euid != 0 && euid != provenant_os::fs::effective_uid()
+            ),
+            "WindowServer must still be unreadable, running sealed platform code and foreign"
         );
-        assert!(created.path.exists());
-        assert!(branch_exists(&fixture, "landed"));
+        eprintln!(
+            "ASSERTED: unreadable WindowServer {pid} allowed merged-clean land cleanup and branch deletion"
+        );
         Ok(())
     }
 
@@ -4491,7 +4554,7 @@ mod lifecycle_tests {
         census: provenant_supervisor::census::Census,
         cwds: BTreeMap<i64, CwdObservation>,
         current: ProcessFact,
-        uids: BTreeMap<i64, u32>,
+        platform_euids: BTreeMap<i64, u32>,
     }
     impl ProcessObserver for InjectedCensus {
         fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
@@ -4512,8 +4575,8 @@ mod lifecycle_tests {
         }
     }
     impl CwdObserver for InjectedCensus {
-        fn uid(&self, pid: i64) -> Option<u32> {
-            self.uids.get(&pid).copied()
+        fn sealed_platform_euid(&self, pid: i64) -> Option<u32> {
+            self.platform_euids.get(&pid).copied()
         }
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             Ok(self.cwds.get(&pid).cloned().unwrap_or(CwdObservation::Gone))
@@ -4531,9 +4594,170 @@ mod lifecycle_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn worker_census_detail_reports_foreign_denial_before_other_unplaceable_processes()
+    fn native_worker_census_places_both_data_firmlink_spellings() -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, ProcessIdentity};
+        let fixture = Fixture::new()?;
+        let resolved = canonicalize(&fixture.root)?;
+        let root = resolved
+            .strip_prefix("/System/Volumes/Data")
+            .unwrap_or(&resolved);
+        let data = Path::new("/System/Volumes/Data").join(root.strip_prefix("/")?);
+        assert_ne!(root, data);
+        let fact = |pid| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: Some("occupant".into()),
+        };
+        let mut observer = InjectedCensus {
+            census: Census::from_observations([fact(100), fact(200)], [], [], true, false, 32)?,
+            cwds: BTreeMap::new(),
+            current: fact(100),
+            platform_euids: BTreeMap::new(),
+        };
+        let sibling = root.with_file_name("outside");
+        fs::create_dir(&sibling)?;
+        fs::create_dir(root.join("child"))?;
+        for (registered, reported) in [
+            (root.to_path_buf(), data.clone()),
+            (data, root.to_path_buf()),
+        ] {
+            for cwd in [
+                reported.clone(),
+                reported.join("child"),
+                reported.join("deleted/descendant"),
+                sibling.clone(),
+            ] {
+                observer.cwds.insert(200, CwdObservation::Path(cwd.clone()));
+                let (states, holders, _) = observe_worker_holders(
+                    std::slice::from_ref(&registered),
+                    &observer,
+                    &observer,
+                    &observer.current,
+                    false,
+                );
+                let inside = cwd != sibling;
+                assert_eq!(
+                    states[&registered],
+                    if inside {
+                        WorkerState::Live
+                    } else {
+                        WorkerState::Free
+                    },
+                    "root={registered:?}, cwd={cwd:?}"
+                );
+                assert_eq!(
+                    holders.get(&registered).map(|holder| holder.pid),
+                    inside.then_some(200)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns()
     -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let fixture = Fixture::new()?;
+        let root = canonicalize(&fixture.root)?;
+        let fact = |pid| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let observer = InjectedCensus {
+            census: Census::from_observations(
+                [fact(100), fact(200), fact(300)],
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?,
+            cwds: BTreeMap::from([
+                (200, CwdObservation::PermissionDenied),
+                (300, CwdObservation::Unsupported),
+            ]),
+            current: fact(100),
+            platform_euids: BTreeMap::from([(
+                200,
+                provenant_os::fs::effective_uid().wrapping_add(1),
+            )]),
+        };
+        assert_eq!(
+            observer.observe_roots(std::slice::from_ref(&root))[&root],
+            WorkerState::Unknown
+        );
+        struct Racing<'a> {
+            observer: &'a InjectedCensus,
+            calls: AtomicUsize,
+            race_at: usize,
+        }
+        impl ProcessObserver for Racing<'_> {
+            fn boot_identity(&self) -> Result<String, CensusError> {
+                self.observer.boot_identity()
+            }
+            fn census(&self, limit: usize) -> Result<Census, CensusError> {
+                self.observer.census(limit)
+            }
+            fn observe(&self, pid: i64) -> ProcessObservation {
+                let mut result = self.observer.observe(pid);
+                if self.calls.fetch_add(1, Ordering::SeqCst) == self.race_at
+                    && let ProcessObservation::Present(fact) = &mut result
+                {
+                    fact.identity.native_start += 1;
+                }
+                result
+            }
+        }
+        for race_at in [0, 1] {
+            let processes = Racing {
+                observer: &observer,
+                calls: AtomicUsize::new(0),
+                race_at,
+            };
+            assert!(
+                matches!(observe_same_process(&processes, &observer, &fact(200)), NativeCwd::Unknown(reason) if reason == "identity race")
+            );
+        }
+        let mut observer = observer;
+        observer
+            .cwds
+            .insert(300, CwdObservation::Path(root.clone()));
+        assert_eq!(
+            observer.observe_roots(std::slice::from_ref(&root))[&root],
+            WorkerState::Live
+        );
+        // Owner/identity lookup failure never licenses exclusion or placement.
+        let missing = root.join("missing-root");
+        assert_eq!(
+            observer.observe_roots(std::slice::from_ref(&missing))[&missing],
+            WorkerState::Unknown
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn worker_census_detail_keeps_the_first_unplaceable_process() -> Result<(), Box<dyn Error>> {
         use provenant_supervisor::census::{Census, ProcessIdentity};
         let fixture = Fixture::new()?;
         let root = canonicalize(&fixture.root)?;
@@ -4565,7 +4789,7 @@ mod lifecycle_tests {
                 (200, CwdObservation::Unsupported),
             ]),
             current: fact(100),
-            uids: BTreeMap::from([(1, provenant_os::fs::effective_uid().wrapping_add(1))]),
+            platform_euids: BTreeMap::new(),
         };
         let (states, details) = observe_worker_roots(
             std::slice::from_ref(&root),
@@ -4601,7 +4825,7 @@ mod lifecycle_tests {
             census: Census::from_observations([current.clone()], [], [], false, false, 32)?,
             cwds: BTreeMap::new(),
             current,
-            uids: BTreeMap::new(),
+            platform_euids: BTreeMap::new(),
         };
         let (states, details) = observe_worker_roots(
             std::slice::from_ref(&root),
@@ -4616,7 +4840,7 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn denied_process_credentials_and_permissions_never_prove_non_occupancy()
+    fn unreadable_process_policy_requires_sealed_platform_code_and_a_foreign_nonroot_euid()
     -> Result<(), Box<dyn Error>> {
         use provenant_supervisor::census::{Census, ProcessIdentity};
         use std::os::unix::fs::PermissionsExt;
@@ -4657,20 +4881,23 @@ mod lifecycle_tests {
                 )?,
                 cwds: BTreeMap::from([(200, CwdObservation::PermissionDenied)]),
                 current: fact(100),
-                uids: BTreeMap::new(),
+                platform_euids: BTreeMap::new(),
             };
-            // Even equal real/effective/saved UIDs describe only current
-            // credentials, not credentials when the process entered the tree.
-            for uid in [None, Some(owner), Some(0), Some(owner + 1)] {
-                observer.uids = uid
+            for euid in [None, Some(owner), Some(0), Some(owner.wrapping_add(1))] {
+                observer.platform_euids = euid
                     .map(|uid| BTreeMap::from([(200, uid)]))
                     .unwrap_or_default();
                 for mode in [0o700, 0o755, 0o710, 0o701, 0o775, 0o757] {
                     fs::set_permissions(&root, fs::Permissions::from_mode(mode))?;
+                    let excluded = !denied_fact && euid.is_some_and(|uid| uid != 0 && uid != owner);
                     assert_eq!(
                         observer.observe_roots(std::slice::from_ref(&root))[&root],
-                        WorkerState::Unknown,
-                        "denied_fact={denied_fact}, uid={uid:?}, mode={mode:o}"
+                        if excluded {
+                            WorkerState::Free
+                        } else {
+                            WorkerState::Unknown
+                        },
+                        "denied_fact={denied_fact}, sealed platform euid={euid:?}, mode={mode:o}"
                     );
                 }
             }
@@ -4711,7 +4938,7 @@ mod lifecycle_tests {
             )?,
             cwds: BTreeMap::from([(200, CwdObservation::PermissionDenied)]),
             current,
-            uids: BTreeMap::from([(200, provenant_os::fs::effective_uid())]),
+            platform_euids: BTreeMap::new(),
         };
         let created = create(
             &test_context.context(),
@@ -4790,17 +5017,7 @@ mod lifecycle_tests {
                 census: census(unknown)?,
                 cwds,
                 current: fact(100),
-                uids: BTreeMap::from([
-                    (
-                        300,
-                        if provenant_os::fs::effective_uid() == 0 {
-                            1
-                        } else {
-                            0
-                        },
-                    ),
-                    (400, provenant_os::fs::effective_uid() + 1),
-                ]),
+                platform_euids: BTreeMap::new(),
             })
         };
         let remove_named = |workers: &InjectedCensus, name: &str| {
@@ -4913,7 +5130,9 @@ mod lifecycle_tests {
                     .map(|root| (root, WorkerState::Free))
                     .collect();
                 match observe_same_process(&SystemProcessObserver, &SystemCwdObserver, &self.0) {
-                    NativeCwd::Path(path) => record_live_path(&mut states, &path),
+                    NativeCwd::Path(path) => {
+                        record_live_path(&mut states, &path);
+                    }
                     _ => {
                         for state in states.values_mut() {
                             *state = WorkerState::Unknown;
@@ -5933,25 +6152,23 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn nested_worker_protects_all_containing_worktrees() {
+    fn nested_worker_protects_all_containing_worktrees() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let outer = fixture.root.join("outer");
+        let nested = outer.join("nested");
+        let sibling = fixture.root.join("sibling");
+        fs::create_dir_all(nested.join("src"))?;
+        fs::create_dir(&sibling)?;
         let mut states = BTreeMap::from([
-            (PathBuf::from("/project/outer"), WorkerState::Free),
-            (PathBuf::from("/project/outer/nested"), WorkerState::Free),
-            (PathBuf::from("/project/sibling"), WorkerState::Free),
+            (outer.clone(), WorkerState::Free),
+            (nested.clone(), WorkerState::Free),
+            (sibling.clone(), WorkerState::Free),
         ]);
-        record_live_path(&mut states, Path::new("/project/outer/nested/src"));
-        assert_eq!(
-            states.get(Path::new("/project/outer")),
-            Some(&WorkerState::Live)
-        );
-        assert_eq!(
-            states.get(Path::new("/project/outer/nested")),
-            Some(&WorkerState::Live)
-        );
-        assert_eq!(
-            states.get(Path::new("/project/sibling")),
-            Some(&WorkerState::Free)
-        );
+        record_live_path(&mut states, &nested.join("src"));
+        assert_eq!(states[&outer], WorkerState::Live);
+        assert_eq!(states[&nested], WorkerState::Live);
+        assert_eq!(states[&sibling], WorkerState::Free);
+        Ok(())
     }
 
     #[test]
