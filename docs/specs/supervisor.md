@@ -274,6 +274,20 @@ The explicit database capability accepts that exposure; it does not create a
 lane-private SysV namespace. Other users' objects remain protected under normal
 restrictive permissions. Profiles without the capability cannot mutate or
 remove the host's objects, including those owned by the same user.
+However, macOS does not sandbox-check the SysV creation path. Even a lane
+without database authority can allocate a segment or semaphore set and then
+be refused permission to remove its own allocation. Repeated failed database
+starts can exhaust host-global IPC limits such as `kern.sysv.shmmni`.
+Capability-off therefore does not guarantee freedom from IPC resource exhaustion.
+
+Every SysV-touching native test records host `ipcs -m -s` inventories before
+and after. Trusted test code journals exact newly created IDs; a host-side
+guard removes only those IDs and asserts that none remain. PostgreSQL tests
+audit allocations across initdb's subprocesses, including failed starts.
+Cleanup never deletes an unowned inventory difference or a pre-existing object.
+A general lane-end sweep is tracked in #2454 and needs a separate ownership design: semaphore metadata
+does not expose a creator PID, and exited-child ancestry cannot be reconstructed
+reliably. It must not infer ownership from a UID or a before/after global diff.
 File confinement still restricts database files to existing writable roots,
 and executable, Mach and network rules retain their existing limits. Database
 clients need the existing local or open network policy for loopback access.
@@ -313,8 +327,9 @@ must remain denied or invisible to libproc.
 
 The native A/B probe confirms that unscoped libproc RSS queries succeed, the
 explicit deny returns `EPERM`, and the scoped PIDINFO and wildcard rules permit
-own-process queries while refusing the outside host. It does not claim separate
-peer-sandbox process-info coverage.
+own-process queries while refusing the outside host. The identical-profile
+peer fixture also requires `proc_pidinfo` of a separately launched live sandbox
+to fail with `EPERM`, while its own RSS query succeeds.
 
 Stock `ps` remains a separate unresolved restriction: `execve("/bin/ps", ... )`
 returns `EPERM` before any process-info lookup, in both access modes. On Darwin

@@ -1,7 +1,36 @@
-//! Native comparison of intra-lane signalling and the host-process boundary.
+//! Native signalling and process-info boundaries, including identical-profile peers.
 #![cfg(target_os = "macos")]
 
 use super::*;
+
+const PEER_PROCESS_INFO_PROBE: &str = r#"
+#include <errno.h>
+#include <libproc.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    if (argc != 2) return 90;
+    struct proc_taskinfo own;
+    errno = 0;
+    int count = proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &own, sizeof(own));
+    if (count != sizeof(own) || own.pti_resident_size == 0) {
+        fprintf(stderr, "own PROC_PIDTASKINFO: count=%d errno=%d\n", count, errno);
+        return 1;
+    }
+    struct proc_taskinfo peer;
+    errno = 0;
+    count = proc_pidinfo((pid_t)strtol(argv[1], NULL, 10), PROC_PIDTASKINFO,
+        0, &peer, sizeof(peer));
+    int error = errno;
+    if (count != 0 || error != EPERM) {
+        fprintf(stderr, "peer PROC_PIDTASKINFO: count=%d errno=%d\n", count, error);
+        return 1;
+    }
+    return 0;
+}
+"#;
 
 #[test]
 // Native process readiness is an explicit real-time boundary, not simulated time.
@@ -26,6 +55,25 @@ fn same_sandbox_signals_reach_parents_but_cannot_reach_host_processes()
     }
     let temp = crate::test_support::tempdir()?;
     let scratch = provenant_os::fs::canonicalize(temp.path())?;
+    let input = scratch.join("peer-process-info.c");
+    let helper = scratch.join("peer-process-info");
+    std::fs::write(&input, PEER_PROCESS_INFO_PROBE)?;
+    let compile = [
+        OsString::from("/usr/bin/cc"),
+        input.as_os_str().to_owned(),
+        "-o".into(),
+        helper.as_os_str().to_owned(),
+    ];
+    let compiled = executor.execute(ExecOptions::new(
+        &compile,
+        &scratch,
+        Duration::from_secs(30),
+    ))?;
+    assert!(
+        successful_probe(&compiled),
+        "compile peer libproc probe: {}",
+        String::from_utf8_lossy(&compiled.stderr.bytes)
+    );
     let (mut plan, _) = write_grants_fixture();
     plan.read_only = None;
     plan.private_state = None;
@@ -35,6 +83,10 @@ fn same_sandbox_signals_reach_parents_but_cannot_reach_host_processes()
     let profile = ProviderProfile {
         spec: ProviderProfileSpec {
             allow_process_fork: true,
+            process_executables: vec![PathGrant {
+                path: helper.clone(),
+                scope: PathScope::Exact,
+            }],
             tool_exec_roots: vec![PathGrant {
                 path: "/bin".into(),
                 scope: PathScope::Subtree,
@@ -175,6 +227,26 @@ test "$notified" = yes
                 "writer={writer}: byte-identical independent sandbox signal: {:?}; {}",
                 denied_peer.termination,
                 String::from_utf8_lossy(&denied_peer.stderr.bytes)
+            );
+            let argv = [
+                OsString::from(SANDBOX_EXEC),
+                "-p".into(),
+                source.clone().into(),
+                helper.as_os_str().to_owned(),
+                peer_pid.into(),
+            ];
+            let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
+            options.env = Some(&env);
+            options.cancel = Some(&cancel);
+            options.process_group = true;
+            options.stdout = StreamPolicy::Capture { limit: 1024 };
+            options.stderr = StreamPolicy::Capture { limit: 1024 };
+            let denied_peer_info = executor.execute(options)?;
+            assert!(
+                successful_probe(&denied_peer_info),
+                "writer={writer}: byte-identical peer proc_pidinfo must fail with EPERM: {:?}; {}",
+                denied_peer_info.termination,
+                String::from_utf8_lossy(&denied_peer_info.stderr.bytes)
             );
             peer_stop.cancel();
             let _expected_cancel = peer.join().expect("peer sandbox thread");

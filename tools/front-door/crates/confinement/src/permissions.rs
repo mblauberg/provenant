@@ -93,6 +93,7 @@ const DYLD_BOOTSTRAP_RULES: &str = r#"
 /// secret-root denials still override the metadata grant.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
+(deny sysctl-read (sysctl-name-prefix "kern.procargs") (sysctl-name-prefix "kern.proc."))
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
 (allow signal (target same-sandbox))
@@ -2434,6 +2435,8 @@ mod tests {
     mod ipc;
     mod process_info;
     mod signals;
+    mod sysctl;
+    mod sysv_audit;
 
     #[test]
     fn git_control_link_refusal_names_the_file_and_the_recovery() {
@@ -2855,6 +2858,7 @@ mod tests {
                 .filter(|line| line.starts_with("(allow signal"))
                 .collect();
             assert_eq!(signals, ["(allow signal (target same-sandbox))"]);
+            assert!(rendered.contains("(deny sysctl-read (sysctl-name-prefix \"kern.procargs\") (sysctl-name-prefix \"kern.proc.\"))"));
             assert!(
                 rendered
                     .contains("(deny process-info*)\n(allow process-info* (target same-sandbox))")
@@ -4456,14 +4460,14 @@ mod tests {
                 outcome.termination,
                 String::from_utf8_lossy(&outcome.stderr.bytes)
             );
-            let outcome = run_in(
-                sbpl,
-                &executables[6],
-                &[
-                    Path::new("-MIPC::SysV=IPC_PRIVATE,IPC_CREAT,IPC_RMID"),
-                    Path::new("-e"),
-                    Path::new(
-                        r#"my ($shm, $sem);
+            let mut audit = sysv_audit::SysvAudit::new(
+                &executor,
+                &plan.scratch.path.join(format!("sysv-{name}")),
+            )?;
+            let script = format!(
+                "{}{}",
+                sysv_audit::PERL_JOURNAL,
+                r#"my ($shm, $sem);
 END {
     my @errors;
     push @errors, "shmctl: $!\n" if defined $shm && !shmctl($shm, IPC_RMID, 0);
@@ -4472,16 +4476,27 @@ END {
 }
 $shm = shmget(IPC_PRIVATE, 56, IPC_CREAT | 0600);
 die "shmget: $!\n" unless defined $shm;
+own("m", $shm);
 shmwrite($shm, "ok", 0, 2) or die "shmwrite: $!\n";
 shmread($shm, my $value, 0, 2) or die "shmread: $!\n";
 die "shared memory contents\n" unless $value eq "ok";
 $sem = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
 die "semget: $!\n" unless defined $sem;
+own("s", $sem);
 semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
-"#,
-                    ),
+"#
+            );
+            let outcome = run_in(
+                sbpl,
+                &executables[6],
+                &[
+                    Path::new("-MIPC::SysV=IPC_PRIVATE,IPC_CREAT,IPC_RMID"),
+                    Path::new("-e"),
+                    Path::new(&script),
+                    audit.journal(),
                 ],
             );
+            audit.finish()?;
             assert!(
                 successful_probe(&outcome),
                 "{name} SysV IPC: {:?}; {}",

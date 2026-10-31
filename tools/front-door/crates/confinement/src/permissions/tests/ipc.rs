@@ -1,6 +1,7 @@
 //! PostgreSQL and foreign-object checks for explicit database IPC authority.
 #![cfg(target_os = "macos")]
 
+use super::sysv_audit::{PERL_JOURNAL, SysvAudit};
 use super::*;
 
 fn native_available(executor: &SystemExecutor) -> Result<bool, Box<dyn std::error::Error>> {
@@ -85,6 +86,7 @@ fn database_profile(
                 PathBuf::from("/bin"),
                 PathBuf::from("/usr/bin"),
                 bin.to_owned(),
+                root.join("scratch/audit-bin"),
             ]
             .map(|path| PathGrant {
                 path,
@@ -128,17 +130,50 @@ fn postgres_case(database: bool) -> Result<(), Box<dyn std::error::Error>> {
         let temp = crate::test_support::tempdir()?;
         let root = provenant_os::fs::canonicalize(temp.path())?;
         let source = database_profile(&root, &bin, writer, database)?;
+        let mut audit = SysvAudit::new(&executor, &root.join("scratch"))?;
+        let library = audit.interposer()?;
+        // initdb finds postgres beside itself and invokes it through a platform
+        // shell, which strips DYLD_* variables. An unchanged initdb copy plus
+        // sibling wrapper restores auditing immediately before real postgres.
+        let audit_bin = root.join("scratch/audit-bin");
+        std::fs::create_dir_all(&audit_bin)?;
+        let initdb_copy = audit_bin.join("initdb");
+        std::fs::copy(bin.join("initdb"), &initdb_copy)?;
+        assert!(std::fs::read(bin.join("initdb"))? == std::fs::read(&initdb_copy)?);
+        let postgres_wrapper = audit_bin.join("postgres");
+        std::fs::write(
+            &postgres_wrapper,
+            concat!(
+                "#!/bin/sh\n",
+                "export DYLD_INSERT_LIBRARIES=\"$PROVENANT_TEST_IPC_LIBRARY\"\n",
+                "exec \"$PROVENANT_TEST_POSTGRES_REAL\" \"$@\"\n",
+            ),
+        )?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&postgres_wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let argv = [bin.join("pg_config").into_os_string(), "--sharedir".into()];
+        let sharedir = executor.execute(ExecOptions::new(
+            &argv,
+            Path::new("/"),
+            Duration::from_secs(3),
+        ))?;
+        assert!(successful_probe(&sharedir), "pg_config --sharedir");
+        let sharedir = String::from_utf8(sharedir.stdout.bytes)?.trim().to_owned();
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port().to_string();
         drop(listener);
         let initdb = r#"
 set -eu
-"$PGBIN/initdb" -D "$TMPDIR/data" --no-locale --encoding=UTF8 -A trust -N -n -c dynamic_shared_memory_type=mmap
+"$AUDIT_POSTGRES" --version >/dev/null
+grep -q '^p ' "$PROVENANT_TEST_IPC_JOURNAL"
+DYLD_INSERT_LIBRARIES="$PROVENANT_TEST_IPC_LIBRARY" "$AUDIT_INITDB" -L "$PGSHARE" -D "$TMPDIR/data" --no-locale --encoding=UTF8 -A trust -N -n -c dynamic_shared_memory_type=mmap
 "#;
         let lifecycle = r#"
 set -eu
-"$PGBIN/initdb" -D "$TMPDIR/data" --no-locale --encoding=UTF8 -A trust -N -n -c dynamic_shared_memory_type=mmap > "$TMPDIR/initdb.log" 2>&1 || { cat "$TMPDIR/initdb.log" >&2; exit 1; }
-"$PGBIN/postgres" -D "$TMPDIR/data" -h 127.0.0.1 -k '' -p "$PGPORT" -c shared_buffers=8MB -c max_connections=10 -c dynamic_shared_memory_type=mmap > "$TMPDIR/postgres.log" 2>&1 &
+"$AUDIT_POSTGRES" --version >/dev/null
+grep -q '^p ' "$PROVENANT_TEST_IPC_JOURNAL"
+DYLD_INSERT_LIBRARIES="$PROVENANT_TEST_IPC_LIBRARY" "$AUDIT_INITDB" -L "$PGSHARE" -D "$TMPDIR/data" --no-locale --encoding=UTF8 -A trust -N -n -c dynamic_shared_memory_type=mmap > "$TMPDIR/initdb.log" 2>&1 || { cat "$TMPDIR/initdb.log" >&2; exit 1; }
+DYLD_INSERT_LIBRARIES="$PROVENANT_TEST_IPC_LIBRARY" "$PGBIN/postgres" -D "$TMPDIR/data" -h 127.0.0.1 -k '' -p "$PGPORT" -c shared_buffers=8MB -c max_connections=10 -c dynamic_shared_memory_type=mmap > "$TMPDIR/postgres.log" 2>&1 &
 pg=$!
 trap 'kill -TERM "$pg"; wait "$pg"' EXIT
 trap 'exit 1' HUP INT TERM
@@ -159,6 +194,21 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
             ("LC_ALL".into(), "C".into()),
             ("TMPDIR".into(), root.join("scratch").into_os_string()),
             ("PGBIN".into(), bin.clone().into_os_string()),
+            ("AUDIT_INITDB".into(), initdb_copy.into_os_string()),
+            ("AUDIT_POSTGRES".into(), postgres_wrapper.into_os_string()),
+            ("PGSHARE".into(), sharedir.into()),
+            (
+                "PROVENANT_TEST_IPC_JOURNAL".into(),
+                audit.journal().as_os_str().to_owned(),
+            ),
+            (
+                "PROVENANT_TEST_IPC_LIBRARY".into(),
+                library.into_os_string(),
+            ),
+            (
+                "PROVENANT_TEST_POSTGRES_REAL".into(),
+                bin.join("postgres").into_os_string(),
+            ),
             ("PGPORT".into(), port.into()),
             ("PGCONNECT_TIMEOUT".into(), "1".into()),
             (
@@ -175,6 +225,8 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
         options.stdout = StreamPolicy::Capture { limit: 8192 };
         options.stderr = StreamPolicy::Capture { limit: 8192 };
         let outcome = executor.execute(options)?;
+        let allocations = audit.allocation_count()?;
+        audit.finish()?;
         let log = std::fs::read_to_string(root.join("scratch/postgres.log")).unwrap_or_default();
         if database {
             assert!(
@@ -194,6 +246,10 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
                 String::from_utf8_lossy(&outcome.stderr.bytes)
             );
         }
+        assert!(
+            allocations > 0,
+            "PostgreSQL SysV allocation auditing did not run"
+        );
         assert!(!outside.exists());
     }
     Ok(())
@@ -210,53 +266,55 @@ fn postgres_database_ipc_allows_mmap_lifecycle_in_both_modes()
     postgres_case(true)
 }
 
-/// Cleanup is owned by the unconfined test supervisor, not the timed sandbox.
-struct SysvObjects<'a> {
-    executor: &'a SystemExecutor,
-    ids: Option<[String; 2]>,
-}
-impl SysvObjects<'_> {
-    fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(ids) = &self.ids else {
-            return Ok(());
-        };
-        let script = r#"
-my @errors;
-push @errors, "shm cleanup: $!\n"
-    if !shmctl($ARGV[0], IPC_RMID, 0) && !$!{EINVAL} && !$!{EIDRM};
-push @errors, "sem cleanup: $!\n"
-    if !semctl($ARGV[1], 0, IPC_RMID, 0) && !$!{EINVAL} && !$!{EIDRM};
-die join("", @errors) if @errors;
-"#;
+#[test]
+fn database_off_creates_but_cannot_remove_own_sysv_objects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let executor = SystemExecutor::new(2)?;
+    if !native_available(&executor)? {
+        return Ok(());
+    }
+    for writer in [false, true] {
+        let temp = crate::test_support::tempdir()?;
+        let root = provenant_os::fs::canonicalize(temp.path())?;
+        let source = database_profile(&root, Path::new("/usr/bin"), writer, false)?;
+        let mut audit = SysvAudit::new(&executor, &root.join("scratch"))?;
+        let script = format!(
+            "{PERL_JOURNAL}{}",
+            r#"
+my $shm = shmget(IPC_PRIVATE, 56, IPC_CREAT | 0600);
+die "sandbox shm create: $!\n" unless defined $shm;
+own("m", $shm);
+my $sem = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
+die "sandbox sem create: $!\n" unless defined $sem;
+own("s", $sem);
+die "own shm removal was not denied: $!\n" unless !shmctl($shm, IPC_RMID, 0) && $! == EPERM;
+die "own sem removal was not denied: $!\n" unless !semctl($sem, 0, IPC_RMID, 0) && $! == EPERM;
+"#
+        );
         let argv = [
-            "/usr/bin/perl",
-            "-MIPC::SysV=IPC_RMID",
-            "-MErrno=EINVAL,EIDRM",
-            "-e",
-            script,
-            &ids[0],
-            &ids[1],
-        ]
-        .map(OsString::from);
-        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
+            OsString::from(SANDBOX_EXEC),
+            "-p".into(),
+            source.into(),
+            "/usr/bin/perl".into(),
+            "-MIPC::SysV=IPC_PRIVATE,IPC_CREAT,IPC_RMID".into(),
+            "-MErrno=EPERM".into(),
+            "-e".into(),
+            script.into(),
+            audit.journal().as_os_str().to_owned(),
+        ];
+        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(5));
         options.process_group = true;
-        options.stderr = StreamPolicy::Capture { limit: 1024 };
-        let result = self.executor.execute(options)?;
-        if !successful_probe(&result) {
-            return Err(format!(
-                "supervisor IPC cleanup: {}",
-                String::from_utf8_lossy(&result.stderr.bytes)
-            )
-            .into());
-        }
-        self.ids = None;
-        Ok(())
+        let outcome = executor.execute(options)?;
+        let count = audit.allocation_count()?;
+        audit.finish()?;
+        assert!(
+            successful_probe(&outcome),
+            "own create/remove probe: {}",
+            String::from_utf8_lossy(&outcome.stderr.bytes)
+        );
+        assert_eq!(count, 2, "both owned SysV allocations must be journalled");
     }
-}
-impl Drop for SysvObjects<'_> {
-    fn drop(&mut self) {
-        let _retry_on_failure = self.cleanup();
-    }
+    Ok(())
 }
 
 #[test]
@@ -278,9 +336,11 @@ END {
 }
 $shm = shmget(IPC_PRIVATE, 56, IPC_CREAT | 0600);
 die "host shmget: $!\n" unless defined $shm;
+own("m", $shm);
 shmwrite($shm, "safe", 0, 4) or die "host shmwrite: $!\n";
 $sem = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
 die "host semget: $!\n" unless defined $sem;
+own("s", $sem);
 semctl($sem, 0, SETVAL, 1) or die "host SETVAL: $!\n";
 printf "%d %d\n", $shm, $sem;
 $transferred = 1;
@@ -301,11 +361,14 @@ die "host semaphore changed\n" unless semctl($ARGV[1], 0, GETVAL, 0) == 1;
         let temp = crate::test_support::tempdir()?;
         let root = provenant_os::fs::canonicalize(temp.path())?;
         let source = database_profile(&root, Path::new("/usr/bin"), writer, false)?;
+        let mut audit = SysvAudit::new(&executor, &root.join("scratch"))?;
+        let allocate = format!("{PERL_JOURNAL}{allocate}");
         let argv = [
             "/usr/bin/perl",
             "-MIPC::SysV=IPC_PRIVATE,IPC_CREAT,IPC_RMID,SETVAL",
             "-e",
-            allocate,
+            &allocate,
+            audit.journal().to_str().ok_or("journal path")?,
         ]
         .map(OsString::from);
         let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
@@ -321,11 +384,7 @@ die "host semaphore changed\n" unless semctl($ARGV[1], 0, GETVAL, 0) == 1;
             .split_whitespace()
             .map(|value| value.parse::<u32>().map(|id| id.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut objects = SysvObjects {
-            executor: &executor,
-            ids: Some(ids.try_into().map_err(|_| "expected two IPC object IDs")?),
-        };
-        let ids = objects.ids.as_ref().ok_or("IPC ownership")?;
+        let ids: [String; 2] = ids.try_into().map_err(|_| "expected two IPC object IDs")?;
         let argv = [
             SANDBOX_EXEC,
             "-p",
@@ -355,9 +414,9 @@ die "host semaphore changed\n" unless semctl($ARGV[1], 0, GETVAL, 0) == 1;
         let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
         options.stderr = StreamPolicy::Capture { limit: 1024 };
         let unchanged = executor.execute(options)?;
-        // Cleanup runs in the Rust-owned host context even if the sandbox
-        // timed out; Drop retries it if any earlier operation returns/panics.
-        objects.cleanup()?;
+        // The host audit guard removes only journalled test allocations and
+        // asserts the before/after inventory contains no leaked test object.
+        audit.finish()?;
         assert!(
             successful_probe(&outcome) && successful_probe(&unchanged),
             "writer={writer}: foreign SysV: {:?}; {}; {}",
