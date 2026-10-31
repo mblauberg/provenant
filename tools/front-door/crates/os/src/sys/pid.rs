@@ -217,19 +217,27 @@ pub(crate) fn sealed_platform_euid(pid: i32) -> Option<u32> {
     #[cfg(target_os = "macos")]
     {
         let before = darwin_effective_uid(pid)?;
-        if !darwin_platform_signature(darwin_signing_status(pid)?) {
+        if before >= 500 || !darwin_platform_signature(darwin_signing_status(pid)?) {
             return None;
         }
-        let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-        // SAFETY: path is writable storage of the supplied size, not retained.
-        let size = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
-        if size <= 0 {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let path = darwin_executable_path(pid)?;
+        if !darwin_daemon_path(&path) {
             return None;
         }
-        let end = path.iter().position(|byte| *byte == 0)?;
-        use std::os::unix::ffi::OsStrExt;
-        let executable = std::fs::File::open(std::ffi::OsStr::from_bytes(&path[..end])).ok()?;
-        if !darwin_on_sealed_system_volume(&executable)?
+        let executable = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .ok()?;
+        let metadata = executable.metadata().ok()?;
+        // Darwin dev_t is signed 32-bit; compare the vnode's u32 bit pattern.
+        let identity = (u64::from(metadata.dev() as u32), metadata.ino());
+        if !metadata.is_file()
+            || !darwin_text_matches(pid, identity)?
+            || !darwin_on_sealed_system_volume(&executable)?
+            || !darwin_text_matches(pid, identity)?
+            || darwin_executable_path(pid)? != path
             || !darwin_platform_signature(darwin_signing_status(pid)?)
             || darwin_effective_uid(pid)? != before
         {
@@ -251,9 +259,122 @@ fn darwin_platform_signature(flags: u32) -> bool {
     const CS_VALID: u32 = 0x0000_0001;
     const CS_PLATFORM_BINARY: u32 = 0x0400_0000;
     const CS_SIGNED: u32 = 0x2000_0000;
-    const UNTRUSTED: u32 = 0x0000_0002 | 0x0000_0020 | 0x1000_0000;
+    const UNTRUSTED: u32 = 0x0000_0002 | 0x0000_0004 | 0x0000_0020 | 0x1000_0000;
     let required = CS_VALID | CS_PLATFORM_BINARY | CS_SIGNED;
     flags & required == required && flags & UNTRUSTED == 0
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_daemon_path(path: &std::path::Path) -> bool {
+    // Component comparisons prevent lookalike prefixes; proc_pidpath must
+    // name a file beneath one of these directories, not a CLI or application.
+    path.components().all(|part| match part {
+        std::path::Component::RootDir => true,
+        std::path::Component::Normal(name) => {
+            !std::path::Path::new(name)
+                .extension()
+                .is_some_and(|extension| {
+                    extension.as_encoded_bytes().eq_ignore_ascii_case(b"app")
+                        || extension.as_encoded_bytes().eq_ignore_ascii_case(b"appex")
+                })
+        }
+        _ => false,
+    }) && ["/sbin", "/usr/sbin", "/usr/libexec", "/System/Library"]
+        .iter()
+        .any(|directory| path.starts_with(directory) && path != std::path::Path::new(directory))
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_executable_path(pid: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: path supplies writable storage of the supplied size, not retained.
+    let size = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    if size <= 0 {
+        return None;
+    }
+    let end = path.iter().position(|byte| *byte == 0)?;
+    let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&path[..end]));
+    path.is_absolute().then_some(path)
+}
+
+// XNU bsd/sys/proc_info.h. libc exposes the vnode half, but not these two
+// records. Keep the ABI fields explicit, including the unused region fields.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct DarwinRegionInfo {
+    protection: u32,
+    max_protection: u32,
+    inheritance: u32,
+    flags: u32,
+    offset: u64,
+    behavior: u32,
+    user_wired_count: u32,
+    user_tag: u32,
+    pages_resident: u32,
+    pages_shared_now_private: u32,
+    pages_swapped_out: u32,
+    pages_dirtied: u32,
+    ref_count: u32,
+    shadow_depth: u32,
+    share_mode: u32,
+    private_pages_resident: u32,
+    shared_pages_resident: u32,
+    obj_id: u32,
+    depth: u32,
+    address: u64,
+    size: u64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct DarwinRegionWithPathInfo {
+    region: DarwinRegionInfo,
+    vnode: libc::vnode_info_path,
+}
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<DarwinRegionWithPathInfo>() == 1272);
+
+#[cfg(target_os = "macos")]
+fn darwin_text_matches(pid: i32, identity: (u64, u64)) -> Option<bool> {
+    const PROC_PIDREGIONPATHINFO: i32 = 8;
+    let requested = std::mem::size_of::<DarwinRegionWithPathInfo>() as i32;
+    let mut address = 0;
+    // Address zero starts enumeration, not necessarily the executable. Bound
+    // the walk and require forward progress; denied/short queries fail closed.
+    for _ in 0..4096 {
+        let mut info = std::mem::MaybeUninit::<DarwinRegionWithPathInfo>::zeroed();
+        // SAFETY: the repr(C) record supplies aligned writable ABI-sized
+        // storage; proc_pidinfo borrows it without retention.
+        let returned = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                PROC_PIDREGIONPATHINFO,
+                address,
+                info.as_mut_ptr().cast(),
+                requested,
+            )
+        };
+        if returned != requested {
+            return None;
+        }
+        // SAFETY: the exact-size successful read initialised the entire record.
+        let info = unsafe { info.assume_init() };
+        let stat = info.vnode.vip_vi.vi_stat;
+        if stat.vst_ino != 0
+            && info.region.protection & libc::VM_PROT_EXECUTE as u32 != 0
+            && (u64::from(stat.vst_dev), stat.vst_ino) == identity
+        {
+            return Some(true);
+        }
+        let next = info.region.address.checked_add(info.region.size)?;
+        if next <= address {
+            return None;
+        }
+        address = next;
+    }
+    None
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -436,7 +557,7 @@ fn linux_cwd(pid: i32) -> Result<CwdObservation, PidError> {
 fn map_cwd_error(pid: i32, error: io::Error) -> Result<CwdObservation, PidError> {
     match error.raw_os_error() {
         Some(libc::ESRCH | libc::ENOENT) => Ok(CwdObservation::Gone),
-        Some(libc::EPERM | libc::EACCES) => Ok(CwdObservation::PermissionDenied),
+        Some(libc::EPERM) => Ok(CwdObservation::PermissionDenied),
         Some(errno) if errno == libc::ENOTSUP || errno == libc::ENOSYS => {
             Ok(CwdObservation::Unsupported)
         }
@@ -472,12 +593,21 @@ fn classify_darwin_result(
     liveness: impl FnOnce() -> DarwinLiveness,
 ) -> Result<DarwinCwdCall, PidError> {
     if size == 0 {
-        // Zero means libproc would not describe the process; it does not prove
-        // absence. Only a probe proving ESRCH may report the process gone.
-        return Ok(match liveness() {
-            DarwinLiveness::Gone => DarwinCwdCall::Gone,
-            DarwinLiveness::Alive | DarwinLiveness::Unknown => DarwinCwdCall::PermissionDenied,
-        });
+        // Zero alone proves neither absence nor EPERM. Only verified ESRCH
+        // establishes disappearance; only the cwd syscall's EPERM can reach
+        // the daemon policy. Production clears errno before the syscall.
+        if liveness() == DarwinLiveness::Gone {
+            return Ok(DarwinCwdCall::Gone);
+        }
+        return match error {
+            Some(error) if error.raw_os_error() == Some(libc::EPERM) => {
+                Ok(DarwinCwdCall::PermissionDenied)
+            }
+            Some(error) if error.raw_os_error().is_some_and(|errno| errno != 0) => {
+                Err(failure(pid, error))
+            }
+            _ => Err(failure(pid, io::Error::from_raw_os_error(libc::EIO))),
+        };
     }
     if size < 0 {
         let error = match error {
@@ -487,7 +617,7 @@ fn classify_darwin_result(
         match error.raw_os_error() {
             Some(libc::EINTR) => return Ok(DarwinCwdCall::Retry),
             Some(libc::ESRCH) => return Ok(DarwinCwdCall::Gone),
-            Some(libc::EPERM | libc::EACCES) => return Ok(DarwinCwdCall::PermissionDenied),
+            Some(libc::EPERM) => return Ok(DarwinCwdCall::PermissionDenied),
             Some(errno)
                 if errno == libc::ENOTSUP || errno == libc::EOPNOTSUPP || errno == libc::ENOSYS =>
             {
@@ -569,6 +699,11 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
         let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
         let buffer_size = i32::try_from(expected)
             .map_err(|_| failure(pid, io::Error::from_raw_os_error(libc::EOVERFLOW)))?;
+        // SAFETY: __error returns this thread's live errno slot; clearing it
+        // prevents a zero libproc result from inheriting stale EPERM.
+        let errno_slot = unsafe { libc::__error() };
+        // SAFETY: this is the live thread-local slot returned just above.
+        unsafe { *errno_slot = 0 };
         // SAFETY: info is aligned writable storage of exactly the requested
         // vnodepathinfo size. proc_pidinfo only borrows it; full success writes
         // all fields. No handles transfer or global state is exposed.
@@ -581,7 +716,7 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
                 buffer_size,
             )
         };
-        let error = (size < 0).then(io::Error::last_os_error);
+        let error = (size <= 0).then(io::Error::last_os_error);
         match classify_darwin_result(pid, size, expected, error, || darwin_liveness(pid))? {
             DarwinCwdCall::Gone => return Ok(CwdObservation::Gone),
             DarwinCwdCall::PermissionDenied => return Ok(CwdObservation::PermissionDenied),
@@ -607,6 +742,74 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_current_process_is_not_an_eligible_platform_daemon() {
+        assert_eq!(sealed_platform_euid(std::process::id() as i32), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_same_user_sleep_is_not_an_eligible_daemon() -> Result<(), Box<dyn std::error::Error>>
+    {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Child(std::process::Command::new("/bin/sleep").arg("30").spawn()?);
+        assert!(child.0.try_wait()?.is_none());
+        assert_eq!(sealed_platform_euid(child.0.id() as i32), None);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::print_stderr)] // An optional live off-volume fixture must report its availability.
+    fn native_offsealed_platform_process_is_refused_when_present() {
+        let mut pids = vec![0i32; 65_536];
+        // SAFETY: the vector supplies writable storage of the supplied byte
+        // size and libproc does not retain the pointer.
+        let count = unsafe {
+            libc::proc_listallpids(
+                pids.as_mut_ptr().cast(),
+                (pids.len() * std::mem::size_of::<i32>()) as i32,
+            )
+        };
+        if count <= 0 || count as usize >= pids.len() {
+            eprintln!(
+                "SKIP: optional off-sealed platform fixture: process enumeration unavailable or incomplete"
+            );
+            return;
+        }
+        for &pid in &pids[..count as usize] {
+            if !darwin_signing_status(pid).is_some_and(darwin_platform_signature) {
+                continue;
+            }
+            let Some(path) = darwin_executable_path(pid) else {
+                continue;
+            };
+            let Ok(file) = std::fs::File::open(&path) else {
+                continue;
+            };
+            if darwin_on_sealed_system_volume(&file) != Some(false) {
+                continue;
+            }
+            assert_eq!(
+                sealed_platform_euid(pid),
+                None,
+                "off-sealed platform process {pid}: {path:?}"
+            );
+            eprintln!(
+                "ASSERTED: off-sealed platform process {pid} {path:?} refused by native daemon policy"
+            );
+            return;
+        }
+        eprintln!("SKIP: no observable off-sealed platform process is present");
+    }
+
     #[test]
     fn platform_policy_requires_valid_signed_platform_code() {
         let required = 0x2000_0000 | 0x0400_0000 | 1;
@@ -614,7 +817,7 @@ mod tests {
         for missing in [1, 0x0400_0000, 0x2000_0000] {
             assert!(!darwin_platform_signature(required & !missing));
         }
-        for untrusted in [2, 0x20, 0x1000_0000] {
+        for untrusted in [2, 4, 0x20, 0x1000_0000] {
             assert!(!darwin_platform_signature(required | untrusted));
         }
         assert!(!darwin_platform_signature(0x0800_0001)); // path is not signing evidence
@@ -622,15 +825,55 @@ mod tests {
 
     #[test]
     fn platform_policy_requires_a_valid_seal_on_the_readonly_root_volume() {
-        for flags in [0, 1, 0x4000, 0x4001] {
-            for valid in [0, 0x0200_0000] {
-                for capabilities in [0, 0x0200_0000] {
-                    assert_eq!(
-                        darwin_sealed_root_volume(flags, valid, capabilities),
-                        flags == 0x4001 && valid != 0 && capabilities != 0
-                    );
-                }
-            }
+        // Real root mounts carry unrelated flags; these must not turn a
+        // bitmask requirement into an exact-equality check.
+        const MNT_JOURNALED: u32 = 0x0080_0000;
+        const MNT_MULTILABEL: u32 = 0x0400_0000;
+        let root_mount = 0x4001 | MNT_JOURNALED | MNT_MULTILABEL;
+        let seal = 0x0200_0000;
+        assert!(darwin_sealed_root_volume(root_mount, seal, seal));
+        assert!(
+            !darwin_sealed_root_volume(root_mount & !1, seal, seal),
+            "writable root"
+        );
+        assert!(
+            !darwin_sealed_root_volume(root_mount & !0x4000, seal, seal),
+            "other sealed volume"
+        );
+        assert!(
+            !darwin_sealed_root_volume(root_mount, 0, seal),
+            "seal capability not valid"
+        );
+        assert!(
+            !darwin_sealed_root_volume(root_mount, seal, 0),
+            "unsealed root"
+        );
+    }
+
+    #[test]
+    fn daemon_paths_exclude_cli_tools_applications_and_lookalike_prefixes() {
+        for path in [
+            "/sbin/launchd",
+            "/usr/sbin/daemon",
+            "/usr/libexec/daemon",
+            "/System/Library/PrivateFrameworks/X/daemon",
+        ] {
+            assert!(darwin_daemon_path(std::path::Path::new(path)), "{path}");
+        }
+        for path in [
+            "/bin/sleep",
+            "/usr/bin/zsh",
+            "/Library/Apple/usr/libexec/usbmuxd",
+            "/Applications/X.app/daemon",
+            "/System/Applications/X.app/daemon",
+            "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
+            "/System/Library/X.appex/daemon",
+            "/usr/libexec-evil/daemon",
+            "/usr/libexec/../bin/sleep",
+            "/sbin",
+            "sbin/daemon",
+        ] {
+            assert!(!darwin_daemon_path(std::path::Path::new(path)), "{path}");
         }
     }
 
@@ -662,7 +905,7 @@ mod tests {
         for liveness in [DarwinLiveness::Alive, DarwinLiveness::Unknown] {
             let result = classify_darwin_result(42, 0, 24, None, || liveness);
             assert!(
-                matches!(result, Ok(DarwinCwdCall::PermissionDenied)),
+                matches!(result, Err(PidError::Io { .. })),
                 "{liveness:?} returned {result:?}"
             );
         }
@@ -670,6 +913,40 @@ mod tests {
         assert!(matches!(
             classify_darwin_result(42, 0, 24, None, || DarwinLiveness::Gone),
             Ok(DarwinCwdCall::Gone)
+        ));
+    }
+
+    #[test]
+    fn only_actual_eperm_can_reach_the_daemon_exception() {
+        for size in [0, -1] {
+            assert!(matches!(
+                classify_darwin_result(
+                    42,
+                    size,
+                    24,
+                    Some(io::Error::from_raw_os_error(libc::EPERM)),
+                    || DarwinLiveness::Alive
+                ),
+                Ok(DarwinCwdCall::PermissionDenied)
+            ));
+            for errno in [libc::EACCES, libc::EIO, libc::EINVAL] {
+                assert!(matches!(
+                    classify_darwin_result(
+                        42,
+                        size,
+                        24,
+                        Some(io::Error::from_raw_os_error(errno)),
+                        || DarwinLiveness::Alive
+                    ),
+                    Err(PidError::Io { .. })
+                ));
+            }
+        }
+        assert!(matches!(
+            classify_darwin_result(42, 0, 24, Some(io::Error::from_raw_os_error(0)), || {
+                DarwinLiveness::Alive
+            }),
+            Err(PidError::Io { .. })
         ));
     }
 

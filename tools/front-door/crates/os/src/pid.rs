@@ -75,14 +75,15 @@ fn signal_process_with(
 pub enum CwdObservation {
     Path(PathBuf),
     Gone,
+    /// The cwd syscall failed with EPERM; other failures remain errors.
     PermissionDenied,
     Unsupported,
 }
 pub trait CwdObserver: Send + Sync {
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError>;
 
-    /// Effective uid only after kernel signing status and sealed system-volume
-    /// checks establish Apple platform code. Missing evidence returns None.
+    /// System effective uid only after kernel signing status, pinned daemon
+    /// image and sealed system-volume checks. Missing evidence returns None.
     /// This supports a caller's explicit risk policy, not non-occupancy proof.
     fn sealed_platform_euid(&self, _pid: i64) -> Option<u32> {
         None
