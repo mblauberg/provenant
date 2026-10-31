@@ -247,10 +247,16 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
                 String::from_utf8_lossy(&outcome.stderr.bytes)
             );
         }
-        assert!(
-            allocations > 0,
-            "PostgreSQL SysV allocation auditing did not run"
-        );
+        // The interposer's load marker proves auditing ran; a database-off
+        // lane is refused before anything is allocated.
+        if database {
+            assert!(
+                allocations > 0,
+                "PostgreSQL SysV allocation auditing did not run"
+            );
+        } else {
+            assert_eq!(allocations, 0, "a denied PostgreSQL start allocated SysV");
+        }
         assert!(!outside.exists());
     }
     Ok(())
@@ -267,29 +273,117 @@ fn postgres_database_ipc_allows_mmap_lifecycle_in_both_modes()
     postgres_case(true)
 }
 
+/// Every way a lane can ask the kernel for a new SysV object. A successful
+/// call is journalled before the case fails, so the host guard still removes it.
+const CREATION_PROBE: &str = r#"
+my $key = shift @ARGV;
+my $flags = IPC_CREAT | IPC_EXCL | 0600;
+my $private = IPC_CREAT | 0600;
+my @cases = (
+    ["shmget private", "m", sub { shmget(IPC_PRIVATE, 4096, $private) }],
+    ["shmget keyed", "m", sub { shmget($key + 1, 4096, $flags) }],
+    ["semget private", "s", sub { semget(IPC_PRIVATE, 1, $private) }],
+    ["semget keyed", "s", sub { semget($key + 2, 1, $flags) }],
+    ["msgget private", "q", sub { msgget(IPC_PRIVATE, $private) }],
+    ["msgget keyed", "q", sub { msgget($key + 3, $flags) }],
+    ["raw shmget", "m", sub { syscall(265, IPC_PRIVATE, 4096, $private) }],
+    ["raw semget", "s", sub { syscall(255, IPC_PRIVATE, 1, $private) }],
+    ["raw msgget", "q", sub { syscall(259, IPC_PRIVATE, $private) }],
+    ["legacy shmsys", "m", sub { syscall(253, 3, IPC_PRIVATE, 4096, $private) }],
+    ["legacy semsys", "s", sub { syscall(251, 1, IPC_PRIVATE, 1, $private) }],
+    ["legacy msgsys", "q", sub { syscall(252, 1, IPC_PRIVATE, $private) }],
+);
+my @failures;
+for my $case (@cases) {
+    my ($name, $kind, $run) = @$case;
+    $! = 0;
+    my $id = $run->();
+    my $created = defined $id && $id != -1;
+    own($kind, $id) if $created;
+    my $outcome = $created ? "created" : ($! == EPERM ? "denied" : "failed: $!");
+    push @failures, "$name: $outcome" unless $outcome eq "denied";
+}
+die join("; ", @failures) . "\n" if @failures;
+"#;
+
+fn denied_creation_probe(executor: &SystemExecutor) -> Result<(), Box<dyn std::error::Error>> {
+    for writer in [false, true] {
+        let temp = crate::test_support::tempdir()?;
+        let root = provenant_os::fs::canonicalize(temp.path())?;
+        let source = database_profile(&root, Path::new("/usr/bin"), writer, false)?;
+        let mut audit = SysvAudit::new(executor, &root.join("scratch"))?;
+        // A key no other workload plausibly holds: a keyed object that survives
+        // would be found by key, independent of concurrent global activity.
+        let key = 0x5000_0000_u32 | (std::process::id() & 0x00ff_ffff);
+        let script = format!("{PERL_JOURNAL}{CREATION_PROBE}");
+        let argv = [
+            OsString::from(SANDBOX_EXEC),
+            "-p".into(),
+            source.into(),
+            "/usr/bin/perl".into(),
+            "-MIPC::SysV=IPC_PRIVATE,IPC_CREAT,IPC_EXCL,IPC_RMID".into(),
+            "-MErrno=EPERM".into(),
+            "-e".into(),
+            script.into(),
+            audit.journal().as_os_str().to_owned(),
+            key.to_string().into(),
+        ];
+        let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(5));
+        options.process_group = true;
+        options.stderr = StreamPolicy::Capture { limit: 2048 };
+        let outcome = executor.execute(options)?;
+        let count = audit.allocation_count()?;
+        let keyed = audit.keyed_objects(key + 1..=key + 3)?;
+        audit.finish()?;
+        assert!(
+            successful_probe(&outcome),
+            "writer={writer}: every SysV creation must be denied: {}",
+            String::from_utf8_lossy(&outcome.stderr.bytes)
+        );
+        assert!(keyed.is_empty(), "keyed SysV objects remain: {keyed:?}");
+        assert_eq!(count, 0, "a denied lane must not have allocated anything");
+    }
+    Ok(())
+}
+
 #[test]
-fn database_off_creates_but_cannot_remove_own_sysv_objects()
+fn database_off_cannot_create_sysv_objects() -> Result<(), Box<dyn std::error::Error>> {
+    let executor = SystemExecutor::new(2)?;
+    if !native_available(&executor)? {
+        return Ok(());
+    }
+    denied_creation_probe(&executor)
+}
+
+#[test]
+fn database_on_creates_and_removes_own_sysv_segments_and_semaphores()
 -> Result<(), Box<dyn std::error::Error>> {
     let executor = SystemExecutor::new(2)?;
     if !native_available(&executor)? {
         return Ok(());
     }
+    // Message queues are never granted, so only the database-authorised
+    // segment and semaphore cases are expected to succeed.
     for writer in [false, true] {
         let temp = crate::test_support::tempdir()?;
         let root = provenant_os::fs::canonicalize(temp.path())?;
-        let source = database_profile(&root, Path::new("/usr/bin"), writer, false)?;
+        let source = database_profile(&root, Path::new("/usr/bin"), writer, true)?;
         let mut audit = SysvAudit::new(&executor, &root.join("scratch"))?;
         let script = format!(
             "{PERL_JOURNAL}{}",
             r#"
 my $shm = shmget(IPC_PRIVATE, 56, IPC_CREAT | 0600);
-die "sandbox shm create: $!\n" unless defined $shm;
+die "database-on shm create: $!\n" unless defined $shm;
 own("m", $shm);
 my $sem = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
-die "sandbox sem create: $!\n" unless defined $sem;
+die "database-on sem create: $!\n" unless defined $sem;
 own("s", $sem);
-die "own shm removal was not denied: $!\n" unless !shmctl($shm, IPC_RMID, 0) && $! == EPERM;
-die "own sem removal was not denied: $!\n" unless !semctl($sem, 0, IPC_RMID, 0) && $! == EPERM;
+shmctl($shm, IPC_RMID, 0) or die "database-on shm removal: $!\n";
+semctl($sem, 0, IPC_RMID, 0) or die "database-on sem removal: $!\n";
+$! = 0;
+my $queue = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+if (defined $queue) { own("q", $queue); die "message queue was created\n"; }
+die "message queue was not denied: $!\n" unless $! == EPERM;
 "#
         );
         let argv = [
@@ -305,15 +399,16 @@ die "own sem removal was not denied: $!\n" unless !semctl($sem, 0, IPC_RMID, 0) 
         ];
         let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(5));
         options.process_group = true;
+        options.stderr = StreamPolicy::Capture { limit: 2048 };
         let outcome = executor.execute(options)?;
         let count = audit.allocation_count()?;
         audit.finish()?;
         assert!(
             successful_probe(&outcome),
-            "own create/remove probe: {}",
+            "writer={writer}: database-on create/remove probe: {}",
             String::from_utf8_lossy(&outcome.stderr.bytes)
         );
-        assert_eq!(count, 2, "both owned SysV allocations must be journalled");
+        assert_eq!(count, 2, "both database allocations must be journalled");
     }
     Ok(())
 }

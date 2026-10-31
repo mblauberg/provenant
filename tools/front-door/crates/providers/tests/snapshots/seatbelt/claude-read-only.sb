@@ -71,6 +71,8 @@
 (allow file-read* (literal "/dev/urandom") (literal "/dev/random"))
 (allow file-read* (literal "/dev/fd"))
 (allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
+(deny syscall-unix (syscall-number SYS_shmget SYS_semget SYS_shmsys SYS_semsys))
+(deny syscall-unix (syscall-number SYS_msgget SYS_msgsys))
 (allow file-read* (subpath "/fixture/repo"))
 (allow file-read* (subpath "/opt/homebrew/Cellar/provider/1.0"))
 (allow file-read* (literal "/fixture/provenant/bin/provenant"))

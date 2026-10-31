@@ -73,6 +73,7 @@
 (allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
 (allow ipc-sysv-shm)
 (allow ipc-sysv-sem)
+(deny syscall-unix (syscall-number SYS_msgget SYS_msgsys))
 (allow file-read* (subpath "/fixture/repo"))
 (allow file-read* (subpath "/opt/homebrew/Cellar/provider/1.0"))
 (allow file-read* (subpath "/fixture/home/.cargo"))

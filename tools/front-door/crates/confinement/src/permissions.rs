@@ -87,6 +87,18 @@ const DYLD_BOOTSTRAP_RULES: &str = r#"
 (with-filter (mac-policy-name "Sandbox")
   (allow system-mac-syscall (mac-syscall-number 2)))
 "#;
+/// macOS checks SysV segment and semaphore authority only on lookup of an
+/// existing object, after creation succeeded. A lane without database IPC could
+/// therefore allocate host-global objects that it is then refused permission to
+/// remove. Denying the creating system calls, and the legacy multiplexed entry
+/// points that reach the same kernel code, stops the allocation itself.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+const SYSV_CREATE_DENY_RULES: &str =
+    "(deny syscall-unix (syscall-number SYS_shmget SYS_semget SYS_shmsys SYS_semsys))\n";
+/// No profile grants SysV message queues, and creation has the same
+/// create-but-cannot-remove behaviour, so every lane is refused them.
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+const SYSV_QUEUE_DENY_RULES: &str = "(deny syscall-unix (syscall-number SYS_msgget SYS_msgsys))\n";
 /// Fixed operating-system runtime every provider CLI needs under deny-default:
 /// kernel and preference reads, TLS trust, DNS, time zone data, and process
 /// information and signals within the same sandbox. It names no user path; explicit
@@ -1662,7 +1674,10 @@ fn render_profile(
     source.push_str(RUNTIME_BASELINE_RULES);
     if profile.spec.allow_database_ipc {
         source.push_str("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n");
+    } else {
+        source.push_str(SYSV_CREATE_DENY_RULES);
     }
+    source.push_str(SYSV_QUEUE_DENY_RULES);
     for grant in reads.iter().chain(&profile.spec.discovery_reads) {
         push_rule(&mut source, "allow", "file-read*", &grant.path, grant.scope)?;
     }
@@ -2829,12 +2844,25 @@ mod tests {
                 Path::new("/fixture/home"),
             )?)?;
             assert!(opted_in.contains("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n"));
+            // Only the database opt-in differs: it replaces the creation denial
+            // with the grants, and no profile gains a SysV creation syscall.
+            assert!(rendered.contains(SYSV_CREATE_DENY_RULES));
+            assert!(!opted_in.contains(SYSV_CREATE_DENY_RULES));
             assert_eq!(
                 opted_in
                     .replace("(allow ipc-sysv-shm)\n", "")
-                    .replace("(allow ipc-sysv-sem)\n", ""),
+                    .replace("(allow ipc-sysv-sem)\n", "")
+                    .replace(SYSV_QUEUE_DENY_RULES, ""),
                 rendered
+                    .replace(SYSV_CREATE_DENY_RULES, "")
+                    .replace(SYSV_QUEUE_DENY_RULES, "")
             );
+            for profile in [&rendered, &opted_in] {
+                assert!(profile.contains(SYSV_QUEUE_DENY_RULES));
+            }
+            assert!(rendered.contains(
+                "(deny syscall-unix (syscall-number SYS_shmget SYS_semget SYS_shmsys SYS_semsys))\n"
+            ));
             let exec = format!("(allow process-exec (subpath \"{scratch}\"))");
             assert_eq!(rendered.lines().any(|line| line == exec), writer);
             assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));

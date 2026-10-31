@@ -135,17 +135,39 @@ impl<'a> SysvAudit<'a> {
         Ok(library)
     }
 
+    /// Objects whose key lies in `keys`, found by key so concurrent unrelated
+    /// activity cannot affect the result.
+    pub(super) fn keyed_objects(
+        &self,
+        keys: std::ops::RangeInclusive<u32>,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let (_, inventory) = Self::inventory(self.executor)?;
+        let mut found = Vec::new();
+        for line in std::str::from_utf8(&inventory)?.lines() {
+            let words = line.split_whitespace().collect::<Vec<_>>();
+            if matches!(words.first(), Some(&"m" | &"s" | &"q"))
+                && let Some(key) = words
+                    .get(2)
+                    .and_then(|key| u32::from_str_radix(key.trim_start_matches("0x"), 16).ok())
+                && keys.contains(&key)
+            {
+                found.push(line.to_owned());
+            }
+        }
+        Ok(found)
+    }
+
     fn inventory(
         executor: &SystemExecutor,
     ) -> Result<(ObjectIds, Vec<u8>), Box<dyn std::error::Error>> {
-        let argv = ["/usr/bin/ipcs", "-m", "-s"].map(OsString::from);
+        let argv = ["/usr/bin/ipcs", "-m", "-s", "-q"].map(OsString::from);
         let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
         options.stdout = StreamPolicy::Capture { limit: 256 * 1024 };
         let env = [("LC_ALL".into(), "C".into())];
         options.env = Some(&env);
         let result = executor.execute(options)?;
         if !successful_probe(&result) {
-            return Err("host ipcs -m -s failed".into());
+            return Err("host ipcs -m -s -q failed".into());
         }
         let mut ids = ObjectIds::new();
         let mut headers = 0;
@@ -154,13 +176,13 @@ impl<'a> SysvAudit<'a> {
             if words.starts_with(&["T", "ID", "KEY"]) {
                 headers += 1;
             }
-            if matches!(words.first(), Some(&"m" | &"s")) {
+            if matches!(words.first(), Some(&"m" | &"s" | &"q")) {
                 let id = words.get(1).ok_or("missing ipcs object ID")?.parse()?;
                 ids.insert((words[0].to_owned(), id));
             }
         }
-        if headers != 2 {
-            return Err("unrecognised ipcs -m -s inventory format".into());
+        if headers != 3 {
+            return Err("unrecognised ipcs -m -s -q inventory format".into());
         }
         Ok((ids, result.stdout.bytes))
     }
@@ -174,7 +196,7 @@ impl<'a> SysvAudit<'a> {
                     return None;
                 }
                 Some((|| {
-                    if fields.len() != 4 || !matches!(fields[0], "m" | "s") {
+                    if fields.len() != 4 || !matches!(fields[0], "m" | "s" | "q") {
                         return Err("invalid test allocation journal".into());
                     }
                     // The journal is written only by trusted test code immediately
@@ -202,7 +224,12 @@ impl<'a> SysvAudit<'a> {
         for (kind, id) in owned.intersection(&present) {
             let argv = [
                 OsString::from("/usr/bin/ipcrm"),
-                if kind == "m" { "-m" } else { "-s" }.into(),
+                match kind.as_str() {
+                    "m" => "-m",
+                    "s" => "-s",
+                    _ => "-q",
+                }
+                .into(),
                 id.to_string().into(),
             ];
             let result = self.executor.execute(ExecOptions::new(
