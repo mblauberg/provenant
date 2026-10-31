@@ -3235,6 +3235,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 request_digest: prepared.request.digest()?,
                 task_id: task.task_id,
                 effective_network: task.access.network(task.writer.is_some()),
+                effective_database_ipc: task.access.database_ipc,
             }),
         };
         verify_lane_profile(
