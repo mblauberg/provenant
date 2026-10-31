@@ -14,7 +14,39 @@ const ROLE: &str = "PROVENANT_TREE_FIXTURE_ROLE";
 const ROOT: &str = "PROVENANT_TREE_FIXTURE_ROOT";
 const HOST: &str = "PROVENANT_TREE_FIXTURE_HOST";
 const PEER: &str = "PROVENANT_TREE_FIXTURE_PEER";
+const HELPER: &str = "PROVENANT_TREE_FIXTURE_HELPER";
 const READER: &str = "permissions::tests::process_tree::process_tree_reader_fixture";
+
+const TREE_HELPER: &str = r#"
+#include <errno.h>
+#include <signal.h>
+#include <stdio.h>
+#include <sys/wait.h>
+#include <unistd.h>
+static volatile sig_atomic_t stopped;
+static void stop(int signal) { (void)signal; stopped = 1; }
+int main(int argc, char **argv) {
+    if (argc != 2) return 90;
+    pid_t live = fork();
+    if (live < 0) return 91;
+    if (live == 0) { for (;;) pause(); }
+    pid_t zombie = fork();
+    if (zombie < 0) return 92;
+    if (zombie == 0) _exit(0);
+    siginfo_t exited;
+    if (waitid(P_PID, zombie, &exited, WEXITED | WNOWAIT)) return 93;
+    signal(SIGTERM, stop); signal(SIGINT, stop);
+    FILE *ready = fopen(argv[1], "w");
+    if (!ready) return 94;
+    fprintf(ready, "%d %d %d\n", getpid(), live, zombie);
+    if (fclose(ready)) return 95;
+    while (!stopped) usleep(10000);
+    kill(live, SIGTERM);
+    while (waitpid(live, NULL, 0) < 0 && errno == EINTR) {}
+    while (waitpid(zombie, NULL, 0) < 0 && errno == EINTR) {}
+    return 0;
+}
+"#;
 
 struct Stop<'a>(&'a CancelToken);
 impl Drop for Stop<'_> {
@@ -55,17 +87,12 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(role, "reader");
     let host = std::env::var(HOST)?.parse::<u32>()?;
     let peer = std::env::var(PEER)?.parse::<u32>()?;
+    let helper = std::env::var_os(HELPER).ok_or("tree helper")?;
     let executor = SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
     std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
         let worker = scope.spawn(|| {
-            let argv = [
-                OsString::from("/bin/sh"),
-                "-c".into(),
-                "/bin/sleep 20 & leaf=$!; trap 'kill \"$leaf\" 2>/dev/null || :; wait \"$leaf\" 2>/dev/null || :; exit' TERM INT; printf '%s %s\\n' \"$$\" \"$leaf\" > \"$1/children\"; wait".into(),
-                "tree-child".into(),
-                root.as_os_str().to_owned(),
-            ];
+            let argv = [helper.clone(), root.join("children").into_os_string()];
             let mut options = ExecOptions::new(&argv, &root, Duration::from_secs(20));
             options.cancel = Some(&cancel);
             options.process_group = true;
@@ -76,7 +103,7 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
             .split_whitespace()
             .map(str::parse::<u32>)
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(children.len(), 2);
+        assert_eq!(children.len(), 3);
         let own = std::process::id();
         std::fs::write(root.join("lane.pid"), own.to_string())?;
         let path = root
@@ -111,6 +138,21 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .any(|process| process.pid == host || process.pid == peer)
         );
+        // Darwin can refuse proc_pidinfo and sandbox membership for an
+        // unreaped zombie. It has no resident task, so omission is safe;
+        // kernels that expose it must report zero RSS.
+        let zombie = sample
+            .processes
+            .iter()
+            .find(|process| process.pid == children[2]);
+        if let Some(zombie) = zombie {
+            assert_eq!(zombie.ppid, children[0]);
+            assert_eq!(zombie.rss_bytes, 0);
+        }
+        assert!(
+            process_tree::read(&path, children[2]).is_err(),
+            "zombie root is unavailable"
+        );
         let subtree = process_tree::read(&path, children[0])?;
         assert_eq!(subtree.root_pid, children[0]);
         assert_eq!(
@@ -119,7 +161,14 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .map(|process| process.pid)
                 .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([children[0], children[1]])
+            [
+                Some(children[0]),
+                Some(children[1]),
+                zombie.map(|process| process.pid)
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>()
         );
         assert!(
             process_tree::read(&path, host).is_err(),
@@ -171,6 +220,22 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
         let directory = provenant_os::fs::Directory::open_anchor(&base)?;
         let root = base.join("scratch");
         std::fs::create_dir(&root)?;
+        let input = root.join("tree-helper.c");
+        let helper = root.join("tree-helper");
+        std::fs::write(&input, TREE_HELPER)?;
+        let compile = [
+            OsString::from("/usr/bin/cc"),
+            input.into_os_string(),
+            "-o".into(),
+            helper.as_os_str().to_owned(),
+        ];
+        let compiled =
+            executor.execute(ExecOptions::new(&compile, &root, Duration::from_secs(30)))?;
+        assert!(
+            successful_probe(&compiled),
+            "tree helper: {}",
+            String::from_utf8_lossy(&compiled.stderr.bytes)
+        );
         let (mut plan, _) = write_grants_fixture();
         plan.read_only = None;
         plan.private_state = None;
@@ -192,10 +257,16 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
         };
         let profile = ProviderProfile {
             spec: ProviderProfileSpec {
-                process_executables: vec![PathGrant {
-                    path: executable.clone(),
-                    scope: PathScope::Exact,
-                }],
+                process_executables: vec![
+                    PathGrant {
+                        path: executable.clone(),
+                        scope: PathScope::Exact,
+                    },
+                    PathGrant {
+                        path: helper.clone(),
+                        scope: PathScope::Exact,
+                    },
+                ],
                 allow_process_fork: true,
                 tool_exec_roots: vec![PathGrant {
                     path: "/bin".into(),
@@ -266,6 +337,7 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
                     (ROOT.into(), reader_root.as_os_str().to_owned()),
                     (HOST.into(), std::process::id().to_string().into()),
                     (PEER.into(), peer_pid.to_string().into()),
+                    (HELPER.into(), helper.as_os_str().to_owned()),
                 ];
                 let mut options =
                     ExecOptions::new(reader_argv, reader_root, Duration::from_secs(15));

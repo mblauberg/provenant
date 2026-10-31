@@ -76,11 +76,21 @@ impl Sampler {
             .name("lane-memory".into())
             .spawn(move || {
                 loop {
-                    let snapshot = sample(&root, attempt).ok();
+                    // Reconcile transient fork/exit churn without overlapping
+                    // walks. Retain the last good observation until it expires.
+                    let mut snapshot = None;
+                    for _ in 0..3 {
+                        snapshot = sample(&root, attempt).ok();
+                        if snapshot.is_some() {
+                            break;
+                        }
+                    }
                     if receiver.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
                         break;
                     }
-                    let _ = publish(&directory, snapshot.as_ref());
+                    if let Some(snapshot) = &snapshot {
+                        let _ = publish(&directory, Some(snapshot));
+                    }
                     if receiver.recv_timeout(std::time::Duration::from_secs(1))
                         != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
                     {
@@ -203,13 +213,13 @@ pub fn publish(directory: &Directory, snapshot: Option<&Snapshot>) -> Result<()>
 /// Read the caller-selected subtree from its lane's bounded, fresh snapshot.
 /// Selecting an outside PID never causes a host-side query or enumeration.
 pub fn read(path: &Path, root_pid: u32) -> Result<Sample> {
-    crate::process_os::process_tree::immutable(path)?;
     let mut file = FileHandle::open_source(path).map_err(|_| Unavailable)?;
     if file.metadata().map_err(|_| Unavailable)?.kind != FileKind::Regular {
         return Err(Unavailable);
     }
     let bytes = file.read_bounded(MAX_BYTES).map_err(|_| Unavailable)?;
     let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|_| Unavailable)?;
+    crate::process_os::process_tree::immutable(path)?;
     let clock = SystemClock::new();
     let now = clock.host_monotonic_micros().map_err(|_| Unavailable)?;
     let boot = clock.boot_identity().map_err(|_| Unavailable)?;

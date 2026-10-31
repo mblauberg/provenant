@@ -329,9 +329,14 @@ of the command being supervised. The normal command envelope has this `data`:
 The root and its descendants are included, sorted by PID. RSS is in bytes;
 `sampled_at` is the observation's start in RFC 3339 UTC with six fractional
 digits. Sum `rss_bytes` to estimate the command tree's resident memory; shared
-pages can be counted by more than one process. An exited zombie can have zero
-RSS. This is periodic observation, not an atomic kernel census or a kernel
+pages can be counted by more than one process. Zombies have no resident task;
+they are omitted when the kernel no longer exposes their sandbox, or included
+with zero RSS. Selecting an exited or zombie root is unavailable.
+This is periodic observation, not an atomic kernel census or a kernel
 memory limit: short-lived processes and changes between samples can be missed.
+The tree follows current parent links. Reparented orphans are no longer in
+that rooted tree and are not counted; use a separate containment policy when
+commands may deliberately daemonise.
 
 The unconfined supervisor walks descendants of its held provider identity with
 libproc, checks each process against the existing attempt sandbox marker, and
@@ -361,8 +366,10 @@ exit **4**, status `unavailable`, error `PROCESS_TREE_UNAVAILABLE`, and null
 or apply its own refusal policy. Invalid CLI arguments return exit 2.
 Traversal is limited to 4,096 processes and a 250 ms observation budget;
 detected churn or exceeded bounds invalidates the sample rather than returning
-a partial tree. A failed refresh replaces the file with an unavailable value;
-failed publication leaves bytes that the freshness check expires. Provider exit
+a partial tree. The worker retries a failed observation up to three times per
+refresh and retains the last good sample until it expires; it never reports
+an incomplete observation as a new sample. Failed publication also leaves
+bytes that the freshness check expires. Provider exit
 stops the worker and requests invalidation; a dead supervisor's file expires.
 
 - Test: `crates/confinement/src/permissions/tests/process_tree.rs::lane_process_tree_sample_is_private_under_production_profiles`;
