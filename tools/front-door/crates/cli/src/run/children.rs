@@ -207,7 +207,7 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
         .find(|task| task.task_id == sealed.task_id)
         .ok_or("parent task missing from its request")?
         .clone();
-    sealed.apply_network(&mut parent_task);
+    sealed.apply_access(&mut parent_task);
     let mut inputs =
         provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
     inputs.state_dir = Some(launch.configuration_root.clone());
@@ -762,12 +762,29 @@ mod tests {
             let sealed = seal_launch_task(child.request.digest()?, &task);
             assert_eq!(sealed.effective_network, network);
         }
+        for database in [false, true] {
+            task.access.database_ipc = database;
+            let sealed = seal_launch_task(child.request.digest()?, &task);
+            let restored: run::SealedTask = serde_json::from_value(serde_json::to_value(sealed)?)?;
+            assert_eq!(restored.effective_database_ipc, database);
+        }
         let mut json = serde_json::to_value(seal_launch_task(child.request.digest()?, &task))?;
         json.as_object_mut()
             .ok_or("sealed task")?
             .remove("effective_network");
+        json.as_object_mut()
+            .ok_or("sealed task")?
+            .remove("effective_database_ipc");
         let old: run::SealedTask = serde_json::from_value(json.clone())?;
         assert_eq!(old.effective_network, NetworkAccess::Provider);
+        assert!(!old.effective_database_ipc);
+        old.apply_access(&mut task);
+        assert!(!task.access.database_ipc);
+        json["effective_database_ipc"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<run::SealedTask>(json.clone()).is_err());
+        json.as_object_mut()
+            .ok_or("sealed task")?
+            .remove("effective_database_ipc");
         json["effective_network"] = serde_json::Value::Null;
         assert!(serde_json::from_value::<run::SealedTask>(json).is_err());
         Ok(())
@@ -800,7 +817,7 @@ mod tests {
         );
         let sealed: run::SealedTask = serde_json::from_slice(&serde_json::to_vec(&sealed)?)?;
         let mut next_parent = validated.tasks[0].clone();
-        sealed.apply_network(&mut next_parent);
+        sealed.apply_access(&mut next_parent);
         assert_eq!(sealed.effective_network, NetworkAccess::Provider);
         child.run_id = RunId::from_bytes([11; 16]);
         child.operation_id = OperationId::parse("grandchild")?;
@@ -823,6 +840,49 @@ mod tests {
                 .network(false),
             NetworkAccess::Provider
         );
+        Ok(())
+    }
+
+    #[test]
+    fn clamped_database_ipc_stays_off_for_grandchildren() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|f| f.message)?;
+        let (context, mut child) = child_fixture(temp.path(), &clock)?;
+        let store =
+            run::RunStore::open(&context, &call)?.with_writer_registry(&temp.path().join("host"));
+        let mut original = child.request.tasks[0].clone();
+        original.access.database_ipc = true;
+        let effective = store.effective_launch_task(&child.request, &original, None);
+        assert!(!effective.access.database_ipc);
+        let sealed = seal_launch_task(child.request.digest()?, &effective);
+        let sealed: run::SealedTask = serde_json::from_slice(&serde_json::to_vec(&sealed)?)?;
+        let mut reconstructed = original;
+        sealed.apply_access(&mut reconstructed);
+        assert!(!reconstructed.access.database_ipc);
+        child.run_id = RunId::from_bytes([11; 16]);
+        child.operation_id = OperationId::parse("grandchild-database")?;
+        child.request.parent_attempt = Some(child.attempts[0].attempt_id);
+        child.request.lane_depth = Some(3);
+        child.attempts[0].attempt_id = AttemptId::from_bytes([12; 16]);
+        child.request.tasks[0].access.database_ipc = true;
+        store.create(&child, &call)?;
+        let result = store.validate_child(
+            child.run_id,
+            child.request.parent_attempt.unwrap(),
+            &reconstructed,
+            2,
+            3,
+            &call,
+        );
+        assert!(matches!(
+            result,
+            Err(run::RunError::Validation(
+                "child database IPC exceeds parent access"
+            ))
+        ));
         Ok(())
     }
 

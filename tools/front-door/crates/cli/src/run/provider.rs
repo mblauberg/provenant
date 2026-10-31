@@ -895,6 +895,7 @@ fn prepare_candidates(
                 continue;
             }
         };
+        spec.profile.spec.allow_database_ipc = task.access.database_ipc;
         let build_settings = config.domains.fabric.lanes.build_settings();
         configure_build_slots(
             &mut spec,
@@ -1210,6 +1211,7 @@ fn prepare_command(
             },
         })
         .map_err(|error| error.to_string())?;
+    spec.profile.spec.allow_database_ipc = task.access.database_ipc;
     let settings = config.domains.fabric.lanes.build_settings();
     configure_build_slots(
         &mut spec,

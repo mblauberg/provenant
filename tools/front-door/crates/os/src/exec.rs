@@ -155,6 +155,9 @@ pub struct ExecOptions<'a> {
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
     /// Run in a private session and kill the whole group immediately on timeout.
     pub process_group: bool,
+    /// Run in a private session and kill remaining group members on every exit,
+    /// including success. Cleanup occurs before the leader's PID is reaped.
+    pub cleanup_process_group: bool,
     pub stdout: StreamPolicy<'a>,
     pub stderr: StreamPolicy<'a>,
     pub stdout_decoder: Option<&'a dyn FrameSink>,
@@ -177,6 +180,7 @@ impl<'a> ExecOptions<'a> {
             secret_input: None,
             inherited_lease: None,
             process_group: false,
+            cleanup_process_group: false,
             stdout: StreamPolicy::default(),
             stderr: StreamPolicy::default(),
             stdout_decoder: None,
@@ -345,12 +349,13 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
             secret_input: options.secret_input,
             inherited_lease: options.inherited_lease,
             inherited_ports: None,
-            process_group: options.process_group,
+            process_group: options.process_group || options.cleanup_process_group,
             capture_stdout: options.stdout.piped(),
             capture_stderr: options.stderr.piped(),
         },
     )
     .map_err(io_error("spawn"))?;
+    child.cleanup_process_group_on_exit(options.cleanup_process_group);
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let mut stdin = child.stdin.take();

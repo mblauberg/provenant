@@ -9,6 +9,27 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
+#[cfg(target_os = "macos")]
+fn zombie_is_only_group_member(pid: u32) -> bool {
+    // XNU excludes zombies from killpg and reports EPERM if none remain.
+    // Its process-list census includes zombies under the process-list lock.
+    // Two slots ensure a singleton result is complete, rather than truncated.
+    let mut members = [0_i32; 2];
+    const PROC_PGRP_ONLY: u32 = 2;
+    // SAFETY: this stack buffer is writable for exactly the supplied byte size.
+    // The caller still owns the unreaped leader, reserving this private PGID.
+    let bytes = unsafe {
+        libc::proc_listpids(
+            PROC_PGRP_ONLY,
+            pid,
+            members.as_mut_ptr().cast(),
+            std::mem::size_of_val(&members) as i32,
+        )
+    };
+    // Zero, denial, truncation or unexpected members all preserve the error.
+    bytes == std::mem::size_of::<i32>() as i32 && members[0] == pid as i32
+}
+
 /// The process edge must keep this policy fixed and never independently reap
 /// owned children. A blocked SIGCHLD is safe: polling still consumes status.
 pub fn verify_child_wait_policy() -> io::Result<()> {
@@ -36,6 +57,7 @@ pub struct OwnedPid {
     permit: Option<Permit>,
     reaped: bool,
     process_group: bool,
+    cleanup_process_group: bool,
     pub stdin: Option<ChildStdin>,
     pub stdout: Option<ChildStdout>,
     pub stderr: Option<ChildStderr>,
@@ -146,6 +168,7 @@ impl OwnedPid {
             permit: Some(permit),
             reaped: false,
             process_group: spec.process_group,
+            cleanup_process_group: false,
             stdin: None,
             stdout: None,
             stderr: None,
@@ -205,6 +228,68 @@ impl OwnedPid {
         self.child.as_ref().map(Child::id)
     }
     pub fn observe(&mut self) -> io::Result<Option<Termination>> {
+        if self.cleanup_process_group && !self.reaped {
+            let pid = self
+                .child
+                .as_ref()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+                .id();
+            let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+            // SAFETY: this owned, unreaped direct child reserves its PID/PGID.
+            // waitid borrows aligned output storage; WNOWAIT keeps that identity
+            // reserved until group cleanup completes and try_wait reaps below.
+            let mut interrupted = 0;
+            loop {
+                // SAFETY: the owned child and writable siginfo storage above
+                // remain live across retries; WNOWAIT retains its PID.
+                let result = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        pid as _,
+                        info.as_mut_ptr(),
+                        libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                    )
+                };
+                if result == 0 {
+                    break;
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted || interrupted == 8 {
+                    return Err(error);
+                }
+                interrupted += 1;
+            }
+            // SAFETY: successful waitid initialises siginfo; zero PID means
+            // that no exit is ready. Linux exposes this field through a union.
+            let info = unsafe { info.assume_init() };
+            #[cfg(target_os = "linux")]
+            // SAFETY: waitid initialised this siginfo; si_pid reads its PID union.
+            let seen_pid = unsafe { info.si_pid() };
+            #[cfg(not(target_os = "linux"))]
+            let seen_pid = info.si_pid;
+            if seen_pid == 0 {
+                return Ok(None);
+            }
+            if seen_pid != pid as i32 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "waitid observed another child",
+                ));
+            }
+            // SAFETY: WNOWAIT still reserves this private group leader's PID.
+            // Killing before reaping cannot target a recycled process group.
+            if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
+                let error = io::Error::last_os_error();
+                #[cfg(target_os = "macos")]
+                let empty =
+                    error.raw_os_error() == Some(libc::EPERM) && zombie_is_only_group_member(pid);
+                #[cfg(not(target_os = "macos"))]
+                let empty = false;
+                if error.raw_os_error() != Some(libc::ESRCH) && !empty {
+                    return Err(error);
+                }
+            }
+        }
         let child = self
             .child
             .as_mut()
@@ -218,6 +303,10 @@ impl OwnedPid {
                 }
             })
         })
+    }
+    pub(crate) fn cleanup_process_group_on_exit(&mut self, enabled: bool) {
+        debug_assert!(!enabled || self.process_group);
+        self.cleanup_process_group = enabled;
     }
     pub(crate) fn signal(&mut self, signal: Signal) -> io::Result<bool> {
         if self.reaped {
@@ -289,6 +378,9 @@ impl OwnedPid {
 impl Drop for OwnedPid {
     fn drop(&mut self) {
         if !self.reaped {
+            if self.cleanup_process_group {
+                self.kill_direct();
+            }
             self.transfer_to_reaper();
         }
     }

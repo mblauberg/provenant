@@ -49,8 +49,12 @@
 (with-filter (mac-policy-name "Sandbox")
   (allow system-mac-syscall (mac-syscall-number 2)))
 (allow sysctl-read)
+(deny sysctl-read (sysctl-name-prefix "kern.procargs") (sysctl-name-prefix "kern.proc."))
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
+(allow signal (target same-sandbox))
+(deny process-info*)
+(allow process-info* (target same-sandbox))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.cfprefsd.daemon")

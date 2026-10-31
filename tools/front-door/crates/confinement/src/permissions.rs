@@ -88,12 +88,17 @@ const DYLD_BOOTSTRAP_RULES: &str = r#"
   (allow system-mac-syscall (mac-syscall-number 2)))
 "#;
 /// Fixed operating-system runtime every provider CLI needs under deny-default:
-/// kernel and preference reads, TLS trust, DNS and time zone data. It names no
-/// user path; explicit secret-root denials still override the metadata grant.
+/// kernel and preference reads, TLS trust, DNS, time zone data, and process
+/// information and signals within the same sandbox. It names no user path; explicit
+/// secret-root denials still override the metadata grant.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
+(deny sysctl-read (sysctl-name-prefix "kern.procargs") (sysctl-name-prefix "kern.proc."))
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
+(allow signal (target same-sandbox))
+(deny process-info*)
+(allow process-info* (target same-sandbox))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.cfprefsd.daemon")
@@ -275,6 +280,8 @@ pub struct ProviderProfileSpec {
     pub process_executables: Vec<PathGrant>,
     /// Forking is broad process authority and requires an explicit profile grant.
     pub allow_process_fork: bool,
+    /// Host-global SysV IPC for explicitly declared database lanes only.
+    pub allow_database_ipc: bool,
     /// Deny keychain IPC and its CLI even when a tool can execute system programs.
     pub deny_keychain_access: bool,
     /// Deny all known credential stores, including networked GitHub access.
@@ -1653,6 +1660,9 @@ fn render_profile(
     // launch prerequisites and provider profiles aligned.
     source.push_str(DYLD_BOOTSTRAP_RULES);
     source.push_str(RUNTIME_BASELINE_RULES);
+    if profile.spec.allow_database_ipc {
+        source.push_str("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n");
+    }
     for grant in reads.iter().chain(&profile.spec.discovery_reads) {
         push_rule(&mut source, "allow", "file-read*", &grant.path, grant.scope)?;
     }
@@ -1681,10 +1691,7 @@ fn render_profile(
             &plan.scratch.path,
             PathScope::Subtree,
         )?;
-        source.push_str(concat!(
-            "(allow signal (target children))\n",
-            "(allow file-read* (subpath \"/dev/fd\"))\n",
-        ));
+        source.push_str("(allow file-read* (subpath \"/dev/fd\"))\n");
     }
     if profile.spec.allow_process_fork {
         source.push_str("(allow process-fork)\n");
@@ -2425,6 +2432,12 @@ mod tests {
     use super::*;
     use provenant_os::exec::SystemExecutor;
 
+    mod ipc;
+    mod process_info;
+    mod signals;
+    mod sysctl;
+    mod sysv_audit;
+
     #[test]
     fn git_control_link_refusal_names_the_file_and_the_recovery() {
         let error = PermissionError::GitControlHardLinked("/repo/.git/config".into());
@@ -2793,6 +2806,34 @@ mod tests {
                 writer.then_some(&git),
                 Path::new("/fixture/home"),
             )?)?;
+            // Every ordinary writer/reviewer profile keeps database IPC denied.
+            assert_eq!(
+                rendered
+                    .lines()
+                    .filter(|line| line.starts_with("(allow ipc-"))
+                    .collect::<Vec<_>>(),
+                ["(allow ipc-posix-shm-read* (ipc-posix-name-prefix \"apple.cfprefs.\"))",]
+            );
+            let mut database = ProviderProfile {
+                spec: profile.spec.clone(),
+                observations: BTreeMap::new(),
+            };
+            database.spec.allow_database_ipc = true;
+            let opted_in = String::from_utf8(render_profile(
+                &plan,
+                &database,
+                &[],
+                &[],
+                writer.then_some(&git),
+                Path::new("/fixture/home"),
+            )?)?;
+            assert!(opted_in.contains("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n"));
+            assert_eq!(
+                opted_in
+                    .replace("(allow ipc-sysv-shm)\n", "")
+                    .replace("(allow ipc-sysv-sem)\n", ""),
+                rendered
+            );
             let exec = format!("(allow process-exec (subpath \"{scratch}\"))");
             assert_eq!(rendered.lines().any(|line| line == exec), writer);
             assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));
@@ -2816,13 +2857,18 @@ mod tests {
                 .lines()
                 .filter(|line| line.starts_with("(allow signal"))
                 .collect();
+            assert_eq!(signals, ["(allow signal (target same-sandbox))"]);
+            assert!(rendered.contains("(deny sysctl-read (sysctl-name-prefix \"kern.procargs\") (sysctl-name-prefix \"kern.proc.\"))"));
+            assert!(
+                rendered
+                    .contains("(deny process-info*)\n(allow process-info* (target same-sandbox))")
+            );
             assert_eq!(
-                signals,
-                if writer {
-                    vec!["(allow signal (target children))"]
-                } else {
-                    vec![]
-                }
+                rendered
+                    .lines()
+                    .filter(|line| line.starts_with("(allow process-info"))
+                    .collect::<Vec<_>>(),
+                ["(allow process-info* (target same-sandbox))"]
             );
             assert_eq!(
                 rendered.contains("(allow file-read* (subpath \"/dev/fd\"))"),
@@ -4159,6 +4205,7 @@ mod tests {
                 }],
                 deny_keychain_access: true,
                 allow_process_fork: true,
+                allow_database_ipc: true,
                 runtime_reads: vec![PathGrant {
                     path: cargo.clone(),
                     scope: PathScope::Subtree,
@@ -4276,6 +4323,31 @@ mod tests {
             directories: &directories,
             worktree: Some((&linked, &selected_ref)),
         };
+        let executor = SystemExecutor::new(2)?;
+        let cancel = CancelToken::new();
+        let env = [
+            ("HOME".into(), home.into_os_string()),
+            ("PROVENANT_STATE_DIR".into(), state.clone().into_os_string()),
+            ("XDG_CONFIG_HOME".into(), xdg.into_os_string()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ];
+        let (baseline, baseline_diagnostic) = probe_sandbox_with_diagnostic(&BackendContext {
+            executor: &fixture.executor,
+            cancel: &CancelToken::new(),
+            env: &env,
+        })?;
+        if !matches!(baseline, Availability::Available { .. }) {
+            let diagnostic = baseline_diagnostic
+                .as_deref()
+                .unwrap_or("no command outcome was captured");
+            assert_ne!(
+                std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
+                Ok("1"),
+                "the required native sandbox baseline is unavailable: {baseline:?}; {diagnostic}"
+            );
+            return Ok(());
+        }
         let backend = MacOsSandboxBackend { ready: true };
         // Existing hard links in the scratch, the worktree and its ignored
         // build and dependency trees do not refuse the launch: the sandbox
@@ -4336,31 +4408,6 @@ mod tests {
                 .compile(&read_only_plan, &profile, &read_only_anchors)?
                 .profile,
         )?;
-        let executor = SystemExecutor::new(2)?;
-        let cancel = CancelToken::new();
-        let env = [
-            ("HOME".into(), home.into_os_string()),
-            ("PROVENANT_STATE_DIR".into(), state.clone().into_os_string()),
-            ("XDG_CONFIG_HOME".into(), xdg.into_os_string()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-        ];
-        let (baseline, baseline_diagnostic) = probe_sandbox_with_diagnostic(&BackendContext {
-            executor: &fixture.executor,
-            cancel: &CancelToken::new(),
-            env: &env,
-        })?;
-        if !matches!(baseline, Availability::Available { .. }) {
-            let diagnostic = baseline_diagnostic
-                .as_deref()
-                .unwrap_or("no command outcome was captured");
-            assert_ne!(
-                std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
-                Ok("1"),
-                "the required native sandbox baseline is unavailable: {baseline:?}; {diagnostic}"
-            );
-            return Ok(());
-        }
         let run_in = |sbpl: &str, program: &Path, args: &[&Path]| {
             let mut argv = vec![
                 OsString::from(SANDBOX_EXEC),
@@ -4413,6 +4460,52 @@ mod tests {
                 outcome.termination,
                 String::from_utf8_lossy(&outcome.stderr.bytes)
             );
+            let mut audit = sysv_audit::SysvAudit::new(
+                &executor,
+                &plan.scratch.path.join(format!("sysv-{name}")),
+            )?;
+            let script = format!(
+                "{}{}",
+                sysv_audit::PERL_JOURNAL,
+                r#"my ($shm, $sem);
+END {
+    my @errors;
+    push @errors, "shmctl: $!\n" if defined $shm && !shmctl($shm, IPC_RMID, 0);
+    push @errors, "semctl: $!\n" if defined $sem && !semctl($sem, 0, IPC_RMID, 0);
+    die join("", @errors) if @errors;
+}
+$shm = shmget(IPC_PRIVATE, 56, IPC_CREAT | 0600);
+die "shmget: $!\n" unless defined $shm;
+own("m", $shm);
+shmwrite($shm, "ok", 0, 2) or die "shmwrite: $!\n";
+shmread($shm, my $value, 0, 2) or die "shmread: $!\n";
+die "shared memory contents\n" unless $value eq "ok";
+$sem = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
+die "semget: $!\n" unless defined $sem;
+own("s", $sem);
+semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
+"#
+            );
+            let outcome = run_in(
+                sbpl,
+                &executables[6],
+                &[
+                    Path::new("-MIPC::SysV=IPC_PRIVATE,IPC_CREAT,IPC_RMID"),
+                    Path::new("-e"),
+                    Path::new(&script),
+                    audit.journal(),
+                ],
+            );
+            audit.finish()?;
+            assert!(
+                successful_probe(&outcome),
+                "{name} SysV IPC: {:?}; {}",
+                outcome.termination,
+                String::from_utf8_lossy(&outcome.stderr.bytes)
+            );
+            let outside = root.join("outside-write-roots");
+            assert!(denied_probe(&run_in(sbpl, &executables[0], &[&outside])));
+            assert!(!outside.exists(), "{name} wrote outside its writable roots");
         }
 
         let shell_outcome = run(&executables[3], &[Path::new("-c"), Path::new("printf ok")]);

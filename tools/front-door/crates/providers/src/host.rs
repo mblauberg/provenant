@@ -235,6 +235,7 @@ impl Executor for HostProbeExecutor<'_> {
             secret_input: options.secret_input,
             inherited_lease: options.inherited_lease,
             process_group: options.process_group,
+            cleanup_process_group: options.cleanup_process_group,
             stdout: options.stdout,
             stderr: options.stderr,
             stdout_decoder: options.stdout_decoder,

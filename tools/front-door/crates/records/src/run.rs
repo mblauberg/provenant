@@ -240,6 +240,9 @@ pub struct LaneAccess {
     /// Explicit network reach; absent defaults to open network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkAccess>,
+    /// Explicit PostgreSQL capability; never inferred from network or write access.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub database_ipc: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_roots: Vec<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1022,7 +1025,25 @@ mod tests {
     #[test]
     fn lane_access_network_defaults_to_open() {
         let access = LaneAccess::default();
+        assert!(!access.database_ipc);
         assert_eq!(access.network(false), NetworkAccess::Open);
         assert_eq!(access.network(true), NetworkAccess::Open);
+    }
+
+    #[test]
+    fn database_ipc_is_explicit_and_round_trips() {
+        let old: LaneAccess = serde_json::from_str("{}").expect("old access");
+        assert!(!old.database_ipc);
+        let access = LaneAccess {
+            database_ipc: true,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&access).expect("access JSON");
+        assert_eq!(value["database_ipc"], true);
+        assert_eq!(
+            serde_json::from_value::<LaneAccess>(value).expect("access round trip"),
+            access
+        );
+        assert!(!access.is_default());
     }
 }

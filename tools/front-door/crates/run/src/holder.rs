@@ -90,14 +90,17 @@ pub struct SealedTask {
     pub task_id: provenant_core::TaskId,
     #[serde(default = "legacy_network")]
     pub effective_network: NetworkAccess,
+    #[serde(default)]
+    pub effective_database_ipc: bool,
 }
 fn legacy_network() -> NetworkAccess {
     NetworkAccess::Provider
 }
 impl SealedTask {
     /// Restore host-sealed launch policy before validating the next generation.
-    pub fn apply_network(&self, task: &mut TaskRequest) {
+    pub fn apply_access(&self, task: &mut TaskRequest) {
         task.access.network = Some(self.effective_network);
+        task.access.database_ipc = self.effective_database_ipc;
     }
 }
 

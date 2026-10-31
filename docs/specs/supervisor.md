@@ -237,6 +237,137 @@ Rendered profiles are pinned by
 `crates/providers/src/seatbelt_snapshots.rs::seatbelt_profiles_match_snapshots`.
 The rules below are what every profile must keep.
 
+### Database IPC shares the host namespace
+
+Database IPC is denied by default in both writer and read-only profiles.
+Only an explicit `provenant run --capability postgres` declaration grants
+`ipc-sysv-shm` and `ipc-sysv-sem`. The CLI preserves this in the sealed
+`LaneAccess.database_ipc` field; both provider and configured-command launchers
+copy it to `ProviderProfileSpec.allow_database_ipc` before compilation. Network
+access, writer mode, provider identity and loopback-server support never imply
+database authority. Ordinary MCP, preset and undeclared reviewer lanes stay
+off. Host child validation refuses database authority beyond the parent, and
+unvalidated sealed requests cannot add it. The separate backend availability
+probe keeps its minimal launch-only profile.
+
+PostgreSQL 18 always uses a small SysV shared-memory interlock, including with
+`shared_memory_type=mmap`. Its [Darwin configuration](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/template/darwin)
+selects SysV semaphores on supported macOS versions, so POSIX semaphores remain
+denied. Configure dynamic shared memory to use files in the confined database
+directory, including during initialisation:
+
+```sh
+initdb -D "$TMPDIR/pgdata" -c dynamic_shared_memory_type=mmap
+postgres -D "$TMPDIR/pgdata" -c dynamic_shared_memory_type=mmap
+```
+
+This avoids PostgreSQL's host-global POSIX shared-memory namespace entirely.
+No PostgreSQL POSIX shared-memory, POSIX semaphore or SysV message-queue grant
+is added, even for a database-enabled lane.
+
+This is a security-relevant confinement trade-off: macOS SysV IPC is
+host-global and Seatbelt cannot restrict these operations to a lane's own
+segments or semaphore sets. A lane may discover keys and access another
+process's objects when ordinary Unix IPC permissions allow it, including
+objects owned by the same user, including mutation and `IPC_RMID` removal.
+The explicit database capability accepts that exposure; it does not create a
+lane-private SysV namespace. Other users' objects remain protected under normal
+restrictive permissions. Profiles without the capability cannot mutate or
+remove the host's objects, including those owned by the same user.
+However, macOS does not sandbox-check the SysV creation path. Even a lane
+without database authority can allocate a segment or semaphore set and then
+be refused permission to remove its own allocation. Repeated failed database
+starts can exhaust host-global IPC limits such as `kern.sysv.shmmni`.
+Capability-off therefore does not guarantee freedom from IPC resource exhaustion.
+
+Every SysV-touching native test records host `ipcs -m -s` inventories before
+and after. Trusted test code journals exact newly created IDs; a host-side
+guard removes only those IDs and asserts that none remain. PostgreSQL tests
+audit allocations across initdb's subprocesses, including failed starts.
+Cleanup never deletes an unowned inventory difference or a pre-existing object.
+A general lane-end sweep is tracked in #2454 and needs a separate ownership design: semaphore metadata
+does not expose a creator PID, and exited-child ancestry cannot be reconstructed
+reliably. It must not infer ownership from a UID or a before/after global diff.
+The test journal is not crash-atomic: a forced kill between allocation and
+journal append can leave an unrecorded object. The production ownership work
+in #2454 must also address that interruption window.
+File confinement still restricts database files to existing writable roots,
+and executable, Mach and network rules retain their existing limits. Database
+clients need the existing local or open network policy for loopback access.
+Use a separate OS user or a VM when isolation from same-user IPC is required.
+
+Both lane modes allow `(allow signal (target same-sandbox))`. PostgreSQL
+backends need to notify their postmaster parent and sibling processes; the
+former writer-only `children` target denied child-to-parent signals and left
+client queries and clean shutdown hanging. The same-sandbox rule replaces that
+target and permits communication only among processes in the same Seatbelt
+sandbox. Signals to the outside supervisor, host processes and independently
+launched sandboxes with byte-identical profiles
+remain denied. It grants no additional execution, file, Mach, network or IPC
+authority.
+
+- Why: PostgreSQL startup and database checks need kernel IPC without broader
+  file, executable or network authority, and intra-sandbox signals for queries
+  and clean shutdown.
+- Test: `crates/confinement/src/permissions.rs::writer_test_grants_stay_within_the_attempt_and_mode`;
+  `::native_sandbox_blocks_path_escape_probes`;
+  `crates/confinement/src/permissions/tests/ipc.rs::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`;
+  `::postgres_without_database_ipc_refuses_initdb`;
+  `::database_off_cannot_mutate_or_remove_foreign_sysv_objects`;
+  `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`
+- Owner: `crates/confinement/src/permissions.rs`
+
+### Process information stays inside the sandbox
+
+Every lane profile explicitly denies the process-info family before allowing
+`(allow process-info* (target same-sandbox))`, so a lane can read process
+information, including resident memory, for a PID it already knows inside its
+own sandbox. The `kern.proc.` sysctl deny stops a lane from enumerating
+processes, its own descendants included, so an in-lane memory guard cannot
+discover its process tree; tree-wide sampling belongs on the host side or in a
+reader handed the PIDs (#2452). An allow-only clause is
+not assumed to restrict APIs that the platform permits by default. The native
+test records the unscoped baseline and compares an explicit deny,
+`process-info-pidinfo` scoped to the sandbox, and the final scoped wildcard.
+The lane's own processes must have nonzero RSS. An outside same-user host PID
+must remain denied or invisible to libproc.
+
+Every profile also denies process-list and argument sysctls with
+`(deny sysctl-read (sysctl-name-prefix "kern.procargs") (sysctl-name-prefix "kern.proc."))`.
+Native controls require self PID/argument and CPU queries to keep working,
+while outside-host PID/argument and process-enumeration queries fail with
+`EPERM`. The tool compatibility probe also runs under this restriction.
+
+The native A/B probe confirms that unscoped libproc RSS queries succeed, the
+explicit deny returns `EPERM`, and the scoped PIDINFO and wildcard rules permit
+own-process queries while refusing the outside host. The identical-profile
+peer fixture also requires `proc_pidinfo` of a separately launched live sandbox
+to fail with `EPERM`, while its own RSS query succeeds.
+
+Stock `ps` remains a separate unresolved restriction: `execve("/bin/ps", ... )`
+returns `EPERM` before any process-info lookup, in both access modes. On Darwin
+27, the binary is setuid and libsandbox's diagnostic `sandbox_check` reports
+`forbidden-exec-sugid` denied; an unknown-operation control returns `EINVAL`.
+This is a queried policy denial, rather than a captured kernel log for the
+exec. `forbidden-exec-sugid` is not a grantable SBPL symbol on that host.
+The process-info rule therefore does not fix consumers that invoke stock `ps`.
+Issue #2452 needs an unprivileged libproc-based process-tree RSS reader, such as
+a `provenant` subcommand, for consumers' memory guards. No privileged execution,
+sandbox escape or Mach authority is added.
+
+The native production-profile shell probe also runs an offline Cargo test with
+two jobs. Its build script acquires and returns an inherited jobserver token,
+and its compiled Rust test checks the success marker. The same probe commits
+with Git and runs Node child-process spawn/fork IPC directly and through a pnpm
+script. macOS CI requires Node and pnpm availability. PostgreSQL's separate
+database-enabled lifecycle smoke covers both access modes.
+
+- Test: `crates/confinement/src/permissions/tests/process_info.rs::process_info_is_same_sandbox_and_reports_own_rss`;
+  `crates/confinement/src/permissions/tests/sysctl.rs::sysctl_blocks_host_process_queries_but_preserves_self`;
+  `src/worktree_tests.rs::lane_prepare_isolates_nested_state` (`verify_lane_profile` shell probe);
+  `crates/confinement/src/permissions/tests/ipc.rs::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`
+- Owner: `crates/confinement/src/permissions.rs`
+
 ### Plans refuse unsafe roots
 
 Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)` from
