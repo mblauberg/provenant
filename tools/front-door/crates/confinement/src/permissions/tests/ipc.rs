@@ -221,6 +221,7 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
         let argv = [SANDBOX_EXEC, "-p", &source, "/bin/sh", "-c", script].map(OsString::from);
         let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(30));
         options.env = Some(&env);
+        options.cleanup_process_group = true;
         options.terminate_grace = Duration::from_secs(5);
         options.stdout = StreamPolicy::Capture { limit: 8192 };
         options.stderr = StreamPolicy::Capture { limit: 8192 };
