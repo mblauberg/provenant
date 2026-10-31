@@ -1,7 +1,40 @@
 //! Narrow native edge for the host sampler and known-PID confined reader.
+use crate::process_tree::SwapUsage;
 #[cfg(target_os = "macos")]
 use crate::process_tree::{MAX_PROCESSES, ProcessMemory};
 use crate::process_tree::{NativeProcess, ObservationError, ObservationResult};
+
+#[cfg(target_os = "macos")]
+pub(crate) fn swap() -> Option<SwapUsage> {
+    let mut usage = std::mem::MaybeUninit::<libc::xsw_usage>::uninit();
+    let mut size = std::mem::size_of_val(&usage);
+    // SAFETY: usage is aligned writable storage for the stated ABI size;
+    // the name is NUL-terminated, no new value is supplied, and no pointer
+    // is retained by sysctlbyname.
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"vm.swapusage".as_ptr(),
+            usage.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size != std::mem::size_of_val(&usage) {
+        return None;
+    }
+    // SAFETY: a successful full-sized read initialised the entire record.
+    let usage = unsafe { usage.assume_init() };
+    Some(SwapUsage {
+        used_bytes: usage.xsu_used,
+        total_bytes: usage.xsu_total,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn swap() -> Option<SwapUsage> {
+    None
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) fn member(pid: u32, name: &std::ffi::CStr) -> ObservationResult<bool> {

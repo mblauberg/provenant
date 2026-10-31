@@ -345,7 +345,11 @@ exit 90
         let value: Value = serde_json::from_str(json.trim())?;
         assert_eq!(value["status"], "ok", "{value}");
         let sample = &value["data"];
-        assert_eq!(sample["schema_version"], 1);
+        assert_eq!(sample["schema_version"], 2);
+        for field in ["swap_used_bytes", "swap_total_bytes"] {
+            assert!(sample.get(field).is_some(), "missing {field}: {sample}");
+            assert!(sample[field].is_null() || sample[field].as_u64().is_some());
+        }
         let root = sample["root_pid"].as_u64().ok_or("root pid")?;
         let processes = sample["processes"].as_array().ok_or("processes")?;
         let child = processes

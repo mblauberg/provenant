@@ -384,7 +384,7 @@ Inside a macOS lane, run `provenant process-tree --root PID --json` with the PID
 of the command being supervised. The normal command envelope has this `data`:
 
 ```json
-{"schema_version":1,"root_pid":410,"sampled_at":"2026-11-01T00:00:00.000000Z","processes":[{"pid":410,"ppid":400,"pgid":410,"rss_bytes":1048576},{"pid":411,"ppid":410,"pgid":410,"rss_bytes":524288}]}
+{"schema_version":2,"root_pid":410,"sampled_at":"2026-11-01T00:00:00.000000Z","swap_used_bytes":536870912,"swap_total_bytes":1073741824,"processes":[{"pid":410,"ppid":400,"pgid":410,"rss_bytes":1048576},{"pid":411,"ppid":410,"pgid":410,"rss_bytes":524288}]}
 ```
 
 The root and its descendants are included, sorted by PID. RSS is in bytes;
@@ -393,6 +393,14 @@ digits. Sum `rss_bytes` to estimate the command tree's resident memory; shared
 pages can be counted by more than one process. Zombies have no resident task;
 they are omitted when the kernel no longer exposes their sandbox, or included
 with zero RSS. Selecting an exited or zombie root is unavailable.
+`swap_used_bytes` and `swap_total_bytes` describe system-wide swap in bytes,
+read by the unconfined supervisor through `sysctlbyname("vm.swapusage")`
+in the same sampling pass. Both fields are null when swap cannot be measured;
+missing swap is never reported as zero and does not invalidate RSS data.
+Swap shares the snapshot's five-second freshness rule and is unchanged when
+selecting a subtree. No swap query or additional sysctl, process-info or file
+scope is granted to the lane. The native tree sampler currently runs only on
+macOS; the unsupported backend leaves swap fields null.
 This is periodic observation, not an atomic kernel census or a kernel
 memory limit: short-lived processes and changes between samples can be missed.
 The tree follows current parent links. Reparented orphans are no longer in
