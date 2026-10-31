@@ -215,6 +215,28 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"A higher count keeps a longer audit trail but a larger history file."` |
 | `type` | `"int"` |
 
+## `confinement.census_host_list_complete`
+
+| Field | Value |
+|---|---|
+| `default` | `false` |
+| `effect` | `"Host-owner declaration that unreadable daemon exceptions are complete. Enables the native clean-Free acceptance assertion; grants no census exception or cleanup authority. Set only after listing the host's daemons."` |
+| `host_only` | `true` |
+| `status` | `"wired"` |
+| `strict` | `true` |
+| `type` | `"bool"` |
+
+## `confinement.census_ignore_unreadable`
+
+| Field | Value |
+|---|---|
+| `default` | `[]` |
+| `effect` | `"Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. All real/effective/saved uids must be system accounts foreign to every root owner; platform entries also require a root-owned chain with no group/other write permission. Listed executables may occupy a worktree. Invalid/unreadable signing state never qualifies. Not accepted through dispatch --knob or Fabric overrides."` |
+| `host_only` | `true` |
+| `status` | `"wired"` |
+| `strict` | `true` |
+| `type` | `"census_ignore_list"` |
+
 ## `domains.routing.capacity_cooldown_seconds`
 
 | Field | Value |

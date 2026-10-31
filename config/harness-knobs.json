@@ -114,6 +114,22 @@
     }
   },
   "knobs": {
+    "confinement.census_host_list_complete": {
+        "type": "bool",
+        "default": false,
+        "strict": true,
+        "host_only": true,
+        "status": "wired",
+        "effect": "Host-owner declaration that unreadable daemon exceptions are complete. Enables the native clean-Free acceptance assertion; grants no census exception or cleanup authority. Set only after listing the host's daemons."
+    },
+    "confinement.census_ignore_unreadable": {
+        "type": "census_ignore_list",
+        "default": [],
+        "strict": true,
+        "host_only": true,
+        "status": "wired",
+        "effect": "Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. All real/effective/saved uids must be system accounts foreign to every root owner; platform entries also require a root-owned chain with no group/other write permission. Listed executables may occupy a worktree. Invalid/unreadable signing state never qualifies. Not accepted through dispatch --knob or Fabric overrides."
+    },
     "routing.workload": {
       "type": "enum", "values": ["general", "read_heavy", "edit_heavy", "review"], "default": "general", "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs",

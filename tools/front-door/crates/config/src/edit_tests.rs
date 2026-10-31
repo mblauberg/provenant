@@ -51,6 +51,53 @@ fn schema_lists_bounds_defaults_values_and_layers() {
 }
 
 #[test]
+fn census_ignore_schema_apply_and_unset_keep_structured_host_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let roots = roots(temp.path());
+    let name = "confinement.census_ignore_unreadable";
+    let complete = "confinement.census_host_list_complete";
+    let value = json!([{ "path": "/Library/Daemon", "team_id": "TEAM123" }]);
+    let edited = patch(
+        &roots,
+        json!({name: value, complete: true}),
+        &EditOptions::new("test"),
+    )
+    .unwrap();
+    assert_eq!(edited.config.census_ignore_unreadable().unwrap().len(), 1);
+    assert!(edited.config.census_host_list_complete().unwrap());
+    let (config, revision) = show(&roots, &NO_DOMAINS).unwrap();
+    let schema = schema(&config, &NO_DOMAINS, revision).unwrap();
+    let field = schema
+        .fields
+        .iter()
+        .find(|field| field.path == name)
+        .unwrap();
+    assert_eq!(field.kind, "census_ignore_list");
+    assert_eq!(field.value, value);
+    let flag = schema
+        .fields
+        .iter()
+        .find(|field| field.path == complete)
+        .unwrap();
+    assert_eq!(flag.kind, "bool");
+    assert_eq!(flag.value, json!(true));
+    let cleared = patch(
+        &roots,
+        json!({name: null, complete: null}),
+        &EditOptions::new("test"),
+    )
+    .unwrap();
+    assert!(!cleared.config.census_host_list_complete().unwrap());
+    assert!(
+        cleared
+            .config
+            .census_ignore_unreadable()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn stale_revision_is_refused_naming_the_current_one() {
     let temp = tempfile::tempdir().unwrap();
     let roots = roots(temp.path());

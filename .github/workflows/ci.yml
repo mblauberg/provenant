@@ -284,12 +284,24 @@ jobs:
         run: |
           brew install postgresql@18 node pnpm
           echo "PROVENANT_TEST_POSTGRES_BIN=$(brew --prefix postgresql@18)/bin" >> "$GITHUB_ENV"
+      - name: Configure native census host policy
+        run: |
+          mkdir -p "$RUNNER_TEMP/provenant-native-host"
+          cat > "$RUNNER_TEMP/provenant-native-host/config.toml" <<'TOML'
+          schema_version = 1
+          [knobs]
+          "confinement.census_ignore_unreadable" = [
+            { path = "/Library/Apple/System/Library/PrivateFrameworks/MobileDevice.framework/Versions/A/Resources/usbmuxd", team_id = "platform" },
+          ]
+          TOML
       - name: Run macOS supervisor custody tests
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
           PROVENANT_POSTGRES_REQUIRED: "1"
-        run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os)'
+        run: |
+          cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E '(package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os)) & !(test(=worktrees::lifecycle_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::lifecycle_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)))'
+          PROVENANT_STATE_DIR="$RUNNER_TEMP/provenant-native-host" cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --success-output immediate -E '(test(=worktrees::lifecycle_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::lifecycle_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)))'
       - name: Run macOS Cargo seed tests
         working-directory: tools/front-door
         run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-run) & test(cargo_seed)'

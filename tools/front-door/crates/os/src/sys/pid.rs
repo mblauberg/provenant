@@ -3,6 +3,15 @@ use std::io;
 
 const MAX_EINTR_RETRIES: u64 = 8;
 
+#[cfg(test)]
+fn test_uids(uid: u32) -> crate::pid::ProcessUids {
+    crate::pid::ProcessUids {
+        real: uid,
+        effective: uid,
+        saved: uid,
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn darwin_thread_state(states: &[Option<i32>]) -> io::Result<ProcessState> {
     // These values are from Darwin's mach/thread_info.h; 5 is HALTED.
@@ -212,68 +221,477 @@ fn parses_linux_stat_states_with_complex_names() {
     assert!(linux_stat_state("123 (name) ? 1").is_err());
 }
 
-pub(crate) fn uid(pid: i32) -> Option<u32> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::Read;
-        // /proc/PID ownership can change to root for a nondumpable process;
-        // status instead reports its real, effective, saved and filesystem UIDs.
-        const LIMIT: u64 = 65_536;
-        let file = std::fs::File::open(format!("/proc/{pid}/status")).ok()?;
-        let mut status = String::new();
-        file.take(LIMIT + 1).read_to_string(&mut status).ok()?;
-        if status.len() as u64 > LIMIT {
-            return None;
-        }
-        linux_status_uid(&status)
-    }
+/// No credentials-only fallback exists on other platforms.
+pub(crate) fn sealed_platform_uids(pid: i32) -> Option<crate::pid::ProcessUids> {
+    ignored_unreadable_uids(pid, &[])
+}
+
+pub(crate) fn ignored_unreadable_uids(
+    pid: i32,
+    entries: &[crate::pid::CensusIgnoreEntry],
+) -> Option<crate::pid::ProcessUids> {
+    unreadable_policy_uids(pid, entries).ok()
+}
+
+pub(crate) fn unreadable_policy_uids(
+    pid: i32,
+    entries: &[crate::pid::CensusIgnoreEntry],
+) -> Result<crate::pid::ProcessUids, crate::pid::UnreadablePolicyFailure> {
     #[cfg(target_os = "macos")]
     {
-        let requested = i32::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).ok()?;
-        let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
-        // SAFETY: info is aligned writable storage of the exact ABI size.
-        // libproc borrows it for this call and retains no pointer.
-        let returned = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDT_SHORTBSDINFO,
-                0,
-                info.as_mut_ptr().cast(),
-                requested,
-            )
-        };
-        if returned != requested {
-            return None;
+        use std::os::unix::fs::OpenOptionsExt;
+        let before = darwin_uids(pid).ok_or("real/effective/saved uids unavailable")?;
+        if !before.all_system() {
+            return Err("real/effective/saved system uids below 500 required".into());
         }
-        // SAFETY: the exact-size successful read initialised the whole record.
-        let info = unsafe { info.assume_init() };
-        (info.pbsi_pid == pid as u32
-            && info.pbsi_uid == info.pbsi_ruid
-            && info.pbsi_uid == info.pbsi_svuid)
-            .then_some(info.pbsi_uid)
+        let flags = darwin_signing_status(pid).ok_or("live signing state unavailable")?;
+        if !darwin_valid_signature(flags) {
+            return Err("valid signed image without untrusted flags required".into());
+        }
+        let path = darwin_executable_path(pid).ok_or("kernel executable path unavailable")?;
+        let executable = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|_| "O_NOFOLLOW executable open failed")?;
+        if !executable
+            .metadata()
+            .map_err(|_| "executable metadata unavailable")?
+            .is_file()
+        {
+            return Err("regular executable file required".into());
+        }
+        let builtin = darwin_builtin_condition(before, flags, &path, || {
+            darwin_on_sealed_system_volume(&executable)
+        });
+        let team = if entries
+            .iter()
+            .any(|entry| entry.path.as_os_str() == path.as_os_str() && entry.team_id != "platform")
+        {
+            darwin_team_id(pid)
+        } else {
+            None
+        };
+        let platform_chain = || root_owned_executable_chain(&path, &executable);
+        let listed = listed_image_matches(entries, &path, flags, team.as_deref(), platform_chain);
+        if !listed {
+            builtin?;
+        }
+        if darwin_executable_path(pid)
+            .ok_or("executable path recheck unavailable")?
+            .as_os_str()
+            != path.as_os_str()
+        {
+            return Err("stable executable path required".into());
+        }
+        if darwin_signing_status(pid).ok_or("signing state recheck unavailable")? != flags {
+            return Err("stable signing state required".into());
+        }
+        if darwin_uids(pid).ok_or("real/effective/saved uid recheck unavailable")? != before {
+            return Err("stable real/effective/saved uids required".into());
+        }
+        if listed && team.is_some() && darwin_team_id(pid) != team {
+            return Err(crate::pid::UnreadablePolicyFailure {
+                condition: "stable signing team required",
+                builtin_condition: builtin.err(),
+            });
+        }
+        Ok(before)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(target_os = "macos"))]
     {
-        let _ = pid;
-        None
+        let _ = (pid, entries);
+        Err("macOS signing evidence unavailable".into())
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn linux_status_uid(status: &str) -> Option<u32> {
-    let mut records = status.lines().filter_map(|line| line.strip_prefix("Uid:"));
-    let record = records.next()?;
-    if records.next().is_some() {
-        return None;
+#[cfg(any(target_os = "macos", test))]
+fn darwin_builtin_condition(
+    uids: crate::pid::ProcessUids,
+    flags: u32,
+    path: &std::path::Path,
+    sealed: impl FnOnce() -> Option<bool>,
+) -> Result<(), &'static str> {
+    if !uids.all_system() {
+        return Err("real/effective/saved system uids below 500 required");
     }
-    let mut fields = record.split_whitespace();
-    let uid = fields.next()?.parse::<u32>().ok()?;
-    for _ in 0..3 {
-        if fields.next()?.parse::<u32>().ok()? != uid {
-            return None;
+    if !darwin_platform_signature(flags) {
+        return Err("valid signed platform binary required");
+    }
+    if !darwin_daemon_path(path) {
+        return Err("approved daemon directory required");
+    }
+    match sealed() {
+        Some(true) => Ok(()),
+        Some(false) => Err("sealed read-only root volume required"),
+        None => Err("sealed read-only root volume evidence unavailable"),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn builtin_condition_names_each_failed_gate_and_accepts_complete_evidence() {
+    use std::path::Path;
+    let daemon = Path::new("/usr/libexec/daemon");
+    let flags = 0x2400_0001;
+    assert_eq!(
+        darwin_builtin_condition(test_uids(0), flags, daemon, || Some(true)),
+        Ok(())
+    );
+    assert_eq!(
+        darwin_builtin_condition(test_uids(500), flags, daemon, || Some(true)),
+        Err("real/effective/saved system uids below 500 required")
+    );
+    assert_eq!(
+        darwin_builtin_condition(test_uids(0), 0x2000_0001, daemon, || Some(true)),
+        Err("valid signed platform binary required")
+    );
+    assert_eq!(
+        darwin_builtin_condition(test_uids(0), flags | 4, daemon, || Some(true)),
+        Err("valid signed platform binary required")
+    );
+    assert_eq!(
+        darwin_builtin_condition(test_uids(0), flags, Path::new("/usr/bin/login"), || Some(
+            true
+        )),
+        Err("approved daemon directory required")
+    );
+    assert_eq!(
+        darwin_builtin_condition(test_uids(0), flags, daemon, || Some(false)),
+        Err("sealed read-only root volume required")
+    );
+    assert_eq!(
+        darwin_builtin_condition(test_uids(0), flags, daemon, || None),
+        Err("sealed read-only root volume evidence unavailable")
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn allowed_daemon_on_unsealed_volume_reaches_seal_refusal() {
+    let called = std::cell::Cell::new(false);
+    let result = darwin_builtin_condition(
+        crate::pid::ProcessUids {
+            real: 0,
+            effective: 88,
+            saved: 0,
+        },
+        0x2400_0001,
+        std::path::Path::new("/System/Library/Daemon"),
+        || {
+            called.set(true);
+            Some(false)
+        },
+    );
+    assert!(called.get(), "all predicates before the seal check passed");
+    assert_eq!(result, Err("sealed read-only root volume required"));
+}
+
+pub(crate) fn process_details(pid: i32) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let path = darwin_executable_path(pid)
+            .map_or_else(|| "unavailable".into(), |path| format!("{path:?}"));
+        let uids = darwin_uids(pid).map_or_else(
+            || "ruid=unavailable, euid=unavailable, svuid=unavailable".into(),
+            |uids| {
+                format!(
+                    "ruid={}, euid={}, svuid={}",
+                    uids.real, uids.effective, uids.saved
+                )
+            },
+        );
+        let status = darwin_signing_status(pid);
+        let flags = status.map_or_else(|| "unavailable".into(), |flags| format!("0x{flags:08x}"));
+        let team = if status.is_some_and(|flags| flags & 0x0400_0000 != 0) {
+            "platform".into()
+        } else {
+            darwin_team_id(pid).unwrap_or_else(|| "unavailable".into())
+        };
+        format!("path={path}, {uids}, cs_flags={flags}, team_id={team}")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        "path=unavailable, ruid=unavailable, euid=unavailable, svuid=unavailable, cs_flags=unavailable, team_id=unavailable".into()
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_valid_signature(flags: u32) -> bool {
+    const CS_VALID: u32 = 0x0000_0001;
+    const CS_SIGNED: u32 = 0x2000_0000;
+    const CS_LINKER_SIGNED: u32 = 0x0002_0000;
+    // CS_ADHOC may be absent on live ad-hoc images; this mask alone is not a
+    // signing trust anchor. Platform bits or explicit path/team policy remain.
+    const UNTRUSTED: u32 = 0x0000_0002 | 0x0000_0004 | 0x0000_0020 | CS_LINKER_SIGNED | 0x1000_0000;
+    let required = CS_VALID | CS_SIGNED;
+    flags & required == required && flags & UNTRUSTED == 0
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_platform_signature(flags: u32) -> bool {
+    // CS_PLATFORM_PATH alone is not signing evidence.
+    darwin_valid_signature(flags) && flags & 0x0400_0000 != 0
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn listed_image_matches(
+    entries: &[crate::pid::CensusIgnoreEntry],
+    path: &std::path::Path,
+    flags: u32,
+    team: Option<&str>,
+    platform_chain: impl Fn() -> bool,
+) -> bool {
+    darwin_valid_signature(flags)
+        && entries.iter().any(|entry| {
+            entry.is_valid()
+                && entry.path.as_os_str() == path.as_os_str()
+                && if entry.team_id == "platform" {
+                    darwin_platform_signature(flags) && platform_chain()
+                } else {
+                    team == Some(entry.team_id.as_str())
+                }
+        })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn root_owned_mode(uid: u32, mode: u32) -> bool {
+    uid == 0 && mode & 0o022 == 0
+}
+
+/// Walk from / using only no-follow descriptor-relative opens. The final
+/// descriptor must identify the same file that was opened for image evidence.
+#[cfg(any(target_os = "macos", test))]
+fn root_owned_executable_chain(path: &std::path::Path, executable: &std::fs::File) -> bool {
+    check_root_owned_executable_chain(path, executable).is_ok()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn check_root_owned_executable_chain(
+    path: &std::path::Path,
+    executable: &std::fs::File,
+) -> Result<(), &'static str> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+    let expected = executable
+        .metadata()
+        .map_err(|_| "executable metadata unavailable")?;
+    if !expected.is_file() || !root_owned_mode(expected.uid(), expected.mode()) {
+        return Err("root-owned non-writable executable required");
+    }
+    let mut parts = path.components();
+    if parts.next() != Some(Component::RootDir) {
+        return Err("absolute executable path required");
+    }
+    let mut parts = parts.peekable();
+    let mut directory = crate::sys::fs::open_anchor(std::path::Path::new("/"))
+        .map_err(|_| "root descriptor unavailable")?;
+    loop {
+        let metadata = directory
+            .metadata()
+            .map_err(|_| "ancestor metadata unavailable")?;
+        if !metadata.is_dir() || !root_owned_mode(metadata.uid(), metadata.mode()) {
+            return Err("root-owned non-writable ancestor required");
+        }
+        let Some(Component::Normal(name)) = parts.next() else {
+            return Err("normal executable component required");
+        };
+        if parts.peek().is_some() {
+            directory = crate::sys::fs::open_directory(&directory, name, false)
+                .map_err(|_| "no-follow ancestor open failed")?;
+        } else {
+            let file = crate::sys::fs::open_read(&directory, name)
+                .map_err(|_| "no-follow executable open failed")?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| "executable metadata unavailable")?;
+            return if metadata.is_file()
+                && root_owned_mode(metadata.uid(), metadata.mode())
+                && (metadata.dev(), metadata.ino()) == (expected.dev(), expected.ino())
+            {
+                Ok(())
+            } else {
+                Err("root-owned executable with matching descriptor identity required")
+            };
         }
     }
-    fields.next().is_none().then_some(uid)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_daemon_path(path: &std::path::Path) -> bool {
+    path.components().all(|part| {
+        matches!(
+            part,
+            std::path::Component::RootDir | std::path::Component::Normal(_)
+        )
+    }) && ["/sbin", "/usr/sbin", "/usr/libexec", "/System/Library"]
+        .iter()
+        .any(|directory| path.starts_with(directory) && path != std::path::Path::new(directory))
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_executable_path(pid: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: path supplies writable storage of the supplied size, not retained.
+    let size = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    if size <= 0 {
+        return None;
+    }
+    let end = path.iter().position(|byte| *byte == 0)?;
+    let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&path[..end]));
+    path.is_absolute().then_some(path)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_sealed_root_volume(flags: u32, valid: u32, capabilities: u32) -> bool {
+    // XNU bsd/sys/{mount,attr}.h: read-only root filesystem and a valid seal.
+    const REQUIRED_MOUNT: u32 = 0x0000_0001 | 0x0000_4000;
+    const SEALED: u32 = 0x0200_0000;
+    flags & REQUIRED_MOUNT == REQUIRED_MOUNT && valid & SEALED != 0 && capabilities & SEALED != 0
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_csops(pid: i32, operation: u32, buffer: &mut [u8]) -> bool {
+    unsafe extern "C" {
+        fn csops(
+            pid: libc::pid_t,
+            ops: libc::c_uint,
+            buffer: *mut libc::c_void,
+            size: usize,
+        ) -> libc::c_int;
+    }
+    // SAFETY: the supplied slice is live writable storage of the declared
+    // length. csops copies bytes to userspace and retains no pointer.
+    let result = unsafe { csops(pid, operation, buffer.as_mut_ptr().cast(), buffer.len()) };
+    result == 0
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_signing_status(pid: i32) -> Option<u32> {
+    let mut flags = [0u8; 4];
+    darwin_csops(pid, 0, &mut flags).then(|| u32::from_ne_bytes(flags))
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_team_id(pid: i32) -> Option<String> {
+    const CS_OPS_TEAMID: u32 = 14;
+    let mut bytes = [0xff; 8 + 64 + 1];
+    if !darwin_csops(pid, CS_OPS_TEAMID, &mut bytes) {
+        return None;
+    }
+    decode_darwin_team_id(&bytes).map(str::to_owned)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn decode_darwin_team_id(bytes: &[u8]) -> Option<&str> {
+    if bytes.get(..4)? != [0; 4] {
+        return None;
+    }
+    let length = u32::from_be_bytes(bytes.get(4..8)?.try_into().ok()?) as usize;
+    if !(10..=8 + 64 + 1).contains(&length) {
+        return None;
+    }
+    let payload = bytes.get(8..length)?;
+    let (&0, team) = payload.split_last()? else {
+        return None;
+    };
+    if !team.iter().all(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    std::str::from_utf8(team).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_uids(pid: i32) -> Option<crate::pid::ProcessUids> {
+    // XNU proc_info.c exposes all three kernel uids in the short record without
+    // CHECK_SAME_USER. Full TBSDINFO is restricted for precisely these daemons.
+    // This is a complete credential read, never an effective-uid-only fallback.
+    let requested = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+    // SAFETY: aligned writable storage has the exact ABI size; no pointer is retained.
+    let returned = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            requested,
+        )
+    };
+    if returned != requested {
+        return None;
+    }
+    // SAFETY: the exact-size successful read initialised the whole record.
+    let info = unsafe { info.assume_init() };
+    (info.pbsi_pid == pid as u32).then_some(crate::pid::ProcessUids {
+        real: info.pbsi_ruid,
+        effective: info.pbsi_uid,
+        saved: info.pbsi_svuid,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_on_sealed_system_volume(executable: &std::fs::File) -> Option<bool> {
+    use std::os::fd::AsRawFd;
+    let mut volume = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: volume supplies aligned ABI-sized storage for this borrowed fd.
+    if unsafe { libc::fstatfs(executable.as_raw_fd(), volume.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: fstatfs successfully initialised the record.
+    let volume = unsafe { volume.assume_init() };
+    let required = (libc::MNT_RDONLY | libc::MNT_ROOTFS) as u32;
+    if volume.f_flags & required != required {
+        return Some(false);
+    }
+    // Query the executable's mount point, supplied by fstatfs, rather than
+    // guessing trust from its pathname (which may traverse a Data firmlink).
+    let mut attrs = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_CAPABILITIES,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    #[repr(C)]
+    struct Capabilities {
+        length: u32,
+        capabilities: libc::vol_capabilities_attr_t,
+    }
+    let mut capabilities = Capabilities {
+        length: 0,
+        capabilities: libc::vol_capabilities_attr_t {
+            capabilities: [0; 4],
+            valid: [0; 4],
+        },
+    };
+    // SAFETY: the kernel's mount-point array is NUL-terminated; attrs and
+    // result are aligned ABI-sized storage and no pointers are retained.
+    let result = unsafe {
+        libc::getattrlist(
+            volume.f_mntonname.as_ptr(),
+            (&mut attrs as *mut libc::attrlist).cast(),
+            (&mut capabilities as *mut Capabilities).cast(),
+            std::mem::size_of::<Capabilities>(),
+            0,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    if capabilities.length as usize != std::mem::size_of::<Capabilities>() {
+        return None;
+    }
+    let format = libc::VOL_CAPABILITIES_FORMAT;
+    Some(darwin_sealed_root_volume(
+        volume.f_flags,
+        capabilities.capabilities.valid[format],
+        capabilities.capabilities.capabilities[format],
+    ))
 }
 
 pub(crate) fn signal_process(pid: i32, signal: ProcessSignal) -> io::Result<()> {
@@ -339,7 +757,7 @@ fn linux_cwd(pid: i32) -> Result<CwdObservation, PidError> {
 fn map_cwd_error(pid: i32, error: io::Error) -> Result<CwdObservation, PidError> {
     match error.raw_os_error() {
         Some(libc::ESRCH | libc::ENOENT) => Ok(CwdObservation::Gone),
-        Some(libc::EPERM | libc::EACCES) => Ok(CwdObservation::PermissionDenied),
+        Some(libc::EPERM) => Ok(CwdObservation::PermissionDenied),
         Some(errno) if errno == libc::ENOTSUP || errno == libc::ENOSYS => {
             Ok(CwdObservation::Unsupported)
         }
@@ -375,12 +793,21 @@ fn classify_darwin_result(
     liveness: impl FnOnce() -> DarwinLiveness,
 ) -> Result<DarwinCwdCall, PidError> {
     if size == 0 {
-        // Zero means libproc would not describe the process; it does not prove
-        // absence. Only a probe proving ESRCH may report the process gone.
-        return Ok(match liveness() {
-            DarwinLiveness::Gone => DarwinCwdCall::Gone,
-            DarwinLiveness::Alive | DarwinLiveness::Unknown => DarwinCwdCall::PermissionDenied,
-        });
+        // Zero alone proves neither absence nor EPERM. Only verified ESRCH
+        // establishes disappearance; only the cwd syscall's EPERM can reach
+        // the daemon policy. Production clears errno before the syscall.
+        if liveness() == DarwinLiveness::Gone {
+            return Ok(DarwinCwdCall::Gone);
+        }
+        return match error {
+            Some(error) if error.raw_os_error() == Some(libc::EPERM) => {
+                Ok(DarwinCwdCall::PermissionDenied)
+            }
+            Some(error) if error.raw_os_error().is_some_and(|errno| errno != 0) => {
+                Err(failure(pid, error))
+            }
+            _ => Err(failure(pid, io::Error::from_raw_os_error(libc::EIO))),
+        };
     }
     if size < 0 {
         let error = match error {
@@ -390,7 +817,7 @@ fn classify_darwin_result(
         match error.raw_os_error() {
             Some(libc::EINTR) => return Ok(DarwinCwdCall::Retry),
             Some(libc::ESRCH) => return Ok(DarwinCwdCall::Gone),
-            Some(libc::EPERM | libc::EACCES) => return Ok(DarwinCwdCall::PermissionDenied),
+            Some(libc::EPERM) => return Ok(DarwinCwdCall::PermissionDenied),
             Some(errno)
                 if errno == libc::ENOTSUP || errno == libc::EOPNOTSUPP || errno == libc::ENOSYS =>
             {
@@ -472,6 +899,11 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
         let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
         let buffer_size = i32::try_from(expected)
             .map_err(|_| failure(pid, io::Error::from_raw_os_error(libc::EOVERFLOW)))?;
+        // SAFETY: __error returns this thread's live errno slot; clearing it
+        // prevents a zero libproc result from inheriting stale EPERM.
+        let errno_slot = unsafe { libc::__error() };
+        // SAFETY: this is the live thread-local slot returned just above.
+        unsafe { *errno_slot = 0 };
         // SAFETY: info is aligned writable storage of exactly the requested
         // vnodepathinfo size. proc_pidinfo only borrows it; full success writes
         // all fields. No handles transfer or global state is exposed.
@@ -484,7 +916,7 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
                 buffer_size,
             )
         };
-        let error = (size < 0).then(io::Error::last_os_error);
+        let error = (size <= 0).then(io::Error::last_os_error);
         match classify_darwin_result(pid, size, expected, error, || darwin_liveness(pid))? {
             DarwinCwdCall::Gone => return Ok(CwdObservation::Gone),
             DarwinCwdCall::PermissionDenied => return Ok(CwdObservation::PermissionDenied),
@@ -511,22 +943,287 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uid_observation_requires_complete_matching_credentials() {
-        assert_eq!(
-            linux_status_uid("Name:\twriter\nUid:\t1000\t1000\t1000\t1000\n"),
-            Some(1000)
+    fn host_listing_requires_exact_path_signer_and_valid_live_signature() {
+        use crate::pid::CensusIgnoreEntry;
+        let entries = [CensusIgnoreEntry {
+            path: "/Library/Daemon".into(),
+            team_id: "TEAM123".into(),
+        }];
+        let path = std::path::Path::new("/Library/Daemon");
+        let signed = 0x2000_0001;
+        assert!(
+            listed_image_matches(&entries, path, signed, Some("TEAM123"), || true),
+            "accepted listing"
         );
-        for status in [
-            "",
-            "Uid:\t1000\t1000\t1000",
-            "Uid:\t1000\t1001\t1000\t1000",
-            "Uid:\t1000\t1000\t0\t1000",
-            "Uid:\t1000\t1000\t1000\t0",
-            "Uid:\t1000\t1000\t1000\t1000\t1000",
-            "Uid:\t1000\t1000\tinvalid\t1000",
-            "Uid:\t1000\t1000\t1000\t1000\nUid:\t1000\t1000\t1000\t1000",
+        assert!(
+            !listed_image_matches(&entries, path, signed, Some("TEAM999"), || true),
+            "team mismatch"
+        );
+        assert!(
+            !listed_image_matches(
+                &entries,
+                std::path::Path::new("/Library/Daemon-child"),
+                signed,
+                Some("TEAM123"),
+                || true
+            ),
+            "exact path mismatch"
+        );
+        assert!(
+            !listed_image_matches(
+                &entries,
+                std::path::Path::new("/Library//Daemon"),
+                signed,
+                Some("TEAM123"),
+                || true
+            ),
+            "do not normalize a listed path match"
+        );
+        assert!(
+            !listed_image_matches(&entries, path, signed, None, || true),
+            "unreadable team"
+        );
+        for invalid in [
+            signed & !1,
+            signed | 2,
+            signed | 4,
+            signed | 0x20,
+            signed | 0x0002_0000,
+            signed | 0x1000_0000,
         ] {
-            assert_eq!(linux_status_uid(status), None, "{status}");
+            assert!(!listed_image_matches(
+                &entries,
+                path,
+                invalid,
+                Some("TEAM123"),
+                || true
+            ));
+        }
+        let platform = [CensusIgnoreEntry {
+            path: path.into(),
+            team_id: "platform".into(),
+        }];
+        assert!(!listed_image_matches(
+            &platform,
+            path,
+            signed,
+            Some("platform"),
+            || true
+        ));
+        assert!(listed_image_matches(
+            &platform,
+            path,
+            signed | 0x0400_0000,
+            None,
+            || true
+        ));
+        assert!(
+            !listed_image_matches(&platform, path, signed | 0x0400_0000, None, || false),
+            "platform selector requires the root-owned protected descriptor chain"
+        );
+        assert!(
+            !listed_image_matches(&platform, path, signed | 0x0402_0000, None, || true),
+            "linker-signed code is refused even with a platform bit"
+        );
+    }
+
+    #[test]
+    fn platform_listing_requires_a_root_owned_nonwritable_descriptor_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert!(root_owned_mode(0, 0o755));
+        assert!(!root_owned_mode(501, 0o755));
+        assert!(!root_owned_mode(0, 0o775), "group-writable ancestor");
+        assert!(!root_owned_mode(0, 0o757), "other-writable ancestor");
+        // Linux runners may install coreutils entry points as symlinks. Select
+        // the real regular fixture before exercising the strict no-follow walk.
+        let path = std::fs::canonicalize("/usr/bin/true")?;
+        let file = crate::sys::fs::open_source(&path)?;
+        assert!(
+            root_owned_executable_chain(&path, &file),
+            "real root-owned chain"
+        );
+        let different_path = std::fs::canonicalize("/bin/sh")?;
+        let different = crate::sys::fs::open_source(&different_path)?;
+        assert!(
+            !root_owned_executable_chain(&path, &different),
+            "must match original fd identity"
+        );
+        let temp = tempfile::tempdir()?;
+        // Keep a genuinely root-owned executable descriptor. Only an ancestor
+        // can fail this assertion; skipping its check would reach a missing leaf.
+        assert_eq!(
+            check_root_owned_executable_chain(&temp.path().join("missing-image"), &file),
+            Err("root-owned non-writable ancestor required"),
+        );
+        let path = temp.path().join("image");
+        std::fs::write(&path, b"image")?;
+        let file = crate::sys::fs::open_source(&path)?;
+        assert!(
+            !root_owned_executable_chain(&path, &file),
+            "user-writable temporary ancestor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn team_id_blob_requires_bounded_network_length_and_exact_nul_terminated_identity() {
+        let mut bytes = vec![0; 8];
+        bytes.extend_from_slice(b"TEAM123\0");
+        let length = bytes.len() as u32;
+        bytes[4..8].copy_from_slice(&length.to_be_bytes());
+        assert_eq!(decode_darwin_team_id(&bytes), Some("TEAM123"));
+        for length in [0u32, 9, 74, u32::MAX] {
+            let mut malformed = bytes.clone();
+            malformed[4..8].copy_from_slice(&length.to_be_bytes());
+            assert_eq!(decode_darwin_team_id(&malformed), None);
+        }
+        for (index, value) in [(0, 1), (9, 0), (15, 1), (10, 0xff)] {
+            let mut malformed = bytes.clone();
+            malformed[index] = value;
+            assert_eq!(decode_darwin_team_id(&malformed), None);
+        }
+        assert_eq!(decode_darwin_team_id(&bytes[..7]), None);
+        bytes.extend_from_slice(b"IGNORED");
+        assert_eq!(decode_darwin_team_id(&bytes), Some("TEAM123"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_current_process_is_not_an_eligible_platform_daemon()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pid = std::process::id() as i32;
+        let uids = darwin_uids(pid).ok_or("complete kernel credential record unavailable")?;
+        assert_eq!(uids.effective, crate::fs::effective_uid());
+        assert_eq!(sealed_platform_uids(pid), None);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_same_user_sleep_is_not_an_eligible_daemon() -> Result<(), Box<dyn std::error::Error>>
+    {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Child(std::process::Command::new("/bin/sleep").arg("30").spawn()?);
+        assert!(child.0.try_wait()?.is_none());
+        assert_eq!(sealed_platform_uids(child.0.id() as i32), None);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::print_stderr)] // An optional live off-volume fixture must report its availability.
+    fn native_offsealed_platform_process_is_refused_when_present() {
+        let mut pids = vec![0i32; 65_536];
+        // SAFETY: the vector supplies writable storage of the supplied byte
+        // size and libproc does not retain the pointer.
+        let count = unsafe {
+            libc::proc_listallpids(
+                pids.as_mut_ptr().cast(),
+                (pids.len() * std::mem::size_of::<i32>()) as i32,
+            )
+        };
+        if count <= 0 || count as usize >= pids.len() {
+            eprintln!(
+                "SKIP: optional off-sealed platform fixture: process enumeration unavailable or incomplete"
+            );
+            return;
+        }
+        for &pid in &pids[..count as usize] {
+            if !darwin_signing_status(pid).is_some_and(darwin_platform_signature) {
+                continue;
+            }
+            let Some(path) = darwin_executable_path(pid) else {
+                continue;
+            };
+            let Ok(file) = std::fs::File::open(&path) else {
+                continue;
+            };
+            if darwin_on_sealed_system_volume(&file) != Some(false) {
+                continue;
+            }
+            assert_eq!(
+                sealed_platform_uids(pid),
+                None,
+                "off-sealed platform process {pid}: {path:?}"
+            );
+            eprintln!(
+                "ASSERTED: off-sealed platform process {pid} {path:?} refused by native daemon policy"
+            );
+            return;
+        }
+        eprintln!("SKIP: no observable off-sealed platform process is present");
+    }
+
+    #[test]
+    fn platform_policy_requires_valid_signed_platform_code() {
+        let required = 0x2000_0000 | 0x0400_0000 | 1;
+        assert!(darwin_platform_signature(required));
+        for missing in [1, 0x0400_0000, 0x2000_0000] {
+            assert!(!darwin_platform_signature(required & !missing));
+        }
+        for untrusted in [2, 4, 0x20, 0x0002_0000, 0x1000_0000] {
+            assert!(!darwin_platform_signature(required | untrusted));
+        }
+        assert!(!darwin_platform_signature(0x0800_0001)); // path is not signing evidence
+    }
+
+    #[test]
+    fn platform_policy_requires_a_valid_seal_on_the_readonly_root_volume() {
+        // Real root mounts carry unrelated flags; these must not turn a
+        // bitmask requirement into an exact-equality check.
+        const MNT_JOURNALED: u32 = 0x0080_0000;
+        const MNT_MULTILABEL: u32 = 0x0400_0000;
+        let root_mount = 0x4001 | MNT_JOURNALED | MNT_MULTILABEL;
+        let seal = 0x0200_0000;
+        assert!(darwin_sealed_root_volume(root_mount, seal, seal));
+        assert!(
+            !darwin_sealed_root_volume(root_mount & !1, seal, seal),
+            "writable root"
+        );
+        assert!(
+            !darwin_sealed_root_volume(root_mount & !0x4000, seal, seal),
+            "other sealed volume"
+        );
+        assert!(
+            !darwin_sealed_root_volume(root_mount, 0, seal),
+            "seal capability not valid"
+        );
+        assert!(
+            !darwin_sealed_root_volume(root_mount, seal, 0),
+            "unsealed root"
+        );
+    }
+
+    #[test]
+    fn daemon_paths_allow_system_library_bundles_but_exclude_cli_and_other_apps() {
+        for path in [
+            "/sbin/launchd",
+            "/usr/sbin/daemon",
+            "/usr/libexec/daemon",
+            "/System/Library/PrivateFrameworks/X/daemon",
+            "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
+            "/System/Library/X.appex/daemon",
+        ] {
+            assert!(darwin_daemon_path(std::path::Path::new(path)), "{path}");
+        }
+        for path in [
+            "/bin/sleep",
+            "/usr/bin/zsh",
+            "/Library/Apple/usr/libexec/usbmuxd",
+            "/Applications/X.app/daemon",
+            "/System/Applications/X.app/daemon",
+            "/usr/libexec-evil/daemon",
+            "/usr/libexec/../bin/sleep",
+            "/sbin",
+            "sbin/daemon",
+        ] {
+            assert!(!darwin_daemon_path(std::path::Path::new(path)), "{path}");
         }
     }
 
@@ -558,7 +1255,7 @@ mod tests {
         for liveness in [DarwinLiveness::Alive, DarwinLiveness::Unknown] {
             let result = classify_darwin_result(42, 0, 24, None, || liveness);
             assert!(
-                matches!(result, Ok(DarwinCwdCall::PermissionDenied)),
+                matches!(result, Err(PidError::Io { .. })),
                 "{liveness:?} returned {result:?}"
             );
         }
@@ -566,6 +1263,40 @@ mod tests {
         assert!(matches!(
             classify_darwin_result(42, 0, 24, None, || DarwinLiveness::Gone),
             Ok(DarwinCwdCall::Gone)
+        ));
+    }
+
+    #[test]
+    fn only_actual_eperm_can_reach_the_daemon_exception() {
+        for size in [0, -1] {
+            assert!(matches!(
+                classify_darwin_result(
+                    42,
+                    size,
+                    24,
+                    Some(io::Error::from_raw_os_error(libc::EPERM)),
+                    || DarwinLiveness::Alive
+                ),
+                Ok(DarwinCwdCall::PermissionDenied)
+            ));
+            for errno in [libc::EACCES, libc::EIO, libc::EINVAL] {
+                assert!(matches!(
+                    classify_darwin_result(
+                        42,
+                        size,
+                        24,
+                        Some(io::Error::from_raw_os_error(errno)),
+                        || DarwinLiveness::Alive
+                    ),
+                    Err(PidError::Io { .. })
+                ));
+            }
+        }
+        assert!(matches!(
+            classify_darwin_result(42, 0, 24, Some(io::Error::from_raw_os_error(0)), || {
+                DarwinLiveness::Alive
+            }),
+            Err(PidError::Io { .. })
         ));
     }
 

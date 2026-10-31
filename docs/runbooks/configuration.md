@@ -29,7 +29,7 @@ Recovery never widens an enforced restriction, so these also refuse the file:
 
 - knobs marked `strict` in the registry (`lanes.publish`,
   `fabric.accept_handoff`, `chair.auto_switch`, `chair.switch_accounts` and
-  `lanes.max_depth`), whose defaults could grant what the user withheld, and a
+  `lanes.max_depth` and `confinement.census_ignore_unreadable`), whose defaults could grant what the user withheld, and a
   `knobs` or `domains` value that is not a table;
 - enforced model policy (`lane.read_only`, `lane.max_context`,
   `lane.max_turns`), and a malformed rule that carries one;
@@ -63,6 +63,81 @@ history [--since T] [--limit N]` lists, with secret-looking values redacted;
 overrides win over configuration. Each sealed task and attempt records the
 profile name, effective knob values and exact dispatch overrides, and
 continuations keep that stamp.
+
+## Unreadable process census exceptions
+
+The host owner may accept specific signed executables that the built-in macOS
+daemon census policy cannot exclude. Configure the strict knob
+`confinement.census_ignore_unreadable`; its default is an empty list:
+
+```toml
+[knobs]
+"confinement.census_ignore_unreadable" = [
+  { path = "/Library/Example/daemon", team_id = "TEAM123456" },
+  { path = "/usr/bin/login", team_id = "platform" },
+]
+"confinement.census_host_list_complete" = false
+```
+
+Use `provenant config set confinement.census_ignore_unreadable` with the same
+list encoded as JSON, or `config apply` with an array of these objects.
+`config show` and `config schema` expose its value and source; `config unset`
+restores the empty list. Up to 128 entries are accepted, each with exactly
+`path` and `team_id`. Paths are exact absolute normalised spellings (at most
+4096 bytes), not prefixes, globs or aliases. Duplicate paths, unknown fields,
+control characters, empty identities and malformed entries refuse the whole
+configuration. A team identifier is at most 64 ASCII alphanumeric bytes;
+`platform` selects Apple platform signing state instead of a team string.
+
+This knob is host-only: run `--knob` and Fabric task overrides refuse it, even
+for an empty list. The runtime reads the selected state root's host config,
+never project data or a task/attempt's profile stamp. No restart is required.
+Every listed executable still requires actual cwd `EPERM`, valid live signing
+state without ad-hoc, linker-signed, invalid-allowed, debugged or get-task-allow
+flags, and an exact kernel executable-path match opened with `O_NOFOLLOW`.
+Real, effective and saved uids must all be in 0–499 and each must differ from
+every candidate root's owner. They are read together through `PROC_PIDT_SHORTBSDINFO`
+and rechecked; query failure stays unplaceable.
+`csops(CS_OPS_TEAMID)` must match the team exactly, or `platform` must match
+`CS_PLATFORM_BINARY`. The platform bit is the signing control for Apple
+platform entries. `CS_ADHOC` is checked but is not a reliable signal by itself:
+live ad-hoc code can omit it. A reported team string is not an independent trust
+anchor; named-team entries rely on the exact path and the host owner's explicit
+acceptance as well as the live signing checks.
+
+At match time a `platform` entry additionally requires the executable and every
+ancestor directory up to `/` to be owned by uid 0 with no group or other write
+permission. The runtime walks from a root descriptor using `O_NOFOLLOW`
+descriptor-relative opens, checks each fd with fstat, and requires the leaf's
+device/inode to equal the originally opened executable. Any symlink, unsafe
+owner/mode, wrong type, identity mismatch or query failure refuses the listing.
+A writable `/usr/local` or user-owned parent therefore cannot host a matching
+`platform` entry merely because an Apple binary was copied there.
+
+The accepted residual risk is a listed executable sitting in a worktree. A
+signature or team identifier does not prove non-occupancy. Entries may admit
+root or other foreign system-account processes, may name `/bin` or `/usr/bin` tools, and
+do not require a sealed volume. Keep the list limited to executable/signer
+pairs whose occupancy risk the host owner accepts. A readable occupant remains
+Live. An unreadable process with any real, effective or saved uid equal to any
+candidate root's owner is never excluded. This refuses an owner's setuid tool;
+an owner-launched sudo command that resets all three uids to root still falls
+within the accepted cwd-history risk when its image otherwise qualifies.
+
+After listing this host's unreadable daemons, the host owner can set
+`provenant config set confinement.census_host_list_complete true`. This strict
+host-only boolean defaults to `false`; unset restores that default. It declares
+coverage for native acceptance and grants no process exception or cleanup
+authority. Native tests always audit every unplaceable process and check a
+same-user sleep occupant; they assert clean-Free only when this flag is true.
+With the default they print why that Free assertion was skipped. CI deliberately
+leaves the flag false while retaining its usbmuxd/platform entry.
+
+Land cleanup still refuses an incomplete census and reports the first unlisted
+daemon. Its diagnostic includes pid, path, real/effective/saved uids, CS flags and, for non-platform
+images, the kernel's `CS_OPS_TEAMID` or `unavailable`. Use that information to
+choose an exact path/team pair whose occupancy risk you accept; the completeness
+declaration does not make an unlisted process admissible.
 
 Batch concurrency resolves from the profile by batch class. A batch with any
 `worktree-write` lane uses `lanes.max_concurrency` (registry default 8); a

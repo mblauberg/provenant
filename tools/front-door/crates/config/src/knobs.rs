@@ -20,6 +20,7 @@ pub(crate) struct Registry {
 pub(crate) enum Kind {
     Bool,
     StringList,
+    CensusIgnoreList,
     Enum,
     Int,
 }
@@ -36,6 +37,8 @@ pub(crate) struct Spec {
     /// the whole configuration rather than recovering to the default.
     #[serde(default)]
     strict: bool,
+    #[serde(default)]
+    host_only: bool,
 }
 #[derive(Deserialize)]
 pub(crate) struct Preset {
@@ -66,6 +69,28 @@ pub enum KnobEdit<'a> {
 }
 
 impl<D> crate::ResolvedConfig<D> {
+    /// Host acceptance declaration only; never changes runtime census policy.
+    pub fn census_host_list_complete(&self) -> Result<bool, ConfigError> {
+        let name = "confinement.census_host_list_complete";
+        self.knobs
+            .get(name)
+            .and_then(|knob| knob.value.as_bool())
+            .ok_or_else(|| invalid(name, "type"))
+    }
+
+    /// Host-owned process exceptions. Never read from a task/profile stamp.
+    pub fn census_ignore_unreadable(
+        &self,
+    ) -> Result<Vec<provenant_os::pid::CensusIgnoreEntry>, ConfigError> {
+        let name = "confinement.census_ignore_unreadable";
+        let value = &self
+            .knobs
+            .get(name)
+            .ok_or_else(|| invalid(name, "missing"))?
+            .value;
+        serde_json::from_value(value.clone()).map_err(|_| invalid(name, "type"))
+    }
+
     /// Whether the user chose `name`, in `[knobs]` or as a dispatch override,
     /// as opposed to the registry default or the profile preset.
     pub fn knob_is_set(&self, name: &str, overrides: &[String]) -> bool {
@@ -90,6 +115,9 @@ impl<D> crate::ResolvedConfig<D> {
                 .split_once('=')
                 .ok_or_else(|| invalid(entry, "expected_name_value"))?;
             let spec = spec(registry, name)?;
+            if spec.host_only {
+                return Err(invalid(name, "host_only"));
+            }
             let value = parse_cli(spec, text).map_err(|rule| invalid(name, rule))?;
             check(spec, &value).map_err(|rule| invalid(name, rule))?;
             knobs.insert(
@@ -164,6 +192,20 @@ fn distance(a: &str, b: &str) -> usize {
 /// Check a value against the knob's type, range, enum values and nullability.
 fn check(spec: &Spec, value: &Value) -> Result<(), &'static str> {
     match value {
+        Value::Array(items) if spec.kind == Kind::CensusIgnoreList => {
+            let entries: Vec<provenant_os::pid::CensusIgnoreEntry> =
+                serde_json::from_value(value.clone()).map_err(|_| "type")?;
+            let mut paths = std::collections::BTreeSet::new();
+            if items.len() <= 128
+                && entries
+                    .iter()
+                    .all(|entry| entry.is_valid() && paths.insert(&entry.path))
+            {
+                Ok(())
+            } else {
+                Err("invalid_census_exception")
+            }
+        }
         Value::Bool(_) if spec.kind == Kind::Bool => Ok(()),
         Value::Array(items) if spec.kind == Kind::StringList => {
             if items.len() <= 128
@@ -199,16 +241,24 @@ fn from_toml(item: &Item) -> Option<Value> {
         toml_edit::Value::Boolean(b) => Some(Value::Bool(*b.value())),
         toml_edit::Value::Array(items) => items
             .iter()
-            .map(|v| v.as_str().map(Value::from))
+            .map(|value| from_toml(&Item::Value(value.clone())))
             .collect::<Option<Vec<_>>>()
             .map(Value::Array),
+        toml_edit::Value::InlineTable(table) => table
+            .iter()
+            .map(|(key, value)| Some((key.to_owned(), from_toml(&Item::Value(value.clone()))?)))
+            .collect::<Option<serde_json::Map<_, _>>>()
+            .map(Value::Object),
         toml_edit::Value::Integer(n) => Some(Value::from(*n.value())),
         toml_edit::Value::String(s) => Some(Value::from(s.value().as_str())),
         _ => None,
     }
 }
 fn parse_cli(spec: &Spec, text: &str) -> Result<Value, &'static str> {
-    if matches!(spec.kind, Kind::Bool | Kind::StringList) {
+    if matches!(
+        spec.kind,
+        Kind::Bool | Kind::StringList | Kind::CensusIgnoreList
+    ) {
         return serde_json::from_str(text).map_err(|_| "type");
     }
     if spec.kind == Kind::Int {
@@ -291,7 +341,22 @@ fn apply(doc: &mut DocumentMut, edit: KnobEdit) -> Result<(), ConfigError> {
                 Value::Array(items) => {
                     let mut array = toml_edit::Array::new();
                     for item in items {
-                        array.push(item.as_str().ok_or_else(|| invalid(name, "type"))?);
+                        if let Some(text) = item.as_str() {
+                            array.push(text);
+                        } else if let Some(fields) = item.as_object() {
+                            let mut table = toml_edit::InlineTable::new();
+                            for (key, value) in fields {
+                                table.insert(
+                                    key,
+                                    toml_edit::Value::from(
+                                        value.as_str().ok_or_else(|| invalid(name, "type"))?,
+                                    ),
+                                );
+                            }
+                            array.push(toml_edit::Value::InlineTable(table));
+                        } else {
+                            return Err(invalid(name, "type"));
+                        }
                     }
                     toml_edit::value(array)
                 }

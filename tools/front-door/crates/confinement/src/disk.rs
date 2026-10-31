@@ -41,8 +41,8 @@ use crate::permissions::PermissionError;
 use crate::repo::VerifiedRepo;
 use crate::utility::{GitRead, UtilityBudget, UtilityRuntime, run_utility};
 use crate::worktrees::{
-    SystemWorkerObserver, WorkerObserver, WorkerState, WorktreeCondition, WorktreeError,
-    WorktreeInfo, WriterState, combine_worker_state, disk_writer_state, parse_worktree_list,
+    WorkerObserver, WorkerState, WorktreeCondition, WorktreeError, WorktreeInfo, WriterState,
+    combine_worker_state, disk_writer_state, parse_worktree_list,
 };
 use provenant_core::CancelToken;
 use provenant_os::{
@@ -200,8 +200,9 @@ pub fn worktrees(
     budget: UtilityBudget,
     cancel: &CancelToken,
     report: &mut DiskReport,
-    registration: Option<&Directory>,
+    custody: (Option<&Directory>, &dyn WorkerObserver),
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    let (registration, workers) = custody;
     let outcome = run_utility(
         executor,
         GitRead::WorktreeList,
@@ -226,7 +227,7 @@ pub fn worktrees(
         .filter(|entry| !entry.bare)
         .map(|entry| entry.path.clone())
         .collect();
-    let observed = SystemWorkerObserver.observe_roots(&roots);
+    let observed = workers.observe_roots(&roots);
     let mut inventory = Vec::new();
     for listed in listed.into_iter().filter(|entry| !entry.bare) {
         let registered = registration.map_or(WorkerState::Unknown, |directory| {

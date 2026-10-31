@@ -75,23 +75,153 @@ fn signal_process_with(
 pub enum CwdObservation {
     Path(PathBuf),
     Gone,
+    /// The cwd syscall failed with EPERM; other failures remain errors.
     PermissionDenied,
     Unsupported,
 }
+
+/// Host-owner acceptance of the risk that this signed executable occupies a
+/// worktree despite an unreadable cwd. Paths and signers are exact matches.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CensusIgnoreEntry {
+    pub path: PathBuf,
+    /// `platform` for Apple platform code, otherwise the kernel team identifier.
+    pub team_id: String,
+}
+
+/// Credentials read together from the kernel, never inferred from effective uid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessUids {
+    pub real: u32,
+    pub effective: u32,
+    pub saved: u32,
+}
+
+impl ProcessUids {
+    pub fn all_system(self) -> bool {
+        [self.real, self.effective, self.saved]
+            .into_iter()
+            .all(|uid| uid < 500)
+    }
+
+    pub fn all_differ_from(self, owner: u32) -> bool {
+        [self.real, self.effective, self.saved]
+            .into_iter()
+            .all(|uid| uid != owner)
+    }
+}
+
+/// A refusal captured from the image observations that decided policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnreadablePolicyFailure {
+    pub condition: &'static str,
+    /// None means the built-in checks passed, even if a listing-specific check
+    /// failed. Native acceptance must reject an unplaceable image in that case.
+    pub builtin_condition: Option<&'static str>,
+}
+
+impl From<&'static str> for UnreadablePolicyFailure {
+    fn from(condition: &'static str) -> Self {
+        Self {
+            condition,
+            builtin_condition: Some(condition),
+        }
+    }
+}
+
+impl CensusIgnoreEntry {
+    pub fn is_valid(&self) -> bool {
+        let path = &self.path;
+        path.is_absolute()
+            && path.file_name().is_some()
+            && path.as_os_str().len() <= 4096
+            && path
+                .to_str()
+                .is_some_and(|text| !text.chars().any(char::is_control))
+            && path.components().all(|part| {
+                matches!(
+                    part,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )
+            })
+            && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str()
+            && !self.team_id.is_empty()
+            && self.team_id.len() <= 64
+            && self
+                .team_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
+    }
+}
+
 pub trait CwdObserver: Send + Sync {
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError>;
 
-    /// Independent credentials; mixed or unreadable credentials stay unknown.
-    fn uid(&self, _pid: i64) -> Option<u32> {
+    /// System real/effective/saved uids only after kernel signing status, daemon
+    /// image and sealed system-volume checks. Missing evidence returns None.
+    /// This supports a caller's explicit risk policy, not non-occupancy proof.
+    fn sealed_platform_uids(&self, _pid: i64) -> Option<ProcessUids> {
+        None
+    }
+
+    fn ignored_unreadable_uids(
+        &self,
+        pid: i64,
+        _entries: &[CensusIgnoreEntry],
+    ) -> Option<ProcessUids> {
+        self.sealed_platform_uids(pid)
+            .filter(|uids| uids.all_system())
+    }
+
+    /// Same authority as `ignored_unreadable_uids`, retaining the failed image
+    /// condition for diagnostics. The caller must first observe actual EPERM.
+    fn unreadable_policy_uids(
+        &self,
+        pid: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Result<ProcessUids, UnreadablePolicyFailure> {
+        self.ignored_unreadable_uids(pid, entries)
+            .ok_or_else(|| "image policy evidence unavailable".into())
+    }
+
+    /// Diagnostic only; failure to read any field cannot grant the exception.
+    fn process_details(&self, _pid: i64) -> Option<String> {
         None
     }
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemCwdObserver;
 impl CwdObserver for SystemCwdObserver {
-    fn uid(&self, pid: i64) -> Option<u32> {
+    fn unreadable_policy_uids(
+        &self,
+        pid: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Result<ProcessUids, UnreadablePolicyFailure> {
+        let pid = i32::try_from(pid)
+            .ok()
+            .filter(|pid| *pid > 0)
+            .ok_or("positive OS pid unavailable")?;
+        crate::sys::pid::unreadable_policy_uids(pid, entries)
+    }
+
+    fn sealed_platform_uids(&self, pid: i64) -> Option<ProcessUids> {
         let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
-        crate::sys::pid::uid(pid)
+        crate::sys::pid::sealed_platform_uids(pid)
+    }
+
+    fn ignored_unreadable_uids(
+        &self,
+        pid: i64,
+        entries: &[CensusIgnoreEntry],
+    ) -> Option<ProcessUids> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        crate::sys::pid::ignored_unreadable_uids(pid, entries)
+    }
+
+    fn process_details(&self, pid: i64) -> Option<String> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        Some(crate::sys::pid::process_details(pid))
     }
 
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError> {
@@ -106,6 +236,56 @@ impl CwdObserver for SystemCwdObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_three_uids_must_be_system_accounts_and_foreign_to_the_owner() {
+        let windowserver = ProcessUids {
+            real: 0,
+            effective: 88,
+            saved: 0,
+        };
+        assert!(windowserver.all_system());
+        assert!(windowserver.all_differ_from(501));
+        for uids in [
+            ProcessUids {
+                real: 88,
+                effective: 0,
+                saved: 0,
+            },
+            ProcessUids {
+                real: 0,
+                effective: 88,
+                saved: 0,
+            },
+            ProcessUids {
+                real: 0,
+                effective: 0,
+                saved: 88,
+            },
+        ] {
+            assert!(uids.all_system());
+            assert!(!uids.all_differ_from(88));
+        }
+        for uids in [
+            ProcessUids {
+                real: 500,
+                effective: 0,
+                saved: 0,
+            },
+            ProcessUids {
+                real: 0,
+                effective: 500,
+                saved: 0,
+            },
+            ProcessUids {
+                real: 0,
+                effective: 0,
+                saved: 500,
+            },
+        ] {
+            assert!(!uids.all_system());
+        }
+    }
 
     #[test]
     fn process_signals_validate_pid_before_calling_the_syscall_boundary() {
@@ -166,5 +346,8 @@ mod tests {
             SystemCwdObserver.cwd(0),
             Err(PidError::Refused { .. })
         ));
+        for pid in [-1, 0, i64::MAX] {
+            assert_eq!(SystemCwdObserver.sealed_platform_uids(pid), None);
+        }
     }
 }
