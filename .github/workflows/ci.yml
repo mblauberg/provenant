@@ -278,10 +278,15 @@ jobs:
         run: >-
           cargo nextest archive --locked --workspace
           --archive-file "$RUNNER_TEMP/macos-tests.tar.zst"
+      - name: Install PostgreSQL for native confinement smoke
+        run: |
+          brew install postgresql@18
+          echo "PROVENANT_TEST_POSTGRES_BIN=$(brew --prefix postgresql@18)/bin" >> "$GITHUB_ENV"
       - name: Run macOS supervisor custody tests
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
+          PROVENANT_POSTGRES_REQUIRED: "1"
         run: cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os)'
       - name: Run macOS Cargo seed tests
         working-directory: tools/front-door
