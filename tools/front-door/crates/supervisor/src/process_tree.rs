@@ -213,13 +213,40 @@ pub fn publish(directory: &Directory, snapshot: Option<&Snapshot>) -> Result<()>
 /// Read the caller-selected subtree from its lane's bounded, fresh snapshot.
 /// Selecting an outside PID never causes a host-side query or enumeration.
 pub fn read(path: &Path, root_pid: u32) -> Result<Sample> {
+    read_with(path, root_pid, || {})
+}
+
+/// Test-only scheduling edge for a pathname substitution after opening.
+#[cfg(feature = "fixture")]
+#[doc(hidden)]
+pub fn read_with_before_trust(
+    path: &Path,
+    root_pid: u32,
+    before_trust: impl FnOnce(),
+) -> Result<Sample> {
+    read_with(path, root_pid, before_trust)
+}
+
+fn read_with(path: &Path, root_pid: u32, before_trust: impl FnOnce()) -> Result<Sample> {
     let mut file = FileHandle::open_source(path).map_err(|_| Unavailable)?;
     if file.metadata().map_err(|_| Unavailable)?.kind != FileKind::Regular {
         return Err(Unavailable);
     }
     let bytes = file.read_bounded(MAX_BYTES).map_err(|_| Unavailable)?;
     let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|_| Unavailable)?;
-    crate::process_os::process_tree::immutable(path)?;
+    before_trust();
+    // Permission checks must describe the descriptor that supplied the bytes,
+    // not a caller-controlled alias which may now name a different file.
+    let physical = file.current_path().map_err(|_| Unavailable)?;
+    crate::process_os::process_tree::immutable(&physical)?;
+    let verified = FileHandle::open_source(&physical).map_err(|_| Unavailable)?;
+    if !file
+        .metadata()
+        .map_err(|_| Unavailable)?
+        .same_identity(&verified.metadata().map_err(|_| Unavailable)?)
+    {
+        return Err(Unavailable);
+    }
     let clock = SystemClock::new();
     let now = clock.host_monotonic_micros().map_err(|_| Unavailable)?;
     let boot = clock.boot_identity().map_err(|_| Unavailable)?;

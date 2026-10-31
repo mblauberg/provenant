@@ -1267,6 +1267,11 @@ impl FileHandle {
             })
             .map_err(error("duplicate file", &self.path))
     }
+    /// Resolve the held file's physical location, independent of symlinks in
+    /// the original open path. Failure leaves the file's identity unchanged.
+    pub fn current_path(&self) -> Result<PathBuf> {
+        os::current_path(&self.file).map_err(error("resolve held file", &self.path))
+    }
     pub fn metadata(&self) -> Result<Metadata> {
         self.file
             .metadata()
