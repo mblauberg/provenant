@@ -641,7 +641,16 @@ fn system_worker_roots_with_policy(
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, "current process unavailable".into()))
+                .map(|root| {
+                    (
+                        root,
+                        process_detail(
+                            &PolicyCwdObserver(entries),
+                            i64::from(std::process::id()),
+                            "current process unavailable",
+                        ),
+                    )
+                })
                 .collect(),
         );
     };
@@ -775,7 +784,7 @@ fn observe_worker_holders(
                     record_unknown_all(
                         &mut states,
                         &mut details,
-                        &format!("process {}: cwd unreadable", fact.identity.pid),
+                        &process_detail(cwd_observer, fact.identity.pid, "cwd unreadable"),
                     );
                     continue;
                 };
@@ -783,9 +792,10 @@ fn observe_worker_holders(
                 for (root, state) in &states {
                     if *state == WorkerState::Unknown {
                         details.entry(root.clone()).or_insert_with(|| {
-                            format!(
-                                "process {}: cwd or root identity unreadable",
-                                fact.identity.pid
+                            process_detail(
+                                cwd_observer,
+                                fact.identity.pid,
+                                "cwd or root identity unreadable",
                             )
                         });
                     }
@@ -5073,6 +5083,65 @@ mod lifecycle_tests {
         );
         assert_eq!(states[&root], WorkerState::Unknown);
         assert_eq!(details[&root], "process listing truncated or incomplete");
+        Ok(())
+    }
+
+    #[test]
+    fn unplaceable_path_failures_retain_process_image_diagnostics() -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, ProcessIdentity};
+        struct DetailedCwd(PathBuf);
+        impl CwdObserver for DetailedCwd {
+            fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+                Ok(CwdObservation::Path(self.0.clone()))
+            }
+            fn process_details(&self, _: i64) -> Option<String> {
+                Some("path=/kernel/image, euid=501, cs_flags=0x20000001".into())
+            }
+        }
+        let fixture = Fixture::new()?;
+        let root = canonicalize(&fixture.root)?;
+        let fact = |pid| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let observer = InjectedCensus {
+            census: Census::from_observations([fact(100), fact(200)], [], [], true, false, 32)?,
+            cwds: BTreeMap::new(),
+            current: fact(100),
+            platform_euids: BTreeMap::new(),
+        };
+        let loop_path = root.join("loop");
+        std::os::unix::fs::symlink("loop", &loop_path)?;
+        let file_path = root.join("file");
+        fs::write(&file_path, "not a directory")?;
+        for path in [loop_path, file_path] {
+            let (states, details) = observe_worker_roots(
+                std::slice::from_ref(&root),
+                &observer,
+                &DetailedCwd(path),
+                &observer.current,
+                false,
+            );
+            assert_eq!(states[&root], WorkerState::Unknown);
+            let detail = &details[&root];
+            for field in [
+                "process 200:",
+                "path=/kernel/image",
+                "euid=501",
+                "cs_flags=0x20000001",
+            ] {
+                assert!(detail.contains(field), "missing {field}: {detail}");
+            }
+        }
         Ok(())
     }
 
