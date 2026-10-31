@@ -166,13 +166,13 @@ fn postgres_case(database: bool) -> Result<(), Box<dyn std::error::Error>> {
 set -eu
 "$AUDIT_POSTGRES" --version >/dev/null
 grep -q '^p ' "$PROVENANT_TEST_IPC_JOURNAL"
-DYLD_INSERT_LIBRARIES="$PROVENANT_TEST_IPC_LIBRARY" "$AUDIT_INITDB" -L "$PGSHARE" -D "$TMPDIR/data" --no-locale --encoding=UTF8 -A trust -N -n -c dynamic_shared_memory_type=mmap
+"$AUDIT_INITDB" -L "$PGSHARE" -D "$TMPDIR/data" --no-locale --encoding=UTF8 -A trust -N -n -c dynamic_shared_memory_type=mmap
 "#;
         let lifecycle = r#"
 set -eu
 "$AUDIT_POSTGRES" --version >/dev/null
 grep -q '^p ' "$PROVENANT_TEST_IPC_JOURNAL"
-DYLD_INSERT_LIBRARIES="$PROVENANT_TEST_IPC_LIBRARY" "$AUDIT_INITDB" -L "$PGSHARE" -D "$TMPDIR/data" --no-locale --encoding=UTF8 -A trust -N -n -c dynamic_shared_memory_type=mmap > "$TMPDIR/initdb.log" 2>&1 || { cat "$TMPDIR/initdb.log" >&2; exit 1; }
+"$AUDIT_INITDB" -L "$PGSHARE" -D "$TMPDIR/data" --no-locale --encoding=UTF8 -A trust -N -n -c dynamic_shared_memory_type=mmap > "$TMPDIR/initdb.log" 2>&1 || { cat "$TMPDIR/initdb.log" >&2; exit 1; }
 DYLD_INSERT_LIBRARIES="$PROVENANT_TEST_IPC_LIBRARY" "$PGBIN/postgres" -D "$TMPDIR/data" -h 127.0.0.1 -k '' -p "$PGPORT" -c shared_buffers=8MB -c max_connections=10 -c dynamic_shared_memory_type=mmap > "$TMPDIR/postgres.log" 2>&1 &
 pg=$!
 trap 'kill -TERM "$pg"; wait "$pg"' EXIT
