@@ -285,12 +285,10 @@ and after. Trusted test code journals exact newly created IDs; a host-side
 guard removes only those IDs and asserts that none remain. PostgreSQL tests
 audit allocations across initdb's subprocesses, including failed starts.
 Cleanup never deletes an unowned inventory difference or a pre-existing object.
-A general lane-end sweep is tracked in #2454 and needs a separate ownership design: semaphore metadata
-does not expose a creator PID, and exited-child ancestry cannot be reconstructed
-reliably. It must not infer ownership from a UID or a before/after global diff.
-The test journal is not crash-atomic: a forced kill between allocation and
-journal append can leave an unrecorded object. The production ownership work
-in #2454 must also address that interruption window.
+General lane-end reclamation remains unavailable; [the ownership limitation
+below](#sysv-reclamation-requires-allocation-proof) records why the test journal
+and process-tree sampler cannot provide it. A forced kill between allocation
+and journal append can still leave an unrecorded test object.
 File confinement still restricts database files to existing writable roots,
 and executable, Mach and network rules retain their existing limits. Database
 clients need the existing local or open network policy for loopback access.
@@ -316,6 +314,71 @@ authority.
   `::database_off_cannot_mutate_or_remove_foreign_sysv_objects`;
   `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`
 - Owner: `crates/confinement/src/permissions.rs`
+
+### SysV reclamation requires allocation proof
+
+The supervisor does not sweep SysV IPC at lane end. No mechanism established
+for #2454 proves ownership of both shared-memory segments and semaphore sets
+created by arbitrary lane processes, including exited children. Ambiguous
+objects remain untouched, even when that leaves lane-created resources behind.
+UID matching, a global before/after inventory difference and stale PID ancestry
+never authorise removal: each can include same-user host or peer-lane objects.
+
+A native C layout probe on macOS 27.0.1 with the macOS 27.0 SDK confirms that
+`shmid_ds` exposes `shm_cpid`, `shm_lpid`, permissions and times, but no creator
+process start time. `semid_ds` exposes permissions, count and operation/change times;
+it has no creator PID. `GETPID` describes the last semaphore operation, not
+creation. A recorded sandbox membership and process start time can distinguish
+live process identities, but cannot turn these fields into a complete
+allocation ledger. The process-tree sampler misses children that exit between
+observations and drops reparented descendants; its latest snapshot is neither
+a history of identities nor evidence that a particular semaphore was created
+by the lane. Matching a surviving `shm_cpid` to a previously observed PID alone
+does not exclude a later allocation by a reused host PID.
+
+Native `sandbox_compile_string` probes accept the existing
+`ipc-sysv-shm`/`ipc-sysv-sem` deny rules, while the candidate operations
+`ipc-sysv-shm-create`, `ipc-sysv-sem-create` and their `-write-create` forms
+are unbound symbols. Candidate filters `ipc-sysv-key`, `ipc-sysv-shm-key`,
+`ipc-sysv-sem-key` and `ipc-key` are also unbound. `ipc-posix-name` and
+`target same-sandbox` compile with these operations; compilation alone does
+not demonstrate a key restriction or a check before allocation. The existing
+native `database_off_creates_but_cannot_remove_own_sysv_objects` test covers
+capability-off allocation and removal denial for both kinds of object.
+Apple's published XNU [shared-memory](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/sysv_shm.c)
+and [semaphore](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/sysv_sem.c)
+implementations place the `shmget`/`semget` MAC permission checks on existing
+object lookup, not the new-object branch. This source corroborates the test;
+it is not a claim that the published revision matches the running kernel.
+There is consequently no established pre-allocation deny or enforceable
+supervisor-assigned key namespace here. A naming convention cannot prevent
+direct allocation with another key or `IPC_PRIVATE`.
+
+The test-only `SysvAudit` interposer records successful exclusive creations
+after the syscall returns. Arbitrary lane code can bypass it, and a kill
+between allocation and append loses the record. Making that journal writable
+by the lane also makes it unsuitable as host removal authority. A mandatory
+supervisor broker would need a non-bypassable allocation boundary, authenticated
+lane requests and protected ownership records. It must also resolve the
+broker's own allocation-to-record interruption window and prevent stale object
+IDs from authorising removal after reuse. Moving the same append into another
+process does not by itself supply those guarantees.
+
+Until such a boundary is demonstrated, production cleanup is deferred rather
+than implemented with weaker evidence. Database capability and all IPC, file,
+process and network policies retain their existing scope. The layout and SBPL
+probes allocate no IPC; they do not verify normal-exit or killed-lane cleanup,
+host/peer survival, or bounded and idempotent settlement. Those native tests,
+under `PROVENANT_CONFINEMENT_REQUIRED=1` in required macOS CI, remain acceptance
+criteria for a future implementation of #2454.
+
+- Evidence: SDK `sys/shm.h::shmid_ds`, `sys/sem.h::semid_ds`;
+  `crates/confinement/src/permissions/tests/ipc.rs::database_off_creates_but_cannot_remove_own_sysv_objects`;
+  `crates/confinement/src/permissions/tests/sysv_audit.rs::INTERPOSER`;
+  `crates/supervisor/src/process_tree.rs::Sampler`, `::walk`;
+  `crates/supervisor/src/process_os/census.rs::darwin_in_attempt_sandbox`
+- Owner: `crates/supervisor/src/process_tree.rs`,
+  `crates/confinement/src/permissions.rs`
 
 ### Lane process-tree memory interface
 
