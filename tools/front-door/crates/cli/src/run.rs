@@ -2521,6 +2521,10 @@ fn dispatch_with_workers(
         // A failed launch can follow admission. Those trees belong to the
         // accepted run and must remain available for resume.
         let cleanup = (|| -> Result<(), Fail> {
+            let workers = provenant_confinement::worktrees::CensusPolicyWorkers::from_roots(
+                workers, edge.roots,
+            )
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
@@ -2537,7 +2541,7 @@ fn dispatch_with_workers(
                 |context| {
                     use provenant_confinement::worktrees;
                     let context = &worktrees::WorktreeContext {
-                        workers,
+                        workers: &workers,
                         ..*context
                     };
                     let info = worktrees::list(context, &cancel)?
@@ -2821,6 +2825,10 @@ fn dispatch_inner(
         &lane_access.write_roots,
     );
     check_flag_capabilities_with_writes(&command, Some(edge.roots), has_writes)?;
+    let configured_workers =
+        provenant_confinement::worktrees::CensusPolicyWorkers::from_roots(workers, edge.roots)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+    let workers = &configured_workers;
     // Preflight. An owned worktree is the first side effect, so every check
     // that does not depend on the tree runs before it and a refusal leaves
     // no tree behind.

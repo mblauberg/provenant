@@ -236,6 +236,7 @@ pub fn schema<T: Serialize>(
             kind: match spec.kind {
                 Kind::Bool => "bool",
                 Kind::StringList => "string_list",
+                Kind::CensusIgnoreList => "census_ignore_list",
                 Kind::Enum => "enum",
                 Kind::Int => "int",
             },

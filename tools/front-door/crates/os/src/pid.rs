@@ -79,6 +79,42 @@ pub enum CwdObservation {
     PermissionDenied,
     Unsupported,
 }
+
+/// Host-owner acceptance of the risk that this signed executable occupies a
+/// worktree despite an unreadable cwd. Paths and signers are exact matches.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CensusIgnoreEntry {
+    pub path: PathBuf,
+    /// `platform` for Apple platform code, otherwise the kernel team identifier.
+    pub team_id: String,
+}
+
+impl CensusIgnoreEntry {
+    pub fn is_valid(&self) -> bool {
+        let path = &self.path;
+        path.is_absolute()
+            && path.file_name().is_some()
+            && path.as_os_str().len() <= 4096
+            && path
+                .to_str()
+                .is_some_and(|text| !text.chars().any(char::is_control))
+            && path.components().all(|part| {
+                matches!(
+                    part,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )
+            })
+            && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str()
+            && !self.team_id.is_empty()
+            && self.team_id.len() <= 64
+            && self
+                .team_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
+    }
+}
+
 pub trait CwdObserver: Send + Sync {
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError>;
 
@@ -88,6 +124,15 @@ pub trait CwdObserver: Send + Sync {
     fn sealed_platform_euid(&self, _pid: i64) -> Option<u32> {
         None
     }
+
+    fn ignored_unreadable_euid(&self, pid: i64, _entries: &[CensusIgnoreEntry]) -> Option<u32> {
+        self.sealed_platform_euid(pid).filter(|uid| *uid < 500)
+    }
+
+    /// Diagnostic only; failure to read any field cannot grant the exception.
+    fn process_details(&self, _pid: i64) -> Option<String> {
+        None
+    }
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemCwdObserver;
@@ -95,6 +140,16 @@ impl CwdObserver for SystemCwdObserver {
     fn sealed_platform_euid(&self, pid: i64) -> Option<u32> {
         let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
         crate::sys::pid::sealed_platform_euid(pid)
+    }
+
+    fn ignored_unreadable_euid(&self, pid: i64, entries: &[CensusIgnoreEntry]) -> Option<u32> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        crate::sys::pid::ignored_unreadable_euid(pid, entries)
+    }
+
+    fn process_details(&self, pid: i64) -> Option<String> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        Some(crate::sys::pid::process_details(pid))
     }
 
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError> {

@@ -198,6 +198,22 @@ fn discover_checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
 /// continue to use the ordinary observer, which includes those processes.
 struct LandWorkers<'a>(&'a dyn WorkerObserver);
 impl WorkerObserver for LandWorkers<'_> {
+    fn observe_roots_with_policy(
+        &self,
+        roots: &[PathBuf],
+        entries: &[provenant_os::pid::CensusIgnoreEntry],
+        _: bool,
+    ) -> provenant_confinement::worktrees::WorkerObservations {
+        self.0.observe_roots_with_policy(roots, entries, true)
+    }
+    fn live_process_with_policy(
+        &self,
+        root: &std::path::Path,
+        entries: &[provenant_os::pid::CensusIgnoreEntry],
+        _: bool,
+    ) -> Option<ObservedProcess> {
+        self.0.live_process_with_policy(root, entries, true)
+    }
     fn requires_complete_census(&self) -> bool {
         true
     }

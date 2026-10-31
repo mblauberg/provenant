@@ -29,7 +29,7 @@ Recovery never widens an enforced restriction, so these also refuse the file:
 
 - knobs marked `strict` in the registry (`lanes.publish`,
   `fabric.accept_handoff`, `chair.auto_switch`, `chair.switch_accounts` and
-  `lanes.max_depth`), whose defaults could grant what the user withheld, and a
+  `lanes.max_depth` and `confinement.census_ignore_unreadable`), whose defaults could grant what the user withheld, and a
   `knobs` or `domains` value that is not a table;
 - enforced model policy (`lane.read_only`, `lane.max_context`,
   `lane.max_turns`), and a malformed rule that carries one;
@@ -63,6 +63,46 @@ history [--since T] [--limit N]` lists, with secret-looking values redacted;
 overrides win over configuration. Each sealed task and attempt records the
 profile name, effective knob values and exact dispatch overrides, and
 continuations keep that stamp.
+
+## Unreadable process census exceptions
+
+The host owner may accept specific signed executables that the built-in macOS
+daemon census policy cannot exclude. Configure the strict knob
+`confinement.census_ignore_unreadable`; its default is an empty list:
+
+```toml
+[knobs]
+"confinement.census_ignore_unreadable" = [
+  { path = "/Library/Example/daemon", team_id = "TEAM123456" },
+  { path = "/usr/bin/login", team_id = "platform" },
+]
+```
+
+Use `provenant config set confinement.census_ignore_unreadable` with the same
+list encoded as JSON, or `config apply` with an array of these objects.
+`config show` and `config schema` expose its value and source; `config unset`
+restores the empty list. Up to 128 entries are accepted, each with exactly
+`path` and `team_id`. Paths are exact absolute normalized spellings (at most
+4096 bytes), not prefixes, globs or aliases. Duplicate paths, unknown fields,
+control characters, empty identities and malformed entries refuse the whole
+configuration. A team identifier is at most 64 ASCII alphanumeric bytes;
+`platform` selects Apple platform signing state instead of a team string.
+
+This knob is host-only: run `--knob` and Fabric task overrides refuse it, even
+for an empty list. The runtime reads the selected state root's host config,
+never project data or a task/attempt's profile stamp. No restart is required.
+Every listed executable still requires actual cwd `EPERM`, valid live signing
+state without ad-hoc, invalid-allowed, debugged or get-task-allow flags, an exact
+kernel executable-path match opened with `O_NOFOLLOW`, and a different euid
+from the worktree owner. `csops(CS_OPS_TEAMID)` must match the team exactly, or
+`platform` must match the platform bit. Evidence query failure stays unplaceable.
+
+The accepted residual risk is a listed executable sitting in a worktree. A
+signature or team identifier does not prove non-occupancy. Entries may admit
+root or other foreign-user processes, may name `/bin` or `/usr/bin` tools, and
+do not require a sealed volume. Keep the list limited to executable/signer
+pairs whose occupancy risk the host owner accepts. A readable occupant and
+every same-owner process retain their existing refusal.
 
 Batch concurrency resolves from the profile by batch class. A batch with any
 `worktree-write` lane uses `lanes.max_concurrency` (registry default 8); a

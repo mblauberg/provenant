@@ -200,6 +200,10 @@ fn collect_resolved(
                 None
             }
         };
+        let workers = provenant_confinement::worktrees::CensusPolicyWorkers::from_roots(
+            &provenant_confinement::worktrees::SystemWorkerObserver,
+            roots,
+        )?;
         Ok(provenant_confinement::disk::worktrees(
             &repo,
             &utility,
@@ -207,7 +211,10 @@ fn collect_resolved(
             budget,
             &cancel,
             &mut report,
-            registration.as_ref().map(|(_, directory)| directory),
+            (
+                registration.as_ref().map(|(_, directory)| directory),
+                &workers,
+            ),
         )?)
     })();
     match inventory {

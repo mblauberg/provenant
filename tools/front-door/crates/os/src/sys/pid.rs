@@ -214,32 +214,48 @@ fn parses_linux_stat_states_with_complex_names() {
 
 /// No credentials-only fallback exists on other platforms.
 pub(crate) fn sealed_platform_euid(pid: i32) -> Option<u32> {
+    ignored_unreadable_euid(pid, &[])
+}
+
+pub(crate) fn ignored_unreadable_euid(
+    pid: i32,
+    entries: &[crate::pid::CensusIgnoreEntry],
+) -> Option<u32> {
     #[cfg(target_os = "macos")]
     {
+        use std::os::unix::fs::OpenOptionsExt;
         let before = darwin_effective_uid(pid)?;
-        if before >= 500 || !darwin_platform_signature(darwin_signing_status(pid)?) {
+        let flags = darwin_signing_status(pid)?;
+        if !darwin_valid_signature(flags) {
             return None;
         }
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         let path = darwin_executable_path(pid)?;
-        if !darwin_daemon_path(&path) {
-            return None;
-        }
         let executable = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)
             .ok()?;
-        let metadata = executable.metadata().ok()?;
-        // Darwin dev_t is signed 32-bit; compare the vnode's u32 bit pattern.
-        let identity = (u64::from(metadata.dev() as u32), metadata.ino());
-        if !metadata.is_file()
-            || !darwin_text_matches(pid, identity)?
-            || !darwin_on_sealed_system_volume(&executable)?
-            || !darwin_text_matches(pid, identity)?
-            || darwin_executable_path(pid)? != path
-            || !darwin_platform_signature(darwin_signing_status(pid)?)
+        if !executable.metadata().ok()?.is_file() {
+            return None;
+        }
+        let builtin = before < 500
+            && darwin_platform_signature(flags)
+            && darwin_daemon_path(&path)
+            && darwin_on_sealed_system_volume(&executable) == Some(true);
+        let team = if entries
+            .iter()
+            .any(|entry| entry.path.as_os_str() == path.as_os_str() && entry.team_id != "platform")
+        {
+            darwin_team_id(pid)
+        } else {
+            None
+        };
+        let listed = listed_image_matches(entries, &path, flags, team.as_deref());
+        if (!builtin && !listed)
+            || darwin_executable_path(pid)?.as_os_str() != path.as_os_str()
+            || darwin_signing_status(pid)? != flags
             || darwin_effective_uid(pid)? != before
+            || (listed && team.is_some() && darwin_team_id(pid) != team)
         {
             return None;
         }
@@ -247,38 +263,70 @@ pub(crate) fn sealed_platform_euid(pid: i32) -> Option<u32> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = pid;
+        let _ = (pid, entries);
         None
     }
 }
 
+pub(crate) fn process_details(pid: i32) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let path = darwin_executable_path(pid)
+            .map_or_else(|| "unavailable".into(), |path| format!("{path:?}"));
+        let uid =
+            darwin_effective_uid(pid).map_or_else(|| "unavailable".into(), |uid| uid.to_string());
+        let flags = darwin_signing_status(pid)
+            .map_or_else(|| "unavailable".into(), |flags| format!("0x{flags:08x}"));
+        format!("path={path}, euid={uid}, cs_flags={flags}")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        "path=unavailable, euid=unavailable, cs_flags=unavailable".into()
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
-fn darwin_platform_signature(flags: u32) -> bool {
-    // XNU osfmk/kern/cs_blobs.h. CS_PLATFORM_PATH alone is deliberately
-    // insufficient; ad-hoc or debugged code cannot earn this exception.
+fn darwin_valid_signature(flags: u32) -> bool {
     const CS_VALID: u32 = 0x0000_0001;
-    const CS_PLATFORM_BINARY: u32 = 0x0400_0000;
     const CS_SIGNED: u32 = 0x2000_0000;
     const UNTRUSTED: u32 = 0x0000_0002 | 0x0000_0004 | 0x0000_0020 | 0x1000_0000;
-    let required = CS_VALID | CS_PLATFORM_BINARY | CS_SIGNED;
+    let required = CS_VALID | CS_SIGNED;
     flags & required == required && flags & UNTRUSTED == 0
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn darwin_platform_signature(flags: u32) -> bool {
+    // CS_PLATFORM_PATH alone is not signing evidence.
+    darwin_valid_signature(flags) && flags & 0x0400_0000 != 0
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn listed_image_matches(
+    entries: &[crate::pid::CensusIgnoreEntry],
+    path: &std::path::Path,
+    flags: u32,
+    team: Option<&str>,
+) -> bool {
+    darwin_valid_signature(flags)
+        && entries.iter().any(|entry| {
+            entry.is_valid()
+                && entry.path.as_os_str() == path.as_os_str()
+                && if entry.team_id == "platform" {
+                    darwin_platform_signature(flags)
+                } else {
+                    team == Some(entry.team_id.as_str())
+                }
+        })
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn darwin_daemon_path(path: &std::path::Path) -> bool {
-    // Component comparisons prevent lookalike prefixes; proc_pidpath must
-    // name a file beneath one of these directories, not a CLI or application.
-    path.components().all(|part| match part {
-        std::path::Component::RootDir => true,
-        std::path::Component::Normal(name) => {
-            !std::path::Path::new(name)
-                .extension()
-                .is_some_and(|extension| {
-                    extension.as_encoded_bytes().eq_ignore_ascii_case(b"app")
-                        || extension.as_encoded_bytes().eq_ignore_ascii_case(b"appex")
-                })
-        }
-        _ => false,
+    path.components().all(|part| {
+        matches!(
+            part,
+            std::path::Component::RootDir | std::path::Component::Normal(_)
+        )
     }) && ["/sbin", "/usr/sbin", "/usr/libexec", "/System/Library"]
         .iter()
         .any(|directory| path.starts_with(directory) && path != std::path::Path::new(directory))
@@ -298,85 +346,6 @@ fn darwin_executable_path(pid: i32) -> Option<std::path::PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-// XNU bsd/sys/proc_info.h. libc exposes the vnode half, but not these two
-// records. Keep the ABI fields explicit, including the unused region fields.
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct DarwinRegionInfo {
-    protection: u32,
-    max_protection: u32,
-    inheritance: u32,
-    flags: u32,
-    offset: u64,
-    behavior: u32,
-    user_wired_count: u32,
-    user_tag: u32,
-    pages_resident: u32,
-    pages_shared_now_private: u32,
-    pages_swapped_out: u32,
-    pages_dirtied: u32,
-    ref_count: u32,
-    shadow_depth: u32,
-    share_mode: u32,
-    private_pages_resident: u32,
-    shared_pages_resident: u32,
-    obj_id: u32,
-    depth: u32,
-    address: u64,
-    size: u64,
-}
-
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct DarwinRegionWithPathInfo {
-    region: DarwinRegionInfo,
-    vnode: libc::vnode_info_path,
-}
-
-#[cfg(target_os = "macos")]
-const _: () = assert!(std::mem::size_of::<DarwinRegionWithPathInfo>() == 1272);
-
-#[cfg(target_os = "macos")]
-fn darwin_text_matches(pid: i32, identity: (u64, u64)) -> Option<bool> {
-    const PROC_PIDREGIONPATHINFO: i32 = 8;
-    let requested = std::mem::size_of::<DarwinRegionWithPathInfo>() as i32;
-    let mut address = 0;
-    // Address zero starts enumeration, not necessarily the executable. Bound
-    // the walk and require forward progress; denied/short queries fail closed.
-    for _ in 0..4096 {
-        let mut info = std::mem::MaybeUninit::<DarwinRegionWithPathInfo>::zeroed();
-        // SAFETY: the repr(C) record supplies aligned writable ABI-sized
-        // storage; proc_pidinfo borrows it without retention.
-        let returned = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                PROC_PIDREGIONPATHINFO,
-                address,
-                info.as_mut_ptr().cast(),
-                requested,
-            )
-        };
-        if returned != requested {
-            return None;
-        }
-        // SAFETY: the exact-size successful read initialised the entire record.
-        let info = unsafe { info.assume_init() };
-        let stat = info.vnode.vip_vi.vi_stat;
-        if stat.vst_ino != 0
-            && info.region.protection & libc::VM_PROT_EXECUTE as u32 != 0
-            && (u64::from(stat.vst_dev), stat.vst_ino) == identity
-        {
-            return Some(true);
-        }
-        let next = info.region.address.checked_add(info.region.size)?;
-        if next <= address {
-            return None;
-        }
-        address = next;
-    }
-    None
-}
-
 #[cfg(any(target_os = "macos", test))]
 fn darwin_sealed_root_volume(flags: u32, valid: u32, capabilities: u32) -> bool {
     // XNU bsd/sys/{mount,attr}.h: read-only root filesystem and a valid seal.
@@ -386,7 +355,7 @@ fn darwin_sealed_root_volume(flags: u32, valid: u32, capabilities: u32) -> bool 
 }
 
 #[cfg(target_os = "macos")]
-fn darwin_signing_status(pid: i32) -> Option<u32> {
+fn darwin_csops(pid: i32, operation: u32, buffer: &mut [u8]) -> bool {
     unsafe extern "C" {
         fn csops(
             pid: libc::pid_t,
@@ -395,19 +364,45 @@ fn darwin_signing_status(pid: i32) -> Option<u32> {
             size: usize,
         ) -> libc::c_int;
     }
-    const CS_OPS_STATUS: u32 = 0;
-    let mut flags = 0u32;
-    // SAFETY: CS_OPS_STATUS writes one u32 to aligned, live storage and
-    // retains no pointer. A denied/failed query supplies no evidence.
-    let result = unsafe {
-        csops(
-            pid,
-            CS_OPS_STATUS,
-            (&mut flags as *mut u32).cast(),
-            std::mem::size_of::<u32>(),
-        )
+    // SAFETY: the supplied slice is live writable storage of the declared
+    // length. csops copies bytes to userspace and retains no pointer.
+    let result = unsafe { csops(pid, operation, buffer.as_mut_ptr().cast(), buffer.len()) };
+    result == 0
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_signing_status(pid: i32) -> Option<u32> {
+    let mut flags = [0u8; 4];
+    darwin_csops(pid, 0, &mut flags).then(|| u32::from_ne_bytes(flags))
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_team_id(pid: i32) -> Option<String> {
+    const CS_OPS_TEAMID: u32 = 14;
+    let mut bytes = [0xff; 8 + 64 + 1];
+    if !darwin_csops(pid, CS_OPS_TEAMID, &mut bytes) {
+        return None;
+    }
+    decode_darwin_team_id(&bytes).map(str::to_owned)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn decode_darwin_team_id(bytes: &[u8]) -> Option<&str> {
+    if bytes.get(..4)? != [0; 4] {
+        return None;
+    }
+    let length = u32::from_be_bytes(bytes.get(4..8)?.try_into().ok()?) as usize;
+    if !(10..=8 + 64 + 1).contains(&length) {
+        return None;
+    }
+    let payload = bytes.get(8..length)?;
+    let (&0, team) = payload.split_last()? else {
+        return None;
     };
-    (result == 0).then_some(flags)
+    if !team.iter().all(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    std::str::from_utf8(team).ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -742,6 +737,99 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn host_listing_requires_exact_path_signer_and_valid_live_signature() {
+        use crate::pid::CensusIgnoreEntry;
+        let entries = [CensusIgnoreEntry {
+            path: "/Library/Daemon".into(),
+            team_id: "TEAM123".into(),
+        }];
+        let path = std::path::Path::new("/Library/Daemon");
+        let signed = 0x2000_0001;
+        assert!(
+            listed_image_matches(&entries, path, signed, Some("TEAM123")),
+            "accepted listing"
+        );
+        assert!(
+            !listed_image_matches(&entries, path, signed, Some("TEAM999")),
+            "team mismatch"
+        );
+        assert!(
+            !listed_image_matches(
+                &entries,
+                std::path::Path::new("/Library/Daemon-child"),
+                signed,
+                Some("TEAM123")
+            ),
+            "exact path mismatch"
+        );
+        assert!(
+            !listed_image_matches(
+                &entries,
+                std::path::Path::new("/Library//Daemon"),
+                signed,
+                Some("TEAM123")
+            ),
+            "do not normalize a listed path match"
+        );
+        assert!(
+            !listed_image_matches(&entries, path, signed, None),
+            "unreadable team"
+        );
+        for invalid in [
+            signed & !1,
+            signed | 2,
+            signed | 4,
+            signed | 0x20,
+            signed | 0x1000_0000,
+        ] {
+            assert!(!listed_image_matches(
+                &entries,
+                path,
+                invalid,
+                Some("TEAM123")
+            ));
+        }
+        let platform = [CensusIgnoreEntry {
+            path: path.into(),
+            team_id: "platform".into(),
+        }];
+        assert!(!listed_image_matches(
+            &platform,
+            path,
+            signed,
+            Some("platform")
+        ));
+        assert!(listed_image_matches(
+            &platform,
+            path,
+            signed | 0x0400_0000,
+            None
+        ));
+    }
+
+    #[test]
+    fn team_id_blob_requires_bounded_network_length_and_exact_nul_terminated_identity() {
+        let mut bytes = vec![0; 8];
+        bytes.extend_from_slice(b"TEAM123\0");
+        let length = bytes.len() as u32;
+        bytes[4..8].copy_from_slice(&length.to_be_bytes());
+        assert_eq!(decode_darwin_team_id(&bytes), Some("TEAM123"));
+        for length in [0u32, 9, 74, u32::MAX] {
+            let mut malformed = bytes.clone();
+            malformed[4..8].copy_from_slice(&length.to_be_bytes());
+            assert_eq!(decode_darwin_team_id(&malformed), None);
+        }
+        for (index, value) in [(0, 1), (9, 0), (15, 1), (10, 0xff)] {
+            let mut malformed = bytes.clone();
+            malformed[index] = value;
+            assert_eq!(decode_darwin_team_id(&malformed), None);
+        }
+        assert_eq!(decode_darwin_team_id(&bytes[..7]), None);
+        bytes.extend_from_slice(b"IGNORED");
+        assert_eq!(decode_darwin_team_id(&bytes), Some("TEAM123"));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn native_current_process_is_not_an_eligible_platform_daemon() {
@@ -851,12 +939,14 @@ mod tests {
     }
 
     #[test]
-    fn daemon_paths_exclude_cli_tools_applications_and_lookalike_prefixes() {
+    fn daemon_paths_allow_system_library_bundles_but_exclude_cli_and_other_apps() {
         for path in [
             "/sbin/launchd",
             "/usr/sbin/daemon",
             "/usr/libexec/daemon",
             "/System/Library/PrivateFrameworks/X/daemon",
+            "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
+            "/System/Library/X.appex/daemon",
         ] {
             assert!(darwin_daemon_path(std::path::Path::new(path)), "{path}");
         }
@@ -866,8 +956,6 @@ mod tests {
             "/Library/Apple/usr/libexec/usbmuxd",
             "/Applications/X.app/daemon",
             "/System/Applications/X.app/daemon",
-            "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
-            "/System/Library/X.appex/daemon",
             "/usr/libexec-evil/daemon",
             "/usr/libexec/../bin/sleep",
             "/sbin",

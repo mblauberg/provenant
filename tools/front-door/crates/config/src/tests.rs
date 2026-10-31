@@ -15,6 +15,60 @@ fn roots() -> Roots {
     inputs.state_dir = Some("/fixture/state".into());
     inputs.resolve(&Resolver).unwrap()
 }
+
+#[test]
+fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_malformed_authority() {
+    let name = "confinement.census_ignore_unreadable";
+    let defaults = load::<&[u8]>(&roots(), None).unwrap();
+    assert!(defaults.census_ignore_unreadable().unwrap().is_empty());
+    let value = r#"[{"path":"/Library/Daemon","team_id":"TEAM123"},{"path":"/usr/bin/login","team_id":"platform"}]"#;
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["schema_version"] = toml_edit::value(1);
+    KnobEdit::Set { name, value }.apply(&mut doc).unwrap();
+    let config = load(&roots(), Some(doc.to_string().as_bytes())).unwrap();
+    let entries = config.census_ignore_unreadable().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].path, Path::new("/Library/Daemon"));
+    assert_eq!(entries[1].team_id, "platform");
+    for value in ["[]", value] {
+        assert!(
+            config
+                .dispatch_profile(&[format!("{name}={value}")])
+                .is_err(),
+            "host-only authority"
+        );
+    }
+    for value in [
+        r#"[{}]"#,
+        r#"[{"path":"relative","team_id":"TEAM123"}]"#,
+        r#"[{"path":"/a/../b","team_id":"TEAM123"}]"#,
+        r#"[{"path":"/a","team_id":""}]"#,
+        r#"[{"path":"/a","team_id":"TEAM123","extra":true}]"#,
+        r#"[{"path":"/a","team_id":"A"},{"path":"/a","team_id":"B"}]"#,
+    ] {
+        assert!(
+            KnobEdit::Set { name, value }.apply(&mut doc).is_err(),
+            "{value}"
+        );
+    }
+    for text in [
+        "schema_version=1\n[knobs]\n'confinement.census_ignore_unreadable'='all'",
+        "schema_version=1\n[knobs]\n'confinement.census_ignore_unreadable'=[{path='/a',team_id=''}]",
+    ] {
+        assert!(
+            load(&roots(), Some(text.as_bytes())).is_err(),
+            "strict authority must not recover"
+        );
+    }
+    KnobEdit::Unset(name).apply(&mut doc).unwrap();
+    assert!(
+        load(&roots(), Some(doc.to_string().as_bytes()))
+            .unwrap()
+            .census_ignore_unreadable()
+            .unwrap()
+            .is_empty()
+    );
+}
 #[test]
 fn explicit_profile_selects_the_compiled_preset() {
     let config = load(

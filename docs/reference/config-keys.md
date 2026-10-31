@@ -215,6 +215,17 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"A higher count keeps a longer audit trail but a larger history file."` |
 | `type` | `"int"` |
 
+## `confinement.census_ignore_unreadable`
+
+| Field | Value |
+|---|---|
+| `default` | `[]` |
+| `effect` | `"Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. Each listed executable may occupy a worktree; same-owner processes and invalid/unreadable signing state never qualify. Not accepted through dispatch --knob or Fabric overrides."` |
+| `host_only` | `true` |
+| `status` | `"wired"` |
+| `strict` | `true` |
+| `type` | `"census_ignore_list"` |
+
 ## `domains.routing.capacity_cooldown_seconds`
 
 | Field | Value |

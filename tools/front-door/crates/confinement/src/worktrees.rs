@@ -22,7 +22,7 @@ use provenant_core::Clock;
 use provenant_core::{AttemptId, CancelToken, GitOid, RelativePath, WaitBudget, hex};
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, canonicalize};
-use provenant_os::pid::{CwdObservation, CwdObserver, SystemCwdObserver};
+use provenant_os::pid::{CensusIgnoreEntry, CwdObservation, CwdObserver, SystemCwdObserver};
 use provenant_records::{PathWire, PathWireError};
 use provenant_supervisor::census::{
     Ancestry, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
@@ -46,8 +46,16 @@ const REPOSITORY_LOCK: &str = "worktrees.lock";
 const WRITER_LOCK: &str = "writer.lock";
 const WORKTREE_ROOT: &str = ".worktrees";
 
+impl From<provenant_config::ConfigError> for WorktreeError {
+    fn from(error: provenant_config::ConfigError) -> Self {
+        Self::Configuration(Box::new(error))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum WorktreeError {
+    #[error("worktree census configuration refused: {0}")]
+    Configuration(#[from] Box<provenant_config::ConfigError>),
     #[error("worktree request is invalid")]
     InvalidRequest,
     #[error("worktree name {name} matches more than one checkout")]
@@ -425,10 +433,102 @@ pub trait WorkerObserver: Send + Sync {
         (self.observe_roots_for_land(roots), BTreeMap::new())
     }
 
+    /// Composition supplies host configuration. Injected observers retain
+    /// their own refusal semantics; the native observer uses these entries.
+    fn observe_roots_with_policy(
+        &self,
+        roots: &[PathBuf],
+        _entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerObservations {
+        if for_land {
+            self.observe_roots_for_land_with_details(roots)
+        } else {
+            self.observe_roots_with_details(roots)
+        }
+    }
+
+    fn live_process_with_policy(
+        &self,
+        root: &Path,
+        _entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> Option<ObservedProcess> {
+        if for_land {
+            self.live_process_for_land(root)
+        } else {
+            self.live_process(root)
+        }
+    }
+
     /// A diagnostic for an incomplete census. It never affects custody; the
     /// default is used by observers that cannot identify the observation.
     fn incomplete_census_detail(&self) -> String {
         "process census unavailable".into()
+    }
+}
+
+/// Immutable host policy around either native observations or an injected seam.
+pub struct CensusPolicyWorkers<'a> {
+    inner: &'a dyn WorkerObserver,
+    entries: Vec<CensusIgnoreEntry>,
+}
+impl<'a> CensusPolicyWorkers<'a> {
+    pub fn from_roots(
+        inner: &'a dyn WorkerObserver,
+        roots: &provenant_core::Roots,
+    ) -> Result<Self, WorktreeError> {
+        Ok(Self {
+            inner,
+            entries: provenant_config::read(roots)?.census_ignore_unreadable()?,
+        })
+    }
+}
+impl WorkerObserver for CensusPolicyWorkers<'_> {
+    fn observe_roots_with_policy(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerObservations {
+        self.inner
+            .observe_roots_with_policy(roots, entries, for_land)
+    }
+    fn live_process_with_policy(
+        &self,
+        root: &Path,
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> Option<ObservedProcess> {
+        self.inner.live_process_with_policy(root, entries, for_land)
+    }
+    fn requires_complete_census(&self) -> bool {
+        self.inner.requires_complete_census()
+    }
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        self.observe_roots_with_details(roots).0
+    }
+    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        self.observe_roots_for_land_with_details(roots).0
+    }
+    fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        self.inner
+            .observe_roots_with_policy(roots, &self.entries, false)
+    }
+    fn observe_roots_for_land_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        self.inner
+            .observe_roots_with_policy(roots, &self.entries, true)
+    }
+    fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
+        self.inner
+            .live_process_with_policy(root, &self.entries, false)
+    }
+    fn live_process_for_land(&self, root: &Path) -> Option<ObservedProcess> {
+        self.inner
+            .live_process_with_policy(root, &self.entries, true)
+    }
+    fn incomplete_census_detail(&self) -> String {
+        self.inner.incomplete_census_detail()
     }
 }
 
@@ -444,6 +544,22 @@ pub fn live_refusal(workers: &dyn WorkerObserver, root: &Path) -> WorktreeError 
 pub struct SystemWorkerObserver;
 
 impl WorkerObserver for SystemWorkerObserver {
+    fn observe_roots_with_policy(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerObservations {
+        system_worker_roots_with_policy(roots, for_land, entries)
+    }
+    fn live_process_with_policy(
+        &self,
+        root: &Path,
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> Option<ObservedProcess> {
+        system_live_process_with_policy(root, for_land, entries)
+    }
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
         system_worker_roots(roots, false).0
     }
@@ -470,6 +586,14 @@ impl WorkerObserver for SystemWorkerObserver {
 }
 
 fn system_live_process(root: &Path, ancestors: bool) -> Option<ObservedProcess> {
+    system_live_process_with_policy(root, ancestors, &[])
+}
+
+fn system_live_process_with_policy(
+    root: &Path,
+    ancestors: bool,
+    entries: &[CensusIgnoreEntry],
+) -> Option<ObservedProcess> {
     let ProcessObservation::Present(current) = current_process() else {
         return None;
     };
@@ -477,7 +601,7 @@ fn system_live_process(root: &Path, ancestors: bool) -> Option<ObservedProcess> 
     observe_worker_holders(
         &roots,
         &SystemProcessObserver,
-        &SystemCwdObserver,
+        &PolicyCwdObserver(entries),
         &current,
         ancestors,
     )
@@ -486,6 +610,27 @@ fn system_live_process(root: &Path, ancestors: bool) -> Option<ObservedProcess> 
 }
 
 fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> WorkerObservations {
+    system_worker_roots_with_policy(roots, ancestors, &[])
+}
+
+struct PolicyCwdObserver<'a>(&'a [CensusIgnoreEntry]);
+impl CwdObserver for PolicyCwdObserver<'_> {
+    fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+        SystemCwdObserver.cwd(pid)
+    }
+    fn ignored_unreadable_euid(&self, pid: i64, _: &[CensusIgnoreEntry]) -> Option<u32> {
+        SystemCwdObserver.ignored_unreadable_euid(pid, self.0)
+    }
+    fn process_details(&self, pid: i64) -> Option<String> {
+        SystemCwdObserver.process_details(pid)
+    }
+}
+
+fn system_worker_roots_with_policy(
+    roots: &[PathBuf],
+    ancestors: bool,
+    entries: &[CensusIgnoreEntry],
+) -> WorkerObservations {
     let ProcessObservation::Present(current) = current_process() else {
         return (
             roots
@@ -503,7 +648,7 @@ fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> WorkerObservations
     observe_worker_roots(
         roots,
         &SystemProcessObserver,
-        &SystemCwdObserver,
+        &PolicyCwdObserver(entries),
         &current,
         ancestors,
     )
@@ -576,7 +721,7 @@ fn observe_worker_holders(
     // unknown. Current credentials and permissions cannot disprove a retained
     // cwd, including one acquired before a permission or credential change.
     for (&pid, &issue) in census.unknown_pids() {
-        let detail = format!("process {pid}: {issue:?}");
+        let detail = process_detail(cwd_observer, pid, &format!("{issue:?}"));
         record_unknown_all(&mut states, &mut details, &detail);
     }
     // Exclude the caller's verified ancestors. A walk that stops early leaves
@@ -608,14 +753,14 @@ fn observe_worker_holders(
             NativeCwd::Gone => {}
             NativeCwd::PolicyExcluded(euid) => {
                 // Accepted risk for sealed Apple code, applied per root owner.
-                // Human-range and same-owner processes never earn this exception.
+                // Same-owner processes never earn either exception.
                 for (root, state) in &mut states {
-                    let excluded = std::fs::metadata(root)
-                        .is_ok_and(|metadata| euid < 500 && euid != metadata.uid());
+                    let excluded =
+                        std::fs::metadata(root).is_ok_and(|metadata| euid != metadata.uid());
                     if !excluded && *state != WorkerState::Live {
                         *state = WorkerState::Unknown;
                         details.entry(root.clone()).or_insert_with(|| {
-                            format!("process {}: cwd unreadable", fact.identity.pid)
+                            process_detail(cwd_observer, fact.identity.pid, "cwd unreadable")
                         });
                     }
                 }
@@ -623,7 +768,7 @@ fn observe_worker_holders(
             NativeCwd::Unknown(category) => record_unknown_all(
                 &mut states,
                 &mut details,
-                &format!("process {}: {category}", fact.identity.pid),
+                &process_detail(cwd_observer, fact.identity.pid, &category),
             ),
             NativeCwd::Path(path) => {
                 let Some(canonical) = canonical_cwd(&path) else {
@@ -694,6 +839,15 @@ enum NativeCwd {
     Unknown(String),
 }
 
+fn process_detail(observer: &dyn CwdObserver, pid: i64, category: &str) -> String {
+    let mut detail = format!("process {pid}: {category}");
+    if let Some(fields) = observer.process_details(pid) {
+        detail.push_str("; ");
+        detail.push_str(&fields);
+    }
+    detail
+}
+
 fn record_unknown_all(
     states: &mut BTreeMap<PathBuf, WorkerState>,
     details: &mut BTreeMap<PathBuf, String>,
@@ -724,7 +878,7 @@ fn observe_same_process(
         Ok(CwdObservation::Path(path)) => NativeCwd::Path(path),
         Ok(CwdObservation::Gone) => return NativeCwd::Gone,
         Ok(CwdObservation::PermissionDenied) => cwd_observer
-            .sealed_platform_euid(expected.identity.pid)
+            .ignored_unreadable_euid(expected.identity.pid, &[])
             .map(NativeCwd::PolicyExcluded)
             .unwrap_or_else(|| NativeCwd::Unknown("cwd unreadable".into())),
         Ok(CwdObservation::Unsupported) => NativeCwd::Unknown("cwd unsupported".into()),
@@ -4919,6 +5073,145 @@ mod lifecycle_tests {
         );
         assert_eq!(states[&root], WorkerState::Unknown);
         assert_eq!(details[&root], "process listing truncated or incomplete");
+        Ok(())
+    }
+
+    #[test]
+    fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
+    -> Result<(), Box<dyn Error>> {
+        struct Probe(std::sync::Mutex<Vec<Vec<CensusIgnoreEntry>>>);
+        impl WorkerObserver for Probe {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, WorkerState::Unknown))
+                    .collect()
+            }
+            fn observe_roots_with_policy(
+                &self,
+                roots: &[PathBuf],
+                entries: &[CensusIgnoreEntry],
+                for_land: bool,
+            ) -> WorkerObservations {
+                assert!(for_land);
+                self.0.lock().unwrap().push(entries.to_vec());
+                (self.observe_roots(roots), BTreeMap::new())
+            }
+        }
+        let fixture = Fixture::new()?;
+        let root = canonicalize(&fixture.root)?;
+        let state = fixture._temp.path().join("host-config");
+        fs::create_dir(&state)?;
+        fs::write(
+            state.join("config.toml"),
+            "schema_version=1\n[knobs]\n'confinement.census_ignore_unreadable'=[{path='/Library/Daemon',team_id='TEAM123'}]\n",
+        )?;
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(state);
+        let configured_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        inputs.state_dir = Some(fixture._temp.path().join("empty-config"));
+        let empty_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let probe = Probe(Default::default());
+        let first = CensusPolicyWorkers::from_roots(&probe, &configured_roots)?;
+        assert_eq!(
+            first.observe_roots_for_land(std::slice::from_ref(&root))[&root],
+            WorkerState::Unknown
+        );
+        let second = CensusPolicyWorkers::from_roots(&first, &empty_roots)?;
+        assert_eq!(
+            second.observe_roots_for_land(std::slice::from_ref(&root))[&root],
+            WorkerState::Unknown
+        );
+        let seen = probe.0.lock().unwrap();
+        assert_eq!(
+            seen[0],
+            vec![CensusIgnoreEntry {
+                path: "/Library/Daemon".into(),
+                team_id: "TEAM123".into()
+            }]
+        );
+        assert!(
+            seen[1].is_empty(),
+            "policy must not leak across roots or wrappers"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn listed_process_is_excluded_only_after_eperm_and_never_for_the_owner()
+    -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, ProcessIdentity};
+        struct Listed {
+            uid: u32,
+            denied: bool,
+        }
+        impl CwdObserver for Listed {
+            fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+                if self.denied {
+                    Ok(CwdObservation::PermissionDenied)
+                } else {
+                    Err(provenant_os::pid::PidError::Io {
+                        pid: pid as i32,
+                        source: std::io::Error::other("cwd failure"),
+                    })
+                }
+            }
+            fn ignored_unreadable_euid(&self, _: i64, _: &[CensusIgnoreEntry]) -> Option<u32> {
+                assert!(self.denied, "non-EPERM must never consult listing policy");
+                Some(self.uid)
+            }
+        }
+        let fixture = Fixture::new()?;
+        let root = canonicalize(&fixture.root)?;
+        let fact = |pid| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let observer = InjectedCensus {
+            census: Census::from_observations([fact(100), fact(200)], [], [], true, false, 32)?,
+            cwds: BTreeMap::new(),
+            current: fact(100),
+            platform_euids: BTreeMap::new(),
+        };
+        let owner = fs::metadata(&root)?.uid();
+        for (name, uid, denied, expected) in [
+            (
+                "accepted foreign listing",
+                owner.wrapping_add(1),
+                true,
+                WorkerState::Free,
+            ),
+            ("owner uid refused", owner, true, WorkerState::Unknown),
+            (
+                "non-EPERM refused",
+                owner.wrapping_add(1),
+                false,
+                WorkerState::Unknown,
+            ),
+        ] {
+            assert_eq!(
+                observe_worker_roots(
+                    std::slice::from_ref(&root),
+                    &observer,
+                    &Listed { uid, denied },
+                    &observer.current,
+                    false
+                )
+                .0[&root],
+                expected,
+                "{name}"
+            );
+        }
         Ok(())
     }
 

@@ -703,9 +703,12 @@ optional branch by canonical path under writer custody.
 ### Unreadable processes need positive non-occupancy evidence
 
 A live process whose cwd cannot be read remains unplaceable unless it meets
-the explicit daemon policy below. Same-owner, human-range (effective uid 500
-or higher), non-platform and non-daemon processes remain unplaceable. Missing credentials or signing
-state, unsupported queries, identity races and other failures cannot establish
+one of the explicit policies below. Same-owner processes always remain
+unplaceable. Built-in daemon policy excludes human-range effective uids (500
+or higher), non-platform code and paths outside its permitted directories;
+only a host-owner listing can accept those remaining signed executables.
+Missing credentials or signing state, unsupported queries, identity races and
+other failures cannot establish
 the exception. Landing and other callers requiring a complete census keep every
 root that is not positively observed live `Unknown`; a placed occupant makes
 its root `Live`. An unreadable process is never `Gone`. The Darwin cwd seam
@@ -725,14 +728,15 @@ The cwd seam clears errno before the syscall and preserves the actual failure.
   `CS_PLATFORM_BINARY`, without ad-hoc, `CS_INVALID_ALLOWED`, `CS_DEBUGGED` or
   `CS_GET_TASK_ALLOW` flags.
   A pathname or `CS_PLATFORM_PATH` alone never establishes platform code.
-- The executable path comes from `proc_pidpath`, lies below `/sbin`,
-  `/usr/sbin`, `/usr/libexec` or `/System/Library`, and has no application or
-  application-extension component. `/bin`, `/usr/bin`, `/Library/Apple` and
-  all application paths are excluded, even for signed platform binaries.
-- That executable is opened with `O_NOFOLLOW`. Its device and inode must match
-  a nonempty executable-region vnode from `PROC_PIDREGIONPATHINFO`, before and
-  after the volume check. Region enumeration is bounded and must advance;
-  denied, short or missing vnode evidence leaves the process unplaceable.
+- The executable path comes from `proc_pidpath`, the kernel path for the
+  process text vnode, and lies below `/sbin`, `/usr/sbin`, `/usr/libexec` or
+  `/System/Library`. Application and extension components within those
+  directories qualify. `/Applications`, `/System/Applications`, `/bin`,
+  `/usr/bin`, `/Library/Apple` and every other prefix stay outside the built-in
+  policy, even for platform binaries.
+- That executable is opened with `O_NOFOLLOW` and must be a regular file.
+  No `PROC_PIDREGIONPATHINFO` match is attempted: foreign-process region
+  queries require privileges unavailable to the ordinary caller.
 - `fstatfs` on the retained executable fd identifies a read-only root
   filesystem. The volume capability query reports `VOL_CAP_FMT_SEALED` in
   both the valid and capabilities masks.
@@ -746,13 +750,37 @@ It may retain or inherit a cwd or directory fd there; sealed Apple code can
 enter user worktrees. The directory, uid, signature and volume restrictions
 bound the exception but do not establish cwd history. The census does not
 inspect all descriptors or provide an atomic cwd, credential or exec snapshot.
-The executable-region match pins the opened vnode to a running mapping, not an
-atomic main-image snapshot across exec. Process-identity checks fence PID reuse;
-later movement or credential/exec changes remain risks. WindowServer's real
-and saved uids of 0 do not decide eligibility. Root now qualifies only through
+The sealed system volume is immutable, and live `csops` describes the running
+image rather than the reopened file. There remains a TOCTOU between exec and
+the path read: identity rechecks bound PID reuse but do not make exec atomic
+(exec can preserve PID/start time). Rechecking path, signing state and euid
+narrows the window; later movement or credential/exec changes remain risks.
+WindowServer's real and saved uids of 0 do not decide eligibility. Root qualifies through
 all the daemon-policy checks, never from uid alone. Every failed evidence query
-leaves the process unplaceable; foreign-daemon region queries can themselves be
-denied, so this policy does not guarantee a complete census on every host.
+leaves the process unplaceable. This policy does not guarantee a complete census
+on every host: unrelated unlisted executables still keep it unknown.
+
+**Host-owner exceptions.** The strict, default-empty knob
+`confinement.census_ignore_unreadable` lists exact `{path, team_id}` records in
+the selected host state root's `config.toml`. It is not accepted through run
+`--knob`, Fabric overrides, project input or retained task stamps. Runtime
+composition reads the host config for land, worktree listing/removal, foreign
+GC, dispatch cleanup and disk inventory; malformed authority refuses the config.
+
+A listed process qualifies only after actual cwd `EPERM`, with an euid different
+from the root owner (root is allowed), a valid signed live `csops` state without
+ad-hoc, invalid-allowed, debugged or get-task-allow flags, and exact equality of
+`proc_pidpath` and the configured path. The path is opened with `O_NOFOLLOW` as a
+regular file. `CS_OPS_TEAMID` must report the configured team exactly, or the
+selector `platform` requires `CS_PLATFORM_BINARY`. Missing/malformed team state
+never matches. Signing state, path, euid and any team evidence are rechecked.
+This explicit host-owner policy does not require the built-in directory, system
+uid or sealed-volume restrictions. It may therefore list `/usr/bin/login`,
+third-party services or other signed executables the built-in rule refuses.
+The residual risk is a listed executable sitting in a worktree, including
+retained directory access; a matching team identifies its signer, not safe cwd
+behaviour. See [configuration](../runbooks/configuration.md#unreadable-process-census-exceptions)
+for entry syntax and validation.
 
 Readable cwd placement checks process identity before and after observation,
 then compares each root's device and inode with those of the cwd's ancestors.
@@ -793,12 +821,13 @@ These conclusions follow from Apple's [directory-change implementation](https://
 and [process-query policy](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c).
 The latter permits short credential queries while restricting foreign cwd and
 descriptor queries. The policy also uses XNU's [code-signing flags](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/cs_blobs.h)
-and [sealed-volume capability](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/attr.h).
+and [sealed-volume capability](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/attr.h),
+plus the [team-identifier query](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_proc.c).
 The native full-census test uses `SystemWorkerObserver` over the real process
 list for a clean merged worktree. It requires `Free`, then places a same-user
 `/bin/sleep` child inside and requires the existing stronger `Live` refusal with
-a placing detail. It reports the first unplaceable detail on a failed clean
-census. Under `PROVENANT_CONFINEMENT_REQUIRED=1` unavailable evidence fails;
+a placing detail. It reports the first unplaceable pid, executable path, effective uid and
+code-signing flags on a failed clean census; unavailable fields are explicit. Under `PROVENANT_CONFINEMENT_REQUIRED=1` unavailable evidence fails;
 optional local runs report why the clean census cannot be verified. Its marker
 appears only after both assertions. The isolated WindowServer fixture selects
 that daemon and the caller, proving only that daemon's effect on removal, not

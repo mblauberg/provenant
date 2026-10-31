@@ -1351,6 +1351,7 @@ fn with_context_mode<T>(
         child(&worktrees_state, &name)?
     };
     let clock = SystemClock;
+    let workers = worktrees::CensusPolicyWorkers::from_roots(workers, roots)?;
     let context = WorktreeContext {
         home,
         repo: &repo,
@@ -1358,7 +1359,7 @@ fn with_context_mode<T>(
         project_state: &project_state,
         executor: &executor,
         utility: &runtime,
-        workers,
+        workers: &workers,
         clock: &clock,
         utility_budget: budget,
         mutation_budget: UtilityBudget::bounded(mutation)?,

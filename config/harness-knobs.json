@@ -114,6 +114,14 @@
     }
   },
   "knobs": {
+    "confinement.census_ignore_unreadable": {
+        "type": "census_ignore_list",
+        "default": [],
+        "strict": true,
+        "host_only": true,
+        "status": "wired",
+        "effect": "Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. Each listed executable may occupy a worktree; same-owner processes and invalid/unreadable signing state never qualify. Not accepted through dispatch --knob or Fabric overrides."
+    },
     "routing.workload": {
       "type": "enum", "values": ["general", "read_heavy", "edit_heavy", "review"], "default": "general", "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs",
