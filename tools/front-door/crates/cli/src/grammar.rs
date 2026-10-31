@@ -53,6 +53,12 @@ pub enum Command {
     },
     /// Print the resolved release root
     Root,
+    /// Read a fresh resident-memory sample of an owned lane process tree
+    ProcessTree {
+        /// PID of the supervised command inside this lane
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=i32::MAX as i64))]
+        root: u32,
+    },
     /// Post a human decision, assumption or question
     Ask(crate::inbox::Ask),
     /// List, inspect, close and acknowledge human requests

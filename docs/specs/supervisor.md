@@ -317,6 +317,61 @@ authority.
   `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`
 - Owner: `crates/confinement/src/permissions.rs`
 
+### Lane process-tree memory interface
+
+Inside a macOS lane, run `provenant process-tree --root PID --json` with the PID
+of the command being supervised. The normal command envelope has this `data`:
+
+```json
+{"schema_version":1,"root_pid":410,"sampled_at":"2026-11-01T00:00:00.000000Z","processes":[{"pid":410,"ppid":400,"pgid":410,"rss_bytes":1048576},{"pid":411,"ppid":410,"pgid":410,"rss_bytes":524288}]}
+```
+
+The root and its descendants are included, sorted by PID. RSS is in bytes;
+`sampled_at` is the observation's start in RFC 3339 UTC with six fractional
+digits. Sum `rss_bytes` to estimate the command tree's resident memory; shared
+pages can be counted by more than one process. An exited zombie can have zero
+RSS. This is periodic observation, not an atomic kernel census or a kernel
+memory limit: short-lived processes and changes between samples can be missed.
+
+The unconfined supervisor walks descendants of its held provider identity with
+libproc, checks each process against the existing attempt sandbox marker, and
+rechecks parent links, start times and child lists before publishing. Host
+processes and independent peer lanes are excluded even when a peer has the
+same profile text or process group. No global process list is published.
+`proc_listchildpids` itself returns `EPERM` inside the production lane, so this
+walk runs on the host. The `kern.proc.` and `kern.procargs` denies and the
+same-sandbox process-info scope remain unchanged.
+
+One worker per live provider refreshes `<attempt>/process-tree.json` about
+once a second without blocking the guardian's control loop. Publication uses
+the held attempt directory and atomic replacement. The lane receives one
+exact read grant for this file and its absolute path in `PROVENANT_PROCESS_TREE`;
+the attempt directory and snapshot remain outside lane write authority. The
+reader checks that its sandbox denies mutation of the selected file, so an
+environment override cannot select a fabricated writable snapshot. The file
+envelope is private; use the CLI for the stable interface. The CLI opens no
+host state store and needs no configured project.
+
+The reader selects only a root present in that lane snapshot, rechecks its
+native identity, and rejects an exited root, another boot, a future observation
+or a sample older than five seconds on the host's sleep-aware monotonic clock.
+Missing, malformed, oversized, incomplete, stale or unsupported samples return
+exit **4**, status `unavailable`, error `PROCESS_TREE_UNAVAILABLE`, and null
+`data`. A guard must treat this as lost observation, never zero memory; retry
+or apply its own refusal policy. Invalid CLI arguments return exit 2.
+Traversal is limited to 4,096 processes and a 250 ms observation budget;
+detected churn or exceeded bounds invalidates the sample rather than returning
+a partial tree. A failed refresh replaces the file with an unavailable value;
+failed publication leaves bytes that the freshness check expires. Provider exit
+stops the worker and requests invalidation; a dead supervisor's file expires.
+
+- Test: `crates/confinement/src/permissions/tests/process_tree.rs::lane_process_tree_sample_is_private_under_production_profiles`;
+  `crates/supervisor/src/process_tree.rs::tests`;
+  `tests/command_adapter.rs::command_lane_reads_its_supervisors_process_tree_through_the_cli`;
+  `::process_tree_cli_is_unavailable_without_a_supervisor_sample`
+- Owner: `crates/supervisor/src/process_tree.rs`, `crates/cli/src/run/provider.rs`,
+  `src/process_tree.rs`
+
 ### Process information stays inside the sandbox
 
 Every lane profile explicitly denies the process-info family before allowing
@@ -324,8 +379,9 @@ Every lane profile explicitly denies the process-info family before allowing
 information, including resident memory, for a PID it already knows inside its
 own sandbox. The `kern.proc.` sysctl deny stops a lane from enumerating
 processes, its own descendants included, so an in-lane memory guard cannot
-discover its process tree; tree-wide sampling belongs on the host side or in a
-reader handed the PIDs (#2452). An allow-only clause is
+discover its process tree. The supervisor samples that tree on the host and
+serves an attempt-local snapshot through `provenant process-tree` below.
+An allow-only clause is
 not assumed to restrict APIs that the platform permits by default. The native
 test records the unscoped baseline and compares an explicit deny,
 `process-info-pidinfo` scoped to the sandbox, and the final scoped wildcard.
@@ -351,9 +407,8 @@ returns `EPERM` before any process-info lookup, in both access modes. On Darwin
 This is a queried policy denial, rather than a captured kernel log for the
 exec. `forbidden-exec-sugid` is not a grantable SBPL symbol on that host.
 The process-info rule therefore does not fix consumers that invoke stock `ps`.
-Issue #2452 needs an unprivileged libproc-based process-tree RSS reader, such as
-a `provenant` subcommand, for consumers' memory guards. No privileged execution,
-sandbox escape or Mach authority is added.
+`provenant process-tree` supplies the supported RSS interface for consumers'
+memory guards. No privileged execution, sandbox escape or Mach authority is added.
 
 The native production-profile shell probe also runs an offline Cargo test with
 two jobs. Its build script acquires and returns an inherited jobserver token,

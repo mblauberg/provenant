@@ -46,6 +46,7 @@ mod preset_select;
     reason = "the custom worktree test driver includes this library without the test harness"
 )]
 mod preset_tests;
+mod process_tree;
 mod provider_retention;
 mod release_smoke;
 mod roots;
@@ -655,6 +656,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     let globals = &inv.globals;
     let command = match inv.command {
         Command::Hook(hook) => return hooks::run(hook, globals),
+        Command::ProcessTree { root } => return process_tree::run(root, globals),
         command => command,
     };
     if let Err(error) = roots::validate_globals(globals) {
@@ -672,6 +674,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
     match command {
+        Command::ProcessTree { root } => process_tree::run(root, globals),
         Command::Hosts { command: None } => fabric::hosts(globals, process.workers()),
         Command::Hosts {
             command: Some(command),

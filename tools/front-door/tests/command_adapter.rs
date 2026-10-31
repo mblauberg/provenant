@@ -266,6 +266,88 @@ fn attempt_id(dispatched: &Value) -> Result<&str> {
 }
 
 #[test]
+fn process_tree_cli_is_unavailable_without_a_supervisor_sample() -> Result {
+    let rig = TestRig::new()?;
+    let out = rig.command(&["process-tree", "--root", "1", "--json"])?;
+    assert_eq!(code(&out), 4);
+    let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(result["status"], "unavailable");
+    assert_eq!(result["error"]["code"], "PROCESS_TREE_UNAVAILABLE");
+    assert!(result["data"].is_null());
+    for root in ["0", "-1", "2147483648"] {
+        assert_eq!(
+            code(&rig.command(&["process-tree", "--root", root, "--json"])?),
+            2
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn command_lane_reads_its_supervisors_process_tree_through_the_cli() -> Result {
+    if !available()? {
+        return Ok(());
+    }
+    let binary = env!("CARGO_BIN_EXE_provenant");
+    let script = r#"
+set -eu
+test -n "$PROVENANT_PROCESS_TREE"
+/bin/sh -c '/bin/sleep 15 & wait' &
+child=$!
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if "$1" process-tree --root "$$" --json > "$TMPDIR/sample.json"; then
+        /bin/cat "$TMPDIR/sample.json"
+        exit 0
+    else
+        status=$?
+        test "$status" = 4
+    fi
+    /bin/sleep 0.2
+done
+exit 90
+"#;
+    let rig = rig(
+        json!({"memory":{"argv":["/bin/sh","-c",script,"memory",binary], "runtimes":[binary]}}),
+    )?;
+    let _cleanup = rig.process_cleanup();
+    let submitted = dispatch(&rig, "memory", 15)?;
+    let id = attempt_id(&submitted)?;
+    let lane = settled(&rig, id)?;
+    assert_eq!(lane["state"], "succeeded", "{lane}");
+    let run = submitted["data"]["run_id"].as_str().ok_or("run id")?;
+    let output = fs::read_to_string(
+        rig.state
+            .join("runs")
+            .join(run)
+            .join("attempts")
+            .join(id)
+            .join("stdout.log"),
+    )?;
+    let value: Value = serde_json::from_str(output.trim())?;
+    assert_eq!(value["status"], "ok", "{value}");
+    let sample = &value["data"];
+    assert_eq!(sample["schema_version"], 1);
+    let root = sample["root_pid"].as_u64().ok_or("root pid")?;
+    let processes = sample["processes"].as_array().ok_or("processes")?;
+    let child = processes
+        .iter()
+        .find(|process| process["ppid"] == root)
+        .ok_or("child")?;
+    assert!(
+        processes
+            .iter()
+            .any(|process| process["ppid"] == child["pid"]),
+        "{value}"
+    );
+    assert!(
+        processes
+            .iter()
+            .all(|process| process["rss_bytes"].as_u64().is_some_and(|rss| rss > 0))
+    );
+    Ok(())
+}
+
+#[test]
 fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Result {
     if !available()? {
         return Ok(());

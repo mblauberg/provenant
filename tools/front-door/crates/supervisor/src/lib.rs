@@ -14,6 +14,7 @@ pub mod custody;
 pub mod fixture;
 mod guardian;
 pub mod machine;
+pub mod process_tree;
 #[cfg(feature = "fixture")]
 pub use guardian::ExitPublisher;
 pub use guardian::{
