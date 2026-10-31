@@ -352,10 +352,8 @@ once a second without blocking the guardian's control loop. Publication uses
 the held attempt directory and atomic replacement. The lane receives one
 exact read grant for this file and its absolute path in `PROVENANT_PROCESS_TREE`;
 the attempt directory and snapshot remain outside lane write authority. The
-reader checks mutation policy on the opened file's physical path and verifies
-its device/inode, so retargeting a pathname cannot make forged writable bytes
-pass as the read-only snapshot. An environment override cannot select a
-fabricated writable snapshot. The file
+guard uses the host-provided path. Caller configuration and environment are
+trusted; overriding this path to supply other data is unsupported. The file
 envelope is private; use the CLI for the stable interface. The CLI opens no
 host state store and needs no configured project.
 

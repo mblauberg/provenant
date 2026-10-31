@@ -4,46 +4,6 @@ use crate::process_tree::{MAX_PROCESSES, ProcessMemory};
 use crate::process_tree::{NativeProcess, Unavailable};
 
 #[cfg(target_os = "macos")]
-pub(crate) fn immutable(path: &std::path::Path) -> Result<(), Unavailable> {
-    use std::os::unix::ffi::OsStrExt;
-    unsafe extern "C" {
-        fn sandbox_check(
-            pid: libc::pid_t,
-            operation: *const libc::c_char,
-            filter_type: libc::c_int,
-            ...
-        ) -> libc::c_int;
-    }
-    if !path.is_absolute() {
-        return Err(Unavailable);
-    }
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| Unavailable)?;
-    let pid = std::process::id() as i32;
-    // SAFETY: a null operation with filter 0 reads only this scalar PID.
-    if unsafe { sandbox_check(pid, std::ptr::null(), 0) } != 1 {
-        return Err(Unavailable);
-    }
-    for operation in [
-        c"file-write-data",
-        c"file-write-unlink",
-        c"file-write-create",
-        c"file-write-mode",
-    ] {
-        // SAFETY: filter 1 takes one NUL-terminated path pointer, borrowed
-        // for the call; both strings remain alive and nothing is retained.
-        if unsafe { sandbox_check(pid, operation.as_ptr(), 1, path.as_ptr()) } != 1 {
-            return Err(Unavailable);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn immutable(_: &std::path::Path) -> Result<(), Unavailable> {
-    Err(Unavailable)
-}
-
-#[cfg(target_os = "macos")]
 pub(crate) fn member(pid: u32, name: &std::ffi::CStr) -> Result<bool, Unavailable> {
     unsafe extern "C" {
         fn sandbox_check(

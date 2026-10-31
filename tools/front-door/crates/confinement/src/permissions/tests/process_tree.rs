@@ -182,30 +182,6 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(&path, b"{}").is_err(),
             "snapshot must remain read-only"
         );
-        let forged = root.join("forged.json");
-        std::fs::write(&forged, std::fs::read(&path)?)?;
-        assert!(
-            process_tree::read(&forged, own).is_err(),
-            "writable snapshot override must fail closed"
-        );
-        let forged_directory = root.join("forge");
-        std::fs::create_dir(&forged_directory)?;
-        std::fs::write(
-            forged_directory.join(process_tree::FILE),
-            std::fs::read(&path)?,
-        )?;
-        let alias = root.join("alias");
-        std::os::unix::fs::symlink(&forged_directory, &alias)?;
-        let raced =
-            process_tree::read_with_before_trust(&alias.join(process_tree::FILE), own, || {
-                std::fs::remove_file(&alias).expect("unlink writable alias");
-                std::os::unix::fs::symlink(root.parent().expect("snapshot directory"), &alias)
-                    .expect("retarget alias to immutable snapshot");
-            });
-        assert!(
-            raced.is_err(),
-            "cannot trust forged bytes by retargeting their path to the immutable snapshot"
-        );
         cancel.cancel();
         let _ = worker.join().expect("tree child executor");
         Ok(())
