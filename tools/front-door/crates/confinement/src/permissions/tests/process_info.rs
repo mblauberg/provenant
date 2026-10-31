@@ -5,6 +5,7 @@ use super::*;
 
 const PROBE: &str = r#"
 #include <errno.h>
+#include <dlfcn.h>
 #include <libproc.h>
 #include <signal.h>
 #include <stdio.h>
@@ -13,7 +14,27 @@ const PROBE: &str = r#"
 #include <sys/wait.h>
 #include <unistd.h>
 
+extern char **environ;
+extern int sandbox_check(pid_t, const char *, int, ...);
+
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "exec-ps") == 0) {
+        const int *no_report = dlsym(RTLD_DEFAULT, "SANDBOX_CHECK_NO_REPORT");
+        int flags = no_report ? *no_report : 0;
+        const char *operations[] = {"forbidden-exec-sugid", "not-a-real-operation-2452"};
+        for (unsigned i = 0; i < 2; ++i) {
+            errno = 0;
+            int result = sandbox_check(getpid(), operations[i], flags);
+            int error = errno;
+            fprintf(stderr, "sandbox_check %s: result=%d errno=%d\n",
+                operations[i], result, error);
+        }
+        char *args[] = {"/bin/ps", "-A", "-o", "pid=,ppid=,pgid=,rss=", NULL};
+        execve(args[0], args, environ);
+        int error = errno;
+        fprintf(stderr, "execve /bin/ps failed: errno=%d\n", error);
+        return 1;
+    }
     if (argc != 3) return 90;
     int baseline = strcmp(argv[1], "baseline") == 0;
     int allowed = strcmp(argv[1], "denied") != 0;
@@ -98,6 +119,7 @@ fn process_info_is_same_sandbox_and_ps_reports_own_rss() -> Result<(), Box<dyn s
     let compile = [
         OsString::from("/usr/bin/cc"),
         input.as_os_str().to_owned(),
+        "-lsandbox".into(),
         "-o".into(),
         helper.as_os_str().to_owned(),
     ];
@@ -130,6 +152,7 @@ fn process_info_is_same_sandbox_and_ps_reports_own_rss() -> Result<(), Box<dyn s
     };
     let host_pid = std::process::id().to_string();
     let mut failures = Vec::new();
+    let mut passed = Vec::new();
     let run = |source: &str, args: &[OsString]| {
         let mut argv = [SANDBOX_EXEC, "-p", source].map(OsString::from).to_vec();
         argv.extend_from_slice(args);
@@ -197,6 +220,10 @@ fn process_info_is_same_sandbox_and_ps_reports_own_rss() -> Result<(), Box<dyn s
                     String::from_utf8_lossy(&result.stdout.bytes),
                     String::from_utf8_lossy(&result.stderr.bytes)
                 ));
+            } else {
+                passed.push(format!(
+                    "writer={writer}: {rule:?} libproc {expected}: PASS"
+                ));
             }
         }
         let script = r#"
@@ -209,10 +236,12 @@ printf 'own=%s child=%s\n' "$$" "$child"
 "#;
         let result = run(&source, &["/bin/sh".into(), "-c".into(), script.into()])?;
         if !successful_probe(&result) {
+            let diagnostic = run(&source, &[helper.as_os_str().to_owned(), "exec-ps".into()])?;
             failures.push(format!(
-                "writer={writer}: stock ps: {:?}; {}",
+                "writer={writer}: stock ps: {:?}; {}; {}",
                 result.termination,
-                String::from_utf8_lossy(&result.stderr.bytes)
+                String::from_utf8_lossy(&result.stderr.bytes),
+                String::from_utf8_lossy(&diagnostic.stderr.bytes)
             ));
             continue;
         }
@@ -259,7 +288,8 @@ printf 'own=%s child=%s\n' "$$" "$child"
     }
     assert!(
         failures.is_empty(),
-        "process-info causal matrix failed:\n{}",
+        "process-info causal matrix passed:\n{}\nfailed:\n{}",
+        passed.join("\n"),
         failures.join("\n")
     );
     Ok(())

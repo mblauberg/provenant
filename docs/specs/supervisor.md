@@ -312,12 +312,21 @@ It separately runs `ps -A -o pid=,ppid=,pgid=,rss=` and requires the
 lane's own processes to have nonzero RSS. An outside same-user host PID must
 remain denied or invisible to libproc and have no readable RSS in `ps`.
 
-The test requires libproc RSS queries against the outside host to be denied;
-it does not claim separate peer-sandbox process-info coverage. The policy also
-cannot override a separate enclosing sandbox's
-refusal to execute the platform's privileged `ps` binary: an `execve` denial
-occurs before any process-info lookup. The test distinguishes these failures
-instead of treating every `EPERM` as a libproc denial.
+The native A/B probe confirms that unscoped libproc RSS queries succeed, the
+explicit deny returns `EPERM`, and the scoped PIDINFO and wildcard rules permit
+own-process queries while refusing the outside host. It does not claim separate
+peer-sandbox process-info coverage.
+
+Stock `ps` remains a separate unresolved restriction: `execve("/bin/ps", ... )`
+returns `EPERM` before any process-info lookup, in both access modes. On Darwin
+27, the binary is setuid and libsandbox's diagnostic `sandbox_check` reports
+`forbidden-exec-sugid` denied; an unknown-operation control returns `EINVAL`.
+This is a queried policy denial, rather than a captured kernel log for the
+exec. `forbidden-exec-sugid` is not a grantable SBPL symbol on that host.
+The process-info rule therefore does not fix consumers that invoke stock `ps`
+(#2452). No privileged execution, sandbox escape or Mach authority is added.
+The native test retains its failing stock-`ps` assertion until this requirement
+is resolved; CI must not be treated as passing.
 
 - Test: `crates/confinement/src/permissions/tests/process_info.rs::process_info_is_same_sandbox_and_ps_reports_own_rss`
 - Owner: `crates/confinement/src/permissions.rs`

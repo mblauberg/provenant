@@ -141,6 +141,7 @@ set -eu
 "$PGBIN/postgres" -D "$TMPDIR/data" -h 127.0.0.1 -k '' -p "$PGPORT" -c shared_buffers=8MB -c max_connections=10 -c dynamic_shared_memory_type=mmap > "$TMPDIR/postgres.log" 2>&1 &
 pg=$!
 trap 'kill -TERM "$pg"; wait "$pg"' EXIT
+trap 'exit 1' HUP INT TERM
 i=0
 until "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGPORT" -d postgres -tAc 'SELECT 42' > "$TMPDIR/query" 2>/dev/null; do
     i=$((i + 1))
@@ -162,7 +163,7 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
             ("PGCONNECT_TIMEOUT".into(), "1".into()),
             (
                 "PGOPTIONS".into(),
-                "-c default_transaction_read_only=on".into(),
+                "-c default_transaction_read_only=on -c statement_timeout=2000".into(),
             ),
             ("OUTSIDE".into(), outside.clone().into_os_string()),
         ];
@@ -170,7 +171,7 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
         let argv = [SANDBOX_EXEC, "-p", &source, "/bin/sh", "-c", script].map(OsString::from);
         let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(30));
         options.env = Some(&env);
-        options.process_group = true;
+        options.terminate_grace = Duration::from_secs(5);
         options.stdout = StreamPolicy::Capture { limit: 8192 };
         options.stderr = StreamPolicy::Capture { limit: 8192 };
         let outcome = executor.execute(options)?;
