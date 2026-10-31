@@ -88,8 +88,9 @@ const DYLD_BOOTSTRAP_RULES: &str = r#"
   (allow system-mac-syscall (mac-syscall-number 2)))
 "#;
 /// Fixed operating-system runtime every provider CLI needs under deny-default:
-/// kernel and preference reads, TLS trust, DNS and time zone data. It names no
-/// user path; explicit secret-root denials still override the metadata grant.
+/// kernel and preference reads, TLS trust, DNS, time zone data, database IPC
+/// and signals within the same sandbox. It names no user path; explicit
+/// secret-root denials still override the metadata grant.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (allow file-read-metadata)
@@ -97,6 +98,7 @@ const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (allow ipc-sysv-shm)
 (allow ipc-sysv-sem)
 (allow ipc-posix-shm* (ipc-posix-name-regex #"^/PostgreSQL\.[0-9]+$"))
+(allow signal (target same-sandbox))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.cfprefsd.daemon")
@@ -1684,10 +1686,7 @@ fn render_profile(
             &plan.scratch.path,
             PathScope::Subtree,
         )?;
-        source.push_str(concat!(
-            "(allow signal (target children))\n",
-            "(allow file-read* (subpath \"/dev/fd\"))\n",
-        ));
+        source.push_str("(allow file-read* (subpath \"/dev/fd\"))\n");
     }
     if profile.spec.allow_process_fork {
         source.push_str("(allow process-fork)\n");
@@ -2429,6 +2428,7 @@ mod tests {
     use provenant_os::exec::SystemExecutor;
 
     mod ipc;
+    mod signals;
 
     #[test]
     fn git_control_link_refusal_names_the_file_and_the_recovery() {
@@ -2836,14 +2836,7 @@ mod tests {
                 .lines()
                 .filter(|line| line.starts_with("(allow signal"))
                 .collect();
-            assert_eq!(
-                signals,
-                if writer {
-                    vec!["(allow signal (target children))"]
-                } else {
-                    vec![]
-                }
-            );
+            assert_eq!(signals, ["(allow signal (target same-sandbox))"]);
             assert_eq!(
                 rendered.contains("(allow file-read* (subpath \"/dev/fd\"))"),
                 writer

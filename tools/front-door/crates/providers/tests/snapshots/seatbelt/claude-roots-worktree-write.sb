@@ -54,6 +54,7 @@
 (allow ipc-sysv-shm)
 (allow ipc-sysv-sem)
 (allow ipc-posix-shm* (ipc-posix-name-regex #"^/PostgreSQL\.[0-9]+$"))
+(allow signal (target same-sandbox))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.cfprefsd.daemon")
@@ -115,7 +116,6 @@
 (allow process-exec (subpath "/fixture/scratch/bin"))
 (allow process-exec (subpath "/fixture/project/.agent-run"))
 (allow process-exec (subpath "/fixture/scratch"))
-(allow signal (target children))
 (allow file-read* (subpath "/dev/fd"))
 (allow process-fork)
 (deny process-exec (literal "/usr/bin/security"))

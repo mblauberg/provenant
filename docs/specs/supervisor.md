@@ -260,15 +260,26 @@ objects owned by the same user. Other users' objects remain protected under
 normal restrictive permissions. The POSIX namespace is also shared by PostgreSQL
 servers belonging to the same user; it is not a lane-private namespace.
 File confinement still restricts database files to existing writable roots,
-and process, signal and network rules retain their existing limits. Database
+and executable, Mach and network rules retain their existing limits. Database
 clients need the existing local or open network policy for loopback access.
 Use a separate OS user or a VM when isolation from same-user IPC is required.
 
+Both lane modes allow `(allow signal (target same-sandbox))`. PostgreSQL
+backends need to notify their postmaster parent and sibling processes; the
+former writer-only `children` target denied child-to-parent signals and left
+client queries and clean shutdown hanging. The same-sandbox rule replaces that
+target and permits communication only among processes in the same Seatbelt
+sandbox. Signals to the outside supervisor, host processes and other lanes
+remain denied. It grants no additional execution, file, Mach, network or IPC
+authority.
+
 - Why: PostgreSQL startup and database checks need kernel IPC without broader
-  file, process or network authority.
+  file, executable or network authority, and intra-sandbox signals for queries
+  and clean shutdown.
 - Test: `crates/confinement/src/permissions.rs::writer_test_grants_stay_within_the_attempt_and_mode`;
   `::native_sandbox_blocks_path_escape_probes`;
-  `crates/confinement/src/permissions/tests/ipc.rs::postgres_initialises_serves_a_read_only_query_and_stops_in_writer_profile`
+  `crates/confinement/src/permissions/tests/ipc.rs::postgres_initialises_serves_a_read_only_query_and_stops_in_writer_profile`;
+  `crates/confinement/src/permissions/tests/signals.rs::same_sandbox_signals_reach_parents_but_cannot_reach_host_processes`
 - Owner: `crates/confinement/src/permissions.rs`
 
 ### Plans refuse unsafe roots
