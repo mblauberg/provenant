@@ -70,6 +70,36 @@ fn ready(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     }
 }
 
+// Independent host oracle. sysctl renders MiB to two decimal places, so the
+// comparison below allows one displayed unit of rounding (0.01 MiB).
+fn host_swap(
+    executor: &SystemExecutor,
+    root: &Path,
+) -> Result<[f64; 2], Box<dyn std::error::Error>> {
+    let argv = [
+        "/usr/sbin/sysctl".into(),
+        "-n".into(),
+        "vm.swapusage".into(),
+    ];
+    let result = executor.execute(ExecOptions::new(&argv, root, Duration::from_secs(2)))?;
+    assert!(successful_probe(&result), "host vm.swapusage failed");
+    let text = std::str::from_utf8(&result.stdout.bytes)?;
+    let fields = text.split_whitespace().collect::<Vec<_>>();
+    let bytes = |name: &str| -> Result<f64, Box<dyn std::error::Error>> {
+        let index = fields
+            .iter()
+            .position(|field| *field == name)
+            .ok_or("swap field")?;
+        let mib = fields
+            .get(index + 2)
+            .ok_or("swap value")?
+            .strip_suffix('M')
+            .ok_or("swap unit")?;
+        Ok(mib.parse::<f64>()? * 1024.0 * 1024.0)
+    };
+    Ok([bytes("used")?, bytes("total")?])
+}
+
 #[test]
 fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let Some(role) = std::env::var_os(ROLE) else {
@@ -109,8 +139,12 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
         let path = PathBuf::from(std::env::var_os(process_tree::ENV).ok_or("snapshot path")?);
         let _ = ready(&path)?;
         let sample = process_tree::read(&path, own)?;
-        assert_eq!(sample.schema_version, 1);
+        assert_eq!(sample.schema_version, 2);
         assert_eq!(sample.root_pid, own);
+        std::fs::write(
+            root.join("lane-swap.json"),
+            serde_json::to_vec(&[sample.swap_used_bytes, sample.swap_total_bytes])?,
+        )?;
         let clock = provenant_os::clock::SystemClock::new();
         assert!(sample.sampled_at <= provenant_core::Clock::wall_now(&clock)?);
         for (pid, parent) in [
@@ -390,7 +424,11 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
                     return Err(format!("ready lane identity unavailable: {observation:?}").into());
                 }
             };
+            let swap_started = std::time::Instant::now();
+            let before = host_swap(&executor, &root)?;
             let snapshot = process_tree::sample(&identity, attempt)?;
+            let after = host_swap(&executor, &root)?;
+            assert!(swap_started.elapsed() < Duration::from_secs(5));
             process_tree::publish(&directory, Some(&snapshot))?;
             let result = reader.join().expect("confined reader executor")?;
             assert!(
@@ -400,6 +438,22 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
                 String::from_utf8_lossy(&result.stdout.bytes),
                 String::from_utf8_lossy(&result.stderr.bytes),
             );
+            let lane_swap: [Option<u64>; 2] =
+                serde_json::from_slice(&std::fs::read(root.join("lane-swap.json"))?)?;
+            for (index, field) in ["swap_used_bytes", "swap_total_bytes"]
+                .into_iter()
+                .enumerate()
+            {
+                let actual = lane_swap[index].ok_or("lane swap must be measured")? as f64;
+                let rounding = 0.01 * 1024.0 * 1024.0;
+                assert!(
+                    actual >= before[index].min(after[index]) - rounding
+                        && actual <= before[index].max(after[index]) + rounding,
+                    "{field}: lane={actual}, host before={}, after={}",
+                    before[index],
+                    after[index]
+                );
+            }
             peer_stop.cancel();
             let _ = peer.join().expect("peer executor");
             Ok(())

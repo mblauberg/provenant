@@ -34,6 +34,7 @@ pub(crate) enum ObservationError {
 pub(crate) type ObservationResult<T> = std::result::Result<T, ObservationError>;
 
 trait TreeSource {
+    fn swap(&self) -> Option<SwapUsage>;
     fn member(&self, pid: u32) -> ObservationResult<bool>;
     fn process(&self, pid: u32) -> ObservationResult<NativeProcess>;
     fn children(&self, pid: u32) -> ObservationResult<Vec<u32>>;
@@ -41,6 +42,9 @@ trait TreeSource {
 
 struct NativeSource<'a>(&'a std::ffi::CStr);
 impl TreeSource for NativeSource<'_> {
+    fn swap(&self) -> Option<SwapUsage> {
+        crate::process_os::process_tree::swap()
+    }
     fn member(&self, pid: u32) -> ObservationResult<bool> {
         crate::process_os::process_tree::member(pid, self.0)
     }
@@ -87,7 +91,14 @@ pub struct Sample {
     pub schema_version: u32,
     pub root_pid: u32,
     pub sampled_at: WallTime,
+    pub swap_used_bytes: Option<u64>,
+    pub swap_total_bytes: Option<u64>,
     pub processes: Vec<ProcessMemory>,
+}
+
+pub(crate) struct SwapUsage {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
 }
 
 /// Private on-disk envelope. Native identities and the boot clock fence stale
@@ -182,9 +193,11 @@ fn observe(root: &ProcessIdentity, attempt: AttemptId) -> ObservationResult<Snap
         root,
         Snapshot {
             sample: Sample {
-                schema_version: 1,
+                schema_version: 2,
                 root_pid: pid,
                 sampled_at,
+                swap_used_bytes: None,
+                swap_total_bytes: None,
                 processes: Vec::new(),
             },
             starts: BTreeMap::new(),
@@ -234,6 +247,11 @@ fn walk(
 ) -> ObservationResult<Snapshot> {
     let pid = snapshot.sample.root_pid;
     let started = snapshot.monotonic_micros;
+    // Swap is independent of tree completeness: a failed measurement must
+    // still publish the RSS observation, with explicit null swap fields.
+    let swap = source.swap();
+    snapshot.sample.swap_used_bytes = swap.as_ref().map(|swap| swap.used_bytes);
+    snapshot.sample.swap_total_bytes = swap.map(|swap| swap.total_bytes);
     let mut processes = Vec::new();
     let mut starts = BTreeMap::new();
     let mut child_lists = BTreeMap::new();
@@ -341,7 +359,7 @@ fn select(
     if age > MAX_AGE_MICROS
         || sample.sampled_at > wall
         || snapshot.boot != boot
-        || sample.schema_version != 1
+        || sample.schema_version != 2
         || sample.processes.is_empty()
         || sample.processes.len() > MAX_PROCESSES
         || sample.processes.len() != snapshot.starts.len()
@@ -393,12 +411,19 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     struct FixtureSource {
+        swap: Option<(u64, u64)>,
         now: Cell<u64>,
         reads: RefCell<Vec<u32>>,
         expire_during_revalidation: bool,
         oversized: bool,
     }
     impl TreeSource for FixtureSource {
+        fn swap(&self) -> Option<SwapUsage> {
+            self.swap.map(|(used_bytes, total_bytes)| SwapUsage {
+                used_bytes,
+                total_bytes,
+            })
+        }
         fn member(&self, _: u32) -> ObservationResult<bool> {
             Ok(true)
         }
@@ -432,6 +457,7 @@ mod tests {
 
     fn fixture_source(expire: bool, oversized: bool) -> FixtureSource {
         FixtureSource {
+            swap: Some((1024, 8192)),
             now: Cell::new(1_000_000),
             reads: RefCell::new(Vec::new()),
             expire_during_revalidation: expire,
@@ -527,9 +553,11 @@ mod tests {
     fn snapshot() -> Snapshot {
         Snapshot {
             sample: Sample {
-                schema_version: 1,
+                schema_version: 2,
                 root_pid: 10,
                 sampled_at: WallTime::from_micros(1_000_000).unwrap(),
+                swap_used_bytes: Some(1024),
+                swap_total_bytes: Some(8192),
                 processes: [(10, 1), (11, 10), (12, 11), (13, 10)]
                     .into_iter()
                     .map(|(pid, ppid)| ProcessMemory {
@@ -577,6 +605,45 @@ mod tests {
         let json = serde_json::to_value(&selected).unwrap();
         assert_eq!(json["sampled_at"], "1970-01-01T00:00:01.000000Z");
         assert!(json.get("starts").is_none());
+        assert_eq!(json["swap_used_bytes"], 1024);
+        assert_eq!(json["swap_total_bytes"], 8192);
+    }
+
+    #[test]
+    fn process_tree_unmeasurable_swap_is_null_without_changing_rss() {
+        let mut source = fixture_source(false, false);
+        let measured = walk(&root(), snapshot(), || Ok(source.now.get()), &source).unwrap();
+        source.swap = Some((0, 0));
+        let zero = walk(&root(), snapshot(), || Ok(source.now.get()), &source).unwrap();
+        let zero = serde_json::to_value(&zero.sample).unwrap();
+        assert_eq!(zero["swap_used_bytes"], 0);
+        assert_eq!(zero["swap_total_bytes"], 0);
+        source.swap = None;
+        let unmeasured = walk(&root(), snapshot(), || Ok(source.now.get()), &source).unwrap();
+        // Exercise both the on-disk envelope and the CLI's selected sample.
+        let wire = serde_json::to_value(&unmeasured).unwrap();
+        for field in ["swap_used_bytes", "swap_total_bytes"] {
+            assert_eq!(wire["sample"].get(field), Some(&serde_json::Value::Null));
+        }
+        let roundtrip = serde_json::from_value(wire).unwrap();
+        let selected = select(
+            roundtrip,
+            10,
+            2_000_000,
+            "boot",
+            WallTime::from_micros(2_000_000).unwrap(),
+            |_| Ok(100),
+        )
+        .unwrap();
+        let json = serde_json::to_value(selected).unwrap();
+        for field in ["swap_used_bytes", "swap_total_bytes"] {
+            assert_eq!(json.get(field), Some(&serde_json::Value::Null));
+        }
+        assert_eq!(
+            json["processes"],
+            serde_json::to_value(&measured.sample.processes).unwrap()
+        );
+        assert_eq!(json["processes"][0]["rss_bytes"], 4096);
     }
 
     #[test]
@@ -605,7 +672,7 @@ mod tests {
         invalid.sample.processes[0].pid = 11;
         assert!(select(invalid, 10, 2_000_000, "boot", wall, |_| Ok(100)).is_err());
         let mut invalid = snapshot();
-        invalid.sample.schema_version = 2;
+        invalid.sample.schema_version = 1;
         assert!(select(invalid, 10, 2_000_000, "boot", wall, |_| Ok(100)).is_err());
     }
 
