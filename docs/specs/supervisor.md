@@ -320,8 +320,12 @@ authority.
 ### Process information stays inside the sandbox
 
 Every lane profile explicitly denies the process-info family before allowing
-`(allow process-info* (target same-sandbox))`, so memory guards can inspect
-their own process tree, including resident memory. An allow-only clause is
+`(allow process-info* (target same-sandbox))`, so a lane can read process
+information, including resident memory, for a PID it already knows inside its
+own sandbox. The `kern.proc.` sysctl deny stops a lane from enumerating
+processes, its own descendants included, so an in-lane memory guard cannot
+discover its process tree; tree-wide sampling belongs on the host side or in a
+reader handed the PIDs (#2452). An allow-only clause is
 not assumed to restrict APIs that the platform permits by default. The native
 test records the unscoped baseline and compares an explicit deny,
 `process-info-pidinfo` scoped to the sandbox, and the final scoped wildcard.
