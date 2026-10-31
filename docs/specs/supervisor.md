@@ -288,6 +288,9 @@ Cleanup never deletes an unowned inventory difference or a pre-existing object.
 A general lane-end sweep is tracked in #2454 and needs a separate ownership design: semaphore metadata
 does not expose a creator PID, and exited-child ancestry cannot be reconstructed
 reliably. It must not infer ownership from a UID or a before/after global diff.
+The test journal is not crash-atomic: a forced kill between allocation and
+journal append can leave an unrecorded object. The production ownership work
+in #2454 must also address that interruption window.
 File confinement still restricts database files to existing writable roots,
 and executable, Mach and network rules retain their existing limits. Database
 clients need the existing local or open network policy for loopback access.
@@ -325,6 +328,12 @@ test records the unscoped baseline and compares an explicit deny,
 The lane's own processes must have nonzero RSS. An outside same-user host PID
 must remain denied or invisible to libproc.
 
+Every profile also denies process-list and argument sysctls with
+`(deny sysctl-read (sysctl-name-prefix "kern.procargs") (sysctl-name-prefix "kern.proc."))`.
+Native controls require self PID/argument and CPU queries to keep working,
+while outside-host PID/argument and process-enumeration queries fail with
+`EPERM`. The tool compatibility probe also runs under this restriction.
+
 The native A/B probe confirms that unscoped libproc RSS queries succeed, the
 explicit deny returns `EPERM`, and the scoped PIDINFO and wildcard rules permit
 own-process queries while refusing the outside host. The identical-profile
@@ -350,6 +359,7 @@ script. macOS CI requires Node and pnpm availability. PostgreSQL's separate
 database-enabled lifecycle smoke covers both access modes.
 
 - Test: `crates/confinement/src/permissions/tests/process_info.rs::process_info_is_same_sandbox_and_reports_own_rss`;
+  `crates/confinement/src/permissions/tests/sysctl.rs::sysctl_blocks_host_process_queries_but_preserves_self`;
   `src/worktree_tests.rs::lane_prepare_isolates_nested_state` (`verify_lane_profile` shell probe);
   `crates/confinement/src/permissions/tests/ipc.rs::postgres_database_ipc_allows_mmap_lifecycle_in_both_modes`
 - Owner: `crates/confinement/src/permissions.rs`

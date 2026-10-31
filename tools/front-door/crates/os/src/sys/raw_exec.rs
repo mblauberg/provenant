@@ -9,6 +9,27 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
+#[cfg(target_os = "macos")]
+fn zombie_is_only_group_member(pid: u32) -> bool {
+    // XNU excludes zombies from killpg and reports EPERM if none remain.
+    // Its process-list census includes zombies under the process-list lock.
+    // Two slots ensure a singleton result is complete, rather than truncated.
+    let mut members = [0_i32; 2];
+    const PROC_PGRP_ONLY: u32 = 2;
+    // SAFETY: this stack buffer is writable for exactly the supplied byte size.
+    // The caller still owns the unreaped leader, reserving this private PGID.
+    let bytes = unsafe {
+        libc::proc_listpids(
+            PROC_PGRP_ONLY,
+            pid,
+            members.as_mut_ptr().cast(),
+            std::mem::size_of_val(&members) as i32,
+        )
+    };
+    // Zero, denial, truncation or unexpected members all preserve the error.
+    bytes == std::mem::size_of::<i32>() as i32 && members[0] == pid as i32
+}
+
 /// The process edge must keep this policy fixed and never independently reap
 /// owned children. A blocked SIGCHLD is safe: polling still consumes status.
 pub fn verify_child_wait_policy() -> io::Result<()> {
@@ -259,7 +280,12 @@ impl OwnedPid {
             // Killing before reaping cannot target a recycled process group.
             if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
                 let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
+                #[cfg(target_os = "macos")]
+                let empty =
+                    error.raw_os_error() == Some(libc::EPERM) && zombie_is_only_group_member(pid);
+                #[cfg(not(target_os = "macos"))]
+                let empty = false;
+                if error.raw_os_error() != Some(libc::ESRCH) && !empty {
                     return Err(error);
                 }
             }

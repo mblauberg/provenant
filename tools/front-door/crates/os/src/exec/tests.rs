@@ -407,18 +407,25 @@ fn normal_and_failed_exit_clean_the_process_group_before_reaping()
     use crate::sys::raw_exec::pid_is_absent_for_test;
     let executor = SystemExecutor::new(1)?;
     let temp = tempfile::tempdir()?;
-    for code in [0, 7] {
-        let pid_file = temp.path().join(format!("leftover-{code}.pid"));
-        let script = format!(
-            "/bin/sleep 60 & echo $! > '{}'; exit {code}",
-            pid_file.display()
-        );
+    for (code, leftover) in [(0, true), (7, true), (0, false), (7, false)] {
+        let pid_file = temp.path().join(format!("leftover-{code}-{leftover}.pid"));
+        let script = if leftover {
+            format!(
+                "/bin/sleep 60 & echo $! > '{}'; exit {code}",
+                pid_file.display()
+            )
+        } else {
+            format!("exit {code}")
+        };
         let argv = [OsString::from("/bin/sh"), "-c".into(), script.into()];
         let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(5));
         options.cleanup_process_group = true;
         let outcome = executor.execute(options)?;
         assert_eq!(outcome.termination, Termination::Exit(code));
         assert!(!outcome.drain_truncated && !outcome.timed_out);
+        if !leftover {
+            continue;
+        }
         let pid = std::fs::read_to_string(pid_file)?.trim().parse()?;
         let deadline = Instant::now() + Duration::from_secs(5);
         while !pid_is_absent_for_test(pid)? {
