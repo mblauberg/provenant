@@ -1307,8 +1307,10 @@ fn configure_process_tree(
     paths: &run::LaunchPaths,
 ) -> Result<(), String> {
     let attempt = paths.scratch.parent().ok_or("attempt directory missing")?;
+    let directory = Directory::open_anchor(attempt).map_err(|error| error.to_string())?;
     spec.profile.spec.runtime_reads.push(PathGrant {
-        path: attempt.join(provenant_supervisor::process_tree::FILE),
+        path: provenant_supervisor::process_tree::snapshot_path(&directory)
+            .map_err(|error| error.to_string())?,
         scope: PathScope::Exact,
     });
     Ok(())

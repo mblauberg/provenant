@@ -577,6 +577,18 @@ fn with_lane_ports(
     );
     out
 }
+
+fn with_process_tree_path(
+    env: &[(OsString, OsString)],
+    path: Option<&Path>,
+) -> Vec<(OsString, OsString)> {
+    let mut env = env.to_vec();
+    env.retain(|(name, _)| name != crate::process_tree::ENV);
+    if let Some(path) = path {
+        env.push((crate::process_tree::ENV.into(), path.as_os_str().to_owned()));
+    }
+    env
+}
 impl Driver<'_> {
     // The guardian owns process lifecycle and its elapsed-time budgets.
     #[allow(clippy::disallowed_methods)]
@@ -623,15 +635,9 @@ impl Driver<'_> {
             env
         };
         // Replace any caller value with this guardian's own held attempt path.
-        let memory_path = self
-            .attempt
-            .current_path()
-            .ok()
-            .map(|path| path.join(crate::process_tree::FILE));
-        let mut env = env.to_vec();
-        env.retain(|(name, _)| name != crate::process_tree::ENV);
-        if let Some(path) = &memory_path {
-            env.push((crate::process_tree::ENV.into(), path.as_os_str().to_owned()));
+        let memory_path = crate::process_tree::snapshot_path(&self.attempt).ok();
+        let env = with_process_tree_path(env, memory_path.as_deref());
+        if memory_path.is_some() {
             let _ = crate::process_tree::publish(&self.attempt, None);
         }
         let env = env.as_slice();

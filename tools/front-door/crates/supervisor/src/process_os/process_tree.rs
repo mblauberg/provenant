@@ -1,43 +1,20 @@
 //! Narrow native edge for the host sampler and known-PID confined reader.
 #[cfg(target_os = "macos")]
 use crate::process_tree::{MAX_PROCESSES, ProcessMemory};
-use crate::process_tree::{NativeProcess, Unavailable};
+use crate::process_tree::{NativeProcess, ObservationError, ObservationResult};
 
 #[cfg(target_os = "macos")]
-pub(crate) fn member(pid: u32, name: &std::ffi::CStr) -> Result<bool, Unavailable> {
-    unsafe extern "C" {
-        fn sandbox_check(
-            pid: libc::pid_t,
-            operation: *const libc::c_char,
-            filter_type: libc::c_int,
-            ...
-        ) -> libc::c_int;
-    }
-    let pid = i32::try_from(pid).map_err(|_| Unavailable)?;
-    // SAFETY: a null operation and filter 0 query only the scalar PID.
-    let sandboxed = unsafe { sandbox_check(pid, std::ptr::null(), 0) };
-    let lookup = |name: &std::ffi::CStr| {
-        // SAFETY: filter 2 takes one NUL-terminated global-name pointer,
-        // borrowed for the call; neither pointer is retained.
-        unsafe { sandbox_check(pid, c"mach-lookup".as_ptr(), 2, name.as_ptr()) }
-    };
-    match (
-        sandboxed,
-        lookup(name),
-        lookup(c"dev.provenant.attempt.control"),
-    ) {
-        (1, 0, 1) => Ok(true),
-        (0..=1, 0..=1, 0..=1) => Ok(false),
-        _ => Err(Unavailable),
-    }
+pub(crate) fn member(pid: u32, name: &std::ffi::CStr) -> ObservationResult<bool> {
+    let pid = i32::try_from(pid).map_err(|_| ObservationError::Unavailable)?;
+    super::census::darwin_in_attempt_sandbox(pid, name).map_err(|_| ObservationError::Unavailable)
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn process(pid: u32) -> Result<NativeProcess, Unavailable> {
+pub(crate) fn process(pid: u32) -> ObservationResult<NativeProcess> {
     let pid = i32::try_from(pid)
         .ok()
         .filter(|pid| *pid > 0)
-        .ok_or(Unavailable)?;
+        .ok_or(ObservationError::Unavailable)?;
     let mut info = std::mem::MaybeUninit::<libc::proc_taskallinfo>::uninit();
     let size = std::mem::size_of_val(&info) as i32;
     // SAFETY: info is aligned writable storage for exactly this ABI record;
@@ -52,19 +29,23 @@ pub(crate) fn process(pid: u32) -> Result<NativeProcess, Unavailable> {
         )
     };
     if count != size {
-        return Err(Unavailable);
+        return Err(if count == 0 {
+            query_error(std::io::Error::last_os_error().raw_os_error())
+        } else {
+            ObservationError::Unavailable
+        });
     }
     // SAFETY: a full successful read initialised the whole record.
     let info = unsafe { info.assume_init() };
     let bsd = info.pbsd;
     if bsd.pbi_pid != pid as u32 || bsd.pbi_pgid == 0 || bsd.pbi_start_tvusec >= 1_000_000 {
-        return Err(Unavailable);
+        return Err(ObservationError::Unavailable);
     }
     let start = bsd
         .pbi_start_tvsec
         .checked_mul(1_000_000)
         .and_then(|seconds| seconds.checked_add(bsd.pbi_start_tvusec))
-        .ok_or(Unavailable)?;
+        .ok_or(ObservationError::Unavailable)?;
     Ok(NativeProcess {
         zombie: bsd.pbi_status == libc::SZOMB,
         memory: ProcessMemory {
@@ -78,7 +59,7 @@ pub(crate) fn process(pid: u32) -> Result<NativeProcess, Unavailable> {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn children(pid: u32) -> Result<Vec<u32>, Unavailable> {
+pub(crate) fn children(pid: u32) -> ObservationResult<Vec<u32>> {
     unsafe extern "C" {
         fn proc_listchildpids(
             pid: libc::pid_t,
@@ -86,7 +67,7 @@ pub(crate) fn children(pid: u32) -> Result<Vec<u32>, Unavailable> {
             size: libc::c_int,
         ) -> libc::c_int;
     }
-    let pid = i32::try_from(pid).map_err(|_| Unavailable)?;
+    let pid = i32::try_from(pid).map_err(|_| ObservationError::Unavailable)?;
     let mut slots = 32;
     loop {
         let mut pids = vec![0_i32; slots];
@@ -108,12 +89,15 @@ pub(crate) fn children(pid: u32) -> Result<Vec<u32>, Unavailable> {
         };
         // SAFETY: __error returns this thread's live errno slot; copy only.
         let error = unsafe { *errno };
-        if count < 0 || (count == 0 && error != 0) {
-            return Err(Unavailable);
+        if count < 0 {
+            return Err(ObservationError::Unavailable);
+        }
+        if count == 0 && error != 0 {
+            return Err(query_error(Some(error)));
         }
         if count as usize >= slots {
             if slots > MAX_PROCESSES {
-                return Err(Unavailable);
+                return Err(ObservationError::SizeLimit);
             }
             slots = (slots * 2).min(MAX_PROCESSES + 1);
             continue;
@@ -125,21 +109,30 @@ pub(crate) fn children(pid: u32) -> Result<Vec<u32>, Unavailable> {
                 u32::try_from(pid)
                     .ok()
                     .filter(|pid| *pid > 0)
-                    .ok_or(Unavailable)
+                    .ok_or(ObservationError::Unavailable)
             })
             .collect();
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn member(_: u32, _: &std::ffi::CStr) -> Result<bool, Unavailable> {
-    Err(Unavailable)
+pub(crate) fn member(_: u32, _: &std::ffi::CStr) -> ObservationResult<bool> {
+    Err(ObservationError::Unavailable)
 }
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn process(_: u32) -> Result<NativeProcess, Unavailable> {
-    Err(Unavailable)
+pub(crate) fn process(_: u32) -> ObservationResult<NativeProcess> {
+    Err(ObservationError::Unavailable)
 }
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn children(_: u32) -> Result<Vec<u32>, Unavailable> {
-    Err(Unavailable)
+pub(crate) fn children(_: u32) -> ObservationResult<Vec<u32>> {
+    Err(ObservationError::Unavailable)
+}
+
+#[cfg(target_os = "macos")]
+fn query_error(errno: Option<i32>) -> ObservationError {
+    if errno == Some(libc::ESRCH) {
+        ObservationError::Churn
+    } else {
+        ObservationError::Unavailable
+    }
 }

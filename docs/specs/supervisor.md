@@ -366,11 +366,22 @@ exit **4**, status `unavailable`, error `PROCESS_TREE_UNAVAILABLE`, and null
 or apply its own refusal policy. Invalid CLI arguments return exit 2.
 Traversal is limited to 4,096 processes and a 250 ms observation budget;
 detected churn or exceeded bounds invalidates the sample rather than returning
-a partial tree. The worker retries a failed observation up to three times per
-refresh and retains the last good sample until it expires; it never reports
+a partial tree. The deadline is checked throughout revalidation as well as
+traversal. Only process churn is retried, up to three attempts per refresh;
+size/time overruns and unavailable native observations stop the refresh.
+The worker retains the last good sample until it expires; it never reports
 an incomplete observation as a new sample. Failed publication also leaves
 bytes that the freshness check expires. Provider exit
 stops the worker and requests invalidation; a dead supervisor's file expires.
+
+Supported nested lanes also get their own attempt snapshot and tree, sampled
+by an unconfined host guardian. Submissions inside a lane are queued for the
+parent guardian's host-side child-launch service; the lane does not launch its
+child supervisor locally (`crates/cli/src/run.rs::submit_with_host_and_wait`,
+`::launch_prepared_with_wait`, `crates/cli/src/run/children.rs::serve`). A supervisor
+started directly inside a parent sandbox cannot use `proc_listchildpids`:
+`EPERM` leaves sampling unavailable and the reader returns exit 4. That is not
+the supported nested-lane launch path.
 
 - Test: `crates/confinement/src/permissions/tests/process_tree.rs::lane_process_tree_sample_is_private_under_production_profiles`;
   `crates/supervisor/src/process_tree.rs::tests`;
@@ -387,7 +398,7 @@ information, including resident memory, for a PID it already knows inside its
 own sandbox. The `kern.proc.` sysctl deny stops a lane from enumerating
 processes, its own descendants included, so an in-lane memory guard cannot
 discover its process tree. The supervisor samples that tree on the host and
-serves an attempt-local snapshot through `provenant process-tree` below.
+serves an attempt-local snapshot through `provenant process-tree` above.
 An allow-only clause is
 not assumed to restrict APIs that the platform permits by default. The native
 test records the unscoped baseline and compares an explicit deny,

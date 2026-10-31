@@ -674,7 +674,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
     match command {
-        Command::ProcessTree { root } => process_tree::run(root, globals),
+        Command::ProcessTree { .. } => unreachable!("process-tree returned before root validation"),
         Command::Hosts { command: None } => fabric::hosts(globals, process.workers()),
         Command::Hosts {
             command: Some(command),

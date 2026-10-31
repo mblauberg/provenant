@@ -175,8 +175,12 @@ impl OrphanProbe for SystemProbe {
         let Ok(name) = std::ffi::CString::new(scope.attempt.sandbox_lookup_name()) else {
             return false;
         };
-        i32::try_from(pid)
-            .is_ok_and(|pid| crate::process_os::census::darwin_in_attempt_sandbox(pid, &name))
+        i32::try_from(pid).is_ok_and(|pid| {
+            matches!(
+                crate::process_os::census::darwin_in_attempt_sandbox(pid, &name),
+                Ok(true)
+            )
+        })
     }
     #[cfg(not(target_os = "macos"))]
     fn in_attempt_sandbox(&self, _: i64, _: &Scope) -> bool {

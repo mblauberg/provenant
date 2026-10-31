@@ -335,7 +335,7 @@ impl Driver<'_> {
                         census.ancestry(&fact.identity, owner) != crate::census::Ancestry::No
                     })
                     && i32::try_from(fact.identity.pid)
-                        .is_ok_and(|pid| crate::process_os::census::darwin_in_attempt_sandbox(pid, &name))
+                        .is_ok_and(|pid| matches!(crate::process_os::census::darwin_in_attempt_sandbox(pid, &name), Ok(true)))
             })
             .map(|fact| fact.identity.clone())
             .collect();

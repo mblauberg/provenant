@@ -106,10 +106,7 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(children.len(), 3);
         let own = std::process::id();
         std::fs::write(root.join("lane.pid"), own.to_string())?;
-        let path = root
-            .parent()
-            .ok_or("snapshot parent")?
-            .join(process_tree::FILE);
+        let path = PathBuf::from(std::env::var_os(process_tree::ENV).ok_or("snapshot path")?);
         let _ = ready(&path)?;
         let sample = process_tree::read(&path, own)?;
         assert_eq!(sample.schema_version, 1);
@@ -182,6 +179,24 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(&path, b"{}").is_err(),
             "snapshot must remain read-only"
         );
+        let attempt = path.parent().ok_or("snapshot parent")?;
+        for forbidden in [
+            attempt.join("reservation.json"),
+            attempt
+                .parent()
+                .ok_or("attempt parent")?
+                .join("other-attempt")
+                .join(process_tree::FILE),
+        ] {
+            let error = std::fs::read(&forbidden)
+                .expect_err("exact snapshot grant must not expose siblings or other attempts");
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "{}: {error}",
+                forbidden.display()
+            );
+        }
         cancel.cancel();
         let _ = worker.join().expect("tree child executor");
         Ok(())
@@ -211,7 +226,17 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
     for writer in [false, true] {
         let temp = crate::test_support::tempdir()?;
         let base = provenant_os::fs::canonicalize(temp.path())?;
-        let directory = provenant_os::fs::Directory::open_anchor(&base)?;
+        let attempt_path = base.join("attempt");
+        std::fs::create_dir(&attempt_path)?;
+        let directory = provenant_os::fs::Directory::open_anchor(&attempt_path)?;
+        let snapshot_path = attempt_path.join(process_tree::FILE);
+        std::fs::write(
+            attempt_path.join("reservation.json"),
+            b"private reservation",
+        )?;
+        let other = base.join("other-attempt");
+        std::fs::create_dir(&other)?;
+        std::fs::write(other.join(process_tree::FILE), b"foreign snapshot")?;
         let root = base.join("scratch");
         std::fs::create_dir(&root)?;
         let input = root.join("tree-helper.c");
@@ -276,7 +301,7 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
             &profile,
             &[
                 PathGrant {
-                    path: base.join(process_tree::FILE),
+                    path: snapshot_path.clone(),
                     scope: PathScope::Exact,
                 },
                 PathGrant {
@@ -288,6 +313,17 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
             writer.then_some(&git),
             Path::new("/fixture/home"),
         )?)?;
+        let attempt_rules = source
+            .lines()
+            .filter(|line| line.contains(attempt_path.to_str().expect("attempt path")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attempt_rules,
+            [format!(
+                "(allow file-read* (literal \"{}\"))",
+                snapshot_path.display()
+            )]
+        );
         // ConfinedLaunch::command appends the same non-serving attempt marker.
         // Both independent launches deliberately receive byte-identical profiles.
         let source = format!(
@@ -332,6 +368,10 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
                     (HOST.into(), std::process::id().to_string().into()),
                     (PEER.into(), peer_pid.to_string().into()),
                     (HELPER.into(), helper.as_os_str().to_owned()),
+                    (
+                        process_tree::ENV.into(),
+                        snapshot_path.as_os_str().to_owned(),
+                    ),
                 ];
                 let mut options =
                     ExecOptions::new(reader_argv, reader_root, Duration::from_secs(15));

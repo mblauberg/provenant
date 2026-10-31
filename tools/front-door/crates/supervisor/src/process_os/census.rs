@@ -952,9 +952,13 @@ unsafe extern "C" {
 /// denying others; system daemons' sandboxes allow lookups broadly and fail the
 /// control. A seatbelt sandbox is inherited and cannot be dropped, so this
 /// survives reparenting and `setsid`. Unsandboxed processes, other sandboxes
-/// and any failed check read as not a member.
+/// are not members. Failed native checks remain errors so callers can either
+/// fail an observation or conservatively withhold cleanup authority.
 #[cfg(target_os = "macos")]
-pub(crate) fn darwin_in_attempt_sandbox(pid: i32, lookup_name: &std::ffi::CStr) -> bool {
+pub(crate) fn darwin_in_attempt_sandbox(
+    pid: i32,
+    lookup_name: &std::ffi::CStr,
+) -> io::Result<bool> {
     const SANDBOX_FILTER_GLOBAL_NAME: libc::c_int = 2;
     const CONTROL_NAME: &std::ffi::CStr = c"dev.provenant.attempt.control";
     let lookup = |name: &std::ffi::CStr| {
@@ -972,8 +976,12 @@ pub(crate) fn darwin_in_attempt_sandbox(pid: i32, lookup_name: &std::ffi::CStr) 
     };
     // SAFETY: a null operation with filter type 0 asks only whether the pid is
     // sandboxed; sandbox_check reads no pointer and retains none.
-    let sandboxed = unsafe { sandbox_check(pid, std::ptr::null(), 0) } == 1;
-    sandboxed && lookup(lookup_name) == 0 && lookup(CONTROL_NAME) == 1
+    let sandboxed = unsafe { sandbox_check(pid, std::ptr::null(), 0) };
+    match (sandboxed, lookup(lookup_name), lookup(CONTROL_NAME)) {
+        (1, 0, 1) => Ok(true),
+        (0..=1, 0..=1, 0..=1) => Ok(false),
+        _ => Err(io::Error::other("sandbox membership unavailable")),
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -17,11 +17,60 @@ pub const FILE: &str = "process-tree.json";
 pub const MAX_PROCESSES: usize = 4096;
 const MAX_BYTES: u64 = 1024 * 1024;
 const MAX_AGE_MICROS: u64 = 5_000_000;
+const MAX_SAMPLE_MICROS: u64 = 250_000;
 
 #[derive(Debug, thiserror::Error)]
 #[error("lane process-tree sample unavailable; retry while the supervisor is running")]
 pub struct Unavailable;
 type Result<T> = std::result::Result<T, Unavailable>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObservationError {
+    Churn,
+    SizeLimit,
+    TimeLimit,
+    Unavailable,
+}
+pub(crate) type ObservationResult<T> = std::result::Result<T, ObservationError>;
+
+trait TreeSource {
+    fn member(&self, pid: u32) -> ObservationResult<bool>;
+    fn process(&self, pid: u32) -> ObservationResult<NativeProcess>;
+    fn children(&self, pid: u32) -> ObservationResult<Vec<u32>>;
+}
+
+struct NativeSource<'a>(&'a std::ffi::CStr);
+impl TreeSource for NativeSource<'_> {
+    fn member(&self, pid: u32) -> ObservationResult<bool> {
+        crate::process_os::process_tree::member(pid, self.0)
+    }
+    fn process(&self, pid: u32) -> ObservationResult<NativeProcess> {
+        crate::process_os::process_tree::process(pid)
+    }
+    fn children(&self, pid: u32) -> ObservationResult<Vec<u32>> {
+        crate::process_os::process_tree::children(pid)
+    }
+}
+
+/// One descriptor-derived path for the exact read grant and guardian publisher.
+pub fn snapshot_path(attempt: &Directory) -> Result<std::path::PathBuf> {
+    Ok(attempt.current_path().map_err(|_| Unavailable)?.join(FILE))
+}
+
+fn observe_refresh<T>(mut observe: impl FnMut() -> ObservationResult<T>) -> Option<T> {
+    for _ in 0..3 {
+        match observe() {
+            Ok(snapshot) => return Some(snapshot),
+            Err(ObservationError::Churn) => {}
+            Err(
+                ObservationError::SizeLimit
+                | ObservationError::TimeLimit
+                | ObservationError::Unavailable,
+            ) => break,
+        }
+    }
+    None
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,13 +127,7 @@ impl Sampler {
                 loop {
                     // Reconcile transient fork/exit churn without overlapping
                     // walks. Retain the last good observation until it expires.
-                    let mut snapshot = None;
-                    for _ in 0..3 {
-                        snapshot = sample(&root, attempt).ok();
-                        if snapshot.is_some() {
-                            break;
-                        }
-                    }
+                    let snapshot = observe_refresh(|| observe(&root, attempt));
                     if receiver.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
                         break;
                     }
@@ -112,48 +155,101 @@ impl Drop for Sampler {
 /// Sample only descendants of the supervisor-held provider identity. A child
 /// listing, identity or RSS failure invalidates the whole observation.
 pub fn sample(root: &ProcessIdentity, attempt: AttemptId) -> Result<Snapshot> {
+    observe(root, attempt).map_err(|_| Unavailable)
+}
+
+fn observe(root: &ProcessIdentity, attempt: AttemptId) -> ObservationResult<Snapshot> {
     let clock = SystemClock::new();
-    let monotonic_micros = clock.host_monotonic_micros().map_err(|_| Unavailable)?;
-    let sampled_at = clock.wall_now().map_err(|_| Unavailable)?;
-    let boot = clock.boot_identity().map_err(|_| Unavailable)?;
-    if crate::census::SystemProcessObserver::boot_identity().map_err(|_| Unavailable)? != root.boot
+    let monotonic_micros = clock
+        .host_monotonic_micros()
+        .map_err(|_| ObservationError::Unavailable)?;
+    let sampled_at = clock
+        .wall_now()
+        .map_err(|_| ObservationError::Unavailable)?;
+    let boot = clock
+        .boot_identity()
+        .map_err(|_| ObservationError::Unavailable)?;
+    if crate::census::SystemProcessObserver::boot_identity()
+        .map_err(|_| ObservationError::Unavailable)?
+        != root.boot
     {
-        return Err(Unavailable);
+        return Err(ObservationError::Unavailable);
     }
-    let name = std::ffi::CString::new(attempt.sandbox_lookup_name()).map_err(|_| Unavailable)?;
-    let pid = u32::try_from(root.pid).map_err(|_| Unavailable)?;
+    let name = std::ffi::CString::new(attempt.sandbox_lookup_name())
+        .map_err(|_| ObservationError::Unavailable)?;
+    let pid = u32::try_from(root.pid).map_err(|_| ObservationError::Unavailable)?;
+    walk(
+        root,
+        Snapshot {
+            sample: Sample {
+                schema_version: 1,
+                root_pid: pid,
+                sampled_at,
+                processes: Vec::new(),
+            },
+            starts: BTreeMap::new(),
+            boot,
+            monotonic_micros,
+        },
+        || {
+            clock
+                .host_monotonic_micros()
+                .map_err(|_| ObservationError::Unavailable)
+        },
+        &NativeSource(&name),
+    )
+}
+
+fn deadline(
+    now: &mut impl FnMut() -> ObservationResult<u64>,
+    started: u64,
+) -> ObservationResult<()> {
+    let elapsed = now()?
+        .checked_sub(started)
+        .ok_or(ObservationError::Unavailable)?;
+    if elapsed > MAX_SAMPLE_MICROS {
+        return Err(ObservationError::TimeLimit);
+    }
+    Ok(())
+}
+
+fn walk(
+    root: &ProcessIdentity,
+    mut snapshot: Snapshot,
+    mut now: impl FnMut() -> ObservationResult<u64>,
+    source: &impl TreeSource,
+) -> ObservationResult<Snapshot> {
+    let pid = snapshot.sample.root_pid;
+    let started = snapshot.monotonic_micros;
     let mut processes = Vec::new();
     let mut starts = BTreeMap::new();
     let mut child_lists = BTreeMap::new();
     let mut pending = vec![(pid, None)];
     while let Some((pid, parent)) = pending.pop() {
-        if processes.len() >= MAX_PROCESSES
-            || clock
-                .host_monotonic_micros()
-                .map_err(|_| Unavailable)?
-                .saturating_sub(monotonic_micros)
-                > 250_000
-        {
-            return Err(Unavailable);
+        if processes.len() >= MAX_PROCESSES {
+            return Err(ObservationError::SizeLimit);
         }
-        if !crate::process_os::process_tree::member(pid, &name)? {
+        deadline(&mut now, started)?;
+        if !source.member(pid)? {
             if parent.is_none() {
-                return Err(Unavailable);
+                return Err(ObservationError::Unavailable);
             }
             continue;
         }
-        let native = crate::process_os::process_tree::process(pid)?;
+        let native = source.process(pid)?;
+        if parent.is_none() && native.start != root.native_start {
+            return Err(ObservationError::Unavailable);
+        }
         if parent.is_some_and(|(ppid, start)| native.memory.ppid != ppid || native.start < start)
-            || (parent.is_none() && native.start != root.native_start)
             || starts.insert(pid, native.start).is_some()
         {
-            return Err(Unavailable);
+            return Err(ObservationError::Churn);
         }
-        let children = crate::process_os::process_tree::children(pid)?;
+        let children = source.children(pid)?;
         child_lists.insert(pid, children.iter().copied().collect::<BTreeSet<_>>());
         for child in children {
             if pending.len() + processes.len() >= MAX_PROCESSES {
-                return Err(Unavailable);
+                return Err(ObservationError::SizeLimit);
             }
             pending.push((child, Some((pid, native.start))));
         }
@@ -162,40 +258,29 @@ pub fn sample(root: &ProcessIdentity, attempt: AttemptId) -> Result<Snapshot> {
     // Revalidate every link after traversal. Never publish a recycled PID's
     // RSS or a tree whose parent changed while it was being walked.
     for old in &processes {
-        let fresh = crate::process_os::process_tree::process(old.pid)?;
+        deadline(&mut now, started)?;
+        let fresh = source.process(old.pid)?;
+        deadline(&mut now, started)?;
         if Some(&fresh.start) != starts.get(&old.pid) || fresh.memory.ppid != old.ppid {
-            return Err(Unavailable);
+            return Err(ObservationError::Churn);
         }
-        let children = crate::process_os::process_tree::children(old.pid)?
+        let children = source
+            .children(old.pid)?
             .into_iter()
             .collect::<BTreeSet<_>>();
+        deadline(&mut now, started)?;
         if child_lists.get(&old.pid) != Some(&children) {
-            return Err(Unavailable);
+            return Err(ObservationError::Churn);
         }
     }
-    if clock
-        .host_monotonic_micros()
-        .map_err(|_| Unavailable)?
-        .saturating_sub(monotonic_micros)
-        > 250_000
-    {
-        return Err(Unavailable);
-    }
+    deadline(&mut now, started)?;
     processes.sort_unstable_by_key(|process| process.pid);
-    Ok(Snapshot {
-        sample: Sample {
-            schema_version: 1,
-            root_pid: pid,
-            sampled_at,
-            processes,
-        },
-        starts,
-        boot,
-        monotonic_micros,
-    })
+    snapshot.sample.processes = processes;
+    snapshot.starts = starts;
+    Ok(snapshot)
 }
 
-/// Replace failures and provider exit with an invalid sample immediately. A
+/// Publish a new observation or explicit invalidation on provider exit. A
 /// failed publication can leave old bytes, which the reader expires in 5 s.
 pub fn publish(directory: &Directory, snapshot: Option<&Snapshot>) -> Result<()> {
     let bytes = serde_json::to_vec(&snapshot).map_err(|_| Unavailable)?;
@@ -224,7 +309,7 @@ pub fn read(path: &Path, root_pid: u32) -> Result<Sample> {
     let boot = clock.boot_identity().map_err(|_| Unavailable)?;
     let wall = clock.wall_now().map_err(|_| Unavailable)?;
     select(snapshot, root_pid, now, &boot, wall, |pid| {
-        let process = crate::process_os::process_tree::process(pid)?;
+        let process = crate::process_os::process_tree::process(pid).map_err(|_| Unavailable)?;
         if process.zombie {
             return Err(Unavailable);
         }
@@ -296,6 +381,126 @@ fn select(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
+
+    struct FixtureSource {
+        now: Cell<u64>,
+        reads: RefCell<Vec<u32>>,
+        expire_during_revalidation: bool,
+        oversized: bool,
+    }
+    impl TreeSource for FixtureSource {
+        fn member(&self, _: u32) -> ObservationResult<bool> {
+            Ok(true)
+        }
+        fn process(&self, pid: u32) -> ObservationResult<NativeProcess> {
+            let mut reads = self.reads.borrow_mut();
+            reads.push(pid);
+            if self.expire_during_revalidation && reads.len() == 3 {
+                self.now.set(1_000_000 + MAX_SAMPLE_MICROS + 1);
+            }
+            Ok(NativeProcess {
+                memory: ProcessMemory {
+                    pid,
+                    ppid: if pid == 10 { 1 } else { 10 },
+                    pgid: 10,
+                    rss_bytes: 4096,
+                },
+                start: if pid == 10 { 100 } else { 110 },
+                zombie: false,
+            })
+        }
+        fn children(&self, pid: u32) -> ObservationResult<Vec<u32>> {
+            Ok(if pid != 10 {
+                Vec::new()
+            } else if self.oversized {
+                (100..100 + MAX_PROCESSES as u32 + 1).collect()
+            } else {
+                vec![11]
+            })
+        }
+    }
+
+    fn fixture_source(expire: bool, oversized: bool) -> FixtureSource {
+        FixtureSource {
+            now: Cell::new(1_000_000),
+            reads: RefCell::new(Vec::new()),
+            expire_during_revalidation: expire,
+            oversized,
+        }
+    }
+
+    fn root() -> ProcessIdentity {
+        ProcessIdentity {
+            boot: "boot".into(),
+            pid: 10,
+            native_start: 100,
+            group_id: 10,
+            session_id: 10,
+        }
+    }
+
+    #[test]
+    fn process_tree_snapshot_path_uses_the_held_attempt_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = provenant_os::fs::canonicalize(temp.path()).unwrap();
+        let parent = base.join("real");
+        let attempt = parent.join("attempt");
+        std::fs::create_dir_all(&attempt).unwrap();
+        let alias = base.join("alias");
+        std::os::unix::fs::symlink(&parent, &alias).unwrap();
+        let directory = Directory::open_anchor(&alias.join("attempt")).unwrap();
+        assert_eq!(snapshot_path(&directory).unwrap(), attempt.join(FILE));
+    }
+
+    #[test]
+    fn process_tree_revalidation_stops_at_the_deadline() {
+        let source = fixture_source(true, false);
+        let observed = walk(&root(), snapshot(), || Ok(source.now.get()), &source);
+        assert_eq!(observed.err(), Some(ObservationError::TimeLimit));
+        assert_eq!(
+            *source.reads.borrow(),
+            [10, 11, 10],
+            "no more native queries after the revalidation deadline"
+        );
+    }
+
+    #[test]
+    fn process_tree_retries_churn_but_not_resource_bounds_or_unavailability() {
+        let source = fixture_source(false, true);
+        assert_eq!(
+            walk(&root(), snapshot(), || Ok(source.now.get()), &source).err(),
+            Some(ObservationError::SizeLimit)
+        );
+        for error in [
+            ObservationError::SizeLimit,
+            ObservationError::TimeLimit,
+            ObservationError::Unavailable,
+        ] {
+            let mut attempts = 0;
+            assert!(
+                observe_refresh::<()>(|| {
+                    attempts += 1;
+                    Err(error)
+                })
+                .is_none()
+            );
+            assert_eq!(attempts, 1, "must not retry {error:?}");
+        }
+        let mut attempts = 0;
+        assert_eq!(
+            observe_refresh(|| {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(ObservationError::Churn)
+                } else {
+                    Ok(42)
+                }
+            }),
+            Some(42)
+        );
+        assert_eq!(attempts, 3);
+    }
 
     fn snapshot() -> Snapshot {
         Snapshot {
