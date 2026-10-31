@@ -359,6 +359,7 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
     let access = |network, reads: &[&str], writes: &[&str]| LaneAccess {
         extra: Default::default(),
         network,
+        database_ipc: false,
         read_roots: reads.iter().map(|path| base.join(path)).collect(),
         write_roots: writes.iter().map(|path| base.join(path)).collect(),
     };
@@ -379,7 +380,32 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         access(Some(NetworkAccess::Local), &["reads"], &["writes"]),
     );
     let quiet_writer = task(true, access(Some(NetworkAccess::Provider), &[], &[]));
+    let database = task(
+        false,
+        LaneAccess {
+            database_ipc: true,
+            ..Default::default()
+        },
+    );
     for (parent_task, child, valid, case) in [
+        (
+            &read_only,
+            database.clone(),
+            false,
+            "database IPC exceeds parent",
+        ),
+        (
+            &database,
+            task(false, LaneAccess::default()),
+            true,
+            "child drops database IPC",
+        ),
+        (
+            &database,
+            database.clone(),
+            true,
+            "database IPC within parent",
+        ),
         (
             &read_only,
             task(false, LaneAccess::default()),
@@ -1118,6 +1144,13 @@ fn lane_continuation_respects_sealed_parent_or_provider_fallback() -> TestResult
         proposal.request.tasks[0].access.network = Some(NetworkAccess::Provider);
         let mut narrower = proposal.request.tasks[0].clone();
         narrower.access.network = Some(NetworkAccess::Provider);
+        narrower.access.database_ipc = true;
+        assert!(
+            !store
+                .effective_launch_task(&proposal.request, &narrower, None)
+                .access
+                .database_ipc
+        );
         assert_eq!(
             store
                 .effective_launch_task(&proposal.request, &narrower, None)

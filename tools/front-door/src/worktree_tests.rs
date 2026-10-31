@@ -3235,6 +3235,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
                 request_digest: prepared.request.digest()?,
                 task_id: task.task_id,
                 effective_network: task.access.network(task.writer.is_some()),
+                effective_database_ipc: task.access.database_ipc,
             }),
         };
         verify_lane_profile(
@@ -3517,9 +3518,59 @@ fn verify_lane_profile(
         )?;
         fs::write(
             project.join("src/lib.rs"),
-            "#[test] fn writer_can_test() { assert_eq!(2 + 2, 4); }\n",
+            "#[test] fn writer_can_test() { assert_eq!(env!(\"LANE_JOBSERVER\"), \"verified\"); }\n",
+        )?;
+        fs::write(
+            project.join("build.rs"),
+            r#"
+use std::{env, fs::File, io::{Read, Write}, mem::ManuallyDrop, os::fd::FromRawFd};
+fn main() {
+    let flags = env::var("CARGO_MAKEFLAGS").expect("Cargo jobserver flags");
+    let auth = flags.split_whitespace().find_map(|flag|
+        flag.strip_prefix("--jobserver-auth=")
+            .or_else(|| flag.strip_prefix("--jobserver-fds="))
+    ).expect("inherited jobserver descriptors");
+    let (read, write) = auth.split_once(',').expect("jobserver pipe pair");
+    // Borrow Cargo's inherited descriptors; leave ownership with Cargo.
+    let mut reader = ManuallyDrop::new(unsafe { File::from_raw_fd(read.parse().unwrap()) });
+    let mut writer = ManuallyDrop::new(unsafe { File::from_raw_fd(write.parse().unwrap()) });
+    let mut token = [0];
+    reader.read_exact(&mut token).expect("acquire second jobserver token");
+    writer.write_all(&token).expect("return jobserver token");
+    println!("cargo:rustc-env=LANE_JOBSERVER=verified");
+}
+"#,
+        )?;
+        fs::write(
+            project.join("package.json"),
+            r#"{"private":true,"scripts":{"compat":"node child-process.cjs"}}"#,
+        )?;
+        fs::write(
+            project.join("child-process.cjs"),
+            r#"
+const assert = require('node:assert/strict');
+const {spawnSync, fork} = require('node:child_process');
+if (process.argv[2] === 'child') {
+    process.send(42, () => process.disconnect());
+} else {
+    const result = spawnSync(process.execPath, ['-e', 'process.stdout.write("42")'], {encoding: 'utf8'});
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '42');
+    let received = false;
+    const child = fork(__filename, ['child'], {stdio: ['ignore', 'ignore', 'inherit', 'ipc']});
+    const deadline = setTimeout(() => { child.kill(); process.exit(1); }, 5000);
+    child.on('message', value => { assert.equal(value, 42); received = true; });
+    child.on('exit', (code, signal) => {
+        clearTimeout(deadline);
+        assert.equal(code, 0);
+        assert.equal(signal, null);
+        assert.equal(received, true);
+    });
+}
+"#,
         )?;
         let argv = ["/bin/sh", "-c", concat!(
+            "set -eu; ",
             "if /usr/bin/security help >/dev/null 2>&1; then exit 11; fi; ",
             "if /bin/cat \"$HOME/Library/Keychains/login.keychain-db\" >/dev/null 2>&1; then exit 12; fi; ",
             "for f in credentials.toml credentials; do ",
@@ -3528,11 +3579,25 @@ fn verify_lane_profile(
             "git -c user.name=lane -c user.email=lane@example.test commit -q --allow-empty -m probe && ",
             "test \"$(command -v git)\" = \"$TMPDIR/bin/git\" && ",
             "git --version && git status --porcelain && ",
-            "cargo test --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\""
+            "cargo test -j2 --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\"; ",
+            "if command -v node >/dev/null && command -v pnpm >/dev/null; then ",
+            "node --version; pnpm --version; ",
+            "node \"$TMPDIR/cargo-probe/child-process.cjs\"; ",
+            "pnpm --dir \"$TMPDIR/cargo-probe\" run compat; ",
+            "printf 'lane-node-pnpm-compat: PASS\\n'; ",
+            "elif [ \"${PROVENANT_LANE_TOOLS_REQUIRED:-0}\" = 1 ]; then ",
+            "echo 'required node/pnpm unavailable' >&2; exit 15; fi"
         )].map(OsString::from);
         let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
         let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
-        options.env = Some(&launch.environment);
+        options.process_group = true;
+        let mut tool_env = launch.environment.clone();
+        let tools_required = std::env::var("PROVENANT_LANE_TOOLS_REQUIRED").as_deref() == Ok("1");
+        tool_env.push((
+            "PROVENANT_LANE_TOOLS_REQUIRED".into(),
+            if tools_required { "1" } else { "0" }.into(),
+        ));
+        options.env = Some(&tool_env);
         let output = executor.execute(options)?;
         assert_eq!(
             code(&output),
@@ -3541,6 +3606,12 @@ fn verify_lane_profile(
             String::from_utf8_lossy(&output.stderr.bytes)
         );
         assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("1 passed"));
+        if tools_required {
+            assert!(
+                String::from_utf8_lossy(&output.stdout.bytes)
+                    .contains("lane-node-pnpm-compat: PASS")
+            );
+        }
     }
     // Start the configured MCP inside the compiled profile too: an
     // unconfined fake provider cannot detect ungranted startup writes.

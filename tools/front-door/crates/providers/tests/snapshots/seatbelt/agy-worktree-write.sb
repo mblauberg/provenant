@@ -51,6 +51,9 @@
 (allow sysctl-read)
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
+(allow signal (target same-sandbox))
+(deny process-info*)
+(allow process-info* (target same-sandbox))
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.cfprefsd.daemon")
@@ -89,7 +92,6 @@
 (allow process-exec (subpath "/fixture/repo"))
 (allow process-exec (subpath "/fixture/scratch/bin"))
 (allow process-exec (subpath "/fixture/scratch"))
-(allow signal (target children))
 (allow file-read* (subpath "/dev/fd"))
 (allow process-fork)
 (allow pseudo-tty)

@@ -230,6 +230,11 @@ impl RunStore {
                 && (self.sealed_requester.is_some()
                     || self.context.state_root.as_path() != self.writer_registry()))
         {
+            // A sealed contributor cannot add a capability through a rewritten
+            // request. Database access needs a host-validated declaration.
+            if child.is_none() {
+                task.access.database_ipc = false;
+            }
             let bound = self
                 .sealed_parent_network
                 .unwrap_or(NetworkAccess::Provider);
@@ -437,6 +442,11 @@ fn child_access_within(
     state_root: &std::path::Path,
     home: Option<&std::path::Path>,
 ) -> Result<()> {
+    if child.access.database_ipc && !parent.access.database_ipc {
+        return Err(RunError::Validation(
+            "child database IPC exceeds parent access",
+        ));
+    }
     let reach = |network| match network {
         NetworkAccess::Provider => 0,
         NetworkAccess::Local => 1,

@@ -181,6 +181,19 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
             profile,
         });
     }
+    for (access, mode) in [
+        (Access::ReadOnly, "read-only"),
+        (Access::WorktreeWrite, "worktree-write"),
+    ] {
+        let (plan, mut profile) = prepared("codex", access, login("codex"), false, None)?;
+        assert!(!profile.spec.allow_database_ipc);
+        profile.spec.allow_database_ipc = true;
+        cases.push(Case {
+            name: format!("database-{mode}"),
+            plan,
+            profile,
+        });
+    }
     // Conditional grants: credential unselected, and continuation on.
     cases.push(Case::new(
         "codex-no-auth-read-only",
