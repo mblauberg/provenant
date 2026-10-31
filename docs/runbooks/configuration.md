@@ -96,7 +96,7 @@ Every listed executable still requires actual cwd `EPERM`, valid live signing
 state without ad-hoc, linker-signed, invalid-allowed, debugged or get-task-allow
 flags, and an exact kernel executable-path match opened with `O_NOFOLLOW`.
 Real, effective and saved uids must all be in 0–499 and each must differ from
-every candidate root's owner. They are read together through `PROC_PIDTBSDINFO`
+every candidate root's owner. They are read together through `PROC_PIDT_SHORTBSDINFO`
 and rechecked; query failure stays unplaceable.
 `csops(CS_OPS_TEAMID)` must match the team exactly, or `platform` must match
 `CS_PLATFORM_BINARY`. The platform bit is the signing control for Apple

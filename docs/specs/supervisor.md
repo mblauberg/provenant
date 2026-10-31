@@ -745,8 +745,10 @@ The cwd seam clears errno before the syscall and preserves the actual failure.
 - `fstatfs` on the retained executable fd identifies a read-only root
   filesystem. The volume capability query reports `VOL_CAP_FMT_SEALED` in
   both the valid and capabilities masks.
-- Real, effective and saved uids come from an exact-size `PROC_PIDTBSDINFO`
+- Real, effective and saved uids come from an exact-size `PROC_PIDT_SHORTBSDINFO`
   record whose pid matches; a failed query never falls back to effective uid.
+  XNU exposes all three credentials in this record without the same-user
+  restriction that prevents unprivileged full `PROC_PIDTBSDINFO` daemon queries.
   Executable path, signing status and all three uids are rechecked, and
   process identity matches the census before and after these observations.
   An undescribed census PID lacks this identity evidence and stays unknown.

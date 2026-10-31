@@ -605,13 +605,16 @@ fn decode_darwin_team_id(bytes: &[u8]) -> Option<&str> {
 
 #[cfg(target_os = "macos")]
 fn darwin_uids(pid: i32) -> Option<crate::pid::ProcessUids> {
-    let requested = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    // XNU proc_info.c exposes all three kernel uids in the short record without
+    // CHECK_SAME_USER. Full TBSDINFO is restricted for precisely these daemons.
+    // This is a complete credential read, never an effective-uid-only fallback.
+    let requested = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
     // SAFETY: aligned writable storage has the exact ABI size; no pointer is retained.
     let returned = unsafe {
         libc::proc_pidinfo(
             pid,
-            libc::PROC_PIDTBSDINFO,
+            libc::PROC_PIDT_SHORTBSDINFO,
             0,
             info.as_mut_ptr().cast(),
             requested,
@@ -622,10 +625,10 @@ fn darwin_uids(pid: i32) -> Option<crate::pid::ProcessUids> {
     }
     // SAFETY: the exact-size successful read initialised the whole record.
     let info = unsafe { info.assume_init() };
-    (info.pbi_pid == pid as u32).then_some(crate::pid::ProcessUids {
-        real: info.pbi_ruid,
-        effective: info.pbi_uid,
-        saved: info.pbi_svuid,
+    (info.pbsi_pid == pid as u32).then_some(crate::pid::ProcessUids {
+        real: info.pbsi_ruid,
+        effective: info.pbsi_uid,
+        saved: info.pbsi_svuid,
     })
 }
 
@@ -1086,8 +1089,13 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn native_current_process_is_not_an_eligible_platform_daemon() {
-        assert_eq!(sealed_platform_uids(std::process::id() as i32), None);
+    fn native_current_process_is_not_an_eligible_platform_daemon()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pid = std::process::id() as i32;
+        let uids = darwin_uids(pid).ok_or("complete kernel credential record unavailable")?;
+        assert_eq!(uids.effective, crate::fs::effective_uid());
+        assert_eq!(sealed_platform_uids(pid), None);
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
