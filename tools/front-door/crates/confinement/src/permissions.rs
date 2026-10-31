@@ -4442,8 +4442,10 @@ mod tests {
                     Path::new(
                         r#"my ($shm, $sem);
 END {
-    shmctl($shm, IPC_RMID, 0) or die "shmctl: $!\n" if defined $shm;
-    semctl($sem, 0, IPC_RMID, 0) or die "semctl: $!\n" if defined $sem;
+    my @errors;
+    push @errors, "shmctl: $!\n" if defined $shm && !shmctl($shm, IPC_RMID, 0);
+    push @errors, "semctl: $!\n" if defined $sem && !semctl($sem, 0, IPC_RMID, 0);
+    die join("", @errors) if @errors;
 }
 $shm = shmget(IPC_PRIVATE, 56, IPC_CREAT | 0600);
 die "shmget: $!\n" unless defined $shm;

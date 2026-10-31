@@ -111,9 +111,10 @@ fn postgres_initialises_serves_a_read_only_query_and_stops_in_writer_profile()
     let script = r#"
 set -eu
 "$PGBIN/initdb" -D "$TMPDIR/data" --no-locale --encoding=UTF8 -A trust -N > "$TMPDIR/initdb.log" 2>&1 || { cat "$TMPDIR/initdb.log"; exit 1; }
+printf 'initdb completed\n'
 "$PGBIN/postgres" -D "$TMPDIR/data" -h 127.0.0.1 -k '' -p "$PGPORT" -c shared_buffers=8MB -c max_connections=10 -c dynamic_shared_memory_type=posix > "$TMPDIR/postgres.log" 2>&1 &
 pg=$!
-trap 'kill -TERM "$pg"; wait "$pg"' EXIT
+trap 'printf "stopping PostgreSQL\n"; kill -TERM "$pg"; wait "$pg"; printf "PostgreSQL stopped\n"' EXIT
 i=0
 until "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGPORT" -d postgres -tAc 'SELECT 42' > "$TMPDIR/query" 2>/dev/null; do
     i=$((i + 1))
@@ -121,8 +122,10 @@ until "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGPORT" -d postgres -tAc 'SELECT 42' > 
     sleep 0.1
 done
 test "$(cat "$TMPDIR/query")" = 42
+printf 'read-only loopback query completed\n'
 if touch "$OUTSIDE" 2> "$TMPDIR/denial"; then exit 1; fi
 grep -q 'Operation not permitted' "$TMPDIR/denial"
+printf 'outside-root write denied\n'
 "#;
     let outside = root.join("outside-write-roots");
     let env = [
