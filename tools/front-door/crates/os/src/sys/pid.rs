@@ -3,6 +3,15 @@ use std::io;
 
 const MAX_EINTR_RETRIES: u64 = 8;
 
+#[cfg(test)]
+fn test_uids(uid: u32) -> crate::pid::ProcessUids {
+    crate::pid::ProcessUids {
+        real: uid,
+        effective: uid,
+        saved: uid,
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn darwin_thread_state(states: &[Option<i32>]) -> io::Result<ProcessState> {
     // These values are from Darwin's mach/thread_info.h; 5 is HALTED.
@@ -213,25 +222,28 @@ fn parses_linux_stat_states_with_complex_names() {
 }
 
 /// No credentials-only fallback exists on other platforms.
-pub(crate) fn sealed_platform_euid(pid: i32) -> Option<u32> {
-    ignored_unreadable_euid(pid, &[])
+pub(crate) fn sealed_platform_uids(pid: i32) -> Option<crate::pid::ProcessUids> {
+    ignored_unreadable_uids(pid, &[])
 }
 
-pub(crate) fn ignored_unreadable_euid(
+pub(crate) fn ignored_unreadable_uids(
     pid: i32,
     entries: &[crate::pid::CensusIgnoreEntry],
-) -> Option<u32> {
-    unreadable_policy_euid(pid, entries).ok()
+) -> Option<crate::pid::ProcessUids> {
+    unreadable_policy_uids(pid, entries).ok()
 }
 
-pub(crate) fn unreadable_policy_euid(
+pub(crate) fn unreadable_policy_uids(
     pid: i32,
     entries: &[crate::pid::CensusIgnoreEntry],
-) -> Result<u32, crate::pid::UnreadablePolicyFailure> {
+) -> Result<crate::pid::ProcessUids, crate::pid::UnreadablePolicyFailure> {
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let before = darwin_effective_uid(pid).ok_or("effective uid unavailable")?;
+        let before = darwin_uids(pid).ok_or("real/effective/saved uids unavailable")?;
+        if !before.all_system() {
+            return Err("real/effective/saved system uids below 500 required".into());
+        }
         let flags = darwin_signing_status(pid).ok_or("live signing state unavailable")?;
         if !darwin_valid_signature(flags) {
             return Err("valid signed image without untrusted flags required".into());
@@ -260,7 +272,8 @@ pub(crate) fn unreadable_policy_euid(
         } else {
             None
         };
-        let listed = listed_image_matches(entries, &path, flags, team.as_deref());
+        let platform_chain = || root_owned_executable_chain(&path, &executable);
+        let listed = listed_image_matches(entries, &path, flags, team.as_deref(), platform_chain);
         if !listed {
             builtin?;
         }
@@ -274,8 +287,8 @@ pub(crate) fn unreadable_policy_euid(
         if darwin_signing_status(pid).ok_or("signing state recheck unavailable")? != flags {
             return Err("stable signing state required".into());
         }
-        if darwin_effective_uid(pid).ok_or("effective uid recheck unavailable")? != before {
-            return Err("stable effective uid required".into());
+        if darwin_uids(pid).ok_or("real/effective/saved uid recheck unavailable")? != before {
+            return Err("stable real/effective/saved uids required".into());
         }
         if listed && team.is_some() && darwin_team_id(pid) != team {
             return Err(crate::pid::UnreadablePolicyFailure {
@@ -294,13 +307,13 @@ pub(crate) fn unreadable_policy_euid(
 
 #[cfg(any(target_os = "macos", test))]
 fn darwin_builtin_condition(
-    euid: u32,
+    uids: crate::pid::ProcessUids,
     flags: u32,
     path: &std::path::Path,
     sealed: impl FnOnce() -> Option<bool>,
 ) -> Result<(), &'static str> {
-    if euid >= 500 {
-        return Err("system effective uid below 500 required");
+    if !uids.all_system() {
+        return Err("real/effective/saved system uids below 500 required");
     }
     if !darwin_platform_signature(flags) {
         return Err("valid signed platform binary required");
@@ -322,33 +335,56 @@ fn builtin_condition_names_each_failed_gate_and_accepts_complete_evidence() {
     let daemon = Path::new("/usr/libexec/daemon");
     let flags = 0x2400_0001;
     assert_eq!(
-        darwin_builtin_condition(0, flags, daemon, || Some(true)),
+        darwin_builtin_condition(test_uids(0), flags, daemon, || Some(true)),
         Ok(())
     );
     assert_eq!(
-        darwin_builtin_condition(500, flags, daemon, || Some(true)),
-        Err("system effective uid below 500 required")
+        darwin_builtin_condition(test_uids(500), flags, daemon, || Some(true)),
+        Err("real/effective/saved system uids below 500 required")
     );
     assert_eq!(
-        darwin_builtin_condition(0, 0x2000_0001, daemon, || Some(true)),
+        darwin_builtin_condition(test_uids(0), 0x2000_0001, daemon, || Some(true)),
         Err("valid signed platform binary required")
     );
     assert_eq!(
-        darwin_builtin_condition(0, flags | 4, daemon, || Some(true)),
+        darwin_builtin_condition(test_uids(0), flags | 4, daemon, || Some(true)),
         Err("valid signed platform binary required")
     );
     assert_eq!(
-        darwin_builtin_condition(0, flags, Path::new("/usr/bin/login"), || Some(true)),
+        darwin_builtin_condition(test_uids(0), flags, Path::new("/usr/bin/login"), || Some(
+            true
+        )),
         Err("approved daemon directory required")
     );
     assert_eq!(
-        darwin_builtin_condition(0, flags, daemon, || Some(false)),
+        darwin_builtin_condition(test_uids(0), flags, daemon, || Some(false)),
         Err("sealed read-only root volume required")
     );
     assert_eq!(
-        darwin_builtin_condition(0, flags, daemon, || None),
+        darwin_builtin_condition(test_uids(0), flags, daemon, || None),
         Err("sealed read-only root volume evidence unavailable")
     );
+}
+
+#[cfg(test)]
+#[test]
+fn allowed_daemon_on_unsealed_volume_reaches_seal_refusal() {
+    let called = std::cell::Cell::new(false);
+    let result = darwin_builtin_condition(
+        crate::pid::ProcessUids {
+            real: 0,
+            effective: 88,
+            saved: 0,
+        },
+        0x2400_0001,
+        std::path::Path::new("/System/Library/Daemon"),
+        || {
+            called.set(true);
+            Some(false)
+        },
+    );
+    assert!(called.get(), "all predicates before the seal check passed");
+    assert_eq!(result, Err("sealed read-only root volume required"));
 }
 
 pub(crate) fn process_details(pid: i32) -> String {
@@ -356,21 +392,28 @@ pub(crate) fn process_details(pid: i32) -> String {
     {
         let path = darwin_executable_path(pid)
             .map_or_else(|| "unavailable".into(), |path| format!("{path:?}"));
-        let uid =
-            darwin_effective_uid(pid).map_or_else(|| "unavailable".into(), |uid| uid.to_string());
+        let uids = darwin_uids(pid).map_or_else(
+            || "ruid=unavailable, euid=unavailable, svuid=unavailable".into(),
+            |uids| {
+                format!(
+                    "ruid={}, euid={}, svuid={}",
+                    uids.real, uids.effective, uids.saved
+                )
+            },
+        );
         let status = darwin_signing_status(pid);
         let flags = status.map_or_else(|| "unavailable".into(), |flags| format!("0x{flags:08x}"));
         let team = if status.is_some_and(|flags| flags & 0x0400_0000 != 0) {
             "platform".into()
         } else {
-            darwin_team_id(pid).map_or_else(|| "unavailable".into(), |team| format!("{team:?}"))
+            darwin_team_id(pid).unwrap_or_else(|| "unavailable".into())
         };
-        format!("path={path}, euid={uid}, cs_flags={flags}, team_id={team}")
+        format!("path={path}, {uids}, cs_flags={flags}, team_id={team}")
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = pid;
-        "path=unavailable, euid=unavailable, cs_flags=unavailable, team_id=unavailable".into()
+        "path=unavailable, ruid=unavailable, euid=unavailable, svuid=unavailable, cs_flags=unavailable, team_id=unavailable".into()
     }
 }
 
@@ -378,7 +421,10 @@ pub(crate) fn process_details(pid: i32) -> String {
 fn darwin_valid_signature(flags: u32) -> bool {
     const CS_VALID: u32 = 0x0000_0001;
     const CS_SIGNED: u32 = 0x2000_0000;
-    const UNTRUSTED: u32 = 0x0000_0002 | 0x0000_0004 | 0x0000_0020 | 0x1000_0000;
+    const CS_LINKER_SIGNED: u32 = 0x0002_0000;
+    // CS_ADHOC may be absent on live ad-hoc images; this mask alone is not a
+    // signing trust anchor. Platform bits or explicit path/team policy remain.
+    const UNTRUSTED: u32 = 0x0000_0002 | 0x0000_0004 | 0x0000_0020 | CS_LINKER_SIGNED | 0x1000_0000;
     let required = CS_VALID | CS_SIGNED;
     flags & required == required && flags & UNTRUSTED == 0
 }
@@ -395,17 +441,81 @@ fn listed_image_matches(
     path: &std::path::Path,
     flags: u32,
     team: Option<&str>,
+    platform_chain: impl Fn() -> bool,
 ) -> bool {
     darwin_valid_signature(flags)
         && entries.iter().any(|entry| {
             entry.is_valid()
                 && entry.path.as_os_str() == path.as_os_str()
                 && if entry.team_id == "platform" {
-                    darwin_platform_signature(flags)
+                    darwin_platform_signature(flags) && platform_chain()
                 } else {
                     team == Some(entry.team_id.as_str())
                 }
         })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn root_owned_mode(uid: u32, mode: u32) -> bool {
+    uid == 0 && mode & 0o022 == 0
+}
+
+/// Walk from / using only no-follow descriptor-relative opens. The final
+/// descriptor must identify the same file that was opened for image evidence.
+#[cfg(any(target_os = "macos", test))]
+fn root_owned_executable_chain(path: &std::path::Path, executable: &std::fs::File) -> bool {
+    check_root_owned_executable_chain(path, executable).is_ok()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn check_root_owned_executable_chain(
+    path: &std::path::Path,
+    executable: &std::fs::File,
+) -> Result<(), &'static str> {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+    let expected = executable
+        .metadata()
+        .map_err(|_| "executable metadata unavailable")?;
+    if !expected.is_file() || !root_owned_mode(expected.uid(), expected.mode()) {
+        return Err("root-owned non-writable executable required");
+    }
+    let mut parts = path.components();
+    if parts.next() != Some(Component::RootDir) {
+        return Err("absolute executable path required");
+    }
+    let mut parts = parts.peekable();
+    let mut directory = crate::sys::fs::open_anchor(std::path::Path::new("/"))
+        .map_err(|_| "root descriptor unavailable")?;
+    loop {
+        let metadata = directory
+            .metadata()
+            .map_err(|_| "ancestor metadata unavailable")?;
+        if !metadata.is_dir() || !root_owned_mode(metadata.uid(), metadata.mode()) {
+            return Err("root-owned non-writable ancestor required");
+        }
+        let Some(Component::Normal(name)) = parts.next() else {
+            return Err("normal executable component required");
+        };
+        if parts.peek().is_some() {
+            directory = crate::sys::fs::open_directory(&directory, name, false)
+                .map_err(|_| "no-follow ancestor open failed")?;
+        } else {
+            let file = crate::sys::fs::open_read(&directory, name)
+                .map_err(|_| "no-follow executable open failed")?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| "executable metadata unavailable")?;
+            return if metadata.is_file()
+                && root_owned_mode(metadata.uid(), metadata.mode())
+                && (metadata.dev(), metadata.ino()) == (expected.dev(), expected.ino())
+            {
+                Ok(())
+            } else {
+                Err("root-owned executable with matching descriptor identity required")
+            };
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -494,14 +604,14 @@ fn decode_darwin_team_id(bytes: &[u8]) -> Option<&str> {
 }
 
 #[cfg(target_os = "macos")]
-fn darwin_effective_uid(pid: i32) -> Option<u32> {
-    let requested = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+fn darwin_uids(pid: i32) -> Option<crate::pid::ProcessUids> {
+    let requested = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     // SAFETY: aligned writable storage has the exact ABI size; no pointer is retained.
     let returned = unsafe {
         libc::proc_pidinfo(
             pid,
-            libc::PROC_PIDT_SHORTBSDINFO,
+            libc::PROC_PIDTBSDINFO,
             0,
             info.as_mut_ptr().cast(),
             requested,
@@ -512,7 +622,11 @@ fn darwin_effective_uid(pid: i32) -> Option<u32> {
     }
     // SAFETY: the exact-size successful read initialised the whole record.
     let info = unsafe { info.assume_init() };
-    (info.pbsi_pid == pid as u32).then_some(info.pbsi_uid)
+    (info.pbi_pid == pid as u32).then_some(crate::pid::ProcessUids {
+        real: info.pbi_ruid,
+        effective: info.pbi_uid,
+        saved: info.pbi_svuid,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -835,11 +949,11 @@ mod tests {
         let path = std::path::Path::new("/Library/Daemon");
         let signed = 0x2000_0001;
         assert!(
-            listed_image_matches(&entries, path, signed, Some("TEAM123")),
+            listed_image_matches(&entries, path, signed, Some("TEAM123"), || true),
             "accepted listing"
         );
         assert!(
-            !listed_image_matches(&entries, path, signed, Some("TEAM999")),
+            !listed_image_matches(&entries, path, signed, Some("TEAM999"), || true),
             "team mismatch"
         );
         assert!(
@@ -847,7 +961,8 @@ mod tests {
                 &entries,
                 std::path::Path::new("/Library/Daemon-child"),
                 signed,
-                Some("TEAM123")
+                Some("TEAM123"),
+                || true
             ),
             "exact path mismatch"
         );
@@ -856,12 +971,13 @@ mod tests {
                 &entries,
                 std::path::Path::new("/Library//Daemon"),
                 signed,
-                Some("TEAM123")
+                Some("TEAM123"),
+                || true
             ),
             "do not normalize a listed path match"
         );
         assert!(
-            !listed_image_matches(&entries, path, signed, None),
+            !listed_image_matches(&entries, path, signed, None, || true),
             "unreadable team"
         );
         for invalid in [
@@ -869,13 +985,15 @@ mod tests {
             signed | 2,
             signed | 4,
             signed | 0x20,
+            signed | 0x0002_0000,
             signed | 0x1000_0000,
         ] {
             assert!(!listed_image_matches(
                 &entries,
                 path,
                 invalid,
-                Some("TEAM123")
+                Some("TEAM123"),
+                || true
             ));
         }
         let platform = [CensusIgnoreEntry {
@@ -886,14 +1004,59 @@ mod tests {
             &platform,
             path,
             signed,
-            Some("platform")
+            Some("platform"),
+            || true
         ));
         assert!(listed_image_matches(
             &platform,
             path,
             signed | 0x0400_0000,
-            None
+            None,
+            || true
         ));
+        assert!(
+            !listed_image_matches(&platform, path, signed | 0x0400_0000, None, || false),
+            "platform selector requires the root-owned protected descriptor chain"
+        );
+        assert!(
+            !listed_image_matches(&platform, path, signed | 0x0402_0000, None, || true),
+            "linker-signed code is refused even with a platform bit"
+        );
+    }
+
+    #[test]
+    fn platform_listing_requires_a_root_owned_nonwritable_descriptor_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert!(root_owned_mode(0, 0o755));
+        assert!(!root_owned_mode(501, 0o755));
+        assert!(!root_owned_mode(0, 0o775), "group-writable ancestor");
+        assert!(!root_owned_mode(0, 0o757), "other-writable ancestor");
+        let path = std::path::Path::new("/usr/bin/true");
+        let file = crate::sys::fs::open_source(path)?;
+        assert!(
+            root_owned_executable_chain(path, &file),
+            "real root-owned chain"
+        );
+        let different = crate::sys::fs::open_source(std::path::Path::new("/usr/bin/false"))?;
+        assert!(
+            !root_owned_executable_chain(path, &different),
+            "must match original fd identity"
+        );
+        let temp = tempfile::tempdir()?;
+        // Keep a genuinely root-owned executable descriptor. Only an ancestor
+        // can fail this assertion; skipping its check would reach a missing leaf.
+        assert_eq!(
+            check_root_owned_executable_chain(&temp.path().join("missing-image"), &file),
+            Err("root-owned non-writable ancestor required"),
+        );
+        let path = temp.path().join("image");
+        std::fs::write(&path, b"image")?;
+        let file = crate::sys::fs::open_source(&path)?;
+        assert!(
+            !root_owned_executable_chain(&path, &file),
+            "user-writable temporary ancestor"
+        );
+        Ok(())
     }
 
     #[test]
@@ -921,7 +1084,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn native_current_process_is_not_an_eligible_platform_daemon() {
-        assert_eq!(sealed_platform_euid(std::process::id() as i32), None);
+        assert_eq!(sealed_platform_uids(std::process::id() as i32), None);
     }
 
     #[cfg(target_os = "macos")]
@@ -937,7 +1100,7 @@ mod tests {
         }
         let mut child = Child(std::process::Command::new("/bin/sleep").arg("30").spawn()?);
         assert!(child.0.try_wait()?.is_none());
-        assert_eq!(sealed_platform_euid(child.0.id() as i32), None);
+        assert_eq!(sealed_platform_uids(child.0.id() as i32), None);
         Ok(())
     }
 
@@ -974,7 +1137,7 @@ mod tests {
                 continue;
             }
             assert_eq!(
-                sealed_platform_euid(pid),
+                sealed_platform_uids(pid),
                 None,
                 "off-sealed platform process {pid}: {path:?}"
             );
@@ -993,7 +1156,7 @@ mod tests {
         for missing in [1, 0x0400_0000, 0x2000_0000] {
             assert!(!darwin_platform_signature(required & !missing));
         }
-        for untrusted in [2, 4, 0x20, 0x1000_0000] {
+        for untrusted in [2, 4, 0x20, 0x0002_0000, 0x1000_0000] {
             assert!(!darwin_platform_signature(required | untrusted));
         }
         assert!(!darwin_platform_signature(0x0800_0001)); // path is not signing evidence

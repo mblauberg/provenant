@@ -231,7 +231,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | Field | Value |
 |---|---|
 | `default` | `[]` |
-| `effect` | `"Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. Each listed executable may occupy a worktree; same-owner processes and invalid/unreadable signing state never qualify. Not accepted through dispatch --knob or Fabric overrides."` |
+| `effect` | `"Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. All real/effective/saved uids must be system accounts foreign to every root owner; platform entries also require a root-owned chain with no group/other write permission. Listed executables may occupy a worktree. Invalid/unreadable signing state never qualifies. Not accepted through dispatch --knob or Fabric overrides."` |
 | `host_only` | `true` |
 | `status` | `"wired"` |
 | `strict` | `true` |

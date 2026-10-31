@@ -93,17 +93,36 @@ This knob is host-only: run `--knob` and Fabric task overrides refuse it, even
 for an empty list. The runtime reads the selected state root's host config,
 never project data or a task/attempt's profile stamp. No restart is required.
 Every listed executable still requires actual cwd `EPERM`, valid live signing
-state without ad-hoc, invalid-allowed, debugged or get-task-allow flags, an exact
-kernel executable-path match opened with `O_NOFOLLOW`, and a different euid
-from the worktree owner. `csops(CS_OPS_TEAMID)` must match the team exactly, or
-`platform` must match the platform bit. Evidence query failure stays unplaceable.
+state without ad-hoc, linker-signed, invalid-allowed, debugged or get-task-allow
+flags, and an exact kernel executable-path match opened with `O_NOFOLLOW`.
+Real, effective and saved uids must all be in 0–499 and each must differ from
+every candidate root's owner. They are read together through `PROC_PIDTBSDINFO`
+and rechecked; query failure stays unplaceable.
+`csops(CS_OPS_TEAMID)` must match the team exactly, or `platform` must match
+`CS_PLATFORM_BINARY`. The platform bit is the signing control for Apple
+platform entries. `CS_ADHOC` is checked but is not a reliable signal by itself:
+live ad-hoc code can omit it. A reported team string is not an independent trust
+anchor; named-team entries rely on the exact path and the host owner's explicit
+acceptance as well as the live signing checks.
+
+At match time a `platform` entry additionally requires the executable and every
+ancestor directory up to `/` to be owned by uid 0 with no group or other write
+permission. The runtime walks from a root descriptor using `O_NOFOLLOW`
+descriptor-relative opens, checks each fd with fstat, and requires the leaf's
+device/inode to equal the originally opened executable. Any symlink, unsafe
+owner/mode, wrong type, identity mismatch or query failure refuses the listing.
+A writable `/usr/local` or user-owned parent therefore cannot host a matching
+`platform` entry merely because an Apple binary was copied there.
 
 The accepted residual risk is a listed executable sitting in a worktree. A
 signature or team identifier does not prove non-occupancy. Entries may admit
-root or other foreign-user processes, may name `/bin` or `/usr/bin` tools, and
+root or other foreign system-account processes, may name `/bin` or `/usr/bin` tools, and
 do not require a sealed volume. Keep the list limited to executable/signer
-pairs whose occupancy risk the host owner accepts. A readable occupant and
-every same-owner process retain their existing refusal.
+pairs whose occupancy risk the host owner accepts. A readable occupant remains
+Live. An unreadable process with any real, effective or saved uid equal to any
+candidate root's owner is never excluded. This refuses an owner's setuid tool;
+an owner-launched sudo command that resets all three uids to root still falls
+within the accepted cwd-history risk when its image otherwise qualifies.
 
 After listing this host's unreadable daemons, the host owner can set
 `provenant config set confinement.census_host_list_complete true`. This strict
@@ -115,7 +134,7 @@ With the default they print why that Free assertion was skipped. CI deliberately
 leaves the flag false while retaining its usbmuxd/platform entry.
 
 Land cleanup still refuses an incomplete census and reports the first unlisted
-daemon. Its diagnostic includes pid, path, euid, CS flags and, for non-platform
+daemon. Its diagnostic includes pid, path, real/effective/saved uids, CS flags and, for non-platform
 images, the kernel's `CS_OPS_TEAMID` or `unavailable`. Use that information to
 choose an exact path/team pair whose occupancy risk you accept; the completeness
 declaration does not make an unlisted process admissible.
