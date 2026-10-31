@@ -3354,8 +3354,16 @@ mod lifecycle_tests {
             &cancel(),
         )?;
         let root = canonicalize(&created.path)?;
+        // Use the same host config selection and policy composition as runtime,
+        // so native CI exercises host-owned exceptions rather than task knobs.
+        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME unavailable")?);
+        let mut inputs = provenant_core::RootInputs::new(home, fixture.root.clone());
+        inputs.environment_state_dir =
+            std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
+        let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let workers = CensusPolicyWorkers::from_roots(&SystemWorkerObserver, &host_roots)?;
         let (clean, clean_details) =
-            SystemWorkerObserver.observe_roots_for_land_with_details(std::slice::from_ref(&root));
+            workers.observe_roots_for_land_with_details(std::slice::from_ref(&root));
         let first = clean_details.get(&root).map_or("none", String::as_str);
         eprintln!(
             "FULL_CENSUS: clean merged worktree {:?}; first unplaceable detail: {first}",
@@ -3375,7 +3383,7 @@ mod lifecycle_tests {
             "same-user /bin/sleep cannot earn daemon exception"
         );
         let (occupied, occupied_details) =
-            SystemWorkerObserver.observe_roots_for_land_with_details(std::slice::from_ref(&root));
+            workers.observe_roots_for_land_with_details(std::slice::from_ref(&root));
         eprintln!(
             "FULL_CENSUS: same-user sleep {pid}: {:?}; placement detail: {:?}",
             occupied[&root],
