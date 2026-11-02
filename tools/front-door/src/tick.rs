@@ -174,16 +174,7 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
         // worker; a failure to queue is recorded for the tick and never fails
         // the collection.
         let _ = queue_seed(&directory, clock.wall_now()?, || {
-            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-            let argv = [
-                executable.into_os_string(),
-                "--state-dir".into(),
-                resolved.roots.state.as_path().as_os_str().to_owned(),
-                "internal".into(),
-                "tick-seed".into(),
-            ];
-            provenant_os::exec::spawn_detached(&argv, &resolved.home)
-                .map_err(|error| error.to_string())
+            spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home)
         });
         collected.map_err(Into::into)
     })();
@@ -221,6 +212,31 @@ fn queue_seed(
         return Err(error);
     }
     Ok(())
+}
+
+fn spawn_seed_worker(state: &std::path::Path, home: &std::path::Path) -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let argv = [
+        executable.into_os_string(),
+        "--state-dir".into(),
+        state.as_os_str().to_owned(),
+        "internal".into(),
+        "tick-seed".into(),
+    ];
+    provenant_os::exec::spawn_detached(&argv, home).map_err(|error| error.to_string())
+}
+
+/// A pass that found a build already running ends `busy`; the tick retries it
+/// once a minute until a pass finds every project current or built.
+fn seed_retry_due(directory: &Directory, now: WallTime) -> bool {
+    directory
+        .read_bounded(SEED_RESULT.as_ref(), 64 * 1024)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<GcResult>(&bytes).ok())
+        .is_some_and(|result| {
+            result.state == "busy"
+                && now.as_micros().saturating_sub(result.at.as_micros()) >= 60_000_000
+        })
 }
 
 /// What one pass over the registered projects did.
@@ -276,8 +292,15 @@ fn seed_pass(
     write_result(directory, SEED_RESULT, "tick-seed", at()?, "running", None)?;
     let outcome = projects().map(|projects| refresh_projects(&projects, refresh));
     let (state, error) = match outcome {
-        Ok(pass) if pass.errors.is_empty() => ("complete", None),
-        Ok(pass) => ("failed", Some(pass.errors.join("; "))),
+        Ok(pass) if !pass.errors.is_empty() => ("failed", Some(pass.errors.join("; "))),
+        Ok(pass) if pass.busy > 0 => (
+            "busy",
+            Some(format!(
+                "{} project(s) had a build running; retrying next tick",
+                pass.busy
+            )),
+        ),
+        Ok(_) => ("complete", None),
         Err(error) => ("failed", Some(error)),
     };
     write_result(directory, SEED_RESULT, "tick-seed", at()?, state, error)
@@ -350,6 +373,7 @@ fn seed_state(directory: &Directory) -> &'static str {
                 "queued" => "queued",
                 "running" => "running",
                 "complete" => "complete",
+                "busy" => "busy",
                 "disabled" => "disabled",
                 _ => "last_failed",
             },
@@ -481,7 +505,20 @@ fn tick(
         &resolved.roots.state.as_path().join("tick"),
         true,
     ) {
-        Ok(directory) => Task::idle("target_seed", seed_state(&directory)),
+        Ok(directory) => {
+            // A busy pass is retried here; the worker is single-flight, so a
+            // retry that finds a build still running costs one short process.
+            if seed_retry_due(&directory, now)
+                && queue_seed(&directory, now, || {
+                    spawn_seed_worker(resolved.roots.state.as_path(), &resolved.home)
+                })
+                .is_err()
+            {
+                Task::idle("target_seed", "last_failed")
+            } else {
+                Task::idle("target_seed", seed_state(&directory))
+            }
+        }
         Err(_) => Task::idle("target_seed", "last_failed"),
     };
     let tasks = vec![
@@ -679,7 +716,23 @@ mod tests {
             |_| Ok(Refresh::Busy),
         )
         .unwrap();
+        let (state, note) = seed_state_of(&directory);
+        assert_eq!(state, "busy");
+        assert!(note.unwrap().contains("retrying next tick"));
+        let wall = seed_clock().wall_now().unwrap();
+        assert!(!seed_retry_due(&directory, wall), "just written: not due");
+        let far = WallTime::from_micros(wall.as_micros() + 61_000_000).unwrap();
+        assert!(seed_retry_due(&directory, far), "busy is retried next tick");
+        seed_pass(
+            &directory,
+            &seed_clock(),
+            true,
+            || Ok(vec![std::path::PathBuf::from("/a")]),
+            |_| Ok(Refresh::Current),
+        )
+        .unwrap();
         assert_eq!(seed_state_of(&directory), ("complete", None));
+        assert!(!seed_retry_due(&directory, far), "only busy is retried");
     }
 
     #[test]
