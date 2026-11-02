@@ -1,0 +1,113 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+# shellcheck source=scripts/test-git-env.sh disable=SC1091
+. "$script_dir/test-git-env.sh"
+unset GITHUB_OUTPUT
+script=$script_dir/select-affected-crate-tests
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-affected-crates.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+root=$tmp/repo
+mkdir -p "$root/tools/front-door/crates/leaf/src" \
+  "$root/tools/front-door/crates/app/src" "$tmp/bin"
+cd "$root"
+git init -q
+git config user.email test@example.com
+git config user.name test
+git config commit.gpgsign false
+printf '[workspace]\nmembers = ["crates/*"]\n' > tools/front-door/Cargo.toml
+printf 'name = "leaf"\n' > tools/front-door/crates/leaf/Cargo.toml
+printf 'name = "app"\n' > tools/front-door/crates/app/Cargo.toml
+printf 'pub fn value() {}\n' > tools/front-door/crates/leaf/src/lib.rs
+printf 'pub fn use_leaf() {}\n' > tools/front-door/crates/app/src/lib.rs
+git add -A
+git commit -qm base
+base=$(git rev-parse HEAD)
+
+cat > "$tmp/bin/cargo" <<'CARGO'
+#!/bin/sh
+python3 - "$GITHUB_WORKSPACE" <<'PY'
+import json
+import os
+import sys
+root = sys.argv[1]
+packages = []
+for name, deps in (("leaf", []), ("app", ["leaf"])):
+    packages.append({
+        "name": name,
+        "manifest_path": os.path.join(root, "tools/front-door/crates", name, "Cargo.toml"),
+        "dependencies": [{"name": dependency} for dependency in deps],
+    })
+packages.append({
+    "name": "provenant",
+    "manifest_path": os.path.join(root, "tools/front-door/Cargo.toml"),
+    "dependencies": [{"name": "app"}],
+})
+print(json.dumps({"packages": packages}))
+PY
+CARGO
+chmod +x "$tmp/bin/cargo"
+export PATH="$tmp/bin:$PATH" GITHUB_WORKSPACE="$root" BASE_SHA="$base" IS_MAIN=false
+
+printf 'pub fn changed() {}\n' >> tools/front-door/crates/leaf/src/lib.rs
+git commit -qam leaf-change
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
+filter=$("$script" 2>"$tmp/reason")
+if [ "$filter" != 'rdeps(=leaf)' ]; then
+  echo "leaf change: expected 'rdeps(=leaf)', got '$filter'" >&2
+  exit 1
+fi
+if ! grep -q 'selecting app, leaf, provenant' "$tmp/reason"; then
+  echo "leaf change did not report its reverse dependencies" >&2
+  exit 1
+fi
+
+printf 'pub fn changed() {}\n' >> tools/front-door/crates/app/src/lib.rs
+git commit -qam app-change
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
+filter=$("$script" 2>"$tmp/reason")
+if [ "$filter" != 'rdeps(=app) | rdeps(=leaf)' ]; then
+  echo "two-crate change: expected 'rdeps(=app) | rdeps(=leaf)', got '$filter'" >&2
+  exit 1
+fi
+
+mkdir -p tools/front-door/.config
+printf '[profile.ci]\n' > tools/front-door/.config/nextest.toml
+git add tools/front-door/.config/nextest.toml
+git commit -qm nextest-config
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
+filter=$("$script" 2>"$tmp/reason")
+if [ -n "$filter" ] || ! grep -q 'full-run trigger' "$tmp/reason"; then
+  echo "nextest config change did not select the full workspace" >&2
+  exit 1
+fi
+git reset -q --hard HEAD~1
+
+printf 'lock' > tools/front-door/Cargo.lock
+git add tools/front-door/Cargo.lock
+git commit -qm lockfile
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
+filter=$("$script" 2>"$tmp/reason")
+if [ -n "$filter" ] || ! grep -q 'full-run trigger' "$tmp/reason"; then
+  echo "lockfile change did not select the full workspace" >&2
+  exit 1
+fi
+
+git reset -q --hard "$base"
+printf 'notes' > README.md
+git add README.md
+git commit -qm outside
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
+filter=$("$script" 2>"$tmp/reason")
+if [ -n "$filter" ] || ! grep -q 'outside a workspace crate' "$tmp/reason"; then
+  echo "outside path did not select the full workspace: filter='$filter'; $(cat "$tmp/reason")" >&2
+  exit 1
+fi
+
+echo 'select-affected-crate-tests tests passed'
