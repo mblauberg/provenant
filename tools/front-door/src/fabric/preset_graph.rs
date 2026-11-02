@@ -40,12 +40,23 @@ pub(crate) fn publish_preset_graph(
     let bytes = serde_json::to_vec(document)?;
     let digest = provenant_records::CanonicalV1::file_digest(&bytes).to_string();
     let filename = format!("preset-{}.json", &digest[7..]);
-    let dir = Directory::open_anchor(&scratch.join("graphs"))?;
-    let directory_metadata = dir.metadata()?;
-    if directory_metadata.uid != provenant_os::fs::effective_uid()
-        || directory_metadata.mode & 0o077 != 0
+    let graphs = scratch.join("graphs");
+    let dir = Directory::open_anchor(&graphs)?;
+    let uid = provenant_os::fs::effective_uid();
+    let mut directory_metadata = dir.metadata()?;
+    if directory_metadata.uid == uid
+        && directory_metadata.mode & 0o077 != 0
+        && dir.make_private().is_ok()
     {
-        return Err("preset graph directory must be private to the current user".into());
+        directory_metadata = dir.metadata()?;
+    }
+    if let Some(refusal) = private_graph_directory_refusal(
+        &graphs,
+        directory_metadata.uid,
+        directory_metadata.mode,
+        uid,
+    ) {
+        return Err(refusal.into());
     }
     match dir.atomic_write(
         OsStr::new(&filename),
@@ -70,6 +81,24 @@ pub(crate) fn publish_preset_graph(
         Err(error) => return Err(error.into()),
     }
     Ok(scratch.join("graphs").join(filename))
+}
+
+/// `None` when a graph directory owned by `current` is private (mode 0700 after
+/// any repair). Otherwise names the path, the observed mode and the repair.
+fn private_graph_directory_refusal(
+    path: &std::path::Path,
+    owner: u32,
+    mode: u32,
+    current: u32,
+) -> Option<String> {
+    (owner != current || mode & 0o077 != 0).then(|| {
+        format!(
+            "preset graph directory {} has mode {:04o} and is not private to the current user; run `chmod 700 {}`",
+            path.display(),
+            mode & 0o7777,
+            path.display()
+        )
+    })
 }
 
 /// Preset waiting advances the retained immutable graph, including CI gates.
@@ -161,5 +190,35 @@ pub(crate) fn run_preset_graph(
             &error.to_string(),
             globals,
         ),
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)] // The worktree driver includes this module without libtest functions.
+mod tests {
+    use super::private_graph_directory_refusal;
+    use std::path::Path;
+
+    #[test]
+    fn refusal_names_the_path_mode_and_repair() {
+        let path = Path::new("/repo/.provenant/scratch/graphs");
+        assert_eq!(
+            private_graph_directory_refusal(path, 501, 0o40700, 501),
+            None
+        );
+        let loose = private_graph_directory_refusal(path, 501, 0o40755, 501)
+            .expect("group and other bits are refused when repair fails");
+        assert!(loose.contains("/repo/.provenant/scratch/graphs"), "{loose}");
+        assert!(loose.contains("0755"), "{loose}");
+        assert!(
+            loose.contains("chmod 700 /repo/.provenant/scratch/graphs"),
+            "{loose}"
+        );
+        let foreign = private_graph_directory_refusal(path, 0, 0o40700, 501)
+            .expect("another owner is refused");
+        assert!(
+            foreign.contains("0700") && foreign.contains("chmod 700"),
+            "{foreign}"
+        );
     }
 }

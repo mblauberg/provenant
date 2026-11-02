@@ -4462,9 +4462,7 @@ impl Factory {
                     },
                 )
                 .map_err(|_| {
-                    FacadeError::io(
-                        "prepare project scratch .provenant/scratch/graphs or .agent-run/graphs",
-                    )
+                    FacadeError::io("prepare project scratch .provenant/scratch/graphs")
                 })?;
                 let path = if document.is_absolute() {
                     document.clone()
@@ -4474,7 +4472,7 @@ impl Factory {
                     self.cwd.join(document)
                 };
                 let path = provenant_os::fs::canonicalize(&path)
-                    .map_err(|_| FacadeError::io("read project-local graph document; use .provenant/scratch/graphs or .agent-run/graphs"))?;
+                    .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
                 if !path.starts_with(&self.cwd) {
                     return Err(FacadeError::ConfinementRefused);
                 }

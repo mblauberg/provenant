@@ -1406,17 +1406,24 @@ Peer changes need exact-head CI and a chair-run smoke between two real hosts.
 
 ### Project-local scratch
 
-Operator graph documents default to `.provenant/scratch/graphs/`; an existing
-`.agent-run/` is reused as the scratch root. Bare document names resolve there
-when no explicitly named file exists in the current directory. Explicit project-local
-paths remain supported. Scratch setup appends its anchored directory pattern to
-Git's common `info/exclude` under a stable lock, preserving existing bytes and
-never editing tracked `.gitignore`. Symlinked scratch roots and exclude files
-are refused. Writer lanes get a
-read-only grant on the primary checkout's scratch root (never a symlink), so
-briefs there stay readable from a linked worktree. The graph path error and CLI help name these directories. Scratch
-is disposable operator data, separate from authoritative run state; expiry is
-owned by GC rather than graph execution.
+`.provenant/scratch/` is the only project scratch root that Provenant selects or
+creates. A legacy `.agent-run/` is never preferred, created, migrated, moved or
+deleted, and no document is copied from it. Its documents stay readable only by
+explicit path, and writer lanes keep their read grant on it. Operator graph
+documents default to `.provenant/scratch/graphs/`. Bare document names resolve
+there when no explicitly named file exists in the current directory; a missing
+bare name is reported with that path and the explicit-path hint. Explicit
+project-local paths remain supported. A preset graph directory owned by the
+current user that is not mode 0700 is narrowed to 0700 when a graph is
+published; any other loose directory is refused, and the error names its path,
+its octal mode and the `chmod 700` repair. Scratch setup appends its anchored
+directory pattern to Git's common `info/exclude` under a stable lock, preserving
+existing bytes and never editing tracked `.gitignore`. Symlinked scratch roots
+and exclude files are refused. Writer lanes get a read-only grant on the primary
+checkout's scratch root (never a symlink), so briefs there stay readable from a
+linked worktree. The graph path error and CLI help name
+`.provenant/scratch/graphs`. Scratch is disposable operator data, separate from
+authoritative run state; expiry is owned by GC rather than graph execution.
 - Why: graph documents and lane briefs need a discoverable project-local home
   without creating tracked configuration changes.
 - Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`;
