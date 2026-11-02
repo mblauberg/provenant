@@ -1294,7 +1294,7 @@ fn tests_lens_includes_mutation_testing_only_for_crucial_or_terminal_risk() {
             "risk tier {risk}"
         );
         assert_eq!(
-            prompt.contains("cargo mutants --in-diff"),
+            prompt.contains("git diff --relative=<workspace> <base>...<PR head>"),
             expected,
             "mutation command at risk tier {risk}"
         );

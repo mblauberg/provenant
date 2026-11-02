@@ -1114,7 +1114,7 @@ fn interpolate(
 const MUTATION_TESTING_PROMPT: &str = r#"
 
 Diff-scoped mutation evidence (optional; crucial or terminal risk only):
-generate a patch from the PR head with `git diff --relative=<workspace>` and run
+generate the PR patch with `git diff --relative=<workspace> <base>...<PR head>` and run
 `cargo mutants --in-diff <workspace-relative diff of the PR head> --workspace`.
 Copy any required out-of-workspace includes into the workspace before running.
 Skip tests that fail on the unmutated baseline and list them as skipped. If
