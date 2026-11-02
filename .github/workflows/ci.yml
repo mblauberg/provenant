@@ -200,6 +200,9 @@ jobs:
           else
             cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2
           fi
+      - name: Report slowest tests
+        if: always()
+        run: scripts/nextest-slowest tools/front-door/target/nextest/ci/junit.xml "$GITHUB_STEP_SUMMARY"
       # Cargo does not include example tests in the default nextest selection.
       - name: Run provider recording example test
         if: matrix.partition == 1 && steps.affected.outputs.run_provider_example == 'true'
