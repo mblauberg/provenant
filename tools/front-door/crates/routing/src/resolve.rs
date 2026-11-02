@@ -114,6 +114,7 @@ pub struct RouteList {
     pub configured_accounts: BTreeMap<String, PacingProfile>,
     pub configured_free: BTreeMap<String, PacingProfile>,
     pub active_overrides: Vec<PacingOverride>,
+    pub model_exclusions: Vec<ModelExclusion>,
 }
 #[derive(Debug, Serialize)]
 pub struct ValidRoutePair {
@@ -239,6 +240,7 @@ pub fn list(
         pacing,
         configured_accounts: context.config.pacing.accounts.clone(),
         configured_free: context.config.pacing.free.clone(),
+        model_exclusions: context.config.model_exclusions.clone(),
         active_overrides: context
             .config
             .pacing_overrides

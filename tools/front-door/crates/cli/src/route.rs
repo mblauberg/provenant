@@ -30,6 +30,35 @@ pub enum Route {
     /// Record, list or clear scheduled pacing overrides; the list also shows
     /// scheduled model policy rules.
     Override(RouteOverride),
+    /// Manage persistent exact-model exclusions from pools.
+    Exclude(RouteExclude),
+}
+#[derive(Debug, Args)]
+pub struct RouteExclude {
+    #[command(subcommand)]
+    pub command: RouteExcludeCommand,
+}
+#[derive(Debug, Subcommand)]
+pub enum RouteExcludeCommand {
+    /// Exclude a model until removed or expired.
+    Add(ExcludeAdd),
+    /// Remove an exact-model exclusion.
+    Remove(ExcludeRemove),
+    /// List exact-model exclusions.
+    List,
+}
+#[derive(Debug, Args)]
+pub struct ExcludeAdd {
+    /// Exact model in ADAPTER/ID form.
+    pub model: Model,
+    /// Future RFC 3339 timestamp or duration, such as 2h.
+    #[arg(long)]
+    pub until: Option<String>,
+}
+#[derive(Debug, Args)]
+pub struct ExcludeRemove {
+    /// Exact model in ADAPTER/ID form.
+    pub model: Model,
 }
 #[derive(Debug, Args)]
 pub struct RouteOverride {
@@ -474,6 +503,16 @@ pub struct OverrideRow {
     pub remaining_seconds: Option<i64>,
 }
 impl OverrideRow {
+    fn model_exclusion(row: &provenant_routing::ModelExclusion, now: WallTime) -> Self {
+        Self {
+            kind: "model_exclusion",
+            scope: format!("model {}", row.model.as_str()),
+            value: "excluded".into(),
+            schedule: row.schedule.clone(),
+            active: row.schedule.active(now),
+            remaining_seconds: row.schedule.remaining(now),
+        }
+    }
     fn pacing(row: &provenant_routing::PacingOverride, now: WallTime) -> Self {
         Self {
             kind: "pacing",
@@ -1699,6 +1738,12 @@ fn list_overrides(roots: &Roots, now: WallTime) -> Result<Vec<OverrideRow>, Edge
         .iter()
         .map(|row| OverrideRow::pacing(row, now))
         .collect();
+    overrides.extend(
+        config
+            .model_exclusions
+            .iter()
+            .map(|row| OverrideRow::model_exclusion(row, now)),
+    );
     for (index, row) in config.model_policy.rules.iter().enumerate() {
         let scope = [
             row.adapter.as_deref().map(|v| format!("adapter {v}")),
@@ -1723,6 +1768,56 @@ fn list_overrides(roots: &Roots, now: WallTime) -> Result<Vec<OverrideRow>, Edge
         });
     }
     Ok(overrides)
+}
+
+fn edit_model_exclusion(
+    roots: &Roots,
+    model: &Model,
+    until: Option<WallTime>,
+    add: bool,
+) -> Result<(), EdgeError> {
+    let id = ModelId::parse(&model.0)?;
+    if add && Catalogue::bundled()?.model(&id).is_none() {
+        return Err(RoutingError::InvalidModel.into());
+    }
+    edit_config(roots, |document| {
+        let routing = routing_table(document)?;
+        let rows = match routing.remove("model_exclusions") {
+            None => Vec::new(),
+            Some(toml_edit::Item::Value(toml_edit::Value::Array(values))) => values
+                .into_iter()
+                .map(|row| match row {
+                    toml_edit::Value::InlineTable(row) => Ok(row),
+                    _ => Err("domains.routing.model_exclusions must be an array of tables"),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(toml_edit::Item::ArrayOfTables(rows)) => rows
+                .into_iter()
+                .map(toml_edit::Table::into_inline_table)
+                .collect(),
+            _ => return Err("domains.routing.model_exclusions must be an array of tables"),
+        };
+        let mut kept = toml_edit::Array::new();
+        for row in rows {
+            if row.get("model").and_then(toml_edit::Value::as_str) != Some(id.as_str()) {
+                kept.push(row);
+            }
+        }
+        if add {
+            let mut row = toml_edit::InlineTable::new();
+            row.insert("model", id.as_str().into());
+            if let Some(until) = until {
+                let mut schedule = toml_edit::InlineTable::new();
+                schedule.insert("expires", until.to_string().into());
+                row.insert("schedule", schedule.into());
+            }
+            kept.push(row);
+        }
+        if !kept.is_empty() {
+            routing.insert("model_exclusions", toml_edit::Item::Value(kept.into()));
+        }
+        Ok(())
+    })
 }
 
 fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeError> {
@@ -1844,6 +1939,26 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
             }))),
             RouteOverrideCommand::Clear(clear) => clear_override(roots, clear, now),
         },
+        Route::Exclude(request) => {
+            match &request.command {
+                RouteExcludeCommand::Add(add) => {
+                    let until = add.until.as_deref().map(|value| instant(value, now).filter(|end| *end > now).ok_or(EdgeError::Pacing("--until must be a future RFC 3339 timestamp or positive duration"))).transpose()?;
+                    edit_model_exclusion(roots, &add.model, until, true)?;
+                }
+                RouteExcludeCommand::Remove(remove) => {
+                    edit_model_exclusion(roots, &remove.model, None, false)?
+                }
+                RouteExcludeCommand::List => {}
+            }
+            Ok(Data::Overrides(Box::new(OverrideReport {
+                recorded: None,
+                cleared: Vec::new(),
+                overrides: list_overrides(roots, now)?
+                    .into_iter()
+                    .filter(|row| row.kind == "model_exclusion")
+                    .collect(),
+            })))
+        }
     }
 }
 pub fn run(
@@ -1859,6 +1974,11 @@ pub fn run(
         Route::Remove(_) => "route remove",
         Route::Reset(_) => "route reset",
         Route::Pacing(_) => "route pacing",
+        Route::Exclude(request) => match request.command {
+            RouteExcludeCommand::Add(_) => "route exclude add",
+            RouteExcludeCommand::Remove(_) => "route exclude remove",
+            RouteExcludeCommand::List => "route exclude list",
+        },
         Route::Override(request) => match request.command {
             RouteOverrideCommand::Set(_) => "route override set",
             RouteOverrideCommand::List => "route override list",
@@ -1946,6 +2066,9 @@ pub fn run(
                         .iter()
                         .map(|override_| format!("pacing override {override_:?}")),
                 );
+                lines.extend(list.model_exclusions.iter().map(|row| {
+                    OverrideRow::model_exclusion(row, at.expect("clock available")).line()
+                }));
                 lines.extend(list.pools.iter().map(|(name, members)| {
                     let models = members
                         .iter()
@@ -2155,6 +2278,45 @@ mod route_tests {
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
     use std::error::Error;
+
+    #[test]
+    fn model_exclusion_commands_record_list_and_remove() -> Result<(), Box<dyn Error>> {
+        use std::path::Path;
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        let now = provenant_core::WallTime::from_unix_seconds(100)?;
+        let model = super::Model("codex/gpt-6-luna".into());
+        super::edit_model_exclusion(
+            &roots,
+            &model,
+            Some(provenant_core::WallTime::from_unix_seconds(200)?),
+            true,
+        )?;
+        let rows = super::list_overrides(&roots, now)?;
+        assert!(rows.iter().any(|row| row.kind == "model_exclusion"
+            && row.active
+            && row.remaining_seconds == Some(100)));
+        super::edit_model_exclusion(&roots, &model, None, false)?;
+        assert!(
+            !super::list_overrides(&roots, now)?
+                .iter()
+                .any(|row| row.kind == "model_exclusion")
+        );
+        Ok(())
+    }
 
     #[test]
     fn pacing_report_prints_every_active_override() -> Result<(), Box<dyn Error>> {

@@ -194,6 +194,21 @@ prints commands to collect or cancel active runs. Active runs are not cancelled
 automatically. Use `provenant lanes --id RUN --wait 4m` to collect one, or
 `provenant cancel RUN` to cancel it.
 
+## Excluding members
+
+To exclude an exact model from every pool, including fallback members, use:
+
+```sh
+provenant route exclude add codex/gpt-6-luna --until 2h
+provenant route exclude list
+provenant route exclude remove codex/gpt-6-luna
+```
+
+`--until` accepts a future RFC 3339 timestamp or a duration; omit it to keep
+the exclusion until it is removed. `route list` and `route override list`
+also show these rules. Explicit `--model` pins continue to select the named
+model independently of pool exclusions.
+
 ## Per-account pacing
 
 Account profiles layer over provider pacing. An active temporary override takes
