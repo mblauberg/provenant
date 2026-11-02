@@ -779,7 +779,7 @@ fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn s
 #[test]
 fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
     let worktree = ["--set", "parameters.worktree=\".\""];
-    let batch = ["--set", "parameters.batch_worktree=\".\""];
+    let batch = ["--plan", "off", "--set", "parameters.batch_worktree=\".\""];
     for (name, extra) in [
         ("single", &[][..]),
         ("chain", &[]),
@@ -1149,5 +1149,42 @@ fn explicit_preset_and_no_task_id_never_read_experiments() -> Result<(), Box<dyn
     );
     let output = fixture.run(&["--preset", "gate-only", "--task-id", WORK_ITEM])?;
     assert!(!output.status.success());
+    Ok(())
+}
+
+#[test]
+fn plan_flag_decides_and_explains_the_planner_front_end() -> Result<(), Box<dyn std::error::Error>>
+{
+    let batch = [
+        "--set",
+        "parameters.batch_worktree=\".\"",
+        "--set",
+        "parameters.worktrees=[\".\"]",
+    ];
+    let with = |mode: &str| -> Vec<String> {
+        let mut args: Vec<String> = vec!["--plan".into(), mode.into()];
+        args.extend(batch.iter().map(|s| (*s).to_owned()));
+        args
+    };
+    let run = |mode: &str| -> Result<String, Box<dyn std::error::Error>> {
+        let owned = with(mode);
+        let args: Vec<&str> = owned.iter().map(String::as_str).collect();
+        explain_text("big-batch", &args)
+    };
+    let on = run("on")?;
+    assert!(on.contains("plan: on -> on (planning requested)"), "{on}");
+    assert!(on.contains("Planner route: principal"), "{on}");
+    golden("big-batch.plan-on.explain.txt", &on)?;
+    let off = run("off")?;
+    assert!(
+        off.contains("plan: off -> off (planning turned off)"),
+        "{off}"
+    );
+    assert!(!off.contains("Planner route"), "{off}");
+    // Default `auto` reads the brief: a short one with no signals stays static.
+    let auto = run("auto")?;
+    assert!(auto.contains("plan: auto -> "), "{auto}");
+    let plain = explain_text("big-batch", &batch[..])?;
+    assert!(plain.contains("plan: auto -> "), "{plain}");
     Ok(())
 }

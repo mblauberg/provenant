@@ -1,6 +1,7 @@
 Graph <id>
 Preset selection: big-batch (override)
 Review shape: standard (default)
+plan: off -> off (planning turned off)
 Requires configuration: "writer worktree"
 scout  role=- tier=- family=any kind=composite access=read_only worktree=-
   scouts  role=- tier=- family=any kind=composite access=read_only worktree=-

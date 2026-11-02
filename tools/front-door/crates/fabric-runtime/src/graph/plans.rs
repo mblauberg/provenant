@@ -551,7 +551,10 @@ fn fragment(
     let units: BTreeMap<String, Vec<String>> = local_nodes
         .iter()
         .map(|unit| {
-            let after = unit.depends_on.iter().chain(unit.inputs.iter().map(|i| &i.node));
+            let after = unit
+                .depends_on
+                .iter()
+                .chain(unit.inputs.iter().map(|i| &i.node));
             (unit.id.clone(), after.cloned().collect())
         })
         .collect();

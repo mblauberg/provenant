@@ -75,7 +75,10 @@ pub fn acceptance_items(text: &str) -> usize {
     let mut inside = false;
     let mut count = 0;
     for line in text.lines() {
-        let label = line.trim().trim_start_matches('#').trim_matches(['*', ':', ' ']);
+        let label = line
+            .trim()
+            .trim_start_matches('#')
+            .trim_matches(['*', ':', ' ']);
         let heading = line.trim_start().starts_with('#');
         if label.to_ascii_lowercase().starts_with("acceptance") && !list_item(line) {
             inside = true;
@@ -93,7 +96,8 @@ pub fn issues(text: &str) -> usize {
     let mut found = BTreeSet::new();
     let bytes = text.as_bytes();
     for (at, byte) in bytes.iter().enumerate() {
-        if *byte != b'#' || at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'&')
+        if *byte != b'#'
+            || at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'&')
         {
             continue;
         }
@@ -113,8 +117,13 @@ pub fn issues(text: &str) -> usize {
 fn crates_of<'a>(paths: impl Iterator<Item = &'a str>, nested_only: bool) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for path in paths {
-        let path = path.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-');
-        let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+        let path = path.trim_matches(|c: char| {
+            !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-'
+        });
+        let segments: Vec<&str> = path
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .collect();
         match segments.iter().position(|part| *part == "crates") {
             Some(at) if at + 1 < segments.len() => {
                 found.insert(segments[at + 1].to_owned());
@@ -192,7 +201,10 @@ fn auto_rule(
     if crates > ctx.auto.write_crates {
         return (
             true,
-            format!("write scope spans {crates} crates, more than {}", ctx.auto.write_crates),
+            format!(
+                "write scope spans {crates} crates, more than {}",
+                ctx.auto.write_crates
+            ),
         );
     }
     let named = issues(brief);
@@ -301,10 +313,20 @@ pub fn apply(
         .and_then(Value::as_object_mut)
         .ok_or("preset parameters must be a table")?;
     for (key, value) in [
-        ("plan_lane_deadline_seconds", json!(ctx.lane_deadline_seconds)),
+        (
+            "plan_lane_deadline_seconds",
+            json!(ctx.lane_deadline_seconds),
+        ),
         ("plan_max_nodes", json!(ctx.max_nodes)),
         ("plan_routes", json!(routes)),
-        ("plan_worktrees", json!(if worktrees.is_empty() { "none registered".into() } else { listed(&worktrees) })),
+        (
+            "plan_worktrees",
+            json!(if worktrees.is_empty() {
+                "none registered".into()
+            } else {
+                listed(&worktrees)
+            }),
+        ),
         ("plan_guidance", json!(guidance)),
     ] {
         parameters.insert(key.into(), value);
@@ -317,7 +339,9 @@ pub fn apply(
         .iter()
         .enumerate()
         .position(|(at, stage)| stage_id(stage, at) == replaces)
-        .ok_or_else(|| format!("preset {name}: plan.replaces names no top-level stage: {replaces}"))?;
+        .ok_or_else(|| {
+            format!("preset {name}: plan.replaces names no top-level stage: {replaces}")
+        })?;
     stages[position] = json!({
         "id": "plan",
         "role": "plan.shape",
@@ -368,7 +392,9 @@ fn lower_pattern(
         .ok_or_else(|| format!("plan pattern {name} needs parameters"))?;
     let mut bound = values.clone();
     let slots = bound.as_object_mut().ok_or("parameters must be a table")?;
-    slots.entry("subject").or_insert_with(|| json!({"type": "commit", "commit": "HEAD"}));
+    slots
+        .entry("subject")
+        .or_insert_with(|| json!({"type": "commit", "commit": "HEAD"}));
     for parameter in declared.keys() {
         slots.insert(parameter.clone(), json!(format!("${{{parameter}}}")));
     }
@@ -382,7 +408,10 @@ fn lower_pattern(
         .and_then(Value::as_array)
         .ok_or_else(|| format!("plan pattern {name} needs nodes"))?
     {
-        let mut entry = entry.as_object().cloned().ok_or("pattern nodes must be tables")?;
+        let mut entry = entry
+            .as_object()
+            .cloned()
+            .ok_or("pattern nodes must be tables")?;
         let id = entry
             .get("id")
             .and_then(Value::as_str)
@@ -403,13 +432,24 @@ fn lower_pattern(
         for (key, value) in kept {
             node[key] = interpolate(&value, &bound, &task, 1)?;
         }
-        if node.get("acceptance_checks").is_none_or(|checks| checks == &json!([])) {
-            node.as_object_mut().map(|map| map.remove("acceptance_checks"));
+        if node
+            .get("acceptance_checks")
+            .is_none_or(|checks| checks == &json!([]))
+        {
+            node.as_object_mut()
+                .map(|map| map.remove("acceptance_checks"));
         }
-        if node.get("write_scope").is_some_and(|scope| scope == &json!([])) {
+        if node
+            .get("write_scope")
+            .is_some_and(|scope| scope == &json!([]))
+        {
             node.as_object_mut().map(|map| map.remove("write_scope"));
         }
-        node.as_object_mut().map(|map| map.remove("depends_on").filter(|deps| deps != &json!([])).map(|deps| map.insert("depends_on".into(), deps)));
+        node.as_object_mut().map(|map| {
+            map.remove("depends_on")
+                .filter(|deps| deps != &json!([]))
+                .map(|deps| map.insert("depends_on".into(), deps))
+        });
         nodes.push(node);
     }
     Ok(json!({

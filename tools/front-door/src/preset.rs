@@ -944,7 +944,10 @@ pub fn expand_with(
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
     let substitutions = layers.substitutions.take();
     let mut warnings = layers.warnings.take();
-    if let Some(why) = plan.as_ref().and_then(|decision| decision.degraded.as_ref()) {
+    if let Some(why) = plan
+        .as_ref()
+        .and_then(|decision| decision.degraded.as_ref())
+    {
         warnings.push(format!(
             "planner unavailable, running the preset's deterministic defaults: {why}"
         ));
@@ -2379,7 +2382,10 @@ fn visit_nodes(
         }
         // A planner's catalogue templates bind the same run context as static
         // nodes, so a planned lane starts from the pinned commit and read roots.
-        if let Some(patterns) = node.pointer_mut("/plan/patterns").and_then(Value::as_array_mut) {
+        if let Some(patterns) = node
+            .pointer_mut("/plan/patterns")
+            .and_then(Value::as_array_mut)
+        {
             for pattern in patterns {
                 if let Some(children) = pattern.get_mut("nodes").and_then(Value::as_array_mut) {
                     visit_nodes(children, visitor)?;
@@ -2674,7 +2680,9 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
     }
     if let Some(decision) = &expansion.plan {
         human.push_str(&format!("{}\n", decision.line()));
-        human.push_str(&format!("Planner route: {}\n", decision.route));
+        if decision.requested != provenant_fabric_runtime::config::PlanMode::Off {
+            human.push_str(&format!("Planner route: {}\n", decision.route));
+        }
     }
     if !validation_error.is_null() {
         human.push_str(&format!("Requires configuration: {validation_error}\n"));
@@ -2920,13 +2928,18 @@ pub fn run(
                     .ok_or_else(|| format!("--plan must be auto, on or off: {text}"))?,
                 None => settings.mode,
             };
-            let unavailable = (!config.domains.routing.routes.contains_key(&settings.route))
-                .then(|| {
-                    format!(
-                        "route {} is not defined in the routing configuration",
-                        settings.route
-                    )
-                });
+            // A route alias is a configured route or pool, or a bundled pool such as
+            // `principal`; anything else cannot be resolved at run time.
+            let known = config.domains.routing.routes.contains_key(&settings.route)
+                || config.domains.routing.pools.contains_key(&settings.route)
+                || provenant_routing::Catalogue::bundled()
+                    .is_ok_and(|catalogue| catalogue.has_pool(&settings.route));
+            let unavailable = (!known).then(|| {
+                format!(
+                    "route {} is not defined in the routing configuration",
+                    settings.route
+                )
+            });
             layers.plan = Some(planner::PlanContext {
                 mode,
                 route: settings.route.clone(),

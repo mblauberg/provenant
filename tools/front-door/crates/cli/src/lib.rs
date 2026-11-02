@@ -1018,9 +1018,7 @@ fn requirements(path: &str, name: &str) -> Vec<String> {
         (
             "provenant run" | "provenant dispatch",
             "preset_set" | "preset_params_file" | "preset_plan",
-        ) => {
-            &["preset"]
-        }
+        ) => &["preset"],
         ("provenant run" | "provenant dispatch", "deliver_remote") => {
             &["deliver_branch", "writer_target"]
         }
