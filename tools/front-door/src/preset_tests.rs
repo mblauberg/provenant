@@ -2732,6 +2732,63 @@ mod planner_front_end {
     }
 
     #[test]
+    fn linked_worktrees_come_from_git_without_the_main_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "lane",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let found = super::super::preset::linked_worktrees(&main);
+        let expected = std::fs::canonicalize(&linked)
+            .unwrap()
+            .display()
+            .to_string();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            std::fs::canonicalize(&found[0])
+                .unwrap()
+                .display()
+                .to_string(),
+            expected
+        );
+        // Outside a repository the project is only its own directory: no lanes.
+        let bare = temp.path().join("bare");
+        std::fs::create_dir(&bare).unwrap();
+        assert!(super::super::preset::linked_worktrees(&bare).is_empty());
+        // The discovered list is what the planner is offered by default.
+        let mut project = layers(PlanMode::On, None);
+        project.plan.as_mut().unwrap().worktrees = found.clone();
+        let expansion = run(&project, "big-batch", "brief", Vec::new());
+        assert_eq!(
+            expansion.document["nodes"][1]["plan"]["patterns"][0]["parameters"]["worktree"]["enum"],
+            json!(found)
+        );
+    }
+
+    #[test]
     fn any_override_beyond_the_bundled_default_counts_as_explicit() {
         let lane = "[{name='one', worktree='/w', scope=['src'], spec=''}]";
         let mut layers = layers(PlanMode::Auto, None);
@@ -3034,6 +3091,42 @@ mod planner_front_end {
     }
 
     /// The planned document is a checked-in fixture the runtime plan tests run.
+    /// A planner node whose pattern reads `root` and may take any of `values`.
+    fn reading(root: &str, values: &[String]) -> Value {
+        json!({"id": "plan", "plan": {"patterns": [{
+            "name": "lane",
+            "parameters": {"tree": {"type": "string", "enum": values}},
+            "nodes": [{"id": "lens", "read_roots": [root]}]
+        }]}})
+    }
+
+    #[test]
+    fn a_pattern_read_root_is_confined_to_the_projects_worktrees() {
+        use provenant_fabric_runtime::read_roots::ReadRoots;
+        let temp = tempfile::tempdir().unwrap();
+        let inside = temp.path().join("inside");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let policy = ReadRoots::new(vec![inside.clone()], &[]);
+        let text = |path: &std::path::Path| path.display().to_string();
+        let confine = |root: &str, values: &[String]| {
+            super::super::preset::confine_pattern_roots(&reading(root, values), &policy)
+        };
+        assert!(confine("${tree}", &[text(&inside)]).is_ok());
+        // A suffix, a prefix or a second placeholder is not a closed-list root.
+        let tree = [text(&inside)];
+        assert!(confine("${tree}/../outside", &tree).is_err());
+        assert!(confine("/x/${tree}", &tree).is_err());
+        assert!(confine("${tree}${tree}", &tree).is_err());
+        // Every value the planner may pick is confined, not only the first.
+        assert!(confine("${tree}", &[text(&inside), text(&outside)]).is_err());
+        let climbing = inside.join("..").join("outside");
+        assert!(confine("${tree}", &[text(&inside), text(&climbing)]).is_err());
+        assert!(confine("${tree}", &["inside".into()]).is_err(), "relative");
+        assert!(confine("${tree}", &[]).is_err(), "an open list");
+    }
+
     #[test]
     fn planned_big_batch_matches_its_golden_graph() {
         let expansion = run(

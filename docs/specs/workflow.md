@@ -520,7 +520,11 @@ a later wave depends on the earlier wave's barrier. A pattern's `route`,
 `routes` or `read_roots` field may be a `${parameter}` placeholder only when
 that parameter is a string with an `enum` (a closed list: route names, or the
 registered worktrees a lane's reviewers read); every other sensitive field
-(kind, access, role, source) still refuses placeholders. A budget is a bounded
+(kind, access, role, source) still refuses placeholders. A `read_roots` entry
+is exactly that one placeholder, never joined to other text, and every value of
+its `enum` is a clean absolute path with no `..`. The front-end also confines
+each value to the project's registered worktrees and `allowed_read_roots`
+before the graph is admitted, as it does a literal root. A budget is a bounded
 integer parameter whose `max` is the graph timeout
 (`limits.graph_timeout_seconds`). Graph nodes have no per-node timer, so a
 budget is advisory: it is told to the writer, and only the graph timeout is

@@ -985,6 +985,27 @@ fn pattern_read_roots_may_follow_only_a_closed_list() {
 }
 
 #[test]
+fn pattern_read_roots_must_be_the_bare_placeholder_over_clean_absolute_values() {
+    let closed = |roots: Value, values: &[&str]| {
+        let mut doc = pattern_planner(4);
+        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+        pattern.nodes[0]["read_roots"] = roots;
+        let parameter = pattern.parameters.get_mut("label").unwrap();
+        parameter.default = Some(json!(values[0]));
+        parameter.allowed = values.iter().map(|value| json!(value)).collect();
+        plans::validate_spec(&doc.nodes[0])
+    };
+    assert!(closed(json!(["${label}"]), &["/repo/a", "/repo/b"]).is_ok());
+    // A suffix lets a parameter climb out of the registered worktree.
+    assert!(closed(json!(["${label}/../../outside"]), &["/repo/a"]).is_err());
+    assert!(closed(json!(["/repo/${label}"]), &["a"]).is_err());
+    // An enum value that is relative or climbs is no read root.
+    assert!(closed(json!(["${label}"]), &["/repo/a", "/repo/../../outside"]).is_err());
+    assert!(closed(json!(["${label}"]), &["/repo/a", "../outside"]).is_err());
+    assert!(closed(json!(["${label}"]), &["/repo/a", ""]).is_err());
+}
+
+#[test]
 fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/presets/fixtures/big-batch.plan.json");

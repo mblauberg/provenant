@@ -121,6 +121,9 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
             if !named.is_empty() && !closed {
                 return Err("plan pattern cannot vary fixed authority fields by parameter");
             }
+            if key == "read_roots" && !named.is_empty() {
+                closed_read_roots(pattern, node)?;
+            }
         }
         let mut names = Vec::new();
         placeholders(node, &mut names)?;
@@ -170,6 +173,41 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
         },
     )
     .map_err(|_| "plan pattern node template")?;
+    Ok(())
+}
+
+/// A read root that follows a parameter is that parameter alone, never joined
+/// to other text, and every value the parameter may take is a clean absolute
+/// path. The host still confines each value to the project's worktrees before
+/// the graph runs; this keeps the template from composing an escape.
+fn closed_read_roots(pattern: &PatternSpec, node: &Value) -> Result<(), &'static str> {
+    const REFUSED: &str = "plan pattern read roots must be a bare parameter over absolute paths";
+    let Some(roots) = node.get("read_roots").and_then(Value::as_array) else {
+        return Err(REFUSED);
+    };
+    for root in roots {
+        let text = root.as_str().ok_or(REFUSED)?;
+        if !text.contains("${") {
+            continue;
+        }
+        let name = text
+            .strip_prefix("${")
+            .and_then(|rest| rest.strip_suffix('}'))
+            .filter(|name| !name.contains(['$', '{', '}']))
+            .ok_or(REFUSED)?;
+        let parameter = pattern.parameters.get(name).ok_or(REFUSED)?;
+        for value in &parameter.allowed {
+            let path = std::path::Path::new(value.as_str().ok_or(REFUSED)?);
+            if !path.is_absolute()
+                || path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+                || path.to_string_lossy().contains(['\0', '$'])
+            {
+                return Err(REFUSED);
+            }
+        }
+    }
     Ok(())
 }
 

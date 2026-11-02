@@ -723,6 +723,7 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
+    let checkout = project.canonicalize()?.display().to_string();
     let output = fixture_cli()
         .current_dir(&project)
         .env("PROVENANT_ROOT", &root)
@@ -731,7 +732,8 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
         .arg(temp.path().join("state"))
         .args(["run", "--preset", preset, "--prompt-file"])
         .arg(&prompt)
-        .args(extra)
+        // `{project}` names the throwaway checkout, a registered worktree.
+        .args(extra.iter().map(|arg| arg.replace("{project}", &checkout)))
         .arg("--explain")
         .output()?;
     assert!(
@@ -1317,9 +1319,9 @@ fn plan_flag_decides_and_explains_the_planner_front_end() -> Result<(), Box<dyn 
 {
     let batch = [
         "--set",
-        "parameters.batch_worktree=\".\"",
+        "parameters.batch_worktree=\"{project}\"",
         "--set",
-        "parameters.worktrees=[\".\"]",
+        "parameters.worktrees=[\"{project}\"]",
     ];
     let with = |mode: &str| -> Vec<String> {
         let mut args: Vec<String> = vec!["--plan".into(), mode.into()];

@@ -76,7 +76,7 @@ council  role=- tier=- family=any kind=composite access=read_only worktree=-
     source: {"node":"subject","type":"node"}
     inputs: [{"node":"verify","outputs":["result"]}]
   exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
-refactor  role=refactor-principal tier=principal family=any kind=- access=worktree_write worktree=.
+refactor  role=refactor-principal tier=principal family=any kind=- access=worktree_write worktree=<project>
   write_scope: ["."]
   source: {"node":"council","type":"node"}
   inputs: [{"node":"council","outputs":["result","findings","commit"]}]
@@ -84,7 +84,7 @@ refactor  role=refactor-principal tier=principal family=any kind=- access=worktr
 repair  role=- tier=- family=any kind=loop access=read_only worktree=-
   inputs: [{"node":"refactor","outputs":["result"]}]
   max_rounds: 2
-  fix  role=repairer tier=senior family=any kind=- access=worktree_write worktree=.
+  fix  role=repairer tier=senior family=any kind=- access=worktree_write worktree=<project>
     write_scope: ["."]
     inputs: [{"node":"previous.review","outputs":["result","findings"]}]
     acceptance_checks: ["Resolve accepted findings","Run targeted checks and commit"]

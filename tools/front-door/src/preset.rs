@@ -2305,10 +2305,10 @@ fn visit_nodes(
     Ok(())
 }
 
-/// The project's primary checkout and registered worktrees, which a graph node
-/// may always read. Outside a repository the project is only its own directory.
-/// The worktrees of the project `directory` belongs to, main checkout first.
-fn project_worktrees(directory: &Path) -> Vec<PathBuf> {
+/// The worktrees of the project `directory` belongs to, main checkout first,
+/// which a graph node may always read. Outside a repository the project is only
+/// its own directory.
+pub(crate) fn project_worktrees(directory: &Path) -> Vec<PathBuf> {
     crate::handoff::git_text(directory, &["worktree", "list", "--porcelain"])
         .map(|listing| {
             listing
@@ -2324,6 +2324,71 @@ fn discover_read_roots(directory: &Path, allowed: &[String], extra: &[PathBuf]) 
     let mut project = project_worktrees(directory);
     project.extend(extra.iter().cloned());
     ReadRoots::new(project, allowed)
+}
+
+/// The linked worktrees, not the main checkout, which can host a writer lane.
+pub(crate) fn linked_worktrees(directory: &Path) -> Vec<String> {
+    project_worktrees(directory)
+        .iter()
+        .skip(1)
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+/// Whether a read root is exactly one `${parameter}`, with nothing around it.
+fn bare_placeholder(text: &str) -> bool {
+    text.strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .is_some_and(|name| !name.is_empty() && !name.contains(['$', '{', '}']))
+}
+
+/// A planner pattern names a read root by a closed-list parameter. The planner
+/// can pick any listed value, so every one is confined to the project's
+/// registered worktrees and allow-list now, exactly like a literal root, and a
+/// root that is not exactly one parameter is refused.
+pub(crate) fn confine_pattern_roots(node: &Value, policy: &ReadRoots) -> Result<(), String> {
+    let Some(patterns) = node.pointer("/plan/patterns").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for pattern in patterns {
+        let name = pattern.get("name").and_then(Value::as_str).unwrap_or("?");
+        let nodes = pattern.get("nodes").and_then(Value::as_array);
+        for root in nodes
+            .into_iter()
+            .flatten()
+            .filter_map(|child| child.get("read_roots").and_then(Value::as_array))
+            .flatten()
+        {
+            let text = root.as_str().ok_or("read_roots entries must be strings")?;
+            if !text.contains("${") {
+                continue;
+            }
+            if !bare_placeholder(text) {
+                return Err(format!(
+                    "plan pattern {name}: read root {text} must be exactly one parameter"
+                ));
+            }
+            let parameter = &text[2..text.len() - 1];
+            let values = pattern
+                .pointer(&format!("/parameters/{parameter}/enum"))
+                .and_then(Value::as_array)
+                .filter(|values| !values.is_empty())
+                .ok_or_else(|| {
+                    format!("plan pattern {name}: read root {text} needs a closed list")
+                })?;
+            for value in values {
+                let path = Path::new(value.as_str().ok_or("read root values must be strings")?);
+                if !path.is_absolute() {
+                    return Err(format!(
+                        "plan pattern {name}: read root {} must be absolute",
+                        path.display()
+                    ));
+                }
+                policy.confine(path)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Bind CLI context before hashing, explaining or retaining the executed graph.
@@ -2357,6 +2422,7 @@ pub(crate) fn bind_run_context(
         .as_array_mut()
         .ok_or("missing graph nodes")?;
     visit_nodes(nodes, &mut |node| {
+        confine_pattern_roots(node, policy)?;
         let container = node.get("composite").is_some() || node.get("loop").is_some();
         if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {
             let writer = node["access"] == "worktree_write";
@@ -2398,7 +2464,8 @@ pub(crate) fn bind_run_context(
                     let text = root.as_str().ok_or("read_roots entries must be strings")?;
                     // A planner catalogue names the root by a closed-list
                     // parameter (a registered worktree); the runtime fills it.
-                    if text.starts_with("${") {
+                    // `confine_pattern_roots` has confined every value it can take.
+                    if bare_placeholder(text) {
                         confined.push(root.clone());
                         continue;
                     }
@@ -2866,12 +2933,7 @@ pub fn run(
             layers.plan = Some(planner::PlanContext {
                 mode,
                 from_cli: request.preset_plan.is_some(),
-                // Linked worktrees, not the main checkout, can host a writer lane.
-                worktrees: project_worktrees(&directory)
-                    .iter()
-                    .skip(1)
-                    .map(|path| path.display().to_string())
-                    .collect(),
+                worktrees: linked_worktrees(&directory),
                 route: settings.route.clone(),
                 lane_deadline_seconds: config.domains.fabric.limits.graph_timeout_seconds,
                 max_nodes: settings.max_nodes,

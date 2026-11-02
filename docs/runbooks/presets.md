@@ -639,7 +639,8 @@ discards them and warns. `--plan on` on a preset with no catalogue is an error
 on the command line; a configured `on` runs the static graph and says why.
 
 The planner route is resolved the way dispatch resolves it, honouring
-`--exclude`, `routing.exclude`, account evidence and quota. If it cannot serve
+`--exclude`, `routing.exclude`, account evidence and quota, and trying each pool
+member as dispatch does. If no member can serve
 (excluded, exhausted, unauthenticated, undefined), or an extending preset
 inherits `[plan]` without the stage it replaces, the preset runs its
 deterministic defaults and the reason is recorded in the graph provenance and
