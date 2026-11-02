@@ -818,7 +818,8 @@ Read-only runs use their bound repository with its Git metadata read-only.
 Lane Git output is never trusted host evidence; the host uses its own pinned
 Git and environment for evidence and settlement.
 - Why: a read grant must not permit mutations of shared Git metadata.
-- Test: `crates/providers/src/seatbelt_snapshots.rs::agy_read_only_linked_worktree_git_directories_are_not_writable`
+- Test: `crates/confinement/src/permissions/tests/render.rs::read_only_profile_reads_verified_git_and_only_writes_project_exceptions`;
+  `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`
 - Owner: `crates/providers/src/launch.rs`, `crates/confinement/src/permissions.rs`
 
 ## Lane Git and import
