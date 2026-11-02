@@ -950,25 +950,27 @@ mod tests {
 
     #[test]
     fn collection_waits_for_the_admission_lock_and_blocks_claims() {
-        let state = tempfile::tempdir().unwrap();
-        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let fixture = Fixture::new();
-        let debug = fixture.profile('a', "debug", 4096, 100);
-        let clock = provenant_os::clock::SystemClock::new();
-        let cancel = provenant_core::CancelToken::new();
-        let request = crate::Request {
-            clock: &clock,
-            cancel: &cancel,
-        };
-        // A claim in flight holds the ledger: collection refuses and deletes nothing.
-        let outcome = crate::ledger::while_admission_held(state.path(), &request, || {
-            collect(state.path(), fixture.home.path(), limits(0, 0), false).is_err()
+        provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || {
+            let state = tempfile::tempdir().unwrap();
+            fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let fixture = Fixture::new();
+            let debug = fixture.profile('a', "debug", 4096, 100);
+            let clock = provenant_os::clock::SystemClock::new();
+            let cancel = provenant_core::CancelToken::new();
+            let request = crate::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            // A claim in flight holds the ledger: collection refuses and deletes nothing.
+            let outcome = crate::ledger::while_admission_held(state.path(), &request, || {
+                collect(state.path(), fixture.home.path(), limits(0, 0), false).is_err()
+            })
+            .unwrap();
+            assert!(outcome);
+            assert!(debug.exists());
+            let report = collect(state.path(), fixture.home.path(), limits(0, 0), false).unwrap();
+            assert_eq!(report.removed, vec![debug.clone()]);
         })
-        .unwrap();
-        assert!(outcome);
-        assert!(debug.exists());
-        let report = collect(state.path(), fixture.home.path(), limits(0, 0), false).unwrap();
-        assert_eq!(report.removed, vec![debug.clone()]);
     }
 
     #[test]
