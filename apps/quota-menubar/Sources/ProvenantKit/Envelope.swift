@@ -88,6 +88,12 @@ public final class CLIClient: @unchecked Sendable {
         if run.signalled { throw ClientError.signalled(run.status) }
         if let command, let header = try? JSONDecoder().decode(Header.self, from: run.out),
            header.schemaVersion != 1 || header.command != command {
+            // The CLI answers an argument it cannot parse with a `parse` error envelope, such as an old CLI that
+            // does not know a flag. Surface it as the command error it is.
+            if header.schemaVersion == 1, header.command == "parse",
+               let error = (try? Envelope<Payload>.decode(run.out))?.error {
+                throw ClientError.command(error)
+            }
             throw ClientError.malformed("unexpected command envelope")
         }
         let envelope: Envelope<Payload>

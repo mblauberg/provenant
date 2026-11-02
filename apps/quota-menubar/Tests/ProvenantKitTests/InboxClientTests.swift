@@ -56,6 +56,33 @@ final class InboxClientTests: XCTestCase {
         _ = try? await other.call(["answer"], command: "answer", as: InboxReceipt.self)
     }
 
+    func testAnOldCLIThatRejectsHostsIsRetriedWithoutIt() async throws {
+        let seen = LockedBox<[[String]]>([])
+        let usage = #"{"schema_version":1,"command":"parse","status":"invalid","data":null,"error":{"code":"INVALID","message":"unexpected argument '--hosts' found","cause":null,"repair":"run `provenant help --all`"}}"#
+        let client = CLIClient(limit: 30) { arguments, _ in
+            seen.update { $0.append(arguments) }
+            if arguments.contains("--hosts") {
+                return CLI.Output(status: 2, signalled: false, timedOut: false, truncated: false, out: Data(usage.utf8), err: "")
+            }
+            return CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false,
+                              out: try Replay.fixture(arguments.contains("--cursor") ? "inbox-page2" : "inbox-page1"), err: "")
+        }
+        let page = try await InboxClient(cli: client).list()
+        XCTAssertEqual(page.items.count, 3)
+        XCTAssertNil(page.peers)
+        let calls = seen.value
+        XCTAssertEqual(calls.count, 3, "one refused call, one retry, one cursor page")
+        XCTAssertEqual(calls.map { $0.contains("--hosts") }, [true, false, false])
+        // A usage error that does not name --hosts is not retried.
+        let other = CLIClient(limit: 30) { _, _ in
+            CLI.Output(status: 2, signalled: false, timedOut: false, truncated: false,
+                       out: Data(usage.replacingOccurrences(of: "--hosts", with: "--state").utf8), err: "")
+        }
+        do { _ = try await InboxClient(cli: other).list(); XCTFail("expected an error") } catch let error as ClientError {
+            XCTAssertEqual(error.code, "INVALID")
+        }
+    }
+
     func testPeerRowsCarryTheirHostLabelProjectAndCoverage() async throws {
         let replay = Replay([(["inbox"], "inbox-peers-complete", 0)])
         let page = try await InboxClient(cli: replay.client).list()

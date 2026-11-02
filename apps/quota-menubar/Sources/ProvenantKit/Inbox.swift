@@ -235,15 +235,36 @@ public struct InboxClient: Sendable {
 
     /// Requests across pages, in the CLI's order, from every registered project on the host.
     public func list(includeClosed: Bool = false, pageSize: Int = 50, maxPages: Int = 10) async throws -> Page<HumanRequest> {
-        try await collectPages(maxPages: maxPages) { cursor in
+        // An old CLI does not know `--hosts`; once it has said so, the rest of the listing is this host's rows.
+        let hosts = HostsFlag()
+        return try await collectPages(maxPages: maxPages) { cursor in
             var arguments = ["inbox", "--all-projects", "--state", includeClosed ? "all" : "open", "--limit", String(pageSize)]
             // Peers are read on the first page only; a cursor page is this host's rows.
-            if let cursor { arguments += ["--cursor", cursor] } else { arguments += ["--hosts", "all"] }
+            if let cursor { arguments += ["--cursor", cursor] }
+            let withPeers = cursor == nil && hosts.supported
             // The peer fan-out waits up to the configured peer deadline (30 s by default) after the local listing, so
             // a call that asks for peers gets a longer budget than that; otherwise an unreachable peer would time
             // out the call and hide the local rows.
-            let listed = try await cli.call(arguments, command: "inbox", limit: cursor == nil ? Self.peerListLimit : nil, as: Listed.self)
-            return Page(items: Self.attribute(listed), nextCursor: listed.nextCursor, truncated: listed.truncated, peers: listed.peers)
+            do {
+                let listed = try await cli.call(arguments + (withPeers ? ["--hosts", "all"] : []), command: "inbox",
+                                                limit: withPeers ? Self.peerListLimit : nil, as: Listed.self)
+                return Page(items: Self.attribute(listed), nextCursor: listed.nextCursor, truncated: listed.truncated, peers: listed.peers)
+            } catch let error as ClientError where withPeers && Self.rejectsHosts(error) {
+                hosts.supported = false
+                let listed = try await cli.call(arguments, command: "inbox", as: Listed.self)
+                return Page(items: Self.attribute(listed), nextCursor: listed.nextCursor, truncated: listed.truncated, peers: listed.peers)
+            }
+        }
+    }
+
+    private final class HostsFlag: @unchecked Sendable { var supported = true }
+
+    /// True when the CLI refused the call as a usage error that names `--hosts`: an old CLI without the flag.
+    static func rejectsHosts(_ error: ClientError) -> Bool {
+        switch error {
+        case .command(let error): error.code == "INVALID" && error.message.contains("--hosts")
+        case .exited(_, let detail): detail.contains("--hosts")
+        default: false
         }
     }
 

@@ -37,7 +37,7 @@ struct RequestRow: View {
                     if let staleSince {
                         Label("Stale since \(Stamp.relative(staleSince, now: now))", systemImage: "clock.arrow.circlepath")
                             .font(.caption2.weight(.medium))
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.secondary)
                             .help("Its host did not answer at the last refresh. This is the last row it gave.")
                     }
                     Text(request.projectPrefix + "Session \(request.sessionTitle)")
