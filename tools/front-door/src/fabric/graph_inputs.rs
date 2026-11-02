@@ -219,7 +219,13 @@ pub(super) fn materialise(
             ));
             continue;
         }
-        remaining -= kept.len();
+        // A cut ends the budget even when a UTF-8 boundary left a few bytes,
+        // so later results are reported as capped rather than written as stubs.
+        remaining = if omitted > 0 {
+            0
+        } else {
+            remaining - kept.len()
+        };
         entries.push(MaterialisedInput::File {
             label: request.label.clone(),
             path: path.join(&name),
