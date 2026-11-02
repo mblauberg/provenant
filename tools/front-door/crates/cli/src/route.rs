@@ -2756,13 +2756,18 @@ mod route_tests {
         assert_ne!(redrawn.account_key.as_deref(), Some(spent.as_str()));
         // A pinned account is the caller's choice and is never swapped.
         // It resolves as unavailable with the typed reason rather than ready.
-        assert!(matches!(
-            resolve(Some(&spent))?.readiness,
-            RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::ProviderRefused,
-                ..
-            }
-        ));
+        let RouteReadiness::Unavailable { reason, .. } = resolve(Some(&spent))?.readiness else {
+            return Err("a pinned refused account must be unavailable".into());
+        };
+        assert_eq!(
+            reason,
+            provenant_records::RouteExclusionReason::ProviderRefused
+        );
+        // The unavailable reason keeps the repair text, not a debug name.
+        assert_eq!(
+            provenant_routing::exclusion_detail(&reason),
+            "scoped provider refusal"
+        );
         Ok(())
     }
 

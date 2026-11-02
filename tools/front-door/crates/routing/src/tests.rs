@@ -4291,6 +4291,25 @@ fn invalid_account_evidence_excludes_only_that_account() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn account_evidence_reasons_carry_their_repair_text() {
+    for (reason, text) in [
+        (RouteExclusionReason::AccountMismatch, "re-register"),
+        (RouteExclusionReason::FreeTierRefused, "paid route"),
+        (
+            RouteExclusionReason::ProviderRefused,
+            "scoped provider refusal",
+        ),
+        (RouteExclusionReason::InvalidAccountEvidence, "invalid"),
+    ] {
+        assert!(exclusion_detail(&reason).contains(text), "{reason:?}");
+    }
+    assert_eq!(
+        exclusion_detail(&RouteExclusionReason::Exhausted),
+        "Exhausted"
+    );
+}
+
+#[test]
 fn free_pool_refusal_excludes_the_account_for_every_free_model()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;

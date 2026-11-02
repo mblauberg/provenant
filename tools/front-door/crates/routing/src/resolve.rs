@@ -1050,6 +1050,24 @@ fn account_reason<'q>(
     }
     (reason, quota)
 }
+/// How a route's unavailability reads to a person. Account evidence carries the
+/// quota repair text, so a refused or mismatched account says what to do next.
+pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
+    match reason {
+        RouteExclusionReason::AccountMismatch => provenant_quota::AccountBlock::Mismatch.repair(),
+        RouteExclusionReason::FreeTierRefused => {
+            provenant_quota::AccountBlock::FreeTierRefusal.repair()
+        }
+        RouteExclusionReason::ProviderRefused => {
+            provenant_quota::AccountBlock::ScopedRefusal.repair()
+        }
+        RouteExclusionReason::InvalidAccountEvidence => {
+            "invalid persisted account evidence; repair or re-register the account"
+        }
+        other => return format!("{other:?}"),
+    }
+    .to_owned()
+}
 /// Persisted mismatch or refusal evidence, assessed by the same quota function
 /// that admission rechecks before launch. Invalid evidence excludes only the
 /// account it belongs to; it is never read as proof the account is ready.
