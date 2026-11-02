@@ -40,7 +40,7 @@ fn command_error(program: &str, error: ExecError) -> ProbeFailure {
         ExecError::Io {
             operation: "spawn",
             source,
-        } if source.raw_os_error() == Some(libc_enoexec())
+        } if source.raw_os_error() == Some(ENOEXEC)
             || (matches!(
                 source.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
@@ -51,15 +51,14 @@ fn command_error(program: &str, error: ExecError) -> ProbeFailure {
         _ => ProbeFailure::Network,
     }
 }
-const fn libc_enoexec() -> i32 {
-    8
-}
-/// Whether `program` resolves, directly or through `PATH`, to an executable file.
+/// `ENOEXEC`: the same value on Linux and macOS.
+const ENOEXEC: i32 = 8;
+/// Whether `program` resolves to a file this user can execute, directly or
+/// through `PATH`. The probe runs in its own private directory, so a relative
+/// program path or `PATH` entry cannot resolve there and counts as absent.
 fn runnable(program: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
     let executable = |path: &Path| {
-        fs::metadata(path)
-            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        path.is_absolute() && path.is_file() && provenant_os::sys::is_executable(path)
     };
     if program.contains('/') {
         return executable(Path::new(program));
@@ -627,9 +626,23 @@ mod tests {
             assert_eq!(command_error("/bin/sh", spawn(kind)), ProbeFailure::Network);
             assert_eq!(command_error("sh", spawn(kind)), ProbeFailure::Network);
         }
+        // Present but not executable by this user, or reachable only through a
+        // relative path that cannot resolve in the private probe directory.
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("provenant-probe");
+        fs::write(&plain, "").unwrap();
+        let plain = plain.to_str().unwrap();
+        let relative = "bin/provenant-probe";
+        for program in [plain, relative] {
+            assert_eq!(
+                command_error(program, spawn(std::io::ErrorKind::PermissionDenied)),
+                ProbeFailure::MissingCli,
+                "{program}"
+            );
+        }
         let not_executable = ExecError::Io {
             operation: "spawn",
-            source: std::io::Error::from_raw_os_error(libc_enoexec()),
+            source: std::io::Error::from_raw_os_error(ENOEXEC),
         };
         assert_eq!(
             command_error("/bin/sh", not_executable),
