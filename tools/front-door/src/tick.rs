@@ -261,7 +261,7 @@ fn refresh_projects(
     for project in projects {
         match refresh(project) {
             Ok(Refresh::Built(_)) => pass.built += 1,
-            Ok(Refresh::Current) => pass.current += 1,
+            Ok(Refresh::Current | Refresh::BackedOff) => pass.current += 1,
             Ok(Refresh::Busy) => pass.busy += 1,
             Err(error) => pass.errors.push(format!("{}: {error}", project.display())),
         }

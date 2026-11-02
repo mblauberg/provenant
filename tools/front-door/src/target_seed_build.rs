@@ -141,6 +141,9 @@ pub enum Refresh {
     Busy,
     /// A new generation was published.
     Built(String),
+    /// The last build of this exact commit failed; it is not retried until
+    /// `origin/main` moves.
+    BackedOff,
 }
 
 /// Rebuild the seed when `origin/main` has moved past the newest complete
@@ -158,16 +161,64 @@ pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refresh_with(state, &commit, |stage| build_into(stage, project, &commit))
 }
 
+/// Raised under the build lock when another refresher published this commit
+/// while we waited for it.
+#[derive(Debug)]
+struct AlreadyCurrent;
+impl std::fmt::Display for AlreadyCurrent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("seed already current")
+    }
+}
+impl Error for AlreadyCurrent {}
+
+const FAILED_COMMIT: &str = "last-failed-commit";
+
+/// The commit whose build last failed, so a broken `origin/main` is not
+/// rebuilt every tick. A new commit differs and so clears the back-off.
+fn failed_commit(state: &Path) -> Option<String> {
+    fs::read_to_string(target_seed::store_path(state).join(FAILED_COMMIT))
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
 fn refresh_with(
     state: &Path,
     head: &str,
     build: impl FnOnce(&Path) -> Result<Manifest>,
 ) -> Result<Refresh> {
+    refresh_racing(state, head, || {}, build)
+}
+
+/// `between` runs after the unlocked staleness check and before the build
+/// lock: the window another refresher can publish in.
+fn refresh_racing(
+    state: &Path,
+    head: &str,
+    between: impl FnOnce(),
+    build: impl FnOnce(&Path) -> Result<Manifest>,
+) -> Result<Refresh> {
     if newest_generation_commit(state).as_deref() == Some(head) {
         return Ok(Refresh::Current);
     }
-    match publish(state, build) {
-        Ok(id) => Ok(Refresh::Built(id)),
+    if failed_commit(state).as_deref() == Some(head) {
+        return Ok(Refresh::BackedOff);
+    }
+    // Another refresher may publish this commit between the check above and
+    // our taking the build lock, so look again once we hold it.
+    between();
+    let result = publish(state, |stage| {
+        if newest_generation_commit(state).as_deref() == Some(head) {
+            return Err(AlreadyCurrent.into());
+        }
+        build(stage)
+    });
+    match result {
+        Ok(id) => {
+            let _ = fs::remove_file(target_seed::store_path(state).join(FAILED_COMMIT));
+            Ok(Refresh::Built(id))
+        }
+        Err(error) if error.is::<AlreadyCurrent>() => Ok(Refresh::Current),
         Err(error)
             if matches!(
                 error.downcast_ref::<provenant_os::fs::FsError>(),
@@ -176,7 +227,13 @@ fn refresh_with(
         {
             Ok(Refresh::Busy)
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            let _ = fs::write(
+                target_seed::store_path(state).join(FAILED_COMMIT),
+                format!("{head}\n"),
+            );
+            Err(error)
+        }
     }
 }
 
@@ -487,10 +544,40 @@ mod tests {
         });
         assert!(failed.is_err());
         assert_eq!(newest_generation_commit(state.path()), None);
+        // The failed commit is backed off; a newer commit builds again.
+        assert_eq!(
+            refresh_with(state.path(), "aaa", |_| panic!(
+                "must not rebuild a failed commit"
+            ))
+            .unwrap(),
+            Refresh::BackedOff
+        );
         assert!(matches!(
-            refresh_with(state.path(), "aaa", |stage| built(stage, "aaa")).unwrap(),
+            refresh_with(state.path(), "bbb", |stage| built(stage, "bbb")).unwrap(),
             Refresh::Built(_)
         ));
+        assert_eq!(
+            failed_commit(state.path()),
+            None,
+            "success clears the back-off"
+        );
+        freeze(state.path());
+    }
+
+    #[test]
+    fn refresh_rechecks_staleness_after_taking_the_build_lock() {
+        let state = tempfile::tempdir().unwrap();
+        let outcome = refresh_racing(
+            state.path(),
+            "aaa",
+            || {
+                publish(state.path(), |stage| built(stage, "aaa")).unwrap();
+            },
+            |_| panic!("the racing publisher already built this commit"),
+        )
+        .unwrap();
+        assert_eq!(outcome, Refresh::Current);
+        assert_eq!(failed_commit(state.path()), None);
         freeze(state.path());
     }
 
