@@ -1,5 +1,5 @@
 {
-  "$id": "https://provenant.dev/schemas/v2/error.schema.json",
+  "$id": "https://provenant.dev/schemas/v1/error.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "A refused or failed command: `error` is set.",
@@ -47,7 +47,7 @@
       "type": "object"
     },
     "schema_version": {
-      "const": 2
+      "const": 1
     },
     "status": {
       "enum": [

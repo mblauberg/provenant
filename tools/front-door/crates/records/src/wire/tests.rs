@@ -325,13 +325,13 @@ fn envelopes_validate_for_every_command_and_for_errors() {
     }
     let lanes = command_schema("lanes").unwrap();
     let ok = json!({
-        "schema_version": SCHEMA_VERSION, "command": "lanes", "status": "ok",
+        "schema_version": ENVELOPE_VERSION, "command": "lanes", "status": "ok",
         "data": serde_json::to_value(list(vec![row()])).unwrap(), "error": null
     });
     validate(&lanes, &ok).unwrap();
     // A failed command carries null data and the error envelope.
     let failed = json!({
-        "schema_version": SCHEMA_VERSION, "command": "lanes", "status": "failed", "data": null,
+        "schema_version": ENVELOPE_VERSION, "command": "lanes", "status": "failed", "data": null,
         "error": {"code": "NOT_FOUND", "message": "m", "cause": null, "repair": null}
     });
     validate(&lanes, &failed).unwrap();
@@ -347,12 +347,17 @@ fn envelopes_validate_for_every_command_and_for_errors() {
     let mut invalid = ok.clone();
     invalid["data"] = Value::Null;
     rejected(&lanes, invalid);
-    let mut invalid = failed.clone();
-    invalid["error"] = Value::Null;
-    rejected(&lanes, invalid);
-    let mut stale = ok.clone();
-    stale["schema_version"] = json!(1);
-    assert!(validate(&lanes, &stale).is_err());
+    // The CLI emits non-ok statuses without an error on some paths.
+    let mut unerrored = failed.clone();
+    unerrored["error"] = Value::Null;
+    validate(&lanes, &unerrored).unwrap();
+    assert!(validate(&errors, &unerrored).is_err());
+    let mut ok_with_error = ok.clone();
+    ok_with_error["error"] = failed["error"].clone();
+    rejected(&lanes, ok_with_error);
+    let mut planned = ok.clone();
+    planned["schema_version"] = json!(SCHEMA_VERSION);
+    rejected(&lanes, planned);
     let mut wrong = ok;
     wrong["command"] = json!("status");
     assert!(validate(&lanes, &wrong).is_err());
@@ -366,21 +371,23 @@ fn envelopes_validate_for_every_command_and_for_errors() {
 
 #[test]
 fn status_values_match_the_envelope_enum() {
-    // Exhaustive: a new Outcome fails to compile here until ALL lists it.
-    for outcome in Outcome::ALL {
-        match outcome {
-            Outcome::Ok
-            | Outcome::Failed
-            | Outcome::Refused
-            | Outcome::Invalid
-            | Outcome::Error
-            | Outcome::Unavailable
-            | Outcome::Timeout
-            | Outcome::Cancelled
-            | Outcome::Pending
-            | Outcome::Waiting => {}
-        }
-    }
+    // Exhaustive: a new Outcome fails to compile here until it gets an index,
+    // and then ALL must list every index.
+    const VARIANTS: usize = 10;
+    let index = |outcome: Outcome| match outcome {
+        Outcome::Ok => 0,
+        Outcome::Failed => 1,
+        Outcome::Refused => 2,
+        Outcome::Invalid => 3,
+        Outcome::Error => 4,
+        Outcome::Unavailable => 5,
+        Outcome::Timeout => 6,
+        Outcome::Cancelled => 7,
+        Outcome::Pending => 8,
+        Outcome::Waiting => 9,
+    };
+    let listed: std::collections::BTreeSet<usize> = Outcome::ALL.into_iter().map(index).collect();
+    assert_eq!(listed, (0..VARIANTS).collect());
     let unique: std::collections::BTreeSet<_> = outcome_names().into_iter().collect();
     assert_eq!(unique.len(), Outcome::ALL.len());
 }
@@ -517,11 +524,105 @@ fn published_set_is_stable_versioned_and_self_describing() {
     }
     for (name, schema) in files.iter().filter(|(name, _)| !name.starts_with("mcp/")) {
         assert_eq!(
-            schema["properties"]["schema_version"]["const"], SCHEMA_VERSION,
+            schema["properties"]["schema_version"]["const"], ENVELOPE_VERSION,
             "{name}"
         );
     }
     assert_eq!(files, published(), "publication must be deterministic");
     assert!(command_schema("worktree").is_none());
     assert!(mcp_output_schema("fabric_mail").is_none());
+}
+
+fn cli_envelope(command: &str, status: &str, data: Value, error: Value) -> Value {
+    json!({
+        "schema_version": 1, "command": command, "status": status,
+        "data": data, "error": error
+    })
+}
+
+#[test]
+fn current_cli_failure_envelopes_validate() {
+    let lanes = command_schema("lanes").unwrap();
+    let cancel = command_schema("cancel").unwrap();
+    let list = serde_json::to_value(list(vec![row()])).unwrap();
+    // `lanes --wait` timing out: partial data, no error object.
+    validate(
+        &lanes,
+        &cli_envelope("lanes", "timeout", list.clone(), Value::Null),
+    )
+    .unwrap();
+    validate(&lanes, &cli_envelope("lanes", "ok", list, Value::Null)).unwrap();
+    // Cancel with an unobservable receipt: failed, no error object.
+    let unobservable = json!({"operation_id": "o", "receipts": [
+        {"attempt_id": "a", "receipt": {"state": "unobservable", "reason": "no launch summary"}}
+    ]});
+    validate(
+        &cancel,
+        &cli_envelope("cancel", "failed", unobservable, Value::Null),
+    )
+    .unwrap();
+    // Cancel timeout without an error.
+    validate(
+        &cancel,
+        &cli_envelope(
+            "cancel",
+            "timeout",
+            json!({"operation_id": "o", "receipts": [], "timed_out": true}),
+            Value::Null,
+        ),
+    )
+    .unwrap();
+    // Cancel failure: `data` is `{operation_id}` only, with an error set.
+    let failure = cli_envelope(
+        "cancel",
+        "failed",
+        json!({"operation_id": "o"}),
+        json!({"code": "NOT_FOUND", "message": "m", "cause": null, "repair": null}),
+    );
+    validate(&cancel, &failure).unwrap();
+    validate(&error_envelope_schema(), &failure).unwrap();
+    // The success shape still needs its receipts, and malformed data is refused.
+    rejected(
+        &cancel,
+        cli_envelope("cancel", "ok", json!({"operation_id": "o"}), Value::Null),
+    );
+    rejected(
+        &cancel,
+        cli_envelope("cancel", "ok", json!({"receipts": []}), Value::Null),
+    );
+    rejected(
+        &lanes,
+        cli_envelope("lanes", "ok", Value::Null, Value::Null),
+    );
+    rejected(
+        &lanes,
+        cli_envelope("lanes", "timeout", Value::Null, json!({"code": "X"})),
+    );
+    rejected(
+        &lanes,
+        cli_envelope("lanes", "bogus", Value::Null, Value::Null),
+    );
+}
+
+#[test]
+fn version_one_envelopes_validate_and_version_two_is_planned_only() {
+    let lanes = command_schema("lanes").unwrap();
+    let cancel = command_schema("cancel").unwrap();
+    let list = serde_json::to_value(list(vec![row()])).unwrap();
+    let receipts = json!({"operation_id": "o", "receipts": []});
+    validate(
+        &lanes,
+        &cli_envelope("lanes", "ok", list.clone(), Value::Null),
+    )
+    .unwrap();
+    validate(
+        &cancel,
+        &cli_envelope("cancel", "ok", receipts.clone(), Value::Null),
+    )
+    .unwrap();
+    for (schema, command, data) in [(&lanes, "lanes", list), (&cancel, "cancel", receipts)] {
+        let mut planned = cli_envelope(command, "ok", data, Value::Null);
+        planned["schema_version"] = json!(SCHEMA_VERSION);
+        rejected(schema, planned);
+    }
 }

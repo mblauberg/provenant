@@ -53,7 +53,7 @@ pub struct OutputChunk {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum OutputData {
-    /// `--part trace`: the launch trace and grants.
+    /// `--trace`: the launch trace and grants.
     Trace {
         attempt_id: String,
         trace: Value,

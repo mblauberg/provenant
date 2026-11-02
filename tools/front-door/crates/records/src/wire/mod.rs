@@ -7,13 +7,23 @@
 //!
 //! # Versioning
 //!
-//! [`SCHEMA_VERSION`] versions the envelope and every data schema together. It
-//! is bumped on any change that an existing consumer could misread; there is no
-//! dual-emit period (chair decision, 2 Nov 2026). Version 2 is the first typed
-//! generation: `status` and `lanes` share one lane row, and `output` and
-//! `cancel` have typed variants. The envelope an edge emits still reads
-//! version 1 until the projection lane moves callers onto these types and
-//! flips the emitted number in the same change.
+//! [`ENVELOPE_VERSION`] is the `schema_version` the CLI emits today
+//! (`CommandResult::new`), and the published command schemas require it, so
+//! they accept current `--json` output. [`SCHEMA_VERSION`] (2) is the planned
+//! typed generation, which is not emitted yet: it will be bumped to in one
+//! change with the callers, with no dual-emit period (chair decision, 2 Nov
+//! 2026). The one exception to "accepts current output" is `status`: its `data`
+//! schema is the planned lane-row shape, while the CLI still emits raw attempt
+//! records and a numeric cursor.
+//!
+//! # Failure envelopes
+//!
+//! A non-ok status may carry `error: null` (`lanes --wait` timeout, cancel
+//! receipts that are unobservable) and may carry partial `data` that is not the
+//! command's success shape (a failed cancel reports `{operation_id}` only).
+//! So command schemas leave `data` unconstrained on non-ok statuses and accept
+//! a null or set `error`; `error.schema.json` validates only failures that
+//! carry an error object.
 pub mod cancel;
 pub mod error;
 pub mod lane;
@@ -32,11 +42,14 @@ pub use error::{CodeKind, EDGE_ERROR_CODES, EdgeErrorCode, error_schema};
 pub use lane::{LaneList, LaneRow, LaneSettlement, LaneTranscript, provider_seconds};
 pub use output::{ChunkBytes, OutputChunk, OutputData, ReviewerReceipt};
 
-/// Version of the typed wire contract; see the module notes.
+/// Version of the planned typed wire contract; see the module notes.
 pub const SCHEMA_VERSION: u64 = 2;
 
+/// The `schema_version` the CLI envelope carries today.
+pub const ENVELOPE_VERSION: u64 = 1;
+
 /// Base of the `$id` of every published schema.
-pub const SCHEMA_ID_BASE: &str = "https://provenant.dev/schemas/v2/";
+pub const SCHEMA_ID_BASE: &str = "https://provenant.dev/schemas/v1/";
 
 /// CLI commands with a typed `data` schema, in publication order. The name is
 /// the envelope's `command` member.
@@ -54,14 +67,15 @@ fn outcome_names() -> Vec<String> {
         .collect()
 }
 
-/// The envelope schema around a `data` schema. `data` may be null when the
-/// command failed before producing any.
+/// The envelope schema around a `data` schema. `data` is checked against it
+/// only for ok, pending and waiting; other statuses may carry null or partial
+/// data and a null or set `error`.
 pub fn envelope_schema(command: &str, data: Value) -> Value {
     let statuses = outcome_names();
     let statuses: Vec<&str> = statuses.iter().map(String::as_str).collect();
     let mut schema = object(
         &[
-            ("schema_version", constant(SCHEMA_VERSION)),
+            ("schema_version", constant(ENVELOPE_VERSION)),
             (
                 "command",
                 if command.is_empty() {
@@ -71,14 +85,19 @@ pub fn envelope_schema(command: &str, data: Value) -> Value {
                 },
             ),
             ("status", choices(&statuses)),
-            ("data", nullable(data.clone())),
+            ("data", json!({})),
             ("error", nullable(error_schema())),
         ],
         &[],
     );
+    let failures: Vec<&str> = statuses
+        .iter()
+        .copied()
+        .filter(|name| !matches!(*name, "ok" | "pending" | "waiting"))
+        .collect();
     schema["oneOf"] = json!([
         {"properties": {"status": {"enum": ["ok", "pending", "waiting"]}, "data": data, "error": {"type": "null"}}},
-        {"properties": {"status": {"enum": ["failed", "refused", "invalid", "error", "unavailable", "timeout", "cancelled"]}, "error": error_schema()}}
+        {"properties": {"status": {"enum": failures}}}
     ]);
     schema
 }
@@ -113,7 +132,7 @@ pub fn error_envelope_schema() -> Value {
     let statuses: Vec<&str> = statuses.iter().map(String::as_str).collect();
     let mut schema = object(
         &[
-            ("schema_version", constant(SCHEMA_VERSION)),
+            ("schema_version", constant(ENVELOPE_VERSION)),
             ("command", string()),
             ("status", choices(&statuses)),
             ("data", json!({})),
@@ -123,6 +142,7 @@ pub fn error_envelope_schema() -> Value {
     );
     if let Some(map) = schema.as_object_mut() {
         // Failed commands may still carry partial data (cancel receipts).
+        // Failures with `error: null` are valid in the command schemas only.
         map.insert(
             "description".into(),
             "A refused or failed command: `error` is set.".into(),

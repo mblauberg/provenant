@@ -4,13 +4,19 @@
 
 Source: `provenant-records print-wire-schemas`.
 
-These JSON Schemas (draft 2020-12) describe planned schema_version 2 contracts.
-The CLI and MCP do not emit these types yet; current CLI `--json` is version 1.
-Status currently emits raw attempt records and a numeric next_cursor; the
-planned typed status uses lane rows and a string cursor. MCP schemas describe
-planned structuredContent. `schema_version` is bumped for
-any change an existing consumer could misread; a new version replaces the old
-one with no dual-emit period.
+These JSON Schemas (draft 2020-12) describe the `--json` envelope the CLI emits
+today (`schema_version` 1) for `lanes`, `cancel` and `output`. `status` is the exception:
+its envelope matches, but its `data` is the planned typed shape (lane rows and a
+string cursor), while the CLI still emits raw attempt records and a numeric
+next_cursor. MCP schemas describe planned structuredContent. Version 2 is the
+planned typed generation and is not emitted yet; `schema_version` is bumped for any
+change an existing consumer could misread, with no dual-emit period.
+
+A non-ok status may carry `error: null` (for example a `lanes --wait` timeout or an
+unobservable cancel) and partial `data`, so the command schemas check `data` only
+for `ok`, `pending` and `waiting`. A failed cancel carries `data: {operation_id}`
+with no `receipts`. Validate failures that carry an `error` object against
+[`error.schema.json`](schemas/error.schema.json).
 
 | Schema | Describes |
 |---|---|
