@@ -280,7 +280,11 @@ pub fn collect(
             lane,
             &branch,
             &output_settings,
-            &|| (policy.terminal)(&lane.path) && (policy.no_live_lanes)(&lane.path),
+            &|| {
+                (policy.terminal)(&lane.path)
+                    && (policy.no_live_lanes)(&lane.path)
+                    && census_free(context, &lane.path)
+            },
             cancel,
             &mut report.worktrees,
         ) {
@@ -288,6 +292,16 @@ pub fn collect(
         }
     }
     Ok(report)
+}
+
+/// Removal needs a fresh positive census. Custody accepts an unobservable
+/// process for ordinary removal; deleting a tree automatically does not.
+fn census_free(context: &WorktreeContext<'_>, path: &Path) -> bool {
+    context
+        .workers
+        .observe_roots(std::slice::from_ref(&path.to_path_buf()))
+        .get(path)
+        == Some(&WorkerState::Free)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -875,13 +889,7 @@ fn collect_foreign(
             {
                 return Err(WorktreeError::IdentityChanged);
             }
-            if context
-                .workers
-                .observe_roots(std::slice::from_ref(&lane.path))
-                .get(&lane.path)
-                != Some(&WorkerState::Free)
-                || !(policy.no_live_lanes)(&lane.path)
-            {
+            if !census_free(context, &lane.path) || !(policy.no_live_lanes)(&lane.path) {
                 return Err(WorktreeError::UnknownWriter);
             }
             match worktree_dirty_at(context, verified.repo(), cancel)? {
@@ -932,14 +940,7 @@ fn collect_foreign(
             lane,
             branch,
             &settings,
-            &|| {
-                (policy.no_live_lanes)(&lane.path)
-                    && context
-                        .workers
-                        .observe_roots(std::slice::from_ref(&lane.path))
-                        .get(&lane.path)
-                        == Some(&WorkerState::Free)
-            },
+            &|| (policy.no_live_lanes)(&lane.path) && census_free(context, &lane.path),
             cancel,
             outcome,
         )?;

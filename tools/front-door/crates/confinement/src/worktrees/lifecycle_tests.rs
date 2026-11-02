@@ -2087,6 +2087,85 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Free until the `unknown_from`th call (1-based), then unobservable.
+struct FlippingWorkers {
+    calls: std::sync::atomic::AtomicUsize,
+    unknown_from: usize,
+}
+
+impl WorkerObserver for FlippingWorkers {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let state = if call >= self.unknown_from {
+            WorkerState::Unknown
+        } else {
+            WorkerState::Free
+        };
+        roots.iter().cloned().map(|root| (root, state)).collect()
+    }
+}
+
+#[test]
+fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Box<dyn Error>> {
+    // Count the censuses of an uninterrupted removal, then make the last one
+    // fail: a tree whose census turns unobservable after selection is kept.
+    let mut total = usize::MAX;
+    for unknown_from in [usize::MAX, 0] {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let mut context = test_context.context();
+        let lane = gc_merged_worktree(&fixture, &context, "gc-census-flip")?;
+        let upstream = fixture.head()?;
+        let run = |context: &WorktreeContext<'_>| {
+            collect(
+                context,
+                std::slice::from_ref(&lane),
+                &WorktreeGcPolicy {
+                    foreign_merged_clean: false,
+                    upstream: Some(upstream),
+                    terminal: &|_| true,
+                    no_live_lanes: &|_| true,
+                    regenerable: &[],
+                    keep: &[],
+                    written_before_ns: i128::MAX,
+                    dry_run: false,
+                },
+                &cancel(),
+            )
+        };
+        if total == usize::MAX {
+            let counting = FlippingWorkers {
+                calls: Default::default(),
+                unknown_from,
+            };
+            context.workers = &counting;
+            let report = run(&context)?;
+            assert_eq!(report.worktrees.removed.len(), 1, "{report:?}");
+            total = counting.calls.load(std::sync::atomic::Ordering::SeqCst);
+            // The removal censuses come after the one that listed the lane.
+            assert!(total >= 2, "{total}");
+            continue;
+        }
+        let flipping = FlippingWorkers {
+            calls: Default::default(),
+            unknown_from: total,
+        };
+        context.workers = &flipping;
+        let report = run(&context)?;
+        assert!(report.worktrees.removed.is_empty(), "{report:?}");
+        assert_eq!(
+            report.worktrees.retained,
+            vec![RetainedBranch {
+                branch: "gc-census-flip".into(),
+                reason: RetainReason::UnknownWriter,
+            }]
+        );
+        assert!(lane.path.is_dir());
+        assert!(branch_exists(&fixture, "gc-census-flip"));
+    }
+    Ok(())
+}
+
 #[test]
 fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
