@@ -187,6 +187,7 @@ jobs:
           tool: cargo-nextest@0.9.149
       - name: Validate flaky-test quarantine
         id: quarantine
+        working-directory: tools/front-door
         run: |
           filter="$(../../scripts/flaky-quarantine)"
           printf '%s\n' "$filter" > "$RUNNER_TEMP/quarantine-filter"
