@@ -95,6 +95,26 @@ pub struct TestRig {
     pub env: Vec<(OsString, OsString)>,
     executor: SystemExecutor,
 }
+/// Launches in a rig create short `TMPDIR` aliases in the shared `/private/tmp`.
+/// Settlement unlinks them, but a test that ends mid-attempt would leave them
+/// dangling, so the rig unlinks every alias that points inside it.
+impl Drop for TestRig {
+    fn drop(&mut self) {
+        let Ok(entries) = fs::read_dir("/private/tmp") else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ours = entry.file_name().to_string_lossy().starts_with("pv-")
+                && fs::read_link(&path).is_ok_and(|target| target.starts_with(&self.root));
+            if ours {
+                // A symlink: this unlinks the alias, never its target.
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
 impl TestRig {
     /// Serialise process creation with executable copies in this test binary.
     pub fn with_process_spawn_lock<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
