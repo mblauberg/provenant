@@ -24,6 +24,10 @@ pub struct RoutingContext<'a> {
     pub availability: &'a [AvailabilityRecord],
     pub quota: &'a [QuotaObservation],
     pub capacity_cooldowns: &'a [provenant_quota::CapacityCooldown],
+    /// Calibrated account records and the policies that date their freshness.
+    /// They supply persisted mismatch and refusal evidence only.
+    pub accounts: &'a [provenant_quota::AccountRecord],
+    pub quota_policies: &'a [provenant_quota::QuotaPolicy],
     pub access: &'a [AccessContext<'a>],
     pub now: provenant_core::WallTime,
     pub host: &'a str,
@@ -988,13 +992,18 @@ fn account_reason<'q>(
     availability: &AvailabilityRecord,
     access: Option<&AccessContext<'_>>,
     context: &'q RoutingContext<'_>,
-) -> (Option<RouteExclusionReason>, Option<&'q QuotaObservation>) {
+) -> Result<(Option<RouteExclusionReason>, Option<&'q QuotaObservation>), RoutingError> {
     let mut reason = availability_reason(Some(availability), context);
     if reason.is_none() && access.is_none_or(|a| a.disclosure_ref.is_empty()) {
         reason = Some(RouteExclusionReason::DisclosureDenied);
     }
     if reason.is_none() && access.is_none_or(|a| a.confinement_ref.is_empty()) {
         reason = Some(RouteExclusionReason::ConfinementUnavailable);
+    }
+    if reason.is_none()
+        && let Some(key) = availability.account_key.as_deref()
+    {
+        reason = account_block_reason(model, key, context)?;
     }
     // Explicit exact IDs use the executable/account preflight too. The provider
     // owns model availability; named routes and pools require catalogue entries.
@@ -1039,7 +1048,30 @@ fn account_reason<'q>(
     {
         reason = Some(RouteExclusionReason::PacingReserve);
     }
-    (reason, quota)
+    Ok((reason, quota))
+}
+/// Persisted mismatch or refusal evidence, assessed by the same quota function
+/// that admission rechecks before launch. Invalid evidence is an error.
+fn account_block_reason(
+    model: &ModelId,
+    account_key: &str,
+    context: &RoutingContext<'_>,
+) -> Result<Option<RouteExclusionReason>, RoutingError> {
+    let pools = context.catalogue.admission_pools(model);
+    let admission = provenant_quota::Admission {
+        policies: context.quota_policies,
+        now_unix_seconds: context.now_seconds(),
+        records: context.accounts,
+        pools: &pools,
+    };
+    Ok(admission
+        .account_block(model.adapter(), account_key, model.model())
+        .map_err(|_| RoutingError::Availability)?
+        .map(|block| match block {
+            provenant_quota::AccountBlock::Mismatch => RouteExclusionReason::AccountMismatch,
+            provenant_quota::AccountBlock::FreeTierRefusal => RouteExclusionReason::FreeTierRefused,
+            provenant_quota::AccountBlock::ScopedRefusal => RouteExclusionReason::ProviderRefused,
+        }))
 }
 /// The account's latest reading for this model, only a fresh one when
 /// `fresh`. Only a fresh reading may refuse the route; a stale one still ranks
@@ -1265,14 +1297,14 @@ fn candidate(
             policy_refused |= !permitted;
             permitted
         })
-        .map(|a| {
-            let (reason, _) = account_reason(model, a, access, context);
+        .map(|a| -> Result<_, RoutingError> {
+            let (reason, _) = account_reason(model, a, access, context)?;
             let (policy, _, _, _) = effective_profile(context, model, a.account_key.as_deref());
             let (headroom, _, standby) =
                 pacing_factor_basis_points(policy, model, a.account_key.as_deref(), context);
             let spent = latest_reading(model, a, context, false)
                 .is_some_and(|q| reading_exhausted(&q.snapshot, model, context));
-            (
+            Ok((
                 a,
                 reason,
                 (
@@ -1281,9 +1313,9 @@ fn candidate(
                     !standby,
                     headroom,
                 ),
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     if evaluated.is_empty() && policy_refused {
         return Err(RoutingError::ReadOnlyPolicy);
     }
@@ -1770,6 +1802,8 @@ fn classify_pool(
                             RouteExclusionReason::StaleAvailability
                             | RouteExclusionReason::AuthRequired
                             | RouteExclusionReason::Exhausted
+                            | RouteExclusionReason::FreeTierRefused
+                            | RouteExclusionReason::ProviderRefused
                             | RouteExclusionReason::PacingReserve => {
                                 if classified.first_recoverable_unavailable.is_none() {
                                     classified.first_recoverable_unavailable =

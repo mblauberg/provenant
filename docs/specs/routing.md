@@ -334,11 +334,28 @@ is fresh, by rank when it is stale. Only a quota-limited outcome cools an accoun
 auth failures never switch accounts. Provider capacity errors settle as
 `model_unavailable` with the provider's reason visible in lanes and record a
 separate, advisory capacity cooldown on the host.
+
+One quota function, `Admission::account_block`, assesses persisted account
+mismatch and live provider refusals (including the free-pool refusal) with their
+expiry and clearing rules. Resolution applies it to each otherwise eligible
+account before choosing one, so a blocked account yields to another serving the
+same model; blocks surface as the reason codes `account_mismatch`,
+`free_tier_refused` and `provider_refused`. Admission reuses the same function on
+freshly reloaded records immediately before launch, so a refusal written after
+resolution still prevents it. Invalid evidence is an error; absent evidence is
+not proof of readiness. Cooldown stays a selection preference, never a block.
+Compatibility: the three reason codes are new `RouteExclusionReason` variants;
+older readers that reject unknown variants cannot read records carrying them.
 - Why: one probe outage or model limit must not take a provider offline.
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
   `::independent_pool_reset_and_refusal_scope`;
   `tests/dispatch_provider.rs::codex_capacity_settles_without_quota_refusal`;
-  `crates/routing/src/tests.rs::spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale`
+  `crates/routing/src/tests.rs::spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale`;
+  `crates/quota/src/admission.rs::tests::account_block_types_mismatch_free_and_scoped_refusals`;
+  `crates/routing/src/tests.rs::persisted_mismatch_excludes_account_and_selects_another`;
+  `::live_scoped_refusal_excludes_only_the_matching_account_and_model`;
+  `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
+  `crates/records/tests/forward_compatibility.rs::route_exclusion_reason_codes_round_trip`
 - Owner: `crates/quota/src/admission.rs`
 
 ### Revisioned, bounded refresh

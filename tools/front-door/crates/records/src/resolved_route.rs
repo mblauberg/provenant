@@ -158,4 +158,10 @@ pub enum RouteExclusionReason {
     PacingReserve,
     AuthRequired,
     UnverifiedModel,
+    /// Persisted evidence shows the executable's account differs from the registered one.
+    AccountMismatch,
+    /// A live refusal on the adapter's keyless free pool.
+    FreeTierRefused,
+    /// A live provider refusal scoped to the model or its verified pool.
+    ProviderRefused,
 }

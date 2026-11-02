@@ -897,6 +897,8 @@ fn with_context<T>(
             availability,
             quota: &quota,
             capacity_cooldowns: &capacity_cooldowns,
+            accounts: &quota_records,
+            quota_policies: &policies,
             access,
             now,
             host,
@@ -1022,7 +1024,7 @@ fn resolve_dispatch_excluding(
             )?;
             loop {
                 let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
-                let pools = admission_pools(&resolved.adapter, context.catalogue, &model);
+                let pools = context.catalogue.admission_pools(&model);
                 let now_unix_seconds = context.now.as_timestamp().as_second();
                 let admission = provenant_quota::Admission {
                     policies,
@@ -1200,21 +1202,6 @@ fn record_pool_redraw(
     current.redraws = redraws;
     Ok(())
 }
-/// The pools a model draws on: the free allowance and its catalogued group.
-fn admission_pools(adapter: &str, catalogue: &Catalogue, model: &ModelId) -> Vec<String> {
-    let mut pools = free_pools(adapter, || catalogue.is_free_model(model));
-    pools.extend(catalogue.quota_pool(model).map(str::to_owned));
-    pools
-}
-/// Only OpenCode draws on the keyless free allowance, whatever a pool lists.
-fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
-    provenant_records::AdapterSpec::get(adapter)
-        .and_then(|spec| spec.free_pool)
-        .filter(|_| free())
-        .map(|pool| vec![pool.to_owned()])
-        .unwrap_or_default()
-}
-
 /// Recheck each selected fallback against the latest persisted refusals.
 pub(crate) fn check_dispatch_candidate(
     roots: &Roots,
@@ -1227,7 +1214,7 @@ pub(crate) fn check_dispatch_candidate(
         .map_err(|e| e.to_string())?
         .domains;
     provenant_routing::check_go_allowance(&model, &domains.routing, &catalogue)?;
-    let pools = admission_pools(&route.adapter, &catalogue, &model);
+    let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
     let mut records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
     domains.quota.apply_calibration(&mut records, now);
@@ -2350,9 +2337,12 @@ mod route_tests {
 
     #[test]
     fn only_opencode_routes_draw_on_the_free_pool() {
-        assert_eq!(super::free_pools("opencode", || true), ["opencode-free"]);
-        assert!(super::free_pools("opencode", || false).is_empty());
-        assert!(super::free_pools("codex", || true).is_empty());
+        assert_eq!(
+            provenant_routing::free_pools("opencode", || true),
+            ["opencode-free"]
+        );
+        assert!(provenant_routing::free_pools("opencode", || false).is_empty());
+        assert!(provenant_routing::free_pools("codex", || true).is_empty());
     }
 
     #[test]
@@ -2715,6 +2705,7 @@ mod route_tests {
         };
         let drawn = resolve(None)?;
         let spent = drawn.account_key.clone().ok_or("account")?;
+        assert!(super::check_dispatch_candidate(&roots, &drawn).is_ok());
         // The provider refused the drawn account: the next dispatch keeps the
         // model and takes the other account instead of failing.
         crate::quota::persist_provider_refusal(
@@ -2730,12 +2721,23 @@ mod route_tests {
             now,
             Some(now + 3_600),
         )?;
+        // A refusal written after resolution still stops the launch.
+        let error = super::check_dispatch_candidate(&roots, &drawn).unwrap_err();
+        assert!(error.contains("scoped provider refusal"), "{error}");
         let redrawn = resolve(None)?;
+        assert!(super::check_dispatch_candidate(&roots, &redrawn).is_ok());
         assert_eq!(redrawn.model, "gpt-6-luna");
         assert!(matches!(redrawn.readiness, RouteReadiness::Ready { .. }));
         assert_ne!(redrawn.account_key.as_deref(), Some(spent.as_str()));
         // A pinned account is the caller's choice and is never swapped.
-        assert!(resolve(Some(&spent)).is_err());
+        // It resolves as unavailable with the typed reason rather than ready.
+        assert!(matches!(
+            resolve(Some(&spent))?.readiness,
+            RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::ProviderRefused,
+                ..
+            }
+        ));
         Ok(())
     }
 
