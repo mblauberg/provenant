@@ -26,6 +26,10 @@ struct RequestDetailView: View {
                         Label("Proceeding with", systemImage: "arrow.turn.down.right")
                     }
                 }
+                if let since = model.staleSince(for: request) {
+                    Notice("\(request.peerLabel ?? "Its host") is not answering. This request is from the last read, \(Stamp.relative(since, now: model.displayNow)). You can still answer; the answer is sent only if the host can be reached.")
+                        .background(.quaternary, in: .rect(cornerRadius: 8))
+                }
                 if let result { ResultBanner(result: result) }
                 if let answer = item?.answer { AnswerSummary(answer: answer, delivery: item?.delivery, now: model.displayNow) }
                 // A saved answer closes the request even when the window could not read the item back.
@@ -68,7 +72,7 @@ struct RequestDetailView: View {
     }
 
     private var metadataLine: String {
-        [request.projectName ?? "No project", "Session \(request.sessionTitle)", "Revision \(request.revision)", request.state.capitalized]
+        [request.projectDisplayName ?? "No project", "Session \(request.sessionTitle)", "Revision \(request.revision)", request.state.capitalized]
             .joined(separator: " · ")
     }
 

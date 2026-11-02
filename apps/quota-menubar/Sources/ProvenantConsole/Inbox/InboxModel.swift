@@ -15,6 +15,12 @@ final class InboxModel {
     }
 
     private(set) var requests: [HumanRequest] = []
+    /// What each peer host contributed to the last listing. Empty when the CLI reported no peers.
+    private(set) var peerCoverage: [PeerCoverage] = []
+    /// When a peer's rows were last read, for each peer whose rows are being kept because it did not answer.
+    private(set) var staleSince: [String: Date] = [:]
+    /// When each peer last contributed a page, whether or not its rows are still shown.
+    private var lastGood: [String: Date] = [:]
     private(set) var truncated = false
     private(set) var refreshing = false
     private(set) var sending = false
@@ -161,7 +167,7 @@ final class InboxModel {
         defer { refreshing = false }
         do {
             let page = try await client.list()
-            requests = page.items
+            apply(page)
             truncated = page.truncated
             refreshError = nil
             lastRefreshed = now()
@@ -171,16 +177,99 @@ final class InboxModel {
         }
     }
 
+    /// Takes a fresh listing. A peer that gave no page keeps the rows it last gave, marked stale; a peer that gave
+    /// a page (complete, or partial with gaps) replaces them; an unsupported or unlisted peer's rows are dropped.
+    private func apply(_ page: Page<HumanRequest>) {
+        let at = now()
+        var merged = page.items
+        var stale: [String: Date] = [:]
+        var good: [String: Date] = [:]
+        for peer in page.peers ?? [] where peer.kind != .unsupported {
+            if peer.contributedNoPage {
+                let kept = requests.filter { $0.peerHost == peer.host }
+                good[peer.host] = lastGood[peer.host]
+                if !kept.isEmpty {
+                    merged += kept
+                    stale[peer.host] = lastGood[peer.host] ?? lastRefreshed ?? at
+                }
+            } else {
+                good[peer.host] = at
+            }
+        }
+        requests = merged
+        peerCoverage = page.peers ?? []
+        staleSince = stale
+        lastGood = good
+    }
+
+    /// When a request's host was last read, if the request is a kept row from a peer that is not answering now.
+    func staleSince(for request: HumanRequest) -> Date? { request.peerHost.flatMap { staleSince[$0] } }
+
+    /// One line for each peer that did not give a complete page, in the CLI's order.
+    var peerNotes: [PeerNote] {
+        peerCoverage.compactMap { peer in
+            let kept = requests.lazy.filter { $0.peerHost == peer.host }.count
+            return Self.note(for: peer, kept: kept, since: staleSince[peer.host], now: displayNow)
+                .map { PeerNote(id: peer.host, text: $0) }
+        }
+    }
+
+    struct PeerNote: Identifiable, Equatable, Sendable {
+        let id: String
+        let text: String
+    }
+
+    /// The coverage line for a peer, or nil when it listed everything.
+    static func note(for peer: PeerCoverage, kept: Int, since: Date?, now: Date) -> String? {
+        let label = peer.label
+        func stale() -> String {
+            guard kept > 0 else { return " Its requests are not shown." }
+            let when = since.map { " since \(Stamp.relative($0, now: now))" } ?? ""
+            return " Showing \(kept) from its last read, stale\(when)."
+        }
+        switch peer.kind {
+        case .complete:
+            return nil
+        case .unsupported:
+            return "Update \(label): it is too old to list requests here."
+        case .unreachable:
+            return "\(label) is unreachable\(peer.reason == "timeout" ? " (timed out)" : "")." + stale()
+        case .partial where peer.contributedNoPage:
+            return "\(label) gave no requests: \(reasonText(peer.reason))." + stale()
+        case .partial:
+            var parts: [String] = []
+            if peer.truncated { parts.append("\(peer.included)+ requests on \(label); more are not loaded") }
+            let skipped = peer.invalidRows + peer.duplicateRows
+            if skipped > 0 { parts.append("\(skipped) \(skipped == 1 ? "row" : "rows") from \(label) could not be used") }
+            return (parts.isEmpty ? "\(label) gave a partial list" : parts.joined(separator: "; ")) + "."
+        case .other(let state):
+            return "\(label): coverage is \(state)."
+        }
+    }
+
+    private static func reasonText(_ reason: String?) -> String {
+        switch reason {
+        case "project_unknown": "it knows none of this Mac’s projects"
+        case "limit_refused": "it refused the page size"
+        case "invalid_request": "it refused the request"
+        case "invalid_page": "it sent an unreadable page"
+        case "duplicate_host": "it is configured twice"
+        case .some(let other): other.replacingOccurrences(of: "_", with: " ")
+        case nil: "no reason given"
+        }
+    }
+
     /// Answers with the revision the person saw. A stale revision writes nothing and shows the current state.
     func answer(_ request: HumanRequest, action: AnswerAction, option: String? = nil, text: String? = nil) async {
         guard !sending else { return }
         sending = true
         defer { sending = false }
         do {
-            switch try await client.answer(request.id, action: action, option: option, text: text, expectRevision: request.revision) {
+            switch try await client.answer(request.id, action: action, option: option, text: text,
+                                          expectRevision: request.revision, route: request.peerRoute) {
             case .saved(let receipt):
                 // A failed read leaves the item out, but the receipt still says what was saved and delivered.
-                let item = try? await client.item(request.id)
+                let item = try? await client.item(request.id, route: request.peerRoute)
                 results[request.id] = Result(kind: .saved, message: saved(receipt), request: request, item: item)
             case .stale(let current):
                 results[request.id] = Result(
@@ -205,18 +294,21 @@ final class InboxModel {
             request.request.body,
             request.request.kind,
             request.projectName ?? "",
+            request.peerLabel ?? "",
             request.chairSessionId,
             request.request.options.map { "\($0.label) \($0.description)" }.joined(separator: " "),
         ].joined(separator: "\n")
         return haystack.localizedCaseInsensitiveContains(query)
     }
 
+    /// Projects are told apart by host as well as ID, since two hosts can number their projects alike.
     static func projectID(_ request: HumanRequest) -> String {
-        request.projectId ?? request.projectName ?? ""
+        let id = request.projectId ?? request.projectName ?? ""
+        return request.peerHost.map { "\($0):\(id)" } ?? id
     }
 
     static func projectName(_ request: HumanRequest) -> String {
-        request.projectName ?? "No project"
+        request.projectDisplayName ?? "No project"
     }
 
     func saved(_ receipt: InboxReceipt) -> String {
