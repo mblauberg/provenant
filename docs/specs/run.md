@@ -642,7 +642,9 @@ matches that intended disposition. Delivery reuses the completed receipt or
 start marker. A start without a known result remains uncertain and is never
 automatically repeated. An unstarted delivery uses the sealed writer head and
 pinned base and verifies the current worktree before starting. A failed Git pin
-cleanup is retried with `retry_git_cleanup`. The internal finish result
+cleanup is recorded as non-retryable in the effect ledger; retained temporary
+data remains discoverable for reconciliation. Git pin cleanup requires the
+writer lock. The internal finish result
 distinguishes retained custody from permission to release; live, recovered and
 landed-writer paths all enforce that distinction. A stop accepted between the last cancellation read and
 the commit is acknowledged ineffective from the host-sealed request after the

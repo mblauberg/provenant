@@ -113,6 +113,23 @@ fn receipt_replay_and_independent_effects() -> TestResult {
             ..
         }
     ));
+    let receipt = store.record_effect(
+        id,
+        0,
+        SettlementEffect::CleanupCustodyRelease,
+        EffectDisposition::Failed {
+            reason: "cleanup failed".into(),
+            retryable: true,
+        },
+        &call,
+    )?;
+    assert!(matches!(
+        receipt.cleanup_custody_release,
+        EffectDisposition::Failed {
+            retryable: false,
+            ..
+        }
+    ));
     let record = store.record(id, &call)?;
     assert_eq!(record.settlement_receipts, Some(receipt));
     let replay = store.replay_terminal(id, &call)?;
@@ -171,7 +188,7 @@ fn receipt_migration_copies_legacy_wal() -> TestResult {
 }
 
 #[test]
-fn receipt_unsettled_does_not_invent_an_exit() -> TestResult {
+fn receipt_withdrawal_does_not_invent_an_exit() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = TestClock::new(WallTime::from_micros(100)?, MonoTime::from_micros(0));
@@ -184,17 +201,22 @@ fn receipt_unsettled_does_not_invent_an_exit() -> TestResult {
     let input = input()?;
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
-    let terminal = store.settle_unsettled(
-        id,
-        1,
-        "missing evidence",
-        WallTime::from_micros(200)?,
-        &call,
-    )?;
+    let terminal = store
+        .withdraw(
+            id,
+            AttemptState::Queued {
+                extra: Default::default(),
+            },
+            Outcome::Rejected,
+            "missing evidence",
+            WallTime::from_micros(200)?,
+            &call,
+        )?
+        .unwrap();
     assert!(matches!(
         terminal.state,
         AttemptState::Terminal {
-            outcome: Outcome::Unsettled,
+            outcome: Outcome::Rejected,
             exit_code: None,
             ..
         }
@@ -203,7 +225,7 @@ fn receipt_unsettled_does_not_invent_an_exit() -> TestResult {
     assert!(matches!(
         store.replay_terminal(id, &call)?.state,
         AttemptState::Terminal {
-            outcome: Outcome::Unsettled,
+            outcome: Outcome::Rejected,
             ..
         }
     ));
@@ -219,80 +241,6 @@ fn receipt_unsettled_does_not_invent_an_exit() -> TestResult {
         Some(CancellationDisposition::AcknowledgedIneffective)
     );
     Ok(())
-}
-
-#[test]
-fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
-    provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(30), || -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = TestClock::new(WallTime::from_micros(100)?, MonoTime::from_micros(0));
-        let cancel = CancelToken::new();
-        let call = Request {
-            clock: &clock,
-            cancel: &cancel,
-        };
-        let store = RunStore::open(&context, &call)?;
-        let input = input()?;
-        store.create(&input, &call)?;
-        let id = input.attempts[0].attempt_id;
-        let db = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
-        db.execute_batch("BEGIN IMMEDIATE")?;
-        assert!(
-            store
-                .settle_unsettled(id, 1, "first decision", WallTime::from_micros(200)?, &call)
-                .is_err()
-        );
-        assert!(matches!(
-            store.record(id, &call)?.state,
-            AttemptState::Queued { .. }
-        ));
-        let attempt = context
-            .state_root
-            .as_path()
-            .join("runs")
-            .join(input.run_id.to_string())
-            .join("attempts")
-            .join(id.to_string());
-        let original = std::fs::read(attempt.join("terminal-pending.json"))?;
-        db.execute_batch("ROLLBACK")?;
-        assert!(
-            store
-                .settle_unsettled(
-                    id,
-                    1,
-                    "conflicting decision",
-                    WallTime::from_micros(201)?,
-                    &call
-                )
-                .is_err()
-        );
-        assert_eq!(
-            std::fs::read(attempt.join("terminal-pending.json"))?,
-            original
-        );
-        assert!(
-            std::fs::read_dir(&attempt)?
-                .filter_map(std::result::Result::ok)
-                .any(|entry| entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("terminal-pending.conflict-"))
-        );
-        let first = store.replay_terminal(id, &call)?;
-        let second = store.replay_terminal(id, &call)?;
-        assert_eq!(first.state, second.state);
-        assert!(
-            matches!(first.state, AttemptState::Terminal { outcome: Outcome::Unsettled, reason: Some(ref reason), .. } if reason == "first decision")
-        );
-        let rows: i64 = db.query_row(
-            "SELECT count(*) FROM events WHERE attempt=?1 AND revision=2",
-            [id.to_string()],
-            |row| row.get(0),
-        )?;
-        assert_eq!(rows, 1);
-        Ok(())
-    })
 }
 
 #[test]
@@ -319,7 +267,16 @@ fn receipt_failed_seal_does_not_commit_terminal() -> TestResult {
     std::fs::create_dir(attempt.join("terminal-pending.json"))?;
     assert!(
         store
-            .settle_unsettled(id, 1, "no exit", WallTime::from_micros(200)?, &call)
+            .withdraw(
+                id,
+                AttemptState::Queued {
+                    extra: Default::default()
+                },
+                Outcome::Rejected,
+                "no exit",
+                WallTime::from_micros(200)?,
+                &call
+            )
             .is_err()
     );
     assert!(matches!(
@@ -343,7 +300,16 @@ fn receipt_delivery_effect_and_late_cancellation_persist() -> TestResult {
     let input = input()?;
     store.create(&input, &call)?;
     let id = input.attempts[0].attempt_id;
-    store.settle_unsettled(id, 1, "decided", WallTime::from_micros(200)?, &call)?;
+    store.withdraw(
+        id,
+        AttemptState::Queued {
+            extra: Default::default(),
+        },
+        Outcome::Rejected,
+        "decided",
+        WallTime::from_micros(200)?,
+        &call,
+    )?;
     let failed = EffectDisposition::Failed {
         reason: "push refused".into(),
         retryable: true,
@@ -368,7 +334,7 @@ fn receipt_delivery_effect_and_late_cancellation_persist() -> TestResult {
     assert!(matches!(
         store.record(id, &call)?.state,
         AttemptState::Terminal {
-            outcome: Outcome::Unsettled,
+            outcome: Outcome::Rejected,
             ..
         }
     ));

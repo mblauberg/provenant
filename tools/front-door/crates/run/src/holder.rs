@@ -684,7 +684,11 @@ impl RunStore {
             }
         }
         self.retry_terminal_effects(&record, attempt, completion, call)?;
-        self.settle_cleanup(&self.record(record.attempt_id, call)?, call);
+        self.settle_cleanup(
+            &self.record(record.attempt_id, call)?,
+            completion.custody(),
+            call,
+        );
         Ok(Finished {
             record: self.record(record.attempt_id, call)?,
             release_permitted: true,
@@ -1788,6 +1792,22 @@ impl RunStore {
         } else {
             self.publish_terminal(id, record.revision, &publication, exit, call)?
         };
+        if !import_failed {
+            let disposition = match object_import_refused(attempt, exit.scope)? {
+                Some(reason) => EffectDisposition::Failed {
+                    reason: reason.chars().take(1024).collect(),
+                    retryable: false,
+                },
+                None => EffectDisposition::Done,
+            };
+            self.record_effect(
+                id,
+                terminal.generation,
+                SettlementEffect::GitImport,
+                disposition,
+                call,
+            )?;
+        }
         if import_failed {
             return Ok(Finished {
                 record: terminal,
@@ -2259,6 +2279,97 @@ mod writer_recovery_tests {
     }
 
     #[test]
+    fn settlement_finish_cleans_writer_pins_with_recovery_held()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut run = input();
+        run.request.tasks[0].writer = Some(fixture.writer.clone());
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let mut launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+        std::fs::create_dir_all(&candidate)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        let pin = format!("refs/provenant/import/{}", launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory,
+            scope,
+            binding,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(provenant_supervisor::fixture::bind_writer_attempt(
+            lease, &attempt,
+        )?);
+        let mut observed = crate::tests::exit();
+        observed.scope = scope;
+        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &crate::db::bytes(
+                &serde_json::json!({"schema_version":1,"scope":scope,"requester":execution.actor_id}),
+            )?,
+            RECORD_LIMIT,
+        )?;
+        let finished = store.finish(
+            id,
+            &attempt,
+            &observed,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+        )?;
+        assert_eq!(
+            finished
+                .settlement_receipts
+                .unwrap()
+                .cleanup_custody_release,
+            EffectDisposition::Done
+        );
+        assert!(crate::objects::resolve_ref(&git, launch.worktree.repo(), &pin).is_err());
+        let db = rusqlite::Connection::open(execution.state_root.as_path().join("run.sqlite3"))?;
+        let retained: bool = db.query_row(
+            "SELECT tmp_retained FROM attempts WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        assert!(!retained);
+        Ok(())
+    }
+
+    #[test]
     fn settlement_import_cancellation_preserves_provider_exit_ordering()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         for delivered in [None, Some(false)] {
@@ -2540,6 +2651,21 @@ mod writer_recovery_tests {
                     "{:?}",
                     store.writer_fences()?
                 );
+                continue;
+            }
+            if mode == "orphan" {
+                assert!(first.release_permitted);
+                assert_eq!(
+                    first
+                        .record
+                        .settlement_receipts
+                        .as_ref()
+                        .unwrap()
+                        .git_import,
+                    EffectDisposition::Done
+                );
+                store.settle_recovered(&attempt, recovery)?;
+                assert!(store.writer_fences()?.is_empty());
                 continue;
             }
             assert!(!first.release_permitted);

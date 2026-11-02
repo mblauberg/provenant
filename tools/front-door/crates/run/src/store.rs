@@ -252,7 +252,7 @@ impl RunStore {
         let (record, committed) = self.replay_terminal_locked(id, call)?;
         drop(guard);
         if committed {
-            self.settle_cleanup(&record, call);
+            self.settle_cleanup(&record, None, call);
         }
         self.record(id, call)
     }
@@ -368,6 +368,17 @@ impl RunStore {
         {
             return Err(RunError::Validation("invalid effect failure reason"));
         }
+        // Cleanup failures are surfaced for manual recovery; no terminal-effect
+        // driver retries them after temporary data has been removed.
+        let disposition = match (effect, disposition) {
+            (SettlementEffect::CleanupCustodyRelease, EffectDisposition::Failed { reason, .. }) => {
+                EffectDisposition::Failed {
+                    reason,
+                    retryable: false,
+                }
+            }
+            (_, disposition) => disposition,
+        };
         let receipts = self.write(call, |tx| {
             let raw: Vec<u8> = tx.query_row("SELECT record FROM attempts WHERE id=?1 AND project=?2 AND terminal=1", params![id.to_string(), self.context.project_id.to_string()], |row| row.get(0)).optional()?.ok_or(RunError::NotFound)?;
             let attempt: AttemptRecord = crate::db::decode_attempt(&raw)?;
@@ -421,73 +432,6 @@ impl RunStore {
             &[provenant_os::changes::Scope::Board],
         );
         Ok(())
-    }
-    /// Seal an inconclusive terminal decision without inventing an exit.
-    /// Custody and its fence remain independent of this decision.
-    pub fn settle_unsettled(
-        &self,
-        id: AttemptId,
-        expected_revision: u64,
-        reason: &str,
-        finished_at: WallTime,
-        call: &Request<'_>,
-    ) -> Result<AttemptRecord> {
-        if reason.is_empty() || reason.len() > 4096 {
-            return Err(RunError::Validation("invalid unsettled reason"));
-        }
-        let current = self.record(id, call)?;
-        let run = self.run_dir(current.run_id, false)?;
-        let guard = run.lock(
-            OsStr::new("publication.lock"),
-            LockMode::Exclusive,
-            call.lock_budget(),
-            call.cancel,
-            call.clock,
-        )?;
-        let current = self.record(id, call)?;
-        if matches!(current.state, AttemptState::Terminal { .. })
-            || current.revision != expected_revision
-        {
-            return Err(RunError::Conflict);
-        }
-        let mut next = current.clone();
-        next.schema_version = 2;
-        next.revision = expected_revision.checked_add(1).ok_or(RunError::Conflict)?;
-        next.terminal_evidence = Some(TerminalEvidence::Unsettled {
-            reason: reason.into(),
-        });
-        next.state = AttemptState::Terminal {
-            extra: Default::default(),
-            outcome: Outcome::Unsettled,
-            exit_code: None,
-            finished_at,
-            reason: Some(reason.into()),
-        };
-        super::reader::validate_attempt(&next)?;
-        let attempt = self.attempt_dir(current.run_id, id, false)?;
-        let intent = bytes(&next)?;
-        if let Some(saved) =
-            read_sealed(&attempt, AttemptFile::TerminalPending.name(), RECORD_LIMIT)?
-        {
-            if saved != intent {
-                let name = format!(
-                    "terminal-pending.conflict-{}.json",
-                    provenant_core::hex(CanonicalV1::file_digest(&intent).bytes())
-                );
-                seal(&attempt, &name, &intent, RECORD_LIMIT)?;
-                return Err(RunError::TerminalRecoveryRequired);
-            }
-        } else {
-            seal(
-                &attempt,
-                AttemptFile::TerminalPending.name(),
-                &intent,
-                RECORD_LIMIT,
-            )?;
-        }
-        self.commit_terminal_record(&current, &next, call)?;
-        drop(guard);
-        self.record(id, call)
     }
     /// Reserve records first, seal the exact request/prompts, then acknowledge.
     /// Repeating a prepared operation repairs a publication gap with the same
@@ -772,7 +716,7 @@ impl RunStore {
         );
         match result {
             Ok(record) => {
-                self.settle_cleanup(&record, call);
+                self.settle_cleanup(&record, None, call);
                 self.record(id, call)
             }
             Err(error) => Err(error),
@@ -904,13 +848,18 @@ impl RunStore {
                 {
                     return self.record(id, call).map(Some);
                 }
-                self.settle_cleanup(&record, call);
+                self.settle_cleanup(&record, None, call);
                 self.record(id, call).map(Some)
             }
             other => other,
         }
     }
-    pub(crate) fn settle_cleanup(&self, record: &AttemptRecord, call: &Request<'_>) {
+    pub(crate) fn settle_cleanup(
+        &self,
+        record: &AttemptRecord,
+        recovery: Option<&provenant_supervisor::custody::Recovery>,
+        call: &Request<'_>,
+    ) {
         if !self.import_release_permitted(record, call).unwrap_or(false) {
             let _ = self.set_temporary_retained(record.attempt_id, true, call);
             return;
@@ -921,7 +870,7 @@ impl RunStore {
                 .iter()
                 .any(|task| task.task_id == record.task_id && task.writer.is_some())
         }) {
-            let _ = self.retry_git_cleanup(record, call);
+            let _ = self.retry_git_cleanup_with_custody(record, recovery, call);
         }
         // The terminal record retains tmp before cleanup; clear that hint only
         // after removal succeeds.
@@ -1257,7 +1206,7 @@ impl RunStore {
                 ) {
                     let (record, committed) = self.replay_terminal_locked(old.attempt_id, call)?;
                     if committed {
-                        self.settle_cleanup(&record, call);
+                        self.settle_cleanup(&record, None, call);
                     }
                     return Ok(());
                 }
@@ -1298,13 +1247,25 @@ impl RunStore {
     }
 
     /// Run the post-commit Git pin cleanup of a committed terminal attempt and
-    /// persist the result: `Failed{retryable}` on error, `Done` on success.
+    /// persist the result: a non-retryable failure on error, `Done` on success.
     /// Safe to repeat; callers retry while the receipt is not `Done`.
     pub fn retry_git_cleanup(
         &self,
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<SettlementReceipts> {
+        self.retry_git_cleanup_with_custody(record, None, call)
+    }
+
+    fn retry_git_cleanup_with_custody(
+        &self,
+        record: &AttemptRecord,
+        recovery: Option<&provenant_supervisor::custody::Recovery>,
+        call: &Request<'_>,
+    ) -> Result<SettlementReceipts> {
+        if !self.import_release_permitted(record, call)? {
+            return Err(RunError::Conflict);
+        }
         let request = self.request(record.run_id, call)?;
         let writer = request
             .tasks
@@ -1312,15 +1273,25 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .and_then(|task| task.writer.as_ref())
             .ok_or(RunError::Validation("attempt has no writer to clean up"))?;
+        // A missing custody directory has no lock holder; keep the import pin.
+        let slot = self.writer_custody_directory(record, writer).ok();
         let cleanup = (|| -> Result<()> {
+            let held = match (recovery, &slot) {
+                (Some(recovery), Some(slot)) if recovery.scope() == Self::scope(record) => recovery
+                    .holds_writer_lock(slot)
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?,
+                _ => false,
+            };
+            // Refuse while another holder owns the writer lock.
+            let _lock = match &slot {
+                Some(slot) if !held => {
+                    Some(slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?)
+                }
+                _ => None,
+            };
             let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
             let head = crate::settlement::pinned_head(&attempt, Self::scope(record))?;
-            let slot = self.writer_custody_directory(record, writer).ok();
-            let lock = slot.as_ref().and_then(|slot| {
-                slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
-                    .ok()
-            });
-            let mut remove_import_pin = lock.is_some();
+            let mut remove_import_pin = slot.is_some();
             if let Some(slot) = &slot {
                 let own = slot.metadata()?;
                 match self.writer_fence_listing() {
@@ -1357,7 +1328,7 @@ impl RunStore {
             Ok(()) => EffectDisposition::Done,
             Err(error) => EffectDisposition::Failed {
                 reason: error.to_string().chars().take(1024).collect(),
-                retryable: true,
+                retryable: false,
             },
         };
         self.record_effect(
