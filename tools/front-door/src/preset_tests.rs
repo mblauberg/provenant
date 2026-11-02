@@ -1276,7 +1276,11 @@ fn integration_review_expands_all_base_lenses_and_resolves_roles() {
 #[test]
 fn docs_panel_keeps_risk_floor_with_readability_lens() {
     let document = council(
-        &["parameters.kind='docs'", "parameters.risk_tier='crucial'"],
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.kind='docs'",
+            "parameters.risk_tier='crucial'",
+        ],
         true,
     )
     .unwrap();
