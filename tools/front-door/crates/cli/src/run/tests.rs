@@ -3912,6 +3912,7 @@ fn clean_exit() -> ExitObservation {
 
 #[test]
 fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use provenant_quota::Admission;
     use provenant_records::{
         ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
@@ -3922,10 +3923,12 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
     std::fs::create_dir(&state)?;
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
     let provider_state = state.join("runs/run/attempts/attempt/provider-state");
-    let output = std::process::Command::new("/bin/sh")
-        .args(["-c", "printf '%s\\n' 'AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000' >&2; exit 1"])
-        .output()?;
-    assert!(!output.status.success());
+    let argv = ["/bin/sh", "-c", "printf '%s\\n' 'AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000' >&2; exit 1"].map(std::ffi::OsString::from);
+    let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(30));
+    options.stdout = StreamPolicy::Capture { limit: 8192 };
+    options.stderr = StreamPolicy::Capture { limit: 8192 };
+    let output = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(output.termination, Termination::Exit(1));
     let route = run::RouteRecord {
         provider: Some("opencode".into()),
         model: Some("opencode/opencode-go/example".into()),
@@ -3937,8 +3940,8 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
     exit.termination = Some(provenant_os::exec::Termination::Exit(1));
     let decoded = Registry::default().decode_captures(
         &route,
-        &output.stdout,
-        &output.stderr,
+        &output.stdout.bytes,
+        &output.stderr.bytes,
         &exit,
         &provider_state,
         None,
