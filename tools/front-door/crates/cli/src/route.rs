@@ -1225,6 +1225,24 @@ fn record_pool_redraw(
     current.redraws = redraws;
     Ok(())
 }
+/// The account records and polling policies every account-block assessment
+/// reads: resolution, the final admission recheck and settlement alternates.
+/// Calibrated at `now` and dated by the configured polling intervals, so the
+/// three agree on what a refusal's clearing reading and freshness mean.
+pub(crate) fn account_evidence(
+    settings: &provenant_quota::Settings,
+    mut records: Vec<provenant_quota::AccountRecord>,
+    now: i64,
+) -> (
+    Vec<provenant_quota::AccountRecord>,
+    Vec<provenant_quota::QuotaPolicy>,
+) {
+    settings.apply_calibration(&mut records, now);
+    (
+        records,
+        provenant_providers::scheduling_policies(settings, REGISTRY),
+    )
+}
 /// Recheck each selected fallback against the latest persisted refusals.
 pub(crate) fn check_dispatch_candidate(
     roots: &Roots,
@@ -1239,10 +1257,10 @@ pub(crate) fn check_dispatch_candidate(
     provenant_routing::check_go_allowance(&model, &domains.routing, &catalogue)?;
     let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
-    let mut records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
-    domains.quota.apply_calibration(&mut records, now);
+    let records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
+    let (records, policies) = account_evidence(&domains.quota, records, now);
     provenant_quota::Admission {
-        policies: &provenant_providers::scheduling_policies(&domains.quota, REGISTRY),
+        policies: &policies,
         now_unix_seconds: now,
         records: &records,
         pools: &pools,
