@@ -3418,6 +3418,32 @@ mod route_tests {
         .err()
         .ok_or("a required separation must not substitute")?;
         assert!(matches!(refused, super::DispatchError::FamilySeparation(_)));
+        // The next family's provider is excluded: a required separation reports
+        // none, and an optional one never substitutes the excluded provider.
+        let rules = [provenant_routing::ExclusionRule {
+            selector: provenant_routing::ExclusionSelector::Provider(second.adapter.clone()),
+            source: provenant_routing::ExclusionSource::Flag,
+        }];
+        let with_rules = |required: bool| {
+            super::resolve_dispatch(
+                &request,
+                &roots,
+                None,
+                ("fixture", 0),
+                &availability,
+                &access,
+                "fixture",
+                Some((std::slice::from_ref(&family), required)),
+                &rules,
+            )
+        };
+        assert!(matches!(
+            with_rules(true)
+                .err()
+                .ok_or("excluded family must not substitute")?,
+            super::DispatchError::FamilySeparation(_)
+        ));
+        assert_ne!(with_rules(false)?.adapter, second.adapter);
         let fallback = resolve(&[family, other])?;
         assert!(matches!(
             fallback.readiness,
