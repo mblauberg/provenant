@@ -5,7 +5,13 @@ use crate::{
 use provenant_core::Roots;
 use provenant_records::Limits;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{collections::BTreeMap, ffi::OsStr, io::Read, ops::Range, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
+    io::Read,
+    ops::Range,
+    path::Path,
+};
 use toml_edit::{Document, DocumentMut, Item, Table, Value};
 
 #[derive(Deserialize)]
@@ -164,7 +170,17 @@ pub(crate) fn validate_edit<T: DeserializeOwned + Serialize>(
         // partial patch is checked as the effective section it would become.
         let mut table = parse((entry.defaults)(profile), &origin, "")?;
         normalise_tables(&mut table);
-        merge_table(&mut table, user);
+        let replace_tables: BTreeSet<String> = entry
+            .replace_tables
+            .iter()
+            .map(|path| format!("domains.{}.{}", entry.name, path))
+            .collect();
+        merge_table(
+            &mut table,
+            user,
+            &mut vec!["domains".into(), entry.name.into()],
+            &replace_tables,
+        );
         if let Some(error) = validate_entry(entry, &table).into_iter().next() {
             return Err(domain_issue(entry.name, error, &table, &sites, &origin).error());
         }
@@ -187,14 +203,25 @@ fn validate_entry(entry: &crate::DomainSection, table: &Table) -> Vec<SectionErr
     (entry.validate)(table)
 }
 
-fn merge_table(target: &mut dyn toml_edit::TableLike, source: &dyn toml_edit::TableLike) {
+fn merge_table(
+    target: &mut dyn toml_edit::TableLike,
+    source: &dyn toml_edit::TableLike,
+    path: &mut Vec<String>,
+    replace_tables: &BTreeSet<String>,
+) {
     for (key, item) in source.iter() {
+        path.push(key.to_owned());
+        if replace_tables.contains(&path.join(".")) {
+            target.insert(key, item.clone());
+            path.pop();
+            continue;
+        }
         let nested = match (
             target.get_mut(key).and_then(Item::as_table_like_mut),
             item.as_table_like(),
         ) {
             (Some(target), Some(source)) => {
-                merge_table(target, source);
+                merge_table(target, source, path, replace_tables);
                 true
             }
             _ => false,
@@ -202,6 +229,7 @@ fn merge_table(target: &mut dyn toml_edit::TableLike, source: &dyn toml_edit::Ta
         if !nested {
             target.insert(key, item.clone());
         }
+        path.pop();
     }
 }
 
@@ -549,6 +577,16 @@ fn inspect<T: DeserializeOwned + Serialize>(
     }
     let mut effective = defaults.clone();
     let mut semantic_sites = compiled_sites.clone();
+    let replace_tables: BTreeSet<String> = sections
+        .entries
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .replace_tables
+                .iter()
+                .map(move |path| format!("domains.{}.{}", entry.name, path))
+        })
+        .collect();
     Overrides {
         defaults: &defaults,
         user: &user,
@@ -558,6 +596,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
         issues: &mut issues,
         compiled_sites: &compiled_sites,
         semantic_sites: &mut semantic_sites,
+        replace_tables: &replace_tables,
     }
     .apply::<T>(&mut effective, &user, &mut Vec::new());
     let mut boundary_error = knob_boundary;
@@ -1475,6 +1514,7 @@ struct Overrides<'a> {
     issues: &'a mut Vec<Issue>,
     compiled_sites: &'a BTreeMap<String, Site>,
     semantic_sites: &'a mut BTreeMap<String, Site>,
+    replace_tables: &'a BTreeSet<String>,
 }
 impl Overrides<'_> {
     fn issue(&mut self, path: &[String], rule: &'static str) {
@@ -1628,6 +1668,13 @@ impl Overrides<'_> {
     ) {
         for (key, value) in user.iter() {
             path.push(key.into());
+            if self.replace_tables.contains(&path.join(".")) && table(value).is_some() {
+                let prefix = format!("{}.", path.join("."));
+                self.origins.retain(|name, _| !name.starts_with(&prefix));
+                self.semantic_sites
+                    .retain(|name, _| !name.starts_with(&prefix));
+                set(effective, path, Item::Table(Table::new()));
+            }
             let mut cleaned = value.clone();
             if let Some(items) = array(value) {
                 let mut values = toml_edit::Array::new();

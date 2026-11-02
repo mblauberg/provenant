@@ -12,7 +12,7 @@ use std::{
 /// Skill reference text compiled into the binary, keyed by the path after
 /// `skill:`. Used when no release root with `skills/` is available (tests and
 /// bare builds); an installed release root always wins.
-const EMBEDDED: [(&str, &str); 17] = [
+const EMBEDDED: [(&str, &str); 19] = [
     (
         "code-review/references/reviewer-context.md",
         include_str!("../../../skills/code-review/references/reviewer-context.md"),
@@ -36,6 +36,14 @@ const EMBEDDED: [(&str, &str); 17] = [
     (
         "code-review/references/lenses/tests.md",
         include_str!("../../../skills/code-review/references/lenses/tests.md"),
+    ),
+    (
+        "test-design/references/judgement.md",
+        include_str!("../../../skills/test-design/references/judgement.md"),
+    ),
+    (
+        "test-design/references/boundaries.md",
+        include_str!("../../../skills/test-design/references/boundaries.md"),
     ),
     (
         "code-review/references/lenses/security-privacy.md",

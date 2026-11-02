@@ -6,6 +6,7 @@ pub(super) type Git<'a> = dyn Fn(&[&str]) -> Result<String, Fail> + 'a;
 #[derive(Default)]
 pub(super) struct Inputs {
     pub paths: Vec<String>,
+    pub test_marker: bool,
     pub size: Option<&'static str>,
     pub warnings: Vec<String>,
 }
@@ -23,12 +24,11 @@ pub(super) fn inputs(
     kind: Option<&str>,
 ) -> Result<Inputs, Fail> {
     let mut inputs = Inputs::default();
-    let Some(explicit) = selection_range(shape, range)? else {
-        return Ok(inputs);
-    };
-    let range = match explicit {
-        Some(range) => range.to_owned(),
-        None => match default_range(git, head) {
+    let explicit_shape = shape.is_some();
+    let selected_range = selection_range(shape, range)?;
+    let range = match selected_range {
+        Some(Some(range)) => range.to_owned(),
+        Some(None) => match default_range(git, head) {
             Some(range) => range,
             None => {
                 inputs
@@ -36,6 +36,14 @@ pub(super) fn inputs(
                     .push("no default branch found; size unknown".into());
                 return Ok(inputs);
             }
+        },
+        None => match range {
+            Some(range) if !range.starts_with('-') => range.to_owned(),
+            Some(_) => return Ok(inputs),
+            None => match default_range(git, head) {
+                Some(range) => range,
+                None => return Ok(inputs),
+            },
         },
     };
     match git(&["diff", "--no-renames", "--name-only", "-z", &range, "--"]) {
@@ -46,15 +54,22 @@ pub(super) fn inputs(
                 .map(str::to_owned)
                 .collect();
         }
-        Err(error) if explicit.is_some() => return Err(error),
+        Err(error) if selected_range.is_some() => return Err(error),
         Err(error) => inputs.warnings.push(error.message),
     }
-    let (base, tip) = split_range(&range, head);
-    let measured = review.size.measure(kind, base, tip, &mut |args| {
-        git(args).map_err(|e| e.message)
-    });
-    inputs.size = measured.size;
-    inputs.warnings.extend(measured.warning);
+    match git(&["diff", "--no-ext-diff", "--unified=0", &range, "--"]) {
+        Ok(diff) => inputs.test_marker = provenant_routing::diff_has_test_markers(&diff),
+        Err(error) if selected_range.is_some() => return Err(error),
+        Err(error) => inputs.warnings.push(error.message),
+    }
+    if !explicit_shape {
+        let (base, tip) = split_range(&range, head);
+        let measured = review.size.measure(kind, base, tip, &mut |args| {
+            git(args).map_err(|e| e.message)
+        });
+        inputs.size = measured.size;
+        inputs.warnings.extend(measured.warning);
+    }
     Ok(inputs)
 }
 
@@ -182,6 +197,7 @@ mod tests {
                 "symbolic-ref" => "origin/main\n".into(),
                 "merge-base" => "base\n".into(),
                 "diff" if args.contains(&"--name-only") => "src/a.rs\0".into(),
+                "diff" if args.contains(&"--unified=0") => "@@ -1,0 +2 @@\n+#[test]\n".into(),
                 "diff" => "400\t0\tsrc/a.rs\0".into(),
                 _ => String::new(),
             })
@@ -189,6 +205,7 @@ mod tests {
         let inputs = inputs(&git, &review, None, None, "abc", None).unwrap();
         assert_eq!(inputs.size, Some("medium"));
         assert_eq!(inputs.paths, ["src/a.rs"]);
+        assert!(inputs.test_marker);
         assert!(inputs.warnings.is_empty());
     }
 }

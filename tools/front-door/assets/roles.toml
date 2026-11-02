@@ -211,6 +211,8 @@ card = "Lens tests. Check that tests prove the behaviour and would fail without 
 references = [
   { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
   { ref = "skill:code-review/references/lenses/tests.md", when = "always", inline = true },
+  { ref = "skill:test-design/references/judgement.md", when = "always", inline = true },
+  { ref = "skill:test-design/references/boundaries.md", when = "always", inline = true },
 ]
 
 [roles."lens.reliability"]

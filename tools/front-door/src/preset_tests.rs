@@ -1222,7 +1222,7 @@ fn shapes() -> super::preset::ShapeSelector {
             name: name.into(),
             source: source.into(),
             slots: vec!["junior".into(); count],
-            plan: provenant_routing::ReviewConfig::default().lens_plan(query.kind),
+            plan: provenant_routing::ReviewConfig::default().lens_plan(query.kind, &[], false),
             ..Default::default()
         })
     })
@@ -1356,6 +1356,40 @@ fn a_caller_supplied_lens_list_keeps_its_order() {
         lens_ids(&document),
         ["lens-simplicity", "lens-tests", "lens-correctness-spec"]
     );
+}
+
+#[test]
+fn a_path_added_lens_survives_its_risk_tag_condition_without_duplicating() {
+    let lenses = "parameters.lenses=[{name='correctness-spec',tier='',when=''},{name='tests',tier='',when='security'}]";
+    for tags in ["[]", "['security']", "['other']"] {
+        let mut layers = Layers::empty();
+        layers.review = Some(Box::new(|_| {
+            Ok(super::preset::ShapeHint {
+                name: "quick".into(),
+                source: "test".into(),
+                slots: vec!["junior".into()],
+                plan: provenant_routing::LensPlan {
+                    add: vec!["tests".into()],
+                    change_add: vec!["tests".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+        let overrides = [
+            "parameters.worktree='/repo/lane'".to_owned(),
+            lenses.to_owned(),
+            format!("parameters.risk_tags={tags}"),
+        ];
+        let document = expand(&layers, "review-council", "the change", &overrides)
+            .unwrap()
+            .document;
+        assert_eq!(
+            lens_ids(&document),
+            ["lens-correctness-spec", "lens-tests"],
+            "risk_tags={tags}"
+        );
+    }
 }
 
 #[test]
@@ -1897,6 +1931,15 @@ fn roles_view_lists_the_library_and_one_role() {
             .unwrap()
             .starts_with("sha256:")
     );
+    let tests = layers.roles_view(Some("lens.tests")).unwrap();
+    let refs: Vec<_> = tests["references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|reference| reference["ref"].as_str())
+        .collect();
+    assert!(refs.contains(&"skill:test-design/references/judgement.md"));
+    assert!(refs.contains(&"skill:test-design/references/boundaries.md"));
 }
 
 #[test]

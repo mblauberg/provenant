@@ -103,7 +103,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
         &head,
         command.kind.as_deref(),
     )?;
-    let (paths, size) = (inputs.paths, inputs.size);
+    let (paths, size, test_marker) = (inputs.paths, inputs.size, inputs.test_marker);
     data["warnings"] = json!(inputs.warnings);
     let selected = routing
         .select_shape(
@@ -117,6 +117,8 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     let panel_shape = routing.panel(
         selected.shape,
         command.kind.as_deref(),
+        &paths,
+        test_marker,
         &provenant_routing::risk_lenses(&command.risk_tags, command.risk.as_deref()),
     );
     if panel_shape
@@ -145,6 +147,15 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     };
     data["shape"] = json!(selected.name);
     data["selection_source"] = json!(selected.source);
+    data["lens_reasons"] = json!(
+        routing
+            .lens_plan(command.kind.as_deref(), &paths, test_marker)
+            .matched_paths
+            .iter()
+            .map(|pattern| format!("by_paths:{pattern}"))
+            .chain(test_marker.then(|| "test-marker".to_owned()))
+            .collect::<Vec<_>>()
+    );
     data["size"] = json!(size);
     data["kind"] = json!(command.kind);
     data["risk"] = json!(command.risk);

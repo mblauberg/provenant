@@ -1718,3 +1718,46 @@ fn read_knobs_ignores_domain_sections_it_does_not_know() {
     let quiet = read_knobs(&fixture.roots).unwrap();
     assert!(quiet.census_ignore_unreadable().unwrap().is_empty());
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceTableDomains {
+    routing: ReplaceTableConfig,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceTableConfig {
+    rules: std::collections::BTreeMap<String, bool>,
+}
+impl DomainConfig for ReplaceTableConfig {
+    fn validate(&self) -> Vec<SectionError> {
+        Vec::new()
+    }
+}
+fn replace_table_defaults(_: Profile) -> &'static str {
+    "[rules]\nbundled = true\n"
+}
+const REPLACE_TABLE_SECTION: DomainSection =
+    DomainSection::new::<ReplaceTableConfig>("routing", replace_table_defaults)
+        .replacing_tables(&["rules"]);
+const REPLACE_TABLE_DOMAINS: DomainSections<ReplaceTableDomains> =
+    DomainSections::new(&[REPLACE_TABLE_SECTION]);
+
+#[test]
+fn owner_marked_tables_replace_defaults_and_allow_empty_overrides() {
+    for (value, expected) in [
+        (
+            "[domains.routing.rules]\ncustom = false\n",
+            std::collections::BTreeMap::from([("custom".into(), false)]),
+        ),
+        (
+            "[domains.routing.rules]\n",
+            std::collections::BTreeMap::new(),
+        ),
+    ] {
+        let text = format!("schema_version = 1\n{value}");
+        let config =
+            load_with_domains(&roots(), Some(text.as_bytes()), &REPLACE_TABLE_DOMAINS).unwrap();
+        assert_eq!(config.domains.routing.rules, expected);
+    }
+}

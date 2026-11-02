@@ -13,6 +13,20 @@ install or release authority. Paths are relative to `tools/front-door/`.
 
 ## Review coverage
 
+### Test changes always receive the tests lens
+
+Every review panel for a diff that changes a recognised test path or changes a
+test declaration in a diff hunk includes `tests`, even when the selected shape
+has one slot. Additions sit outside the slot count and are deduplicated when
+`tests` already occupies a slot. A diff with neither signal keeps its normal
+panel. Repository routing config can replace or extend
+`review.lenses.by_paths`; an empty table disables the bundled path rules.
+- Why: small test changes need test-design review as well as the shape's base lens.
+- Test: `crates/routing/src/review.rs::quick_panel_adds_test_paths_and_markers_without_changing_other_diffs`;
+  `src/preset/panel.rs::tests::default_preset_scans_test_paths_without_changing_shape_selection`;
+  `src/preset/panel.rs::tests::plan_additions_are_included_once_even_when_lenses_are_caller_supplied`
+- Owner: `crates/routing/src/review.rs`, `src/preset/panel.rs`
+
 ### Only independent, exact reviews count
 
 A review passes only for a retained matching verdict and output on the exact

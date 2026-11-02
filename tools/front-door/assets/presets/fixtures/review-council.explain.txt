@@ -16,6 +16,8 @@ lenses  role=- tier=- family=any kind=composite access=read_only worktree=-
   lens-tests  role=lens.tests tier=junior family=any kind=- access=read_only worktree=-
     reference: skill:code-review/references/reviewer-context.md <digest>
     reference: skill:code-review/references/lenses/tests.md <digest>
+    reference: skill:test-design/references/judgement.md <digest>
+    reference: skill:test-design/references/boundaries.md <digest>
     read_roots: ["<project>","<root>/skills"]
   lens-design-fit-reuse  role=lens.design-fit-reuse tier=junior family=any kind=- access=read_only worktree=-
     reference: skill:code-review/references/reviewer-context.md <digest>

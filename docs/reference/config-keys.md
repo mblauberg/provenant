@@ -53,6 +53,14 @@ Set these in `[domains.fabric.limits]` in the host configuration. Omit a key for
 |---|---|---|
 | `store_busy_timeout_ms` | 30000 (30 seconds) | Milliseconds a command waits for a contended local store, both the SQLite busy timeout and the stores' own advisory locks, before it reports contention. Read once when a command starts; zero fails fast (0 to 600000). |
 
+## Host review lens settings
+
+Set these in `[domains.routing.review.lenses.by_paths]` in the host configuration. Omit the table for the bundled rules.
+
+| Key | Default | Effect |
+|---|---|---|
+| `"<glob>".add` | bundled test-path rules (`**/tests/**`, `**/*.test.*`, `**/conftest.py` and others) add `tests` | Add these review lenses, outside the slot cap and once, when a changed path matches the glob. The reason is recorded as `by_paths:<glob>` in `--explain` and the review report. Setting any `by_paths` table replaces the bundled rules; an empty `[domains.routing.review.lenses.by_paths]` removes them. (lens names, such as tests). |
+
 ## Host model policy settings
 
 Set these in `[domains.routing.model_policy]` in the host configuration. Omit a key for its bundled or empty default. `rules.policy` takes the same fields as `defaults`.

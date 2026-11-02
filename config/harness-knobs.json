@@ -129,6 +129,12 @@
       "build_dir_survey_interval_seconds": {"type": "int", "allowed": "seconds, 0 or more", "default": "300 (5 minutes)", "effect": "Settlement-triggered collection walks the lane caches at most this often, unless free space is below gc.free_floor or the last walk found the total within 10% of the cap. While free space stays below the floor, every settlement walks. Zero walks on every settlement."}
     }
   },
+  "host_review_lens_settings": {
+    "path": "domains.routing.review.lenses.by_paths",
+    "settings": {
+      "\"<glob>\".add": {"type": "string_list", "allowed": "lens names, such as tests", "default": "bundled test-path rules (`**/tests/**`, `**/*.test.*`, `**/conftest.py` and others) add `tests`", "effect": "Add these review lenses, outside the slot cap and once, when a changed path matches the glob. The reason is recorded as `by_paths:<glob>` in `--explain` and the review report. Setting any `by_paths` table replaces the bundled rules; an empty `[domains.routing.review.lenses.by_paths]` removes them."}
+    }
+  },
   "host_store_settings": {
     "path": "domains.fabric.limits",
     "settings": {

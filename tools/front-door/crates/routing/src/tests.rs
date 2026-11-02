@@ -4820,3 +4820,30 @@ fn a_malformed_persisted_exclusion_fails_closed_for_its_row_only()
         && candidate.exclusion.is_some()));
     Ok(())
 }
+
+#[test]
+fn review_path_lens_rules_load_replace_or_clear_the_bundled_table_through_the_loader()
+-> Result<(), Box<dyn std::error::Error>> {
+    let paths = vec!["crates/x/tests/a.rs".to_owned(), "docs/e2e/b.md".to_owned()];
+    for (text, expected) in [
+        // No override keeps the bundled rules.
+        ("schema_version=1\n", vec!["**/tests/**"]),
+        // A custom table replaces the bundled table rather than extending it.
+        (
+            "schema_version=1\n[domains.routing.review.lenses.by_paths.\"docs/e2e/**\"]\nadd=['tests']\n",
+            vec!["docs/e2e/**"],
+        ),
+        // An empty table clears every bundled rule.
+        (
+            "schema_version=1\n[domains.routing.review.lenses.by_paths]\n",
+            vec![],
+        ),
+    ] {
+        let config = load_routing(text)??;
+        let review = &config.domains.routing.review;
+        let plan = review.lens_plan(None, &paths, false);
+        assert_eq!(plan.matched_paths, expected, "{text}");
+        assert_eq!(plan.add.is_empty(), expected.is_empty(), "{text}");
+    }
+    Ok(())
+}

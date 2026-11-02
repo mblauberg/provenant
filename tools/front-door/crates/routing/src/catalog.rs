@@ -928,6 +928,7 @@ pub const SECTION: DomainSection = DomainSection {
     ..DomainSection::new::<RoutingConfig>("routing", defaults)
         .with_boundary_check(crate::policy::boundary)
         .with_fields(FIELD_METADATA)
+        .replacing_tables(&["review.lenses.by_paths"])
 };
 /// Retired timing keys are named first; serde never reads their values.
 fn validate_section(table: &toml_edit::Table) -> Vec<SectionError> {
