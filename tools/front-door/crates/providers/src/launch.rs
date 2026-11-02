@@ -172,8 +172,8 @@ pub(crate) fn base_env(
 }
 
 /// Writer Git uses a complete private directory, including its index and all
-/// operation state. Shared metadata is read-only. The small publishing wrapper
-/// restores this environment only for providers which scrub it.
+/// operation state. Shared metadata is read-only. The Git launcher restores
+/// this binding even when a provider's subprocess clears its environment.
 pub(crate) fn private_git_objects(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,

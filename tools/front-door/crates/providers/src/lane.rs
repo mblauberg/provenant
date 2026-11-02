@@ -32,37 +32,15 @@ impl crate::LaunchSpec {
             return Err(ProviderError::InvalidPath);
         }
         self.git_wrapper.git = Some(git.to_owned());
-        let bytes = git_wrapper(
+        install_git(
+            bin,
             git,
-            &self.env,
+            &mut self.env,
+            &mut self.setup,
             self.git_wrapper.scrub,
             self.git_wrapper.include.as_deref(),
-        )?;
-        let wrapper = bin.join("git");
-        self.setup.retain(|step| {
-            !matches!(step,
-            SetupStep::WriteExecutable { path, .. } | SetupStep::Symlink { link: path, .. }
-            if path == &wrapper)
-        });
-        if !self.setup.contains(&SetupStep::CreateDir(bin.to_owned())) {
-            self.setup.push(SetupStep::CreateDir(bin.to_owned()));
-        }
-        self.setup.push(SetupStep::WriteExecutable {
-            path: wrapper,
-            bytes,
-        });
-        let (_, path) = self
-            .env
-            .iter_mut()
-            .find(|(key, _)| key == "PATH")
-            .ok_or(ProviderError::InvalidPath)?;
-        if std::env::split_paths(path).next().as_deref() != Some(bin) {
-            *path = std::env::join_paths(
-                std::iter::once(bin.to_owned()).chain(std::env::split_paths(path)),
-            )
-            .map_err(|_| ProviderError::InvalidPath)?;
-        }
-        Ok(())
+            true,
+        )
     }
     /// Restore selected environment before Claude starts each Bash command.
     pub fn configure_claude_shell(&mut self, scratch: &Path) -> Result<(), ProviderError> {
@@ -242,6 +220,47 @@ fn git_wrapper(
     Ok(bytes)
 }
 
+// Both adapter setup and the writer/publishing composition use the same
+// executable selection, PATH and configuration policy.
+fn install_git(
+    bin: &Path,
+    git: &Path,
+    env: &mut [(OsString, OsString)],
+    setup: &mut Vec<SetupStep>,
+    scrub: bool,
+    include: Option<&str>,
+    wrapper: bool,
+) -> Result<(), ProviderError> {
+    let path = bin.join("git");
+    let step = if wrapper {
+        SetupStep::WriteExecutable {
+            path: path.clone(),
+            bytes: git_wrapper(git, env, scrub, include)?,
+        }
+    } else {
+        SetupStep::Symlink {
+            link: path.clone(),
+            target: git.to_owned(),
+        }
+    };
+    setup.retain(|step| !matches!(step, SetupStep::WriteExecutable { path: existing, .. } | SetupStep::Symlink { link: existing, .. } if existing == &path));
+    if !setup.contains(&SetupStep::CreateDir(bin.to_owned())) {
+        setup.push(SetupStep::CreateDir(bin.to_owned()));
+    }
+    setup.push(step);
+    let (_, search_path) = env
+        .iter_mut()
+        .find(|(key, _)| key == "PATH")
+        .ok_or(ProviderError::InvalidPath)?;
+    if std::env::split_paths(search_path).next().as_deref() != Some(bin) {
+        *search_path = std::env::join_paths(
+            std::iter::once(bin.to_owned()).chain(std::env::split_paths(search_path)),
+        )
+        .map_err(|_| ProviderError::InvalidPath)?;
+    }
+    Ok(())
+}
+
 fn gh_wrapper(gh: &str, gh_config: &str, policy: &provenant_config::GithubPolicy) -> String {
     let mut guard = String::new();
     for verb in &policy.deny_verbs {
@@ -416,26 +435,15 @@ impl LaneRuntime<'_> {
     ) -> Result<(), ProviderError> {
         // A private name also pins ordinary shell `git`, independently of
         // PATH's system shim and of the override executable's basename.
-        let bin = scratch.join("bin");
-        let (_, path) = env
-            .iter_mut()
-            .find(|(key, _)| key == "PATH")
-            .ok_or(ProviderError::InvalidPath)?;
-        *path =
-            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
-                .map_err(|_| ProviderError::InvalidPath)?;
-        setup.push(SetupStep::CreateDir(bin.clone()));
-        setup.push(if scrubbed_git_config {
-            SetupStep::WriteExecutable {
-                path: bin.join("git"),
-                bytes: git_wrapper(self.git, env, true, None)?,
-            }
-        } else {
-            SetupStep::Symlink {
-                link: bin.join("git"),
-                target: self.git.to_owned(),
-            }
-        });
+        install_git(
+            &scratch.join("bin"),
+            self.git,
+            env,
+            setup,
+            scrubbed_git_config,
+            None,
+            scrubbed_git_config,
+        )?;
         env.extend([
             (
                 "PROVENANT_AGENT_LABEL".into(),
@@ -521,7 +529,7 @@ fn claude_shell(env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> 
     Ok(format!("#!/bin/sh\n{exports}exec /bin/bash -c \"$1\"\n").into_bytes())
 }
 
-/// Shell exports that carry the host's git identity past an environment scrub.
+/// Carry the private repository binding and host identity past an environment scrub.
 fn identity_exports(env: &[(OsString, OsString)]) -> Result<String, ProviderError> {
     let mut identity = String::new();
     for (key, value) in env {
@@ -552,6 +560,224 @@ fn identity_exports(env: &[(OsString, OsString)]) -> Result<String, ProviderErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[allow(clippy::disallowed_methods)] // Exercise real subprocess environment clearing.
+    fn adapter_private_git(adapter: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+        use std::{
+            fs,
+            io::Write,
+            os::unix::fs::PermissionsExt,
+            process::{Command, Stdio},
+        };
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let repo = root.join("repo");
+        let scratch = root.join("scratch");
+        let home = root.join("home");
+        fs::create_dir_all(&repo)?;
+        fs::create_dir_all(&scratch)?;
+        fs::create_dir_all(home.join(".config/gh"))?;
+        let real_git = provenant_os::git::git_executable()
+            .ok_or("Git unavailable")?
+            .canonicalize()?;
+        let init = |path: &Path, bare: bool| -> Result<(), Box<dyn std::error::Error>> {
+            let mut command = Command::new(&real_git);
+            command.arg("init");
+            if bare {
+                command.arg("--bare");
+            }
+            assert!(
+                command
+                    .arg(path)
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .output()?
+                    .status
+                    .success()
+            );
+            Ok(())
+        };
+        init(&repo, false)?;
+        init(&scratch.join("git-common"), true)?;
+        fs::create_dir_all(scratch.join("git-objects"))?;
+        let host_head = fs::read(repo.join(".git/HEAD"))?;
+        let host_config = fs::read(repo.join(".git/config"))?;
+        fs::write(
+            home.join(".gitconfig"),
+            "[user]\n name = Host Name\n email = host@example.com\n[fixture]\n poison = yes\n",
+        )?;
+        let marker = root.join("pinned-called");
+        let git = root.join("selected-git");
+        fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\nprintf called > {}\nexec {} \"$@\"\n",
+                shell_quote(marker.to_str().ok_or("marker")?),
+                shell_quote(real_git.to_str().ok_or("git")?)
+            ),
+        )?;
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700))?;
+        let gh = root.join("gh");
+        fs::write(
+            &gh,
+            "#!/bin/sh\nprintf 'username=fixture\\npassword=fixture-secret\\n'\n",
+        )?;
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
+        let registration = crate::REGISTRY
+            .iter()
+            .find(|entry| entry.adapter.id() == adapter)
+            .ok_or("adapter")?;
+        let base = crate::tests::fixture_access_plan(
+            crate::Access::WorktreeWrite,
+            provenant_records::AdapterSpec::get(adapter).and_then(|s| s.authentication),
+            false,
+        );
+        let mut permissions = base.permissions().clone();
+        permissions.scratch.path = scratch.clone();
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })?;
+        let mut route = crate::tests::route(adapter, "fixture-model");
+        route.account_key = None;
+        let prompt = crate::Prompt::new("fixture".into());
+        let token = crate::tests::fixture_token();
+        let mut input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            &repo,
+            (adapter == "claude").then_some(&token),
+        );
+        input.provenant.git = &git;
+        let mut spec = registration.adapter.prepare(input)?;
+        spec.env.retain(|(key, _)| {
+            ![
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+            ]
+            .iter()
+            .any(|name| key == name)
+        });
+        spec.env.extend([
+            ("GIT_AUTHOR_NAME".into(), "Lane Author".into()),
+            ("GIT_AUTHOR_EMAIL".into(), "lane@example.com".into()),
+            ("GIT_COMMITTER_NAME".into(), "Lane Committer".into()),
+            ("GIT_COMMITTER_EMAIL".into(), "lane@example.com".into()),
+        ]);
+        spec.configure_publishing(&scratch, &git, &gh, &home, &Default::default())?;
+        for step in &spec.setup {
+            match step {
+                SetupStep::CreateDir(path) if path.starts_with(&scratch) => {
+                    fs::create_dir_all(path)?
+                }
+                SetupStep::WriteFile { path, bytes } if path.starts_with(&scratch) => {
+                    fs::write(path, bytes)?
+                }
+                SetupStep::WriteExecutable { path, bytes } if path.starts_with(&scratch) => {
+                    fs::write(path, bytes)?;
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                }
+                SetupStep::Symlink { link, target } if link.starts_with(&scratch) => {
+                    std::os::unix::fs::symlink(target, link)?
+                }
+                _ => {}
+            }
+        }
+        fs::write(repo.join("file"), "lane object")?;
+        let run = |args: &[&str]| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+            Ok(Command::new("/bin/sh")
+                .args(["-c", "exec git \"$@\"", "sh"])
+                .args(args)
+                .current_dir(&repo)
+                .env_clear()
+                .env("HOME", &home)
+                .env(
+                    "PATH",
+                    format!("{}:/usr/bin:/bin", scratch.join("bin").display()),
+                )
+                .output()?)
+        };
+        for args in [&["add", "file"][..], &["commit", "-m", "lane"][..]] {
+            let output = run(args)?;
+            assert!(
+                output.status.success(),
+                "{adapter}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(marker.exists(), "{adapter}: pinned Git was not invoked");
+        assert!(scratch.join("git-common/index").exists());
+        assert!(
+            scratch
+                .join("git-common/refs/heads")
+                .read_dir()?
+                .next()
+                .is_some()
+        );
+        assert!(scratch.join("git-objects").read_dir()?.next().is_some());
+        let author = run(&["log", "-1", "--format=%an <%ae>"])?;
+        assert_eq!(author.stdout, b"Lane Author <lane@example.com>\n");
+        assert!(
+            !run(&["config", "--get", "fixture.poison"])?
+                .status
+                .success()
+        );
+        let helper = run(&["config", "--get-all", "credential.helper"])?;
+        assert!(String::from_utf8_lossy(&helper.stdout).contains("auth git-credential"));
+        let mut credential = Command::new(scratch.join("bin/git"))
+            .args(["credential", "fill"])
+            .current_dir(&repo)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        credential
+            .stdin
+            .take()
+            .ok_or("stdin")?
+            .write_all(b"protocol=https\nhost=github.com\n\n")?;
+        let credential = credential.wait_with_output()?;
+        assert!(credential.status.success());
+        assert!(String::from_utf8_lossy(&credential.stdout).contains("password=fixture-secret"));
+        assert_eq!(fs::read(repo.join(".git/HEAD"))?, host_head);
+        assert_eq!(fs::read(repo.join(".git/config"))?, host_config);
+        assert!(!repo.join(".git/index").exists());
+        assert!(repo.join(".git/refs/heads").read_dir()?.next().is_none());
+        Ok(())
+    }
+
+    macro_rules! adapter_git_test {
+        ($name:ident, $adapter:literal) => {
+            #[test]
+            fn $name() -> Result<(), Box<dyn std::error::Error>> {
+                adapter_private_git($adapter)
+            }
+        };
+    }
+    adapter_git_test!(private_git_claude, "claude");
+    adapter_git_test!(private_git_codex, "codex");
+    adapter_git_test!(private_git_cursor, "cursor");
+    adapter_git_test!(private_git_agy, "agy");
+    adapter_git_test!(private_git_opencode, "opencode");
+
+    #[test]
+    fn private_git_command_writer_is_unsupported() {
+        assert!(
+            !provenant_records::AdapterSpec::get("command")
+                .expect("command")
+                .launch
+                .write
+        );
+    }
 
     #[test]
     fn github_policy_guards_labels_and_verb_prefixes() -> Result<(), Box<dyn std::error::Error>> {
