@@ -173,6 +173,12 @@ class ReferenceTests(unittest.TestCase):
             files, gaps = GEN['generate'](self.root)
         self.assertTrue(any('print-wire-schemas' in gap for gap in gaps))
         self.assertIn('Source gap', files['schemas.md'])
+        destination = self.root / 'reference'
+        GEN['write_files'](destination, {'schemas/lanes.schema.json': 'existing\n',
+                                         'schemas/mcp/fabric_run.schema.json': 'existing mcp\n'})
+        GEN['update_files'](destination, files, gaps)
+        self.assertEqual((destination / 'schemas/lanes.schema.json').read_text(), 'existing\n')
+        self.assertEqual((destination / 'schemas/mcp/fabric_run.schema.json').read_text(), 'existing mcp\n')
         with self.assertRaises(ValueError):
             with patch.dict(GLOBALS, cargo=lambda *_: '{"error-codes": 1}'):
                 GEN['wire_schemas'](self.root)

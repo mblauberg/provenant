@@ -1,16 +1,16 @@
-//! The lane row: the one projection both `status` and `lanes` emit.
+//! The planned shared lane projection for `status` and `lanes`.
 use super::schema::{
     any, array, boolean, integer, nullable, number, object, open_object, string, unsigned,
 };
 use serde::Serialize;
 use serde_json::Value;
 
-/// One lane (attempt) as the CLI and MCP present it. Members the run records own
+/// One lane (attempt) in the planned CLI projection. Members the run records own
 /// (routes, grants, delivery, continuation, timestamps) stay `Value`: this
 /// crate publishes their position and nullability, and the run records stay
 /// the single source of their inner shape.
 ///
-/// Optional members (`title`, `requested_priority`, `provider_seconds`) are
+/// Optional members (`title`, `requested_priority`, `provider_seconds`, `handoff`, `provider_error`) are
 /// omitted when absent; every other member is always present, null when unknown.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LaneRow {
@@ -63,6 +63,10 @@ pub struct LaneRow {
     /// two, never both. The CLI emits neither.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_error: Option<String>,
 }
 
 /// The settled record's reason.
@@ -79,8 +83,9 @@ pub struct LaneTranscript {
     pub path: Option<String>,
 }
 
-/// `data` of `lanes` and of `status`: one list type for both, so the two
-/// commands cannot drift. Members after `next_cursor` are present only on the
+/// Planned `data` of `lanes` and `status`. Current status emits raw attempt
+/// records and a numeric cursor; migration will use this string cursor.
+/// Members after `next_cursor` are present only on the
 /// command or path that produces them.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LaneList {
@@ -165,6 +170,8 @@ pub fn lane_row_schema() -> Value {
             ("title", string()),
             ("requested_priority", integer()),
             ("provider_seconds", nullable(number())),
+            ("handoff", any()),
+            ("provider_error", string()),
         ],
     )
 }

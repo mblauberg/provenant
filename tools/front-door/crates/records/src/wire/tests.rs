@@ -42,6 +42,8 @@ fn row() -> LaneRow {
         title: None,
         requested_priority: None,
         provider_seconds: None,
+        handoff: None,
+        provider_error: None,
     }
 }
 
@@ -93,6 +95,8 @@ fn lane_rows_validate_with_and_without_optional_members() {
     full.requested_priority = Some(10);
     full.cache_read_share = Some(0.25);
     full.provider_seconds = Some(1.5);
+    full.handoff = Some(Value::Null);
+    full.provider_error = Some("failed".into());
     full.transcript = Some(LaneTranscript {
         adapter: "codex".into(),
         session: "s".into(),
@@ -218,6 +222,9 @@ fn chunk_optional_members_and_encodings() {
     let plain = serde_json::to_value(chunk()).unwrap();
     assert_eq!(plain["bytes"], json!({"encoding": "utf8", "data": "hello"}));
     assert!(plain.get("tail").is_none());
+    let mut invalid = plain.clone();
+    invalid["bytes"] = json!({"encoding": "base64", "data": "%%%"});
+    rejected(&schema, invalid);
     let mut bad = plain;
     bad["bytes"] = json!({"encoding": "latin1", "data": "x"});
     rejected(&schema, bad);
@@ -276,13 +283,30 @@ fn cancel_receipts_cover_every_state_and_error_rows() {
     );
     data.recovered = Some(vec![CancelRecovered {
         attempt_id: id,
-        found: "terminal".into(),
+        found: cancel::ReconciledWire::Settling {
+            phase: "delivering".into(),
+        },
     }]);
     data.lanes = Some(vec![row()]);
     data.condition_met = Some(true);
     data.timed_out = Some(false);
     data.reason = Some("r".into());
     accepted(&schema, &data);
+    // Values use the run owner's tagged Reconciled representation.
+    for found in [
+        json!({"state": "queued"}),
+        json!({"state": "held"}),
+        json!({"state": "deadline_stop"}),
+        json!({"state": "settling", "phase": "delivery"}),
+        json!({"state": "finished"}),
+        json!({"state": "temporary_removed"}),
+        json!({"state": "temporary_retained", "path": "/tmp/a", "reason": "retained"}),
+        json!({"state": "withdrawn"}),
+        json!({"state": "escaped", "pids": [123]}),
+        json!({"state": "uncertain", "reason": {"kind": "no_launch_summary"}}),
+    ] {
+        validate(&cancel::reconciled_schema(), &found).unwrap();
+    }
     rejected(
         &schema,
         json!({"operation_id": "o", "receipts": [{"attempt_id": "a", "receipt": {"state": "requested", "reason": "x"}}]}),
@@ -320,6 +344,12 @@ fn envelopes_validate_for_every_command_and_for_errors() {
     validate(&errors, &with_repair).unwrap();
     // An error envelope needs its error; a success cannot pass as one.
     assert!(validate(&errors, &ok).is_err());
+    let mut invalid = ok.clone();
+    invalid["data"] = Value::Null;
+    rejected(&lanes, invalid);
+    let mut invalid = failed.clone();
+    invalid["error"] = Value::Null;
+    rejected(&lanes, invalid);
     let mut stale = ok.clone();
     stale["schema_version"] = json!(1);
     assert!(validate(&lanes, &stale).is_err());
@@ -447,6 +477,14 @@ fn mcp_results_validate_by_tag_and_allow_unknown_members() {
         }),
     )
     .unwrap();
+    rejected(
+        &out,
+        json!({
+            "kind": "artifact", "target": target, "digest": "sha256:00",
+            "artifact": {"path": {"encoding": "utf8", "path": "result.md"}, "digest": null},
+            "bytes": {"encoding": "base64", "data": "%%%"}
+        }),
+    );
 }
 
 #[test]

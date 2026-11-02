@@ -1,6 +1,8 @@
 //! Cancel receipts.
 use super::error::row_error_schema;
-use super::schema::{array, boolean, choices, constant, object, one_of, string};
+use super::schema::{
+    array, boolean, choices, constant, integer, object, one_of, open_object, string,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -54,7 +56,68 @@ pub enum CancelRow {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CancelRecovered {
     pub attempt_id: String,
-    pub found: String,
+    pub found: ReconciledWire,
+}
+
+/// The run owner's tagged reconciliation result.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReconciledWire {
+    Queued,
+    Held,
+    DeadlineStop,
+    Settling {
+        phase: String,
+    },
+    Finished,
+    TemporaryRemoved,
+    TemporaryRetained {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+    Withdrawn,
+    Escaped {
+        pids: Vec<i64>,
+    },
+    Uncertain {
+        reason: Value,
+    },
+}
+
+pub fn reconciled_schema() -> Value {
+    one_of(vec![
+        object(
+            &[(
+                "state",
+                choices(&[
+                    "queued",
+                    "held",
+                    "deadline_stop",
+                    "finished",
+                    "temporary_removed",
+                    "withdrawn",
+                ]),
+            )],
+            &[],
+        ),
+        object(&[("state", constant("settling")), ("phase", string())], &[]),
+        object(
+            &[
+                ("state", constant("temporary_retained")),
+                ("path", string()),
+                ("reason", string()),
+            ],
+            &[],
+        ),
+        object(
+            &[("state", constant("escaped")), ("pids", array(integer()))],
+            &[],
+        ),
+        object(
+            &[("state", constant("uncertain")), ("reason", open_object())],
+            &[],
+        ),
+    ])
 }
 
 /// `data` of `cancel`. The members after `receipts` appear only when the
@@ -113,7 +176,7 @@ pub fn cancel_data_schema() -> Value {
             (
                 "recovered",
                 array(object(
-                    &[("attempt_id", string()), ("found", string())],
+                    &[("attempt_id", string()), ("found", reconciled_schema())],
                     &[],
                 )),
             ),

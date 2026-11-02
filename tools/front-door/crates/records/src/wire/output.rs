@@ -95,7 +95,13 @@ pub struct ReviewerReceipt {
 pub fn chunk_bytes_schema() -> Value {
     one_of(vec![
         object(&[("encoding", constant("utf8")), ("data", string())], &[]),
-        object(&[("encoding", constant("base64")), ("data", string())], &[]),
+        object(
+            &[
+                ("encoding", constant("base64")),
+                ("data", super::schema::base64()),
+            ],
+            &[],
+        ),
     ])
 }
 

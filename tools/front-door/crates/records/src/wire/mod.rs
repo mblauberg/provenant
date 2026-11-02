@@ -1,6 +1,6 @@
-//! Typed wire projections shared by the CLI, MCP and the generated reference.
+//! Planned typed wire projections for the CLI, MCP and generated reference.
 //!
-//! Each type serialises exactly what the edges emit and has a builder-written
+//! Each planned projection has a builder-written
 //! JSON Schema (draft 2020-12) beside it; tests validate serialised values
 //! against the schema, and `scripts/generate-reference --check` fails when the
 //! published schema files drift from [`published`].
@@ -59,7 +59,7 @@ fn outcome_names() -> Vec<String> {
 pub fn envelope_schema(command: &str, data: Value) -> Value {
     let statuses = outcome_names();
     let statuses: Vec<&str> = statuses.iter().map(String::as_str).collect();
-    object(
+    let mut schema = object(
         &[
             ("schema_version", constant(SCHEMA_VERSION)),
             (
@@ -71,11 +71,16 @@ pub fn envelope_schema(command: &str, data: Value) -> Value {
                 },
             ),
             ("status", choices(&statuses)),
-            ("data", nullable(data)),
+            ("data", nullable(data.clone())),
             ("error", nullable(error_schema())),
         ],
         &[],
-    )
+    );
+    schema["oneOf"] = json!([
+        {"properties": {"status": {"enum": ["ok", "pending", "waiting"]}, "data": data, "error": {"type": "null"}}},
+        {"properties": {"status": {"enum": ["failed", "refused", "invalid", "error", "unavailable", "timeout", "cancelled"]}, "error": error_schema()}}
+    ]);
+    schema
 }
 
 /// The data schema for a command in [`COMMANDS`].
@@ -88,9 +93,8 @@ pub fn data_schema(command: &str) -> Option<Value> {
     })
 }
 
-/// The complete versioned schema of a command's `--json` envelope; what the
-/// CLI's `--schema` flag prints for it. `None` for commands without a typed
-/// data schema yet.
+/// The planned versioned schema of a command's `--json` envelope.
+/// `None` for commands without a typed data schema yet.
 pub fn command_schema(command: &str) -> Option<Value> {
     let data = data_schema(command)?;
     Some(root(
@@ -174,7 +178,7 @@ pub fn edge_error_codes() -> Value {
     Value::Array(
         EDGE_ERROR_CODES
             .iter()
-            .map(|entry| json!({"code": entry.code, "summary": entry.summary, "kind": format!("{:?}", entry.kind).to_lowercase()}))
+            .map(|entry| json!({"code": entry.code, "summary": entry.summary, "kind": match entry.kind { CodeKind::Specific => "specific", CodeKind::Umbrella => "umbrella", CodeKind::LegacySpelling => "legacy_spelling" }}))
             .collect(),
     )
 }

@@ -15,6 +15,11 @@ pub fn any() -> Value {
 pub fn string() -> Value {
     json!({"type": "string"})
 }
+/// Pattern for padded RFC 4648 base64 strings.
+pub const BASE64_PATTERN: &str = r"^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$";
+pub fn base64() -> Value {
+    json!({"type": "string", "pattern": BASE64_PATTERN})
+}
 pub fn boolean() -> Value {
     json!({"type": "boolean"})
 }
@@ -105,8 +110,9 @@ pub fn root(id: &str, title: &str, mut schema: Value) -> Value {
 
 /// Validate `instance` against the subset of JSON Schema the builders emit:
 /// `type`, `const`, `enum`, `properties`, `required`, `additionalProperties:
-/// false`, `items`, `oneOf`, `anyOf`, `minimum`, `maximum`. Other keywords are
-/// ignored. Errors name the failing JSON path.
+/// false`, `items`, `oneOf`, `anyOf`, `minimum`, `maximum`, and the base64
+/// pattern emitted above. Other keywords are ignored. Errors name the failing
+/// JSON path.
 pub fn validate(schema: &Value, instance: &Value) -> Result<(), String> {
     check(schema, instance, "$")
 }
@@ -149,6 +155,20 @@ fn check(schema: &Value, value: &Value, at: &str) -> Result<(), String> {
         };
         if !ok {
             return Err(format!("{at}: {value} is not of type {kind}"));
+        }
+    }
+    if map.get("pattern").and_then(Value::as_str) == Some(BASE64_PATTERN)
+        && let Some(text) = value.as_str()
+    {
+        let bytes = text.as_bytes();
+        let padding = bytes.iter().rev().take_while(|&&b| b == b'=').count();
+        if bytes.len() % 4 != 0
+            || padding > 2
+            || !bytes[..bytes.len() - padding]
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/')
+        {
+            return Err(format!("{at}: invalid base64"));
         }
     }
     if let Some(number) = value.as_f64() {

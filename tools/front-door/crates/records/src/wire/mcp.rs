@@ -82,7 +82,13 @@ pub fn run_result_schema() -> Value {
 fn bytes() -> Value {
     one_of(vec![
         open(&[("encoding", constant("utf8")), ("data", string())], &[]),
-        open(&[("encoding", constant("base64")), ("data", string())], &[]),
+        open(
+            &[
+                ("encoding", constant("base64")),
+                ("data", super::schema::base64()),
+            ],
+            &[],
+        ),
     ])
 }
 

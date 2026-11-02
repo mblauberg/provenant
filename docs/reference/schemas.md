@@ -4,8 +4,11 @@
 
 Source: `provenant-records print-wire-schemas`.
 
-Each file is a JSON Schema (draft 2020-12) for the `--json` envelope of one
-command, or for an MCP tool's `structuredContent`. `schema_version` is bumped for
+These JSON Schemas (draft 2020-12) describe planned schema_version 2 contracts.
+The CLI and MCP do not emit these types yet; current CLI `--json` is version 1.
+Status currently emits raw attempt records and a numeric next_cursor; the
+planned typed status uses lane rows and a string cursor. MCP schemas describe
+planned structuredContent. `schema_version` is bumped for
 any change an existing consumer could misread; a new version replaces the old
 one with no dual-emit period.
 
@@ -45,9 +48,9 @@ owner splits them.
 | `REVIEW_INCOMPLETE` | specific | Review coverage does not support acceptance. |
 | `IN_LANE` | specific | A lane cannot register or save a chair session. |
 | `SESSION_PROJECT` | specific | The workflow session is registered under a different project. |
-| `launch_unknown` | legacyspelling | The launch handoff was not confirmed (same meaning as LAUNCH_UNKNOWN). |
-| `owner_local_only` | legacyspelling | The inbox owner must run this operation on the owner host or from the owning chair session. |
-| `unsupported_owner` | legacyspelling | The peer does not support inbox operations. |
-| `console_app_unavailable` | legacyspelling | The console app cannot be opened. |
-| `reconcile_incomplete` | legacyspelling | Reconcile could not settle everything it found. |
-| `cli_failed` | legacyspelling | A delegated Provenant command failed without a code of its own. |
+| `launch_unknown` | legacy_spelling | The launch handoff was not confirmed (same meaning as LAUNCH_UNKNOWN). |
+| `owner_local_only` | legacy_spelling | The inbox owner must run this operation on the owner host or from the owning chair session. |
+| `unsupported_owner` | legacy_spelling | The peer does not support inbox operations. |
+| `console_app_unavailable` | legacy_spelling | The console app cannot be opened. |
+| `reconcile_incomplete` | legacy_spelling | Reconcile could not settle everything it found. |
+| `cli_failed` | legacy_spelling | A delegated Provenant command failed without a code of its own. |

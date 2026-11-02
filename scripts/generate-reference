@@ -145,8 +145,11 @@ def schema_files(data):
         files[f"schemas/{name}"] = json.dumps(data[name], ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     text = header("Published JSON Schemas", "provenant-records print-wire-schemas")
     text += (
-        "Each file is a JSON Schema (draft 2020-12) for the `--json` envelope of one\n"
-        "command, or for an MCP tool's `structuredContent`. `schema_version` is bumped for\n"
+        "These JSON Schemas (draft 2020-12) describe planned schema_version 2 contracts.\n"
+        "The CLI and MCP do not emit these types yet; current CLI `--json` is version 1.\n"
+        "Status currently emits raw attempt records and a numeric next_cursor; the\n"
+        "planned typed status uses lane rows and a string cursor. MCP schemas describe\n"
+        "planned structuredContent. `schema_version` is bumped for\n"
         "any change an existing consumer could misread; a new version replaces the old\n"
         "one with no dual-emit period.\n\n"
         "| Schema | Describes |\n|---|---|\n"
@@ -297,6 +300,16 @@ def differences(expected, actual):
     return changed
 
 
+def update_files(destination, files, gaps):
+    if destination.exists():
+        for path in destination.rglob("*"):
+            relative = path.relative_to(destination)
+            preserve_schema = any("print-wire-schemas" in gap for gap in gaps) and relative.parts[0] == "schemas"
+            if path.is_file() and relative.as_posix() not in files and not preserve_schema:
+                path.unlink()
+    write_files(destination, files)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="regenerate in a temporary directory and diff")
@@ -315,12 +328,7 @@ def main():
                 print(f"Generated reference differs; run {COMMAND}.", file=sys.stderr)
                 return 1
     else:
-        # This directory is wholly generated; remove stale generated files too.
-        if destination.exists():
-            for path in destination.rglob("*"):
-                if path.is_file() and path.relative_to(destination).as_posix() not in files:
-                    path.unlink()
-        write_files(destination, files)
+        update_files(destination, files, gaps)
     return 0
 
 
