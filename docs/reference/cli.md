@@ -1925,6 +1925,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -1949,7 +1950,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "route",
         "effort",
         "confidential",
-        "fallback"
+        "fallback",
+        "exclude"
       ],
       "multiple": true,
       "name": "RouteRequest",
@@ -2384,6 +2386,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
 | `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
@@ -2442,7 +2445,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "route",
         "effort",
         "confidential",
-        "fallback"
+        "fallback",
+        "exclude"
       ],
       "multiple": true,
       "name": "RouteRequest",
@@ -2485,6 +2489,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--risk` | `{"description": "Risk tier used to select a shape", "name": "risk"}` |
 | `--kind` | `{"description": "Task kind used to select a shape", "name": "kind"}` |
 | `--range` | `{"description": "Git range whose changed paths select the shape", "name": "range"}` |
+| `--exclude` | `{"description": "Keep a provider, account or exact model out of every reviewer pool (repeatable); see &#96;provenant route resolve --help&#96;", "name": "exclude", "repeatable": true}` |
 | `--wait` | `{"bounds": [1, 14400], "defaults": ["3600"], "description": "Overall wait limit (seconds or a duration such as 30m)", "name": "wait"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -2501,6 +2506,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "risk",
         "kind",
         "range",
+        "exclude",
         "wait"
       ],
       "multiple": true,
@@ -2601,6 +2607,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
 | `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
 | `--worktree` | `{"description": "Writer worktree; local run creates an owned worktree for a missing branch name", "name": "worktree"}` |
@@ -2658,7 +2665,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "route",
         "effort",
         "confidential",
-        "fallback"
+        "fallback",
+        "exclude"
       ],
       "multiple": true,
       "name": "RouteRequest",
