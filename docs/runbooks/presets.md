@@ -671,9 +671,10 @@ inherits `[plan]` without the stage it replaces, the preset runs its
 deterministic defaults and the reason is recorded in the graph provenance and
 printed as a warning.
 
-If the planner node itself fails at run time, no fallback runs: its dependents
-block and the graph fails with the node's error. Rerun with `--plan off`, or
-resume after fixing the route with `provenant fabric graph resume`.
+If a planner node fails at run time, the graph runs the preset's deterministic
+static stage and records `plan.fallback_reason` in the run output. The static
+stage must settle successfully for the graph to succeed; `provenant output`
+shows the fallback and its reason.
 
 A preset opts in with a `[plan]` table: `replaces` (the stage to swap),
 `explicit` (parameters that, when set, keep the static graph), `guidance` and

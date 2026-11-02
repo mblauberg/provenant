@@ -54,6 +54,212 @@ fn pattern_planner(max_nodes: usize) -> GraphDocument {
     })).unwrap()
 }
 
+#[test]
+fn failed_planner_runs_static_fallback_and_records_reason() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"planned-fallback", "nodes":[
+            {"id":"before", "access":"read_only", "prompt":"Prepare inputs", "route":{"alias":"junior"}},
+            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan",
+             "route":{"alias":"senior"}, "depends_on":["before"],
+             "inputs":[{"node":"before", "outputs":["result"]}],
+             "plan":{"kinds":["task"], "max_nodes":2,
+             "wire_exports":true,
+             "fallback_depends_on":["before"],
+             "fallback_inputs":[{"node":"before", "outputs":["result"]}],
+             "fallback":{"nodes":[
+                 {"id":"static", "access":"read_only", "prompt":"Static stage", "route":{"alias":"junior"}}
+             ], "exports":[{"node":"static", "outputs":["result"]}]}}},
+            {"id":"after", "access":"read_only", "prompt":"Consume stage", "route":{"alias":"senior"},
+             "depends_on":["plan"], "inputs":[{"node":"plan", "outputs":["result"]}]}
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "prepared result"),
+            terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief"),
+            terminal_with_result(AttemptOutcome::Succeeded, "static result"),
+            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 4);
+    assert!(owner.calls[2].0.node_id.contains("plan--fallback--static"));
+    assert!(owner.prompts[2].contains("prepared result"));
+    assert!(owner.prompts[3].contains("static result"));
+    let plan = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    assert_eq!(plan.state, NodeState::Succeeded);
+    assert_eq!(
+        serde_json::to_value(plan).unwrap()["outputs"]["plan"]["fallback_reason"],
+        "planner attempt failed (TaskFailed): planner rejected the brief"
+    );
+    let summary = plan.deterministic_summary().unwrap();
+    assert_eq!(
+        summary,
+        include_str!("../fixtures/plan-fallback-output.txt")
+    );
+}
+
+fn two_step_fallback_document() -> GraphDocument {
+    serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"planned-fallback-restart", "nodes":[
+            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan",
+             "route":{"alias":"senior"},
+             "plan":{"kinds":["task"], "max_nodes":2, "wire_exports":true,
+             "fallback":{"nodes":[
+                 {"id":"first", "access":"read_only", "prompt":"First step", "route":{"alias":"junior"}},
+                 {"id":"second", "access":"read_only", "prompt":"Second step", "route":{"alias":"junior"},
+                  "depends_on":["first"], "inputs":[{"node":"first", "outputs":["result"]}]}
+             ], "exports":[{"node":"second", "outputs":["result"]}]}}},
+            {"id":"after", "access":"read_only", "prompt":"Consume stage", "route":{"alias":"senior"},
+             "depends_on":["plan"], "inputs":[{"node":"plan", "outputs":["result"]}]}
+        ]
+    })).unwrap()
+}
+
+#[test]
+fn restart_after_fallback_expansion_does_not_duplicate_work_or_admit_dependants_early() {
+    let document = two_step_fallback_document();
+    let mut journal = MemoryJournal::default();
+    let mut first_owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief"),
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let interrupted = advance(&document, &mut first_owner, &mut journal).unwrap();
+    assert_eq!(interrupted.status, GraphStatus::Pending);
+    assert_eq!(interrupted.checkpoint.expansions.len(), 1);
+    let ids: Vec<_> = first_owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert!(ids[1].ends_with("--fallback--first"), "{ids:?}");
+    let state = |run: &GraphRun, suffix: &str| {
+        run.checkpoint.nodes.iter().find(|node| node.id.ends_with(suffix)).map(|node| node.state)
+    };
+    assert_eq!(state(&interrupted, "--fallback--second"), Some(NodeState::Pending));
+    assert_eq!(state(&interrupted, "after"), Some(NodeState::Pending));
+
+    let mut second_owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "first result"),
+            terminal_with_result(AttemptOutcome::Succeeded, "second result"),
+            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut second_owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.expansions.len(), 1);
+    let ids: Vec<_> = second_owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    assert_eq!(ids.len(), 3, "{ids:?}");
+    assert!(!ids.contains(&"plan"), "{ids:?}");
+    assert!(ids[0].ends_with("--fallback--first"), "{ids:?}");
+    assert!(ids[1].ends_with("--fallback--second"), "{ids:?}");
+    assert_eq!(ids[2], "after");
+    assert!(second_owner.prompts[1].contains("first result"));
+    assert!(second_owner.prompts[2].contains("second result"));
+}
+
+#[test]
+fn restart_rejects_a_fallback_expansion_that_differs_from_the_spec() {
+    let document = two_step_fallback_document();
+    let mut journal = MemoryJournal::default();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief"),
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let mut checkpoint = journal.0.clone().unwrap();
+    checkpoint.expansions[0].nodes[0].prompt = "Tampered step".into();
+    journal.0 = Some(checkpoint);
+    let result = advance(&document, &mut fixture_owner(&[]), &mut journal);
+    assert!(matches!(result, Err(GraphError::BadCheckpoint)), "{:?}", result.map(|run| run.status));
+}
+
+#[test]
+fn fallback_expansion_over_a_structural_limit_pauses_with_a_reason() {
+    let document = two_step_fallback_document();
+    let limits = crate::config::GraphLimits { nodes: 3, ..Default::default() };
+    let mut owner = fixture_owner(&["planner rejected the brief"]);
+    let mut owner = {
+        owner.observations =
+            [terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief")].into();
+        owner
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    let reason = run.checkpoint.pause_reason.as_deref().unwrap();
+    assert!(reason.contains("plan fallback expansion paused"), "{reason}");
+    assert!(run.checkpoint.expansions.is_empty());
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+fn planner_prelaunch_failure_runs_static_fallback_without_an_attempt() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"planned-fallback-prelaunch", "nodes":[
+            {"id":"before", "access":"read_only", "prompt":"Prepare", "route":{"alias":"junior"}},
+            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan",
+             "route":{"alias":"senior"}, "depends_on":["before"],
+             "inputs":[{"node":"before", "outputs":["result"]}],
+             "plan":{"kinds":["task"], "max_nodes":2,
+             "wire_exports":true,
+             "fallback":{"nodes":[
+                 {"id":"static", "access":"read_only", "prompt":"Static stage", "route":{"alias":"junior"}}
+             ], "exports":[{"node":"static", "outputs":["result"]}]}}},
+            {"id":"after", "access":"read_only", "prompt":"Consume", "route":{"alias":"senior"},
+             "depends_on":["plan"], "inputs":[{"node":"plan", "outputs":["result"]}]}
+        ]
+    })).unwrap();
+    let mut document = document;
+    document.nodes[1].prompt = "x".repeat(100);
+    let mut owner = fixture_owner(&[&"u".repeat(3000), "static result", "done"]);
+    let limits = crate::config::GraphLimits {
+        node_prompt_bytes: 2000,
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(owner.calls.len(), 3, "{:?}", run.checkpoint.nodes);
+    assert!(owner.calls[1].0.node_id.contains("plan--fallback--static"));
+    assert_eq!(owner.calls[2].0.node_id, "after");
+    assert!(owner.prompts[2].contains("static result"));
+    let plan = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    assert!(plan.attempts.is_empty());
+    assert_eq!(plan.state, NodeState::Succeeded);
+    assert_eq!(
+        plan.outputs.as_ref().unwrap().plan.as_ref().unwrap().fallback_reason,
+        "planner attempt failed (unknown failure): node plan: selected upstream outputs do not fit; increase node_prompt_bytes and restart the graph"
+    );
+}
+
 fn pattern_result(instance: Value) -> String {
     format!(
         "```fragment\n{}\n```",

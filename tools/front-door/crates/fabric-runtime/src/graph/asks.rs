@@ -611,6 +611,7 @@ fn decision_outputs(ask_id: &str, option: &str, answer: &AskAnswer) -> NodeOutpu
         branch: None,
         commit: None,
         warnings: Vec::new(),
+        plan: None,
         remaining: None,
     }
 }
