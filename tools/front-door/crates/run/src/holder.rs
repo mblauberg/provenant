@@ -956,7 +956,6 @@ impl RunStore {
                         EffectDisposition::Cancelled {
                             reason: delivery_cancellation_reason(
                                 read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.as_deref(),
-                                false,
                             ),
                             retryable: true,
                         }
@@ -2953,15 +2952,11 @@ fn cancellation_reason(bytes: Option<&[u8]>) -> Option<String> {
     })
 }
 
-fn delivery_cancellation_reason(bytes: Option<&[u8]>, handoff_done: bool) -> String {
-    let mut reason = match cancellation_reason(bytes) {
+fn delivery_cancellation_reason(bytes: Option<&[u8]>) -> String {
+    match cancellation_reason(bytes) {
         Some(cancellation) => format!("cancelled during delivery: {cancellation}"),
         None => "cancelled during delivery".into(),
-    };
-    if handoff_done {
-        reason.push_str("; handoff declared done but settlement was not successful");
     }
-    reason
 }
 
 #[cfg(test)]
@@ -2979,21 +2974,11 @@ mod friction_tests {
     #[test]
     fn delivery_cancellation_reason_keeps_its_whole_cause() {
         assert_eq!(
-            super::delivery_cancellation_reason(
-                Some(br#"{"reason":"explicit_cancellation"}"#),
-                false
-            ),
+            super::delivery_cancellation_reason(Some(br#"{"reason":"explicit_cancellation"}"#)),
             "cancelled during delivery: explicit_cancellation"
         );
         assert_eq!(
-            super::delivery_cancellation_reason(
-                Some(br#"{"reason":"explicit_cancellation"}"#),
-                true
-            ),
-            "cancelled during delivery: explicit_cancellation; handoff declared done but settlement was not successful"
-        );
-        assert_eq!(
-            super::delivery_cancellation_reason(Some(br#"{"scope":{}}"#), false),
+            super::delivery_cancellation_reason(Some(br#"{"scope":{}}"#)),
             "cancelled during delivery"
         );
     }

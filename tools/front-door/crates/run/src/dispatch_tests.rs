@@ -3291,6 +3291,58 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
 }
 
 #[test]
+fn a_busy_publication_lock_leaves_the_sealed_decision_to_replay() -> TestResult {
+    use provenant_os::fs::{FsError, LockMode};
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        ..Fake::default()
+    };
+    let held = store
+        .run_dir(run.run_id, false)?
+        .try_lock(std::ffi::OsStr::new("publication.lock"), LockMode::Exclusive)?;
+    let error = store
+        .finish(id, &dir, &observed, &fake, &call)
+        .expect_err("a held publication lock cannot commit");
+    assert!(
+        matches!(error, RunError::Filesystem(FsError::LockTimeout { .. })),
+        "{error:?}"
+    );
+    let decision =
+        artifacts::read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT)?.ok_or("decision")?;
+    drop(held);
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(record.state, AttemptState::Terminal { .. }));
+    assert_eq!(
+        artifacts::read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT)?.ok_or("decision")?,
+        decision,
+        "replay commits the sealed bytes"
+    );
+    assert_eq!(fake.decoded.get(), 1, "replay never decodes again");
+    Ok(())
+}
+
+#[test]
 fn cancelled_lane_keeps_its_outcome_and_reason_when_session_scrub_fails() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
