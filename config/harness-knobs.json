@@ -38,6 +38,18 @@
       "limits.expansion_depth": {"type": "int", "allowed": "1 or more", "default": "64", "effect": "Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 33. Graph documents cannot raise it."}
     }
   },
+  "host_plan_settings": {
+    "path": "domains.fabric.plan",
+    "settings": {
+      "mode": {"type": "enum", "allowed": "auto, on or off", "default": "auto", "effect": "Default for `provenant run --preset --plan`. on puts a principal planner node in front of the preset graph so it can shape the graph from the preset's pattern catalogue; off keeps the preset's static graph; auto decides from the subject size. `--explain` prints the decision and its reason."},
+      "route": {"type": "string", "allowed": "a pool alias", "default": "principal", "effect": "Route alias the planner node runs on. When it is unavailable the run falls back to the preset's deterministic defaults and records the reason; a weaker planner is never substituted."},
+      "lane_deadline_seconds": {"type": "int", "min": 60, "max": 14400, "default": "3600", "effect": "Longest wall-clock budget a planner may give one planned lane. A larger budget refuses the plan before admission."},
+      "max_nodes": {"type": "int", "min": 1, "max": 512, "default": "24", "effect": "Most nodes and pattern instances one plan may emit, within the host graph limits."},
+      "auto.acceptance_items": {"type": "int", "min": 1, "default": "6", "effect": "`auto` turns planning on when the subject lists more acceptance items than this."},
+      "auto.write_crates": {"type": "int", "min": 1, "default": "2", "effect": "`auto` turns planning on when the subject's write scope touches more crates than this."},
+      "auto.batch_issues": {"type": "int", "min": 1, "default": "2", "effect": "`auto` turns planning on when one batch names at least this many issues."}
+    }
+  },
   "host_model_policy_settings": {
     "path": "domains.routing.model_policy",
     "settings": {
