@@ -508,12 +508,14 @@ impl LiveQuota {
         // An isolated agy account is signed in under its own directory as
         // `HOME`. A missing keychain has its own failure, never auth, and the
         // probe re-checks it around the spawn.
-        let probe_home = crate::agy::ProbeHome::select(&account.identity_dir, &self.home)
-            .map_err(|error| match error {
-                crate::ProviderError::IsolatedKeychainUnavailable(_) => {
-                    ProbeFailure::IsolatedKeychainUnavailable
+        let probe_home =
+            crate::agy::ProbeHome::select(&account.identity_dir, &self.home).map_err(|error| {
+                match error {
+                    crate::ProviderError::IsolatedKeychainUnavailable(_) => {
+                        ProbeFailure::IsolatedKeychainUnavailable
+                    }
+                    _ => ProbeFailure::Auth,
                 }
-                _ => ProbeFailure::Auth,
             })?;
         let scratch = crate::host::HostProbeDir::create(&self.state)
             .map_err(|_| ProbeFailure::ProbeDirectory)?;

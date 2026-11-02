@@ -1898,7 +1898,10 @@ mod tests {
         };
         let human = quota_human(&report);
         assert!(human.contains("KEYCHAIN_UNAVAILABLE"), "{human}");
-        assert!(human.contains("/tmp/.gemini/Library/Keychains/login.keychain-db"), "{human}");
+        assert!(
+            human.contains("/tmp/.gemini/Library/Keychains/login.keychain-db"),
+            "{human}"
+        );
         assert!(human.contains("--directory ~ legacy"), "{human}");
     }
 
