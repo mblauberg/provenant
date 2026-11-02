@@ -3,7 +3,7 @@ import ProvenantKit
 /// Which answers a request offers, by kind. The same set applies whether or not it has options.
 enum InboxActions {
     static func isAssumption(_ draft: HumanRequest.Draft) -> Bool {
-        draft.kind.lowercased() == "assumption" || draft.proceedingWith != nil
+        RequestKind(draft.kind) == .assumption || draft.proceedingWith != nil
     }
 
     /// Choose when there are options, confirm and override for an assumption, and reply for every kind.

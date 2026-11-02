@@ -102,11 +102,11 @@ final class MenuTests: XCTestCase {
         XCTAssertEqual(facts, ["Checked"])
     }
 
-    func testFooterHasConsoleHintAndSettings() throws {
+    func testFooterOpensTheConsoleAndHasSettings() throws {
         let rows = items(entries(try fixture()))
         let console = try XCTUnwrap(rows.first { $0.title == "Open Console" })
-        XCTAssertFalse(console.enabled)
-        XCTAssertTrue(console.subtitle?.contains("provenant inbox") == true)
+        XCTAssertTrue(console.enabled)
+        XCTAssertEqual(console.action, .openConsole)
         let settings = try XCTUnwrap(rows.first { $0.title == "Settings" }?.submenu)
         XCTAssertTrue(items(settings).contains { $0.title == "Open Report Folder" })
         XCTAssertTrue(items(settings).contains { $0.action == .quit })

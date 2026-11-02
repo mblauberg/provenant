@@ -1,0 +1,30 @@
+{
+  "command": "console overview",
+  "data": {
+    "counts": {
+      "attention": null,
+      "needs_you": 1,
+      "running": null
+    },
+    "coverage": {
+      "inbox": "complete",
+      "nested_runs": "unavailable",
+      "runs": "unavailable",
+      "scope": "local"
+    },
+    "lanes": [],
+    "needs_you": [
+      {
+        "chair_session_id": "console-chair",
+        "id": "a8ea09c643f2dc516e749aa64a503643",
+        "project_id": "47e56ec3dd1b387241e80489127d81e9",
+        "project_label": "project",
+        "title": "Review console"
+      }
+    ],
+    "schema_version": 2
+  },
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
+}

@@ -36,8 +36,6 @@ public enum CLI {
         func close(_ fd: Int32) -> Bool { lock.withLock { closed.insert(fd).inserted } }
         func markTimedOut() { lock.withLock { timedOut = true } }
         var snapshot: (Data, Data, Bool, Bool) { lock.withLock { (out, err, timedOut, truncated) } }
-        private var exit = siginfo_t()
-        var reaped: siginfo_t { get { lock.withLock { exit } } set { lock.withLock { exit = newValue } } }
     }
 
 
@@ -73,14 +71,48 @@ public enum CLI {
         return Launcher(url: URL(fileURLWithPath: lines[index]), path: path, custom: false)
     }
 
-    /// Runs the CLI as the leader of its own process group, so an overrun's descendants are signalled with it.
-    /// Pipes drain as data arrives, so neither can fill and block the child. At the limit the group gets SIGTERM
-    /// and a full grace period, then SIGKILL; a pipe still held open after that is abandoned. Every wait here is
-    /// bounded, and one waiter owns reaping the leader, however late it exits.
-    public static func exec(_ url: URL, _ arguments: [String], path: String?, limit: Double, qos: qos_class_t = QOS_CLASS_UTILITY,
-                            maxOutput: Int = defaultMaxOutput) throws -> Output {
-        let out = Pipe(), err = Pipe(), shared = Shared(limit: maxOutput), drained = DispatchGroup()
-        let exited = DispatchSemaphore(value: 0), released = DispatchSemaphore(value: 0), reaped = DispatchSemaphore(value: 0)
+    /// Waits for, and finally reaps, the group leader. One waiter owns this, however late the leader exits: it
+    /// reports the exit without reaping (so the unreaped pid keeps the group id from being reused while signalling),
+    /// then reaps once `release` is called.
+    final class Leader: @unchecked Sendable {
+        let pid: pid_t
+        private let exited = DispatchSemaphore(value: 0), released = DispatchSemaphore(value: 0)
+        private let reaped = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var info = siginfo_t()
+
+        init(pid: pid_t) {
+            self.pid = pid
+            DispatchQueue.global(qos: .utility).async { [self] in
+                var status = siginfo_t()
+                while waitid(P_PID, id_t(pid), &status, WEXITED | WNOWAIT) == -1 && errno == EINTR {}
+                exited.signal()
+                released.wait()
+                while waitid(P_PID, id_t(pid), &status, WEXITED) == -1 && errno == EINTR {}
+                lock.withLock { info = status }
+                reaped.signal()
+            }
+        }
+
+        /// True if the leader exited within `seconds`.
+        func waitForExit(seconds: Double) -> Bool { exited.wait(timeout: .now() + seconds) == .success }
+        func signalGroup(_ signal: Int32) { kill(-pid, signal) }
+
+        /// Lets the waiter reap, and returns the exit once it has. Only call when the leader has exited.
+        func reap() -> siginfo_t {
+            released.signal()
+            reaped.wait()
+            return lock.withLock { info }
+        }
+
+        /// Lets the waiter go without waiting for it, for a leader that never exited.
+        func abandon() { released.signal() }
+    }
+
+    /// Spawns the CLI as the leader of its own process group with stdin on /dev/null and both output pipes
+    /// attached. The parent's copies of the write ends are closed, so EOF can arrive.
+    static func spawn(_ url: URL, _ arguments: [String], path: String?, qos: qos_class_t,
+                      out: Pipe, err: Pipe) throws -> pid_t {
         var environment = ProcessInfo.processInfo.environment
         if let path { environment["PATH"] = path }
         var actions: posix_spawn_file_actions_t?, attributes: posix_spawnattr_t?
@@ -107,6 +139,13 @@ public enum CLI {
         try? out.fileHandleForWriting.close()   // the child holds its own copies; EOF needs ours closed
         try? err.fileHandleForWriting.close()
         guard spawned == 0 else { throw POSIXError(POSIXErrorCode(rawValue: spawned) ?? .EIO) }
+        return pid
+    }
+
+    /// Drains both pipes as data arrives, so neither can fill and block the child. The group is left when each
+    /// pipe has reported end of file.
+    static func drain(out: Pipe, err: Pipe, into shared: Shared) -> DispatchGroup {
+        let drained = DispatchGroup()
         for pipe in [out, err] {
             let toErr = pipe === err
             drained.enter()
@@ -117,34 +156,41 @@ public enum CLI {
                 if shared.close(handle.fileDescriptor) { drained.leave() }
             }
         }
-        // The one owner of the leader's exit. It reaps only once signalling is over, so until then the unreaped
-        // pid keeps the group id from being reused.
-        DispatchQueue.global(qos: .utility).async {
-            var info = siginfo_t()
-            while waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) == -1 && errno == EINTR {}
-            exited.signal()
-            released.wait()
-            while waitid(P_PID, id_t(pid), &info, WEXITED) == -1 && errno == EINTR {}
-            shared.reaped = info
-            reaped.signal()
-        }
+        return drained
+    }
+
+    /// At the limit the group gets SIGTERM and a full `grace`, then SIGKILL. Returns true when the leader is
+    /// still running after that.
+    static func terminate(_ leader: Leader, grace: Double) -> Bool {
+        leader.signalGroup(SIGTERM)
+        let gone = leader.waitForExit(seconds: grace)
+        // An early exit still leaves descendants the full grace; this sleeps out the rest without clock arithmetic.
+        if gone { _ = DispatchSemaphore(value: 0).wait(timeout: .now() + grace) }
+        leader.signalGroup(SIGKILL)
+        return !gone && !leader.waitForExit(seconds: 3)
+    }
+
+    /// Runs the CLI as the leader of its own process group, so an overrun's descendants are signalled with it.
+    /// At the limit the group gets SIGTERM and a full grace period, then SIGKILL; a pipe still held open after
+    /// that is abandoned. Every wait here is bounded, and one waiter owns reaping the leader, however late it exits.
+    public static func exec(_ url: URL, _ arguments: [String], path: String?, limit: Double, qos: qos_class_t = QOS_CLASS_UTILITY,
+                            maxOutput: Int = defaultMaxOutput, grace: Double = 3) throws -> Output {
+        let out = Pipe(), err = Pipe(), shared = Shared(limit: maxOutput)
+        let pid = try spawn(url, arguments, path: path, qos: qos, out: out, err: err)
+        let drained = drain(out: out, err: err, into: shared)
+        let leader = Leader(pid: pid)
         var running = false
-        if exited.wait(timeout: .now() + limit) == .timedOut {
+        if !leader.waitForExit(seconds: limit) {
             shared.markTimedOut()
-            kill(-pid, SIGTERM)
-            let grace = DispatchTime.now() + 3
-            let gone = exited.wait(timeout: grace) == .success
-            if gone { _ = DispatchSemaphore(value: 0).wait(timeout: grace) }   // sleeps out the rest; no clock arithmetic
-            kill(-pid, SIGKILL)   // descendants get the full grace even when the leader exits early
-            running = !gone && exited.wait(timeout: .now() + 3) == .timedOut
+            running = terminate(leader, grace: grace)
         }
         if drained.wait(timeout: .now() + 2) == .timedOut {
-            kill(-pid, SIGKILL)   // a descendant still holds the pipes
+            leader.signalGroup(SIGKILL)   // a descendant still holds the pipes
             for pipe in [out, err] { pipe.fileHandleForReading.readabilityHandler = nil }
         }
-        released.signal()
-        if !running { reaped.wait() }   // the leader has exited, so this is immediate
-        let (data, errData, timedOut, truncated) = shared.snapshot, info = shared.reaped
+        let info: siginfo_t
+        if running { leader.abandon(); info = siginfo_t() } else { info = leader.reap() }
+        let (data, errData, timedOut, truncated) = shared.snapshot
         return Output(status: running ? SIGKILL : info.si_status, signalled: running || info.si_code != CLD_EXITED,
                       timedOut: timedOut, truncated: truncated, out: data, err: String(decoding: errData, as: UTF8.self))
     }

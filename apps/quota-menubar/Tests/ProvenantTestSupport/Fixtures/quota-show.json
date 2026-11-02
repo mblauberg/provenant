@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "command": "quota show",
+  "status": "ok",
+  "data": {
+    "schema_version": 1,
+    "generated_unix_seconds": 1793610000,
+    "accounts": [
+      {
+        "account": {
+          "adapter": "claude",
+          "account_key": "anese",
+          "label": "Anese"
+        },
+        "snapshot": {
+          "windows": [
+            {
+              "pool": "claude-5h",
+              "used_basis_points": 8400,
+              "resets_unix_seconds": 1793620800
+            },
+            {
+              "pool": "claude-weekly",
+              "used_basis_points": 5200,
+              "resets_unix_seconds": 1793869200
+            }
+          ]
+        },
+        "status": "available",
+        "age_seconds": 120,
+        "refreshing": false,
+        "error": null
+      },
+      {
+        "account": {
+          "adapter": "codex",
+          "account_key": "default",
+          "label": "default"
+        },
+        "snapshot": {
+          "windows": [
+            {
+              "pool": "codex-weekly",
+              "used_basis_points": 10000,
+              "resets_unix_seconds": 1793782800
+            }
+          ]
+        },
+        "status": "credit_only",
+        "age_seconds": 120,
+        "refreshing": false,
+        "error": null
+      },
+      {
+        "account": {
+          "adapter": "agy",
+          "account_key": "g1",
+          "label": "Account 01"
+        },
+        "snapshot": {
+          "windows": [
+            {
+              "pool": "agy-daily",
+              "used_basis_points": 2100,
+              "resets_unix_seconds": 1793642400
+            }
+          ]
+        },
+        "status": "available",
+        "age_seconds": 120,
+        "refreshing": false,
+        "error": null
+      }
+    ],
+    "coverage": {
+      "total": 3,
+      "known": 3
+    },
+    "refreshing_ids": [],
+    "report_path": "/tmp/provenant/quota/report.json"
+  },
+  "error": null
+}

@@ -162,6 +162,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         switch action {
         case .refresh: model.refresh()
         case .quit: NSApplication.shared.terminate(nil)
+        case .openConsole: ConsoleApp.open()
         case .open(let url): NSWorkspace.shared.open(url)
         case .run(let arguments): model.apply(arguments)
         }
