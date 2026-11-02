@@ -1355,6 +1355,7 @@ impl ServiceError {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
             }
             Self::Facade(FacadeError::DispatchRefused { .. })
+            | Self::Facade(FacadeError::HostDeliveryIo { .. })
             | Self::Facade(FacadeError::UpgradeRequired { .. })
             | Self::Facade(FacadeError::PeerProtocolMismatch { .. })
             | Self::Coordination(CoordinationError::Peer(

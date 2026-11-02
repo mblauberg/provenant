@@ -48,6 +48,18 @@ fn io_error_payload_preserves_native_path_diagnostics_without_source_text() {
 }
 
 #[test]
+fn host_delivery_io_keeps_its_reason_under_the_io_code() {
+    let reason = "host writer delivery failed at Prepare (worktree): git worktree list output exceeded the 8388608-byte host limit";
+    let detail = ServiceError::Facade(FacadeError::HostDeliveryIo {
+        reason: reason.into(),
+    })
+    .structured_error();
+    assert_eq!(detail["code"], "io");
+    let message = detail["message"].as_str().unwrap_or_default();
+    assert!(message.contains(reason), "{message}");
+}
+
+#[test]
 fn output_bytes_are_utf8_or_an_explicit_lossless_byte_encoding() {
     assert_eq!(
         OutputBytes::from_bytes(b"hello".to_vec()),

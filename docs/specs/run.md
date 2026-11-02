@@ -1139,6 +1139,12 @@ Destinations supplied in flags are also checked before creating an owned tree.
 Accepted operations compare and replay their immutable inputs before checking
 current branch protection; later protection changes do not invalidate replay.
 Actual delivery still rechecks protection.
+Host Git output is bounded per call. A `worktree list` listing may use the
+8 MiB capture default, so a repository with many linked worktrees can still be
+checked; other calls keep 16 KiB, and `--show-origin` keeps 1 MiB. Output over
+its bound is refused at the stage that read it, and the error names the
+command and the limit. The MCP and graph edges keep that text. A truncated
+listing is never treated as complete.
 
 Integration prepares objects without holding an application lock through Git.
 It fast-forwards when possible, otherwise uses merge-tree and commit-tree to

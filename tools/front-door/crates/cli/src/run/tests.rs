@@ -857,6 +857,34 @@ fn unsafe_store_path_reason_survives_cli_conversion() {
 }
 
 #[test]
+fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
+    for (tool, command, text) in [
+        (
+            "git",
+            "worktree list",
+            "host writer delivery failed at Integrate: git worktree list output exceeded the 8388608-byte host limit",
+        ),
+        (
+            "gh",
+            "pr",
+            "host writer delivery failed at Integrate: gh pr output exceeded the 8388608-byte host limit",
+        ),
+    ] {
+        let failure = super::Fail::from(provenant_run::RunError::DeliveryLimit {
+            stage: provenant_records::run::WriterDeliveryStage::Integrate,
+            tool,
+            command: command.into(),
+            limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+        });
+        assert_eq!(failure.message, text);
+        assert_eq!(failure.kind, ErrorKind::Io);
+        let detail = failure.detail.expect("typed detail");
+        assert_eq!(detail.code(), "io");
+        assert_eq!(detail.to_string(), text);
+    }
+}
+
+#[test]
 fn stats_summary_reports_cost_coverage() {
     use provenant_telemetry::{CostTotal, Money, Totals};
     let mut totals = Totals {
