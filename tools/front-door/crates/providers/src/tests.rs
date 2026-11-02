@@ -2272,13 +2272,10 @@ fn claude_network_on_native_tls_files_are_readable() -> Result<(), Box<dyn std::
                 .env_clear()
                 .output()?;
             let diagnostic = String::from_utf8_lossy(&output.stderr);
-            if diagnostic.contains("sandbox_apply: Operation not permitted")
-                && std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").as_deref()
-                    != Some("1".as_ref())
-            {
-                eprintln!(
+            if diagnostic.contains("sandbox_apply: Operation not permitted") {
+                provenant_test_support::skip_sandbox_dependent_test(format!(
                     "native TLS file probe unavailable under inherited sandbox: {diagnostic}"
-                );
+                ))?;
                 return Ok(());
             }
             assert_eq!(

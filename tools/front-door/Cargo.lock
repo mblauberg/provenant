@@ -512,6 +512,7 @@ dependencies = [
  "provenant-sqlite",
  "provenant-supervisor",
  "provenant-telemetry",
+ "provenant-test-support",
  "provenant-workflow",
  "regex",
  "rusqlite",
@@ -577,6 +578,7 @@ dependencies = [
  "provenant-os",
  "provenant-records",
  "provenant-supervisor",
+ "provenant-test-support",
  "serde",
  "serde_json",
  "sha2",
@@ -668,6 +670,7 @@ dependencies = [
  "provenant-os",
  "provenant-quota",
  "provenant-records",
+ "provenant-test-support",
  "rusqlite",
  "serde",
  "serde_json",
@@ -777,6 +780,10 @@ dependencies = [
  "thiserror",
  "toml_edit",
 ]
+
+[[package]]
+name = "provenant-test-support"
+version = "1.4.2"
 
 [[package]]
 name = "provenant-workflow"

@@ -252,11 +252,9 @@ fn lane_process_tree_sample_is_private_under_production_profiles()
         env: &env,
     })?;
     if !matches!(availability, Availability::Available { .. }) {
-        assert_ne!(
-            std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
-            Ok("1"),
+        provenant_test_support::skip_sandbox_dependent_test(format!(
             "native sandbox unavailable: {availability:?}; {diagnostic:?}"
-        );
+        ))?;
         return Ok(());
     }
     let executable = provenant_os::fs::canonicalize(&std::env::current_exe()?)?;

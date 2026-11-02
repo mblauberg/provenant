@@ -428,11 +428,12 @@ pub(super) fn writer_backend_available() -> Result<bool> {
     );
     match backend {
         Ok(_) => Ok(true),
-        Err(error) if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_none() => {
-            writeln!(std::io::stderr(), "writer fixture skipped: {error}")?;
+        Err(error) => {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "writer fixture skipped: {error}"
+            ))?;
             Ok(false)
         }
-        Err(error) => Err(error.into()),
     }
 }
 
@@ -3448,11 +3449,12 @@ fn verify_lane_profile(
         env: &[],
     }) {
         Ok(backend) => backend,
-        Err(error) if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_none() => {
-            writeln!(std::io::stderr(), "lane profile execution skipped: {error}")?;
+        Err(error) => {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "lane profile execution skipped: {error}"
+            ))?;
             return Ok(());
         }
-        Err(error) => return Err(error.into()),
     };
     let confinement = launch.confinement.as_mut().ok_or("confinement")?;
     // Synthetic fake-provider evidence exercises the compiler only. This does

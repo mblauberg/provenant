@@ -25,6 +25,8 @@ const DIRECT: &[&str] = &[
 // docs/specs/rust-workspace.md#crate-layering, without the provenant- prefix.
 const LAYERS: &[(&str, &[&str])] = &[
     ("core", &[]),
+    // Test-only helpers, reachable only through dev-dependencies.
+    ("test-support", &[]),
     ("records", &["core"]),
     ("config", &["core", "records", "os"]),
     ("os", &["core"]),
@@ -745,7 +747,9 @@ fn check_internal_dependencies(
                 return Err("provenant-os must keep its name for source policy checks".into());
             }
             let dev_exception = kind == "dev-dependencies"
-                && (internal == name || (name == "fabric-mcp" && internal == "fabric-store"));
+                && (internal == name
+                    || internal == "test-support"
+                    || (name == "fabric-mcp" && internal == "fabric-store"));
             if (internal == "cli" && name != "provenant")
                 || !(allowed.contains(&internal) || dev_exception)
             {

@@ -24,6 +24,7 @@ provenant-quota = { workspace = true }
 recording = ["provenant-os/fixture"]
 
 [dev-dependencies]
+provenant-test-support = { path = "../test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }
 provenant-confinement = { workspace = true, features = ["snapshot"] }
 sha2 = { workspace = true }
