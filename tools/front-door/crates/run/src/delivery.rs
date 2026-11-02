@@ -1630,7 +1630,10 @@ impl HostDeliveryContext {
             return Err(RunError::Delivery(Stage::Head));
         }
         self.refuse_protected_target(writer, &request.branch)
-            .map_err(|_| RunError::Delivery(Stage::Prepare))?;
+            .map_err(|error| match error {
+                RunError::DeliveryLimit { .. } => error,
+                _ => RunError::Delivery(Stage::Prepare),
+            })?;
         self.clean(writer)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
             self.integrate(writer, request, head)?;
