@@ -622,7 +622,7 @@ mod tests {
     fn parsing_defaults_and_validation() {
         let config: RoutingConfig =
             toml_edit::de::from_str(include_str!("../assets/review-defaults.toml")).unwrap();
-        assert_eq!(config.review.shapes["deep"].reviewers[0].lenses.len(), 4);
+        assert!(config.review.shapes["deep"].reviewers[0].lenses.is_empty());
         assert!(config.validate().is_empty());
         let mut invalid = config;
         invalid.review.shapes.get_mut("quick").unwrap().reviewers[0].pool = "missing".into();

@@ -113,6 +113,10 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     let priority = provenant_routing::lens_priority(command.kind.as_deref());
     let mut lens_index = 0;
     for group in &mut panel_shape.reviewers {
+        if !group.lenses.is_empty() {
+            lens_index += group.count;
+            continue;
+        }
         group.lenses = (0..group.count)
             .map(|_| {
                 let lens = priority

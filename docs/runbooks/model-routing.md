@@ -122,7 +122,7 @@ reviewers = [{ pool = "junior", count = 2, distinct_families = true }]
 
 [domains.routing.review.shapes.deep]
 reviewers = [
-  { pool = "junior", count = 4, lenses = ["correctness-spec", "security-privacy", "concurrency-data-errors", "tests"], distinct_families = true },
+  { pool = "junior", count = 4, distinct_families = true },
   { pool = "senior", count = 4, distinct_families = true },
 ]
 
