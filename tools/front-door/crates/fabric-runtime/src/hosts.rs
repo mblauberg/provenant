@@ -19,6 +19,7 @@ pub const CONSOLE_PROTOCOL: u64 = 7;
 pub const INBOX_PROTOCOL: u64 = 8;
 pub const DOCTOR_PROTOCOL: u64 = 9;
 pub const CONSOLE_DETAIL_PROTOCOL: u64 = 10;
+pub const CONSOLE_INBOX_PROTOCOL: u64 = 11;
 pub const MAX_FRAME: usize = 1_048_576;
 
 /// The newest feature protocol level this release speaks. `PROTOCOL` is the
@@ -31,6 +32,7 @@ pub fn newest_feature_protocol() -> u64 {
         .max(INBOX_PROTOCOL)
         .max(DOCTOR_PROTOCOL)
         .max(CONSOLE_DETAIL_PROTOCOL)
+        .max(CONSOLE_INBOX_PROTOCOL)
 }
 
 /// Render a protocol mismatch, naming the expected level only when the
@@ -386,6 +388,14 @@ pub enum PeerAction {
         extra: provenant_records::ExtraFields,
         id: String,
     },
+    /// The first page of this host's requests across all its projects,
+    /// read-only. `state` is `open` or `all`; `limit` is at most `page_rows`.
+    ConsoleInbox {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        state: crate::inbox::InboxFilter,
+        limit: u64,
+    },
     RunStatuses {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
@@ -473,7 +483,9 @@ pub struct PeerRequest<A = PeerAction> {
 /// The protocol fence an action negotiates. Feature actions carry their own
 /// fence above the base; everything else sits at `PROTOCOL`.
 fn action_fence(action: &PeerAction) -> u64 {
-    if matches!(action, PeerAction::ConsoleDetail { .. }) {
+    if matches!(action, PeerAction::ConsoleInbox { .. }) {
+        CONSOLE_INBOX_PROTOCOL
+    } else if matches!(action, PeerAction::ConsoleDetail { .. }) {
         CONSOLE_DETAIL_PROTOCOL
     } else if matches!(action, PeerAction::Inbox { .. }) {
         INBOX_PROTOCOL
@@ -709,7 +721,9 @@ pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError>
         request.action["action"].as_str(),
         Some("console_board" | "console_tree")
     );
-    let expected = if request.action["action"] == "console_detail" {
+    let expected = if request.action["action"] == "console_inbox" {
+        CONSOLE_INBOX_PROTOCOL
+    } else if request.action["action"] == "console_detail" {
         CONSOLE_DETAIL_PROTOCOL
     } else if request.action["action"] == "inbox" {
         INBOX_PROTOCOL
@@ -941,6 +955,7 @@ impl SshTransport<'_> {
                     PeerAction::ConsoleBoard { .. }
                         | PeerAction::ConsoleTree { .. }
                         | PeerAction::ConsoleDetail { .. }
+                        | PeerAction::ConsoleInbox { .. }
                         | PeerAction::Inbox { .. }
                         | PeerAction::Doctor { .. }
                 ) && stderr_has_line(
@@ -971,6 +986,7 @@ impl SshTransport<'_> {
                         PeerAction::ConsoleBoard { .. }
                             | PeerAction::ConsoleTree { .. }
                             | PeerAction::ConsoleDetail { .. }
+                            | PeerAction::ConsoleInbox { .. }
                             | PeerAction::Inbox { .. }
                             | PeerAction::Doctor { .. }
                     )
@@ -1165,7 +1181,7 @@ mod tests {
         // reports the newest feature level beside it, so 6 cannot read as
         // stale. A new action family must raise the ceiling it negotiates.
         assert_eq!(PROTOCOL, 6);
-        assert_eq!(newest_feature_protocol(), CONSOLE_DETAIL_PROTOCOL);
+        assert_eq!(newest_feature_protocol(), CONSOLE_INBOX_PROTOCOL);
     }
 
     #[test]
@@ -1596,6 +1612,76 @@ mod tests {
                 PeerError::Failed(_)
             ));
         }
+    }
+    #[test]
+    fn console_inbox_peer_without_its_fence_is_unsupported() {
+        let action = PeerAction::ConsoleInbox {
+            extra: Default::default(),
+            state: crate::inbox::InboxFilter::Open,
+            limit: 50,
+        };
+        // An old peer rejects the unknown frame; the caller reads it as unsupported.
+        let old = Canned(Mutex::new(Some(Ok(outcome(
+            3,
+            "provenant: fabric peer: invalid peer frame\n",
+            false,
+        )))));
+        assert!(matches!(
+            exchange_action_error(&old, action.clone()),
+            PeerError::ProtocolMismatch {
+                expected: CONSOLE_INBOX_PROTOCOL,
+                ..
+            }
+        ));
+        let offline = Canned(Mutex::new(Some(Ok(outcome(
+            255,
+            "connection refused",
+            false,
+        )))));
+        assert!(matches!(
+            exchange_action_error(&offline, action),
+            PeerError::Failed(_)
+        ));
+    }
+    #[test]
+    fn console_inbox_uses_its_own_protocol() {
+        let host = HostId::from_bytes([2; 16]);
+        let project = ProjectLocator {
+            extra: Default::default(),
+            key: CrossHostProjectKey::from_home(
+                Path::new("/home/a"),
+                Path::new("/home/a/repo/.git"),
+            )
+            .unwrap(),
+            common_dir: "repo/.git".into(),
+        };
+        let request = PeerRequest::new(
+            host,
+            HostId::from_bytes([1; 16]),
+            "chair".into(),
+            project,
+            PeerAction::ConsoleInbox {
+                extra: Default::default(),
+                state: crate::inbox::InboxFilter::Open,
+                limit: 50,
+            },
+        );
+        assert_eq!(request.protocol, CONSOLE_INBOX_PROTOCOL);
+        assert!(request.operation().is_none());
+        assert!(
+            protocol_refusal(&serde_json::to_vec(&request).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        let mut old = serde_json::to_value(request).unwrap();
+        old["protocol"] = CONSOLE_DETAIL_PROTOCOL.into();
+        assert_eq!(
+            protocol_refusal(&serde_json::to_vec(&old).unwrap())
+                .unwrap()
+                .unwrap()
+                .protocol,
+            CONSOLE_INBOX_PROTOCOL
+        );
     }
     #[test]
     fn console_protocol_refused_before_action_decode() {

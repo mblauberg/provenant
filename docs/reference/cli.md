@@ -154,6 +154,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--host` | `{"description": "Owner host label or host ID", "name": "host"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "name": "limit"}` |
 | `--cursor` | `{"name": "cursor"}` |
+| `--hosts` | `{"description": "With --all-projects (list only): also read these peers' first pages; &#96;all&#96; or comma-separated host labels", "name": "hosts"}` |
+| `--project-key` | `{"description": "With --all-projects and a remote --host: the project key (as in a listed request's project_key) that selects the local project to route through", "name": "project_key"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -169,7 +171,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "session",
         "host",
         "limit",
-        "cursor"
+        "cursor",
+        "hosts",
+        "project_key"
       ],
       "multiple": true,
       "name": "Inbox",
@@ -261,6 +265,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--expect-revision` | `{"name": "expect_revision", "required": true}` |
 | `--channel` | `{"name": "channel", "required": true, "values": ["chat", "console", "phone_remote", "cli", "unknown"]}` |
 | `--operation-id` | `{"name": "operation_id"}` |
+| `--project-key` | `{"description": "With --all-projects and a remote --host: the project key (as in a listed request's project_key) that selects the local project to route through", "name": "project_key"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -279,7 +284,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "text_file",
         "expect_revision",
         "channel",
-        "operation_id"
+        "operation_id",
+        "project_key"
       ],
       "multiple": true,
       "name": "Answer",

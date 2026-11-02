@@ -57,6 +57,30 @@ by request ID. Without it, these commands use the current project; if no project
 resolves, `no_project` reports the cause and names `--all-projects` as a repair.
 Close and acknowledgement must run on the owner host or in the owning chair
 session; remote attempts return `owner_local_only`.
+
+`provenant inbox --all-projects --hosts all|LABEL,… --json` also reads each
+chosen peer's first page of requests (`local` is skipped; an unknown label is
+refused as in `console board --hosts`). Peer rows are appended after the local
+rows, each with its `owner_host`; the local `next_cursor` and the string
+`coverage` are unchanged, and `data.projects` gains `"<host>:<project_id>"`
+entries with `label` and `host`. Without `--hosts` the output is unchanged. With
+`--cursor` the peer read is skipped. `data.peers` has one entry per peer:
+`{host, label, state, included, invalid_rows, duplicate_rows, truncated,
+reason?}`. `state` is `complete`; `partial` (the page was truncated, or rows
+were duplicate, invalid, or named another host or no `project_key`); `unreachable`
+(no answer in time; local rows still show); or `unsupported` (the peer predates
+this listing, so update it). A peer that is down never fails the listing.
+
+To answer or show a peer's request under `--all-projects`, pass `--host H` (or
+a qualified ID) and `--project-key KEY`, the listed request's `project_key`. The
+CLI routes through the local project with that key, so the answer reaches the
+owner through the normal remote path with a frozen operation ID, and an unknown
+key returns `no_project`. Close stays `owner_local_only`.
+
+The Console shows peer requests labelled by host. While a peer is `unreachable`
+it keeps that peer's last rows, marked stale, and answering stays allowed; an
+`owner_unavailable` failure is shown if the owner cannot be reached. It drops a
+peer's rows when the peer is `complete` or `unsupported`.
 The MCP `fabric_inbox` tool accepts `host` for list, answer, close and
 acknowledge; list with an ID shows one request. The same owner-local restriction
 applies to close and acknowledgement.

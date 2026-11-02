@@ -1,6 +1,8 @@
 //! The real Rust command edge runs without Python, Node or ambient state.
 mod support;
-use provenant_fabric_runtime::hosts::{CONSOLE_DETAIL_PROTOCOL, DOCTOR_PROTOCOL, PROTOCOL};
+use provenant_fabric_runtime::hosts::{
+    CONSOLE_DETAIL_PROTOCOL, CONSOLE_INBOX_PROTOCOL, DOCTOR_PROTOCOL, PROTOCOL,
+};
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -548,6 +550,50 @@ fn peer_run_statuses_refuses_more_than_one_page() -> Result {
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(response["result"]["result"], "error");
     assert_eq!(response["result"]["data"]["error"]["code"], "invalid_input");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn peer_console_inbox_is_read_only_and_refuses_an_oversized_page() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let host = identity["data"]["host"].as_str().ok_or("host")?;
+    let source = next_host(host.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    let ask = |protocol: u64, limit: u64| -> Result<Value> {
+        let request = json!({
+            "version": 1, "protocol":protocol,
+            "target_host": host,
+            "source_host": source,
+            "agent": "fixture",
+            "project": {"key": key, "common_dir": "repo/.git"},
+            "action": {"action":"console_inbox","state":"open","limit":limit}
+        });
+        let output = rig.execute_os(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "--state-dir".into(),
+                rig.state.clone().into(),
+                "fabric".into(),
+                "peer".into(),
+            ],
+            Some(&serde_json::to_vec(&request)?),
+        )?;
+        assert_eq!(code(&output), 0);
+        Ok(serde_json::from_slice(&output.stdout.bytes)?)
+    };
+    let oversized = ask(CONSOLE_INBOX_PROTOCOL, 101)?;
+    assert_eq!(oversized["result"]["result"], "error");
+    assert_eq!(
+        oversized["result"]["data"]["error"]["code"],
+        "invalid_input"
+    );
+    // A peer on the previous feature fence is refused before the action decodes.
+    let old = ask(CONSOLE_DETAIL_PROTOCOL, 50)?;
+    assert_eq!(old["result"]["data"]["error"]["code"], "peer_version");
     rig.assert_legacy_unchanged()
 }
 
@@ -2904,6 +2950,143 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
         )
     })?;
     Ok((code(&output), value))
+}
+
+#[test]
+fn inbox_all_projects_reads_and_answers_through_peers() -> Result {
+    let mut rig = TestRig::new()?;
+    let peer = loopback_peer(&mut rig)?;
+    let (_, local_identity) = json_command(&rig, &["fabric", "identity", "--json"])?;
+    let key = local_identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?
+        .to_owned();
+    let draft = rig.root.join("inbox-draft.json");
+    std::fs::write(
+        &draft,
+        serde_json::to_vec(&json!({
+            "kind":"question", "title":"Question", "body":"Please reply", "blocking":false,
+            "options":[], "recommended_option_id":null, "proceeding_with":null
+        }))?,
+    )?;
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.root.join("peer-state").into(),
+            "--json".into(),
+            "ask".into(),
+            "--file".into(),
+            draft.into(),
+            "--session".into(),
+            "chair-a".into(),
+            "--operation-id".into(),
+            "peer-ask".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&output), 0);
+    let asked: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let id = asked["data"]["request_id"].as_str().ok_or("request id")?;
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--json".into(),
+            "ask".into(),
+            "--file".into(),
+            rig.root.join("inbox-draft.json").into(),
+            "--session".into(),
+            "chair-local".into(),
+            "--operation-id".into(),
+            "local-ask".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&output), 0);
+    // Without --hosts the listing is exactly the local one.
+    let (status, plain) = json_command(&rig, &["inbox", "--all-projects", "--json"])?;
+    assert_eq!(status, 0, "{plain}");
+    assert!(plain["data"].get("peers").is_none(), "{plain}");
+    assert_eq!(plain["data"]["items"].as_array().ok_or("items")?.len(), 1);
+    let (status, listed) = json_command(
+        &rig,
+        &["inbox", "--all-projects", "--hosts", "all", "--json"],
+    )?;
+    assert_eq!(status, 0, "{listed}");
+    let data = &listed["data"];
+    assert!(data["coverage"].is_string());
+    assert!(
+        data["items"]
+            .as_array()
+            .ok_or("items")?
+            .iter()
+            .any(|item| item["id"] == id && item["owner_host"] == peer.to_string())
+    );
+    assert_eq!(data["peers"][0]["state"], "complete", "{listed}");
+    assert_eq!(data["peers"][0]["label"], "workshop");
+    assert_eq!(data["peers"][0]["included"], 1);
+    assert_eq!(data["items"].as_array().ok_or("items")?.len(), 2);
+    let (status, unknown) = json_command(
+        &rig,
+        &["inbox", "--all-projects", "--hosts", "nowhere", "--json"],
+    )?;
+    assert_ne!(status, 0);
+    assert_eq!(unknown["error"]["code"], "invalid_input");
+    let reply_file = rig.root.join("reply.txt");
+    std::fs::write(&reply_file, "Yes")?;
+    let reply_path = reply_file.to_str().ok_or("reply path")?;
+    let answer = |key: &str| {
+        json_command(
+            &rig,
+            &[
+                "answer",
+                "--all-projects",
+                "--host",
+                "workshop",
+                "--project-key",
+                key,
+                id,
+                "--action",
+                "reply",
+                "--text-file",
+                reply_path,
+                "--expect-revision",
+                "1",
+                "--channel",
+                "console",
+                "--operation-id",
+                "routed-answer",
+                "--json",
+            ],
+        )
+    };
+    let (status, missing) = answer("no/such/key")?;
+    assert_ne!(status, 0);
+    assert_eq!(missing["error"]["code"], "no_project", "{missing}");
+    let (status, answered) = answer(&key)?;
+    assert_eq!(status, 0, "{answered}");
+    assert_eq!(answered["data"]["operation_id"], "routed-answer");
+    let (status, close) = json_command(
+        &rig,
+        &[
+            "inbox",
+            "close",
+            "--all-projects",
+            "--host",
+            "workshop",
+            id,
+            "--state",
+            "withdrawn",
+            "--reason",
+            "obsolete",
+            "--expect-revision",
+            "1",
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0);
+    assert_eq!(close["error"]["code"], "owner_local_only");
+    Ok(())
 }
 
 #[test]
