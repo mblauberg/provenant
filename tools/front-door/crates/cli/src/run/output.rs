@@ -486,11 +486,6 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
     } else {
         None
     };
-    if let Some(reason) = &fallback_reason {
-        text.push_str(&format!(
-            "\nPlanner fallback: static stage\nReason: {reason}\n"
-        ));
-    }
     // The text alone cannot tell a clean success from one that needs the chair.
     let (state, reason) = state_and_reason(&record.state);
     let mut data = json!({
@@ -517,7 +512,7 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
         data["changed_files_total"] = total;
     }
     if let Some(reason) = fallback_reason {
-        data["planner_fallback"] = json!({"stage":"static", "reason":reason});
+        add_planner_fallback(&mut data, &mut text, reason);
     }
     if matches!(command.part, Part::Result)
         && matches!(
@@ -541,7 +536,22 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
     Ok((data, text))
 }
 
-pub(super) fn planner_fallback_reason(
+/// Wire key under which a serving peer carries the fallback reason in its
+/// output chunk, so `output --host` reports what the peer's graph recorded.
+pub const PLANNER_FALLBACK_KEY: &str = "planner_fallback";
+
+/// Name the planner fallback and its reason in an output reply; one rendering
+/// for local and peer output.
+pub(super) fn add_planner_fallback(data: &mut Value, text: &mut String, reason: String) {
+    text.push_str(&format!(
+        "\nPlanner fallback: static stage\nReason: {reason}\n"
+    ));
+    data["planner_fallback"] = json!({"stage":"static", "reason":reason});
+}
+
+/// The reason the attempt's graph planner fell back to its static stage, read
+/// from the graph checkpoint in `state_root`; the serving side computes it.
+pub fn planner_fallback_reason(
     state_root: &provenant_core::StateRoot,
     project: provenant_core::ProjectId,
     record: &run::AttemptRecord,

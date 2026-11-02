@@ -169,6 +169,26 @@ fn restart_after_fallback_expansion_does_not_duplicate_work_or_admit_dependants_
 }
 
 #[test]
+fn restart_rejects_a_fallback_expansion_that_differs_from_the_spec() {
+    let document = two_step_fallback_document();
+    let mut journal = MemoryJournal::default();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief"),
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let mut checkpoint = journal.0.clone().unwrap();
+    checkpoint.expansions[0].nodes[0].prompt = "Tampered step".into();
+    journal.0 = Some(checkpoint);
+    let result = advance(&document, &mut fixture_owner(&[]), &mut journal);
+    assert!(matches!(result, Err(GraphError::BadCheckpoint)), "{:?}", result.map(|run| run.status));
+}
+
+#[test]
 fn fallback_expansion_over_a_structural_limit_pauses_with_a_reason() {
     let document = two_step_fallback_document();
     let limits = crate::config::GraphLimits { nodes: 3, ..Default::default() };

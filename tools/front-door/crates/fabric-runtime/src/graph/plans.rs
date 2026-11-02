@@ -1003,43 +1003,13 @@ pub(super) fn settle(
             .any(|progress| progress.id == node.id && progress.state == NodeState::Failed)
     {
         let spec = node.plan.as_ref()?;
-        let fallback = spec.fallback.as_ref()?;
         let index = checkpoint
             .nodes
             .iter()
             .position(|progress| progress.id == node.id)?;
         let reason = fallback_reason(&checkpoint.nodes[index]);
-        let root_id = format!("{}--fallback", node.id);
         let built = (|| {
-            let root: GraphNode = serde_json::from_value(serde_json::json!({
-                "id": root_id,
-                "kind": "composite",
-                "access": "read_only",
-                "depends_on": spec.fallback_depends_on,
-                "inputs": spec.fallback_inputs,
-                "source": spec.fallback_source,
-                "read_roots": spec.fallback_read_roots,
-                "title": spec.fallback_title,
-                "composite": fallback,
-            }))
-            .map_err(|error| format!("invalid fallback stage: {error}"))?;
-            let mut document_with_fallback = source.clone();
-            document_with_fallback.nodes.push(root);
-            let expansion_document = composites::expand(&document_with_fallback, &generous())
-                .map_err(|error| format!("fallback stage does not expand: {error}"))?;
-            let addition = Expansion {
-                extra: Default::default(),
-                source: node.id.clone(),
-                continuation: false,
-                nodes: expansion_document
-                    .nodes
-                    .into_iter()
-                    .filter(|child| {
-                        child.id == root_id || child.id.starts_with(&format!("{root_id}--"))
-                    })
-                    .collect(),
-                patterns: Vec::new(),
-            };
+            let addition = fallback_expansion(&node.id, spec, source)?;
             let mut preview = document.clone();
             append(&mut preview, &addition);
             let (plan, positions) =
@@ -1187,6 +1157,48 @@ pub(super) fn settle(
             None
         }
     }
+}
+
+/// The static stage a planner's `fallback` spec expands to in the original
+/// document. Deterministic, so `settle` appends it and checkpoint validation
+/// recomputes it to check what was persisted.
+pub(super) fn fallback_expansion(
+    node_id: &str,
+    spec: &PlanSpec,
+    source: &GraphDocument,
+) -> Result<Expansion, String> {
+    let fallback = spec
+        .fallback
+        .as_ref()
+        .ok_or_else(|| "planner has no fallback stage".to_owned())?;
+    let root_id = format!("{node_id}--fallback");
+    let root: GraphNode = serde_json::from_value(serde_json::json!({
+        "id": root_id,
+        "kind": "composite",
+        "access": "read_only",
+        "depends_on": spec.fallback_depends_on,
+        "inputs": spec.fallback_inputs,
+        "source": spec.fallback_source,
+        "read_roots": spec.fallback_read_roots,
+        "title": spec.fallback_title,
+        "composite": fallback,
+    }))
+    .map_err(|error| format!("invalid fallback stage: {error}"))?;
+    let mut with_root = source.clone();
+    with_root.nodes.push(root);
+    let expanded = composites::expand(&with_root, &generous())
+        .map_err(|error| format!("fallback stage does not expand: {error}"))?;
+    Ok(Expansion {
+        extra: Default::default(),
+        source: node_id.to_owned(),
+        continuation: false,
+        nodes: expanded
+            .nodes
+            .into_iter()
+            .filter(|child| child.id == root_id || child.id.starts_with(&format!("{root_id}--")))
+            .collect(),
+        patterns: Vec::new(),
+    })
 }
 
 fn fallback_reason(progress: &NodeProgress) -> String {

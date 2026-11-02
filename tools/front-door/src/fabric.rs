@@ -2086,8 +2086,23 @@ impl BinaryRunOwner<'_> {
                     )
                     .map_err(run_error)?;
                 provenant_cli::run::align_utf8_tail(&mut chunk);
+                // The serving side reads its own graph, so `output --host` can
+                // name the planner fallback it recorded.
+                let mut extra = provenant_records::ExtraFields::new();
+                if matches!(part, OutputPart::Result)
+                    && let Some(reason) = provenant_cli::run::planner_fallback_reason(
+                        &self.factory.context.roots.state,
+                        session.context.project_id,
+                        &record,
+                    )
+                {
+                    extra.insert(
+                        provenant_cli::run::PLANNER_FALLBACK_KEY.into(),
+                        serde_json::Value::String(reason),
+                    );
+                }
                 Ok(OutputResult::Chunk {
-                    extra: Default::default(),
+                    extra,
                     target,
                     part,
                     state,

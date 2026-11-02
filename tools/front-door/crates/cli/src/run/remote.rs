@@ -1217,13 +1217,7 @@ pub(super) fn output(
         ));
     };
     let peer = Peer::open_for(edge, [placement])?;
-    let record = peer
-        .records(&[(host, attempt)])
-        .ok()
-        .and_then(|mut records| records.pop());
-    let (mut data, mut text) = read_output(command, host, attempt, peer)?;
-    add_planner_fallback(command, edge, record.as_ref(), &mut data, &mut text);
-    Ok((data, text))
+    read_output(command, host, attempt, peer)
 }
 
 /// `output --host PEER` or `PEER/ATTEMPT`: the peer's own attempt, with no
@@ -1286,37 +1280,7 @@ pub(super) fn output_on_peer(
         .ok_or_else(|| Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required"))?;
     let peer = Peer::open(edge)?;
     peer.project()?;
-    let record = peer
-        .records(&[(host, attempt)])
-        .ok()
-        .and_then(|mut records| records.pop());
-    let (mut data, mut text) = read_output(command, host, attempt, peer)?;
-    add_planner_fallback(command, edge, record.as_ref(), &mut data, &mut text);
-    Ok((data, text))
-}
-
-fn add_planner_fallback(
-    command: &Output,
-    edge: &Edge<'_>,
-    record: Option<&run::AttemptRecord>,
-    data: &mut Value,
-    text: &mut String,
-) {
-    if !matches!(command.part, Part::Result) {
-        return;
-    }
-    let Some(record) = record else {
-        return;
-    };
-    let Some(reason) =
-        super::output::planner_fallback_reason(&edge.roots.state, record.project_id, record)
-    else {
-        return;
-    };
-    text.push_str(&format!(
-        "\nPlanner fallback: static stage\nReason: {reason}\n"
-    ));
-    data["planner_fallback"] = json!({"stage":"static", "reason":reason});
+    read_output(command, host, attempt, peer)
 }
 
 fn read_output(
@@ -1365,6 +1329,13 @@ fn read_output(
     else {
         return Err(corrupt());
     };
+    let fallback = match &chunk {
+        OutputResult::Chunk { extra, .. } if matches!(command.part, Part::Result) => extra
+            .get(super::output::PLANNER_FALLBACK_KEY)
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    };
     let chunk = if let Some(lines) = command.tail {
         collect_tail(chunk, lines, command.max_bytes, |offset| {
             let input = OutputInput::Read {
@@ -1396,7 +1367,11 @@ fn read_output(
     } else {
         chunk
     };
-    chunk_response(attempt, host, &command.part, chunk)
+    let (mut data, mut text) = chunk_response(attempt, host, &command.part, chunk)?;
+    if let Some(reason) = fallback {
+        super::output::add_planner_fallback(&mut data, &mut text, reason);
+    }
+    Ok((data, text))
 }
 
 /// Older peers expose paged reads. Retain only the bounded tail while paging,

@@ -623,7 +623,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             if let Some(reason) = loops::legacy(&checkpoint) {
                 return Err(GraphError::Refused(reason));
             }
-            validate_checkpoint(&checkpoint, &plan, &plan_digest)?;
+            validate_checkpoint(document, &checkpoint, &plan, &plan_digest)?;
             checkpoint
         }
         None => {
