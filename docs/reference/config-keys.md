@@ -436,6 +436,17 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Selection still weighs pacing and readiness over the remaining members, but an exclusion that empties a pool refuses the dispatch rather than widening it."` |
 | `type` | `"string_list"` |
 
+## `routing.graph_exclude`
+
+| Field | Value |
+|---|---|
+| `default` | `[]` |
+| `effect` | `"The exclusion list a graph passes to each node it launches, set from &#96;run --exclude&#96; on a preset or graph. Same selectors as &#96;routing.exclude&#96;; refusals and &#96;--explain&#96; name the graph as the source."` |
+| `reader` | `"tools/front-door/crates/cli/src/route.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Applies to every node's named-route pool; a node's pinned model is never affected."` |
+| `type` | `"string_list"` |
+
 ## `routing.workload`
 
 | Field | Value |

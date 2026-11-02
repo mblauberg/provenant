@@ -196,7 +196,41 @@ automatically. Use `provenant lanes --id RUN --wait 4m` to collect one, or
 
 ## Excluding members
 
-To exclude an exact model from every pool, including fallback members, use:
+An exclusion keeps a provider, an account or an exact model out of named-route
+pools. It never widens a pool: if the exclusions leave a pool with no eligible
+member, the dispatch is refused and the error names each exclusion and its
+source (`flag`, `graph` or `config`).
+
+A selector takes one of three forms:
+
+| Selector | Example | Removes |
+|---|---|---|
+| Provider | `claude` | Every member served by that adapter. |
+| Account | a label, an entry, or `claude/work` | That account's availability. A member of its adapter goes only when no other serving account remains. |
+| Exact model | `codex/gpt-6-luna` | That model in every pool, including fallback members. |
+
+An unknown selector is refused with the valid forms, before anything is
+submitted.
+
+For one dispatch, pass `--exclude` (repeatable) to `run`, `review` or
+`route resolve`:
+
+```sh
+provenant run --route junior --exclude claude --explain
+provenant review --exclude codex/gpt-6-luna
+provenant route resolve junior --exclude claude
+```
+
+`--explain` and `route resolve` list each exclusion that removed a candidate
+and where it came from. `review` keeps its family separation: it substitutes
+an unused family around the exclusions, and refuses once they exhaust the
+families left.
+
+On a preset or an automatically selected graph, `--exclude` is recorded on the
+graph and every node inherits it (the `routing.graph_exclude` knob, source
+`graph`). A node's pinned `--model` is unaffected.
+
+To exclude an exact model from every pool until you remove it, use:
 
 ```sh
 provenant route exclude add codex/gpt-6-luna --until 2h
@@ -206,8 +240,11 @@ provenant route exclude remove codex/gpt-6-luna
 
 `--until` accepts a future RFC 3339 timestamp or a duration; omit it to keep
 the exclusion until it is removed. `route list` and `route override list`
-also show these rules. Explicit `--model` pins continue to select the named
-model independently of pool exclusions.
+also show these rules.
+
+An explicit `--model` pin always selects the named model, whatever the
+exclusions. Pacing overrides keep their precedence; an exclusion removes
+members before pacing weighs the rest.
 
 ## Per-account pacing
 
