@@ -2483,6 +2483,7 @@ fn synthesis_declares_and_requests_a_disposition_for_every_finding() {
     );
     let prompt = synthesis["prompt"].as_str().unwrap();
     assert!(prompt.contains("findings block") && prompt.contains("\"disposition\""));
+    assert!(prompt.contains("canonical array form") && prompt.contains("\"findings\":[{"));
 }
 
 fn appending(overrides: &[&str]) -> Result<Expansion, String> {

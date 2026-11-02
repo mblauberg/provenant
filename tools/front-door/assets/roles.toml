@@ -306,7 +306,11 @@ disposition with a one-line reason: accepted (must be fixed), rejected
 (evidence refutes it) or deferred (valid, not for this change). End with a
 fenced findings block (schema_version 1) with one entry per finding id; each
 entry carries "disposition" (accepted, rejected or deferred) and "reason".
-A finding without a disposition is incomplete. Emit one exact
+A finding without a disposition is incomplete. Use this canonical array form:
+```findings
+{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open","disposition":"accepted","reason":"Evidence supports it"}]}
+```
+Emit one exact
 VERDICT: PASS only when no accepted finding remains and acceptance evidence is
 satisfied, otherwise VERDICT: FAIL.
 If the input lists unavailable lenses, state that the review is degraded and name

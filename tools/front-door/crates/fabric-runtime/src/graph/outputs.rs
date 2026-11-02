@@ -90,10 +90,31 @@ pub(super) fn make_outputs(
             if block.len() > 8 * 1024 {
                 return None;
             }
-            let block: FindingsBlock = serde_json::from_str(block).ok()?;
-            (block.schema_version == 1
-                && block.findings.len() <= MAX_FINDINGS
-                && block.findings.iter().all(|f| {
+            let block: serde_json::Value = serde_json::from_str(block).ok()?;
+            let schema_version = block.get("schema_version")?.as_u64()?;
+            let findings: Vec<Finding> = match block.get("findings")? {
+                serde_json::Value::Array(findings) => {
+                    serde_json::from_value(serde_json::Value::Array(findings.clone())).ok()?
+                }
+                serde_json::Value::Object(findings) => findings
+                    .iter()
+                    .map(|(id, finding)| {
+                        let mut finding = finding.as_object()?.clone();
+                        match finding.get("id") {
+                            Some(value) if value.as_str()? != id => return None,
+                            Some(_) => {}
+                            None => {
+                                finding.insert("id".into(), serde_json::Value::String(id.clone()));
+                            }
+                        }
+                        serde_json::from_value(serde_json::Value::Object(finding)).ok()
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+                _ => return None,
+            };
+            (schema_version == 1
+                && findings.len() <= MAX_FINDINGS
+                && findings.iter().all(|f| {
                     [&f.id, &f.severity, &f.file, &f.summary, &f.status]
                         .iter()
                         .all(|field| field.len() <= OUTPUT_FIELD_BYTES)
@@ -101,7 +122,7 @@ pub(super) fn make_outputs(
                             field.as_ref().is_none_or(|v| v.len() <= OUTPUT_FIELD_BYTES)
                         })
                 }))
-            .then_some(block.findings)
+            .then_some(findings)
         })
         .filter(|findings| canonical_len(findings) <= FINDINGS_BYTES);
     let findings = parsed.unwrap_or_else(|| {
