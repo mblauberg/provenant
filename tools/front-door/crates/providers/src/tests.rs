@@ -2895,6 +2895,24 @@ pub(super) fn legacy_agy_account() -> identity::RegisteredAccount {
 }
 
 #[test]
+fn agy_registers_at_a_shallow_home_but_other_adapters_keep_the_depth_floor() {
+    use identity::RegisteredAccount;
+    for directory in ["/Users/me", "/home/me"] {
+        assert!(RegisteredAccount::new("agy", "opaque-account", directory.into()).is_ok());
+        assert!(matches!(
+            RegisteredAccount::new("claude", "opaque-account", directory.into()),
+            Err(ProviderError::InvalidPath)
+        ));
+    }
+    for directory in ["/", "relative/dir", "/Users/../me"] {
+        assert!(matches!(
+            RegisteredAccount::new("agy", "opaque-account", directory.into()),
+            Err(ProviderError::InvalidPath)
+        ));
+    }
+}
+
+#[test]
 fn agy_includes_attempt_scratch_in_the_workspace() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("agy", "fixture-model");
