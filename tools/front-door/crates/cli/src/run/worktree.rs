@@ -214,6 +214,7 @@ pub(super) fn own_worktree(
                     context,
                     &verified,
                     &owner,
+                    info.head,
                     expected_prior.as_ref(),
                     terminal_prior,
                     cancel,

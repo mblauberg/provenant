@@ -76,11 +76,15 @@ fn validate(owner: &WorktreeOwner) -> Result<(), WorktreeError> {
 
 /// Publish lane ownership only while both repository and writer custody are
 /// excluded. Reassignment requires the caller's owner snapshot to remain
-/// current; only a verified terminal prior may permit an unknown census.
+/// current and the worktree HEAD must still be the one the caller observed
+/// (and validated, for example for base ancestry); only a verified terminal
+/// prior may permit an unknown census.
+#[allow(clippy::too_many_arguments)]
 pub fn save_lane_owner_when_free(
     context: &WorktreeContext<'_>,
     worktree: &VerifiedWorktree,
     owner: &WorktreeOwner,
+    expected_head: GitOid,
     expected_prior: Option<&WorktreeOwner>,
     terminal_prior: bool,
     cancel: &CancelToken,
@@ -99,6 +103,7 @@ pub fn save_lane_owner_when_free(
     if !read_worktrees(context, cancel)?.iter().any(|entry| {
         canonicalize(&entry.path).ok().as_deref() == Some(tree.path())
             && entry.branch.as_ref().map(GitRefName::as_str) == Some(branch.as_str())
+            && entry.head == expected_head
             && !entry.locked
             && !entry.prunable
     }) {
