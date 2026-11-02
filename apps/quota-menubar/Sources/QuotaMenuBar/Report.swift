@@ -47,7 +47,6 @@ struct QuotaReport {
     struct Source {
         let adapter: String
         let status: Status
-        let freePoolRefusal: Bool
         let error: String?
         let nextDueAt: Date?
         var title: String { QuotaReport.providerName(adapter) }
@@ -65,6 +64,7 @@ struct QuotaReport {
         let backAt, observedAt: Date?
         let windows: [Window]
         let refusals: [Refusal]
+        let freePoolRefusal: Bool
         let unreported: [String]?
         let drawingCredits: Bool?
         let creditBurnPerHour: Double?
@@ -472,7 +472,8 @@ extension QuotaReport.Account {
             .filter { $0.pace.state == "exhausted" }
     }
     func back(now: Date) -> Date? {
-        backAt
+        // A free-pool refusal without a recorded expiry has no known return time.
+        backAt ?? (freePoolRefusal ? nil : binding(now: now).flatMap { $0.pace.state == "exhausted" ? $0.resetAt : nil })
     }
     func isDrawing(now _: Date) -> Bool { drawingCredits == true }
     func rank(_ now: Date) -> Int {

@@ -236,7 +236,7 @@ enum QuotaMenu {
             parts = [until.map { "On credits until \(Fmt.moment($0, now: now))" } ?? "On credits"]
         case 3:
             row.icon = .ring(1, .red)
-            parts = account.freePoolRefusal == true ? [] : [Fmt.sentence(Fmt.back(account.back(now: now), now: now))]
+            parts = account.freePoolRefusal ? [] : [Fmt.sentence(Fmt.back(account.back(now: now), now: now))]
         case 4:
             row.icon = .mark("exclamationmark", .orange)
             parts = ["Sign-in required"]
