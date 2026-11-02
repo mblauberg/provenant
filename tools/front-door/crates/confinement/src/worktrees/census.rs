@@ -218,6 +218,9 @@ pub(super) fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> WorkerO
 
 pub(super) struct PolicyCwdObserver<'a>(pub(super) &'a [CensusIgnoreEntry]);
 impl CwdObserver for PolicyCwdObserver<'_> {
+    fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+        SystemCwdObserver.occupancy(pid)
+    }
     fn unreadable_policy_uids(
         &self,
         pid: i64,
@@ -394,7 +397,52 @@ pub(super) fn observe_worker_holders_with_audit(
         if excluded.contains(&fact.identity) {
             continue;
         }
-        match observe_same_process(observer, cwd_observer, fact) {
+        let cwd = observe_same_process(observer, cwd_observer, fact);
+        if !matches!(cwd, NativeCwd::Gone) {
+            let policy_exception = matches!(&cwd, NativeCwd::PolicyExcluded(uids)
+                if uids.all_system() && roots.iter().all(|root| std::fs::metadata(root)
+                    .is_ok_and(|metadata| uids.all_differ_from(metadata.uid()))));
+            let before = observer.observe(fact.identity.pid);
+            let occupancy = cwd_observer.occupancy(fact.identity.pid);
+            let after = observer.observe(fact.identity.pid);
+            let stable = matches!(before, ProcessObservation::Present(ref p) if p.identity == fact.identity)
+                && matches!(after, ProcessObservation::Present(ref p) if p.identity == fact.identity);
+            if stable {
+                for path in &occupancy.paths {
+                    let Some(canonical) = canonical_cwd(path) else {
+                        record_unknown_all(&mut states, &mut details, "occupancy path unavailable");
+                        continue;
+                    };
+                    let location = match std::fs::metadata(&canonical) {
+                        Ok(meta) if !meta.is_dir() => canonical.parent().unwrap_or(&canonical),
+                        _ => &canonical,
+                    };
+                    for root in record_live_path_with_audit(&mut states, location, &mut || {}) {
+                        holders
+                            .entry(root.clone())
+                            .or_insert_with(|| ObservedProcess {
+                                pid: fact.identity.pid,
+                                command: fact.command.clone(),
+                            });
+                        details.insert(
+                            root,
+                            format!(
+                                "process {}: executable or open file inside root",
+                                fact.identity.pid
+                            ),
+                        );
+                    }
+                }
+            }
+            if !stable || (!occupancy.complete && !policy_exception) {
+                unplaceable(
+                    Some(fact.identity.pid),
+                    Some("complete stable occupancy required"),
+                );
+                record_unknown_all(&mut states, &mut details, "process occupancy incomplete");
+            }
+        }
+        match cwd {
             NativeCwd::Gone => {}
             NativeCwd::PolicyExcluded(uids) => {
                 // Accepted risk for sealed Apple code, applied per root owner.
@@ -567,7 +615,9 @@ pub(super) fn observe_same_process(
     }
     let observed = match cwd_observer.cwd(expected.identity.pid) {
         Ok(CwdObservation::Path(path)) => NativeCwd::Path(path),
-        Ok(CwdObservation::Gone) => return NativeCwd::Gone,
+        // A missing cwd is not proof that the process vanished. The stable
+        // identity recheck below distinguishes a real exit from a query gap.
+        Ok(CwdObservation::Gone) => NativeCwd::Unknown("cwd unavailable".into()),
         Ok(CwdObservation::PermissionDenied) => cwd_observer
             .unreadable_policy_uids(expected.identity.pid, &[])
             .map(NativeCwd::PolicyExcluded)

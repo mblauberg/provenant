@@ -3,6 +3,166 @@ use std::io;
 
 const MAX_EINTR_RETRIES: u64 = 8;
 
+/// A bounded snapshot. Every failure leaves completeness false while preserving
+/// any paths already obtained for positive occupancy evidence.
+pub(crate) fn occupancy(pid: i32) -> crate::pid::OccupancyObservation {
+    #[cfg(target_os = "linux")]
+    {
+        return linux_occupancy(pid);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return darwin_occupancy(pid);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = pid;
+        crate::pid::OccupancyObservation::default()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_occupancy(pid: i32) -> crate::pid::OccupancyObservation {
+    const LIMIT: usize = 16_384;
+    let mut result = crate::pid::OccupancyObservation::default();
+    let image = std::fs::read_link(format!("/proc/{pid}/exe"));
+    let list = || -> io::Result<Vec<std::ffi::OsString>> {
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
+            if entries.len() == LIMIT {
+                return Err(io::Error::other("descriptor limit exceeded"));
+            }
+            entries.push(entry?.file_name());
+        }
+        entries.sort();
+        Ok(entries)
+    };
+    let mut complete = true;
+    match image {
+        Ok(path) if path.is_absolute() => {
+            if path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") {
+                complete = false;
+            }
+            result.paths.push(path);
+        }
+        _ => complete = false,
+    }
+    let Ok(before) = list() else { return result };
+    for fd in &before {
+        let path = std::path::Path::new("/proc")
+            .join(pid.to_string())
+            .join("fd")
+            .join(fd);
+        match std::fs::read_link(path) {
+            Ok(path) if path.is_absolute() => {
+                if path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") {
+                    complete = false;
+                }
+                result.paths.push(path);
+            }
+            Ok(path)
+                if path.as_os_str().as_encoded_bytes().starts_with(b"socket:[")
+                    || path.as_os_str().as_encoded_bytes().starts_with(b"pipe:[")
+                    || path
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .starts_with(b"anon_inode:") => {}
+            _ => complete = false,
+        }
+    }
+    // Matching descriptor numbers do not prove that the same objects remain
+    // open. Until object identities are rechecked, this is only positive data.
+    let _ = complete && list().is_ok_and(|after| before == after);
+    result.complete = false;
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_occupancy(pid: i32) -> crate::pid::OccupancyObservation {
+    #[repr(C)]
+    struct FileInfo {
+        open_flags: u32,
+        status: u32,
+        offset: i64,
+        kind: i32,
+        guard_flags: u32,
+    }
+    #[repr(C)]
+    struct VnodePath {
+        file: FileInfo,
+        vnode: libc::vnode_info_path,
+    }
+    const LIMIT: usize = 16_384;
+    let list = || -> Option<Vec<(i32, u32)>> {
+        let mut records = vec![0u64; LIMIT];
+        let size = i32::try_from(records.len() * std::mem::size_of::<u64>()).ok()?;
+        // SAFETY: the aligned buffer has size writable bytes; libproc borrows it.
+        let count = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                records.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if count <= 0
+            || count >= size
+            || !(count as usize).is_multiple_of(std::mem::size_of::<libc::proc_fdinfo>())
+        {
+            return None;
+        }
+        // SAFETY: full fd records are initialized by libproc and u64 alignment suffices.
+        let entries = unsafe {
+            std::slice::from_raw_parts(
+                records.as_ptr().cast::<libc::proc_fdinfo>(),
+                count as usize / std::mem::size_of::<libc::proc_fdinfo>(),
+            )
+        };
+        let mut values: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry.proc_fd, entry.proc_fdtype))
+            .collect();
+        values.sort_unstable();
+        Some(values)
+    };
+    let mut result = crate::pid::OccupancyObservation::default();
+    let mut complete = true;
+    match darwin_executable_path(pid) {
+        Some(path) => result.paths.push(path),
+        None => complete = false,
+    }
+    let Some(before) = list() else { return result };
+    for (fd, kind) in &before {
+        if *kind != libc::PROX_FDTYPE_VNODE as u32 {
+            if !matches!(*kind, 0 | 2..=7 | 9..=11) {
+                complete = false;
+            }
+            continue;
+        }
+        let mut info = std::mem::MaybeUninit::<VnodePath>::zeroed();
+        let size = std::mem::size_of::<VnodePath>() as i32;
+        // SAFETY: info is ABI-sized writable storage, borrowed only for this call.
+        let count = unsafe { libc::proc_pidfdinfo(pid, *fd, 2, info.as_mut_ptr().cast(), size) };
+        if count != size {
+            complete = false;
+            continue;
+        }
+        // SAFETY: the full record was initialized by libproc.
+        let info = unsafe { info.assume_init() };
+        let raw: Vec<_> = info.vnode.vip_path.into_iter().flatten().collect();
+        match decode_darwin_path(pid, &raw) {
+            Ok(path) => result.paths.push(path),
+            Err(_) => complete = false,
+        }
+    }
+    // Descriptor numbers and types can be reused between the two listings.
+    // Do not infer non-occupancy without rechecking each object's identity.
+    let _ = complete && list().is_some_and(|after| before == after);
+    result.complete = false;
+    result
+}
+
 #[cfg(test)]
 fn test_uids(uid: u32) -> crate::pid::ProcessUids {
     crate::pid::ProcessUids {
@@ -536,7 +696,7 @@ fn darwin_executable_path(pid: i32) -> Option<std::path::PathBuf> {
     let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: path supplies writable storage of the supplied size, not retained.
     let size = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
-    if size <= 0 {
+    if size <= 0 || size as usize >= path.len() {
         return None;
     }
     let end = path.iter().position(|byte| *byte == 0)?;

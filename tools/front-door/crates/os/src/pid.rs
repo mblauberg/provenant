@@ -80,6 +80,14 @@ pub enum CwdObservation {
     Unsupported,
 }
 
+/// Paths positively observed for an executable and filesystem descriptors.
+/// A partial observation retains its paths but cannot establish non-occupancy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OccupancyObservation {
+    pub paths: Vec<PathBuf>,
+    pub complete: bool,
+}
+
 /// Host-owner acceptance of the risk that this signed executable occupies a
 /// worktree despite an unreadable cwd. Paths and signers are exact matches.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -158,6 +166,11 @@ impl CensusIgnoreEntry {
 pub trait CwdObserver: Send + Sync {
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError>;
 
+    /// Unimplemented observers must not accidentally prove non-occupancy.
+    fn occupancy(&self, _pid: i64) -> OccupancyObservation {
+        OccupancyObservation::default()
+    }
+
     /// System real/effective/saved uids only after kernel signing status, daemon
     /// image and sealed system-volume checks. Missing evidence returns None.
     /// This supports a caller's explicit risk policy, not non-occupancy proof.
@@ -193,6 +206,13 @@ pub trait CwdObserver: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemCwdObserver;
 impl CwdObserver for SystemCwdObserver {
+    fn occupancy(&self, pid: i64) -> OccupancyObservation {
+        let Some(pid) = i32::try_from(pid).ok().filter(|pid| *pid > 0) else {
+            return OccupancyObservation::default();
+        };
+        crate::sys::pid::occupancy(pid)
+    }
+
     fn unreadable_policy_uids(
         &self,
         pid: i64,
@@ -236,6 +256,32 @@ impl CwdObserver for SystemCwdObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn native_occupancy_reports_image_and_open_file() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let observation = SystemCwdObserver.occupancy(i64::from(std::process::id()));
+        assert!(
+            !observation.complete,
+            "object identity is not yet rechecked"
+        );
+        let file_path = std::fs::canonicalize(file.path()).unwrap();
+        assert!(
+            observation
+                .paths
+                .iter()
+                .any(|path| std::fs::canonicalize(path).ok().as_ref() == Some(&file_path))
+        );
+        let executable = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        assert!(
+            observation
+                .paths
+                .iter()
+                .any(|path| std::fs::canonicalize(path).ok().as_ref() == Some(&executable))
+        );
+        assert!(!SystemCwdObserver.occupancy(0).complete);
+    }
 
     #[test]
     fn all_three_uids_must_be_system_accounts_and_foreign_to_the_owner() {

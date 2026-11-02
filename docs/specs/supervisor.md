@@ -702,6 +702,14 @@ optional branch by canonical path under writer custody.
 
 ### Unreadable processes need positive non-occupancy evidence
 
+Per-root occupancy requires stable process identity and complete observations
+of cwd, executable and open filesystem descriptors. A placed occupant makes
+the corresponding root live; a complete unrelated observation leaves other
+roots unchanged. Failed or partial listings, unreadable required paths, PID
+reuse and unsupported queries leave every root that could contain the process
+unknown. A failed query is never an empty observation. Host-authorised
+exceptions below remain accepted risks rather than non-occupancy proofs.
+
 A live process whose cwd cannot be read remains unplaceable unless it meets
 one of the explicit policies below. Both policies require all real, effective
 and saved uids to be system accounts (0–499), and each uid must differ from
@@ -740,8 +748,9 @@ The cwd seam clears errno before the syscall and preserves the actual failure.
   `/usr/bin`, `/Library/Apple` and every other prefix stay outside the built-in
   policy, even for platform binaries.
 - That executable is opened with `O_NOFOLLOW` and must be a regular file.
-  No `PROC_PIDREGIONPATHINFO` match is attempted: foreign-process region
-  queries require privileges unavailable to the ordinary caller.
+  The daemon exception does not rely on `PROC_PIDREGIONPATHINFO`; access to
+  another process's regions can be restricted, and incomplete region records
+  cannot establish non-occupancy.
 - `fstatfs` on the retained executable fd identifies a read-only root
   filesystem. The volume capability query reports `VOL_CAP_FMT_SEALED` in
   both the valid and capabilities masks.

@@ -299,6 +299,12 @@ fn worker_census_places_a_process_in_a_deleted_directory_by_its_nearest_ancestor
     }
     struct Cwd(PathBuf);
     impl CwdObserver for Cwd {
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: true,
+            }
+        }
         fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             Ok(CwdObservation::Path(self.0.clone()))
         }
@@ -369,6 +375,12 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
     }
     struct Cwds(BTreeMap<i64, PathBuf>);
     impl CwdObserver for Cwds {
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: true,
+            }
+        }
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             Ok(self
                 .0
@@ -563,6 +575,12 @@ impl ProcessObserver for InjectedCensus {
 }
 
 impl CwdObserver for InjectedCensus {
+    fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+        provenant_os::pid::OccupancyObservation {
+            paths: vec![],
+            complete: true,
+        }
+    }
     fn sealed_platform_uids(&self, pid: i64) -> Option<ProcessUids> {
         self.platform_uids.get(&pid).copied()
     }
@@ -581,6 +599,81 @@ impl WorkerObserver for InjectedCensus {
     fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         observe_worker_roots(roots, self, self, &self.current, true)
     }
+}
+
+#[test]
+fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
+-> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    struct Occupancy {
+        cwd: PathBuf,
+        paths: Vec<PathBuf>,
+        complete: bool,
+    }
+    impl CwdObserver for Occupancy {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(self.cwd.clone()))
+        }
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: self.paths.clone(),
+                complete: self.complete,
+            }
+        }
+    }
+    let fixture = Fixture::new()?;
+    let base = canonicalize(fixture._temp.path())?;
+    let a = base.join("a");
+    let b = base.join("b");
+    fs::create_dir(&a)?;
+    fs::create_dir(&b)?;
+    let file = a.join("open");
+    fs::write(&file, "open")?;
+    let fact = |pid| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let current = fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations([current.clone(), fact(200)], [], [], true, false, 32)?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let roots = vec![a.clone(), b.clone()];
+    let observe = |paths, complete| {
+        observe_worker_roots(
+            &roots,
+            &processes,
+            &Occupancy {
+                cwd: base.clone(),
+                paths,
+                complete,
+            },
+            &current,
+            false,
+        )
+        .0
+    };
+    let free = observe(vec![], true);
+    assert_eq!(free[&a], WorkerState::Free);
+    assert_eq!(free[&b], WorkerState::Free);
+    let live = observe(vec![file.clone()], true);
+    assert_eq!(live[&a], WorkerState::Live);
+    assert_eq!(live[&b], WorkerState::Free);
+    let partial = observe(vec![file], false);
+    assert_eq!(partial[&a], WorkerState::Live);
+    assert_eq!(partial[&b], WorkerState::Unknown);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -888,6 +981,12 @@ fn unplaceable_path_failures_retain_process_image_diagnostics() -> Result<(), Bo
     use provenant_supervisor::census::{Census, ProcessIdentity};
     struct DetailedCwd(PathBuf);
     impl CwdObserver for DetailedCwd {
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: true,
+            }
+        }
         fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             Ok(CwdObservation::Path(self.0.clone()))
         }
@@ -1267,6 +1366,10 @@ fn cwd_query_errors_never_consult_the_daemon_policy() -> Result<(), Box<dyn Erro
     };
     assert!(matches!(
         observe_same_process(&observer, &FailedCwd, &fact),
+        NativeCwd::Unknown(_)
+    ));
+    assert!(matches!(
+        observe_same_process(&observer, &observer, &fact),
         NativeCwd::Unknown(_)
     ));
     Ok(())

@@ -1194,7 +1194,7 @@ pub struct Gc {
     /// Also delete merged worktrees and ignored declared output (otherwise previewed)
     #[arg(long)]
     pub apply: bool,
-    /// Minimum idle age for caches, ignored output and opt-in foreign worktrees
+    /// Minimum idle age for standalone caches and ignored output; merged trees are immediate
     #[arg(long, default_value = "7", value_parser = clap::value_parser!(u64).range(1..=3650))]
     pub idle_days: u64,
 }

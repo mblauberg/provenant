@@ -664,6 +664,23 @@ pub(super) fn remove_tree_when(
         }
         WorktreeCondition::Unknown => return Err(WorktreeError::UnknownWriter),
     }
+    // Output preparation can take time. Recheck registration, head and lane
+    // eligibility before removing the tree while writer exclusion is held.
+    let fresh = read_worktrees(context, cancel)?;
+    let current = fresh
+        .iter()
+        .find(|tree| canonicalize(&tree.path).ok().as_deref() == Some(&canonical))
+        .ok_or(WorktreeError::IdentityChanged)?;
+    if current.branch != entry.branch
+        || current.head != expected_head
+        || current.locked
+        || current.prunable
+    {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    if !eligible() {
+        return Err(WorktreeError::UnknownWriter);
+    }
     // A cache that cannot be derived must not block removal; warn and skip it.
     let cargo_cache = crate::permissions::worktree_cargo_cache(context.home, &locked.verified)
         .map_err(|error| warn_cache_removal(&error))
