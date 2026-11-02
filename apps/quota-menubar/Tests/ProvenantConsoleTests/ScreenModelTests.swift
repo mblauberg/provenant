@@ -67,6 +67,25 @@ final class ConsoleModelTests: XCTestCase {
         return (ConsoleModel(cli: replay.client, defaults: nil), replay)
     }
 
+    func testAFailedTerminalOverviewLaneKeepsItsOutcomeInRowAndHeading() async throws {
+        let replay = Replay([(["console", "overview"], "console-overview-active", 0), (["inbox"], "inbox-console", 0)])
+        let model = ConsoleModel(cli: replay.client, defaults: nil)
+        await model.load(.overview)
+        let lane = try XCTUnwrap(model.overview.reader.value?.overview.lanes.last)
+        XCTAssertEqual(lane.state, "terminal")
+        XCTAssertEqual(lane.outcome, "failed")
+        let row = LaneRow(lane)
+        XCTAssertEqual(row.style, StatusStyle.attempt(state: "terminal", outcome: "failed"))
+        XCTAssertEqual(row.style.tone, .bad)
+        XCTAssertNotEqual(row.style.label, "Finished")
+        let heading = try XCTUnwrap(model.heading(lane.id))
+        XCTAssertEqual(heading.outcome, "failed")
+        XCTAssertEqual(StatusStyle.attempt(state: heading.state, outcome: heading.outcome).tone, .bad)
+        // The project label is context beside the state, not what the attempt waits on.
+        XCTAssertNil(row.waiting)
+        XCTAssertEqual(row.project, "provenant")
+    }
+
     func testStartsOnTheOverviewWithEverythingStale() {
         let (model, _) = model()
         XCTAssertEqual(model.destination, .overview)

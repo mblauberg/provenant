@@ -21,6 +21,7 @@
         "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
         "task_label": "Implement console overview",
         "state": "running",
+        "outcome": null,
         "attention": false
       },
       {
@@ -31,6 +32,7 @@
         "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
         "task_label": "Review the change set",
         "state": "running",
+        "outcome": null,
         "attention": false
       },
       {
@@ -41,6 +43,7 @@
         "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
         "task_label": "Run the whole test suite",
         "state": "terminal",
+        "outcome": "failed",
         "attention": true
       }
     ],

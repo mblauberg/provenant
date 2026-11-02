@@ -15,6 +15,8 @@ final class ConsoleClientTests: XCTestCase {
         XCTAssertEqual(lanes.map(\.title), ["Implement console overview", "Review the change set", "Run the whole test suite"])
         XCTAssertEqual(lanes.last?.state, "terminal")
         XCTAssertEqual(lanes.last?.attention, true)
+        XCTAssertEqual(lanes.last?.outcome, "failed")
+        XCTAssertNil(lanes.first?.outcome)
         XCTAssertEqual(lanes.first?.projectLabel, "provenant")
 
         let (console, _) = client([(["console", "overview"], "console-overview", 0)])

@@ -272,6 +272,7 @@ fn overview_needs_you() -> Result {
         [
             "attempt_id",
             "attention",
+            "outcome",
             "project_id",
             "project_label",
             "run_id",
@@ -280,6 +281,7 @@ fn overview_needs_you() -> Result {
             "task_label"
         ]
     );
+    assert!(lane["outcome"].is_null(), "a running lane has no outcome");
     assert_eq!(with_lane["data"]["counts"]["running"], 1);
     assert!(!with_lane.to_string().contains("PRIVATE PROMPT MARKER"));
 

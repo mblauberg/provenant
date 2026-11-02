@@ -139,22 +139,11 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                     let Some(label) = labels.get(&item.project_id.to_string()) else {
                         continue;
                     };
-                    let (state, active, needs_attention) = match item.state {
-                        OverviewState::Queued => ("queued", true, false),
-                        OverviewState::Starting => ("starting", true, false),
-                        OverviewState::Running => ("running", true, false),
-                        OverviewState::Settling => ("settling", true, false),
-                        OverviewState::Terminal(outcome) => {
-                            use provenant_run::Outcome;
-                            let attention =
-                                !matches!(outcome, Outcome::Succeeded | Outcome::Cancelled);
-                            ("terminal", false, attention)
-                        }
-                    };
+                    let (state, active, needs_attention, outcome_value) = lane_state(item.state);
                     running += usize::from(active);
                     attention += usize::from(needs_attention);
                     if active || needs_attention {
-                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"run_id":item.run_id,"task_id":item.task_id,"attempt_id":item.attempt_id,"task_label":item.title,"state":state,"attention":needs_attention}));
+                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"run_id":item.run_id,"task_id":item.task_id,"attempt_id":item.attempt_id,"task_label":item.title,"state":state,"outcome":outcome_value,"attention":needs_attention}));
                     }
                 }
                 if batch.truncated {
@@ -177,9 +166,43 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
     )
 }
 
+/// A lane's coarse state, whether it is active, whether it needs attention, and
+/// the terminal outcome in the snake_case vocabulary the board and tree emit.
+fn lane_state(state: OverviewState) -> (&'static str, bool, bool, Value) {
+    match state {
+        OverviewState::Queued => ("queued", true, false, Value::Null),
+        OverviewState::Starting => ("starting", true, false, Value::Null),
+        OverviewState::Running => ("running", true, false, Value::Null),
+        OverviewState::Settling => ("settling", true, false, Value::Null),
+        OverviewState::Terminal(outcome) => {
+            use provenant_run::Outcome;
+            let attention = !matches!(outcome, Outcome::Succeeded | Outcome::Cancelled);
+            let outcome = serde_json::to_value(outcome).unwrap_or(Value::Null);
+            ("terminal", false, attention, outcome)
+        }
+    }
+}
+
 #[cfg(test)]
 mod comparison_tests {
     use super::*;
+
+    #[test]
+    fn terminal_lane_carries_its_outcome() {
+        use provenant_run::Outcome;
+        assert_eq!(
+            lane_state(OverviewState::Terminal(Outcome::TimedOut)),
+            ("terminal", false, true, json!("timed_out"))
+        );
+        assert_eq!(
+            lane_state(OverviewState::Terminal(Outcome::Succeeded)),
+            ("terminal", false, false, json!("succeeded"))
+        );
+        assert_eq!(
+            lane_state(OverviewState::Running),
+            ("running", true, false, Value::Null)
+        );
+    }
     use provenant_fabric_runtime::inbox::{OverviewBatch, OverviewItem};
 
     #[test]

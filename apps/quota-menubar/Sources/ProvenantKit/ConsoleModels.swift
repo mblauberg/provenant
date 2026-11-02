@@ -236,6 +236,8 @@ public struct OverviewLane: Decodable, Equatable, Sendable, Identifiable {
     public let taskLabel: String?
     /// `queued`, `starting`, `running`, `settling` or `terminal`.
     public let state: String
+    /// The terminal outcome (`failed`, `timed_out`, ...); null until the attempt is terminal.
+    public let outcome: String?
     public let attention: Bool
     public var id: String { attemptId }
     public var title: String { taskLabel ?? "Attempt \(attemptId.prefix(8))" }

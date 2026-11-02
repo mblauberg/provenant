@@ -10,9 +10,11 @@ struct LaneRow: View {
     let route: Route?
     let waiting: String?
     let attention: Bool
+    /// The project the attempt belongs to, shown beside its state; not what it waits on.
+    var project: String? = nil
     var depth = 0
 
-    private var style: StatusStyle { .attempt(state: state, outcome: outcome) }
+    var style: StatusStyle { .attempt(state: state, outcome: outcome) }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.small) {
@@ -39,7 +41,7 @@ struct LaneRow: View {
     }
 
     private var subtitle: String {
-        [style.label, route?.summary, waiting].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        [style.label, project, route?.summary, waiting].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
@@ -51,8 +53,8 @@ extension LaneRow {
     }
 
     init(_ lane: OverviewLane) {
-        self.init(title: lane.title, state: lane.state, outcome: nil, route: nil,
-                  waiting: lane.projectLabel, attention: lane.attention)
+        self.init(title: lane.title, state: lane.state, outcome: lane.outcome, route: nil,
+                  waiting: nil, attention: lane.attention, project: lane.projectLabel)
     }
 
     init(_ node: TreeNode) {
