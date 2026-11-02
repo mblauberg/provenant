@@ -257,6 +257,9 @@ pub enum ProbeFailure {
     /// The CLI is signed in as a different account than the registered key.
     AccountMismatch,
     MissingCli,
+    /// The probe command could not run for a transient host reason (busy
+    /// executor, process budget, spawn failure other than a missing binary).
+    Command,
     ProbeDirectory,
     Disabled,
     Malformed,

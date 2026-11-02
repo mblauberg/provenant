@@ -33,7 +33,19 @@ fn command_error(error: ExecError) -> ProbeFailure {
             operation: PROBE_DIR_OPERATION,
             ..
         } => ProbeFailure::ProbeDirectory,
-        _ => ProbeFailure::MissingCli,
+        // Only a binary that cannot be found or executed is worth a day's
+        // backoff; anything else is the host, and clears on a short retry.
+        ExecError::Io {
+            operation: "spawn",
+            source,
+        } if matches!(
+            source.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+        ) =>
+        {
+            ProbeFailure::MissingCli
+        }
+        _ => ProbeFailure::Command,
     }
 }
 struct Account {
@@ -149,7 +161,7 @@ impl LiveQuota {
         if remaining <= 0 {
             return Err(ProbeFailure::Network);
         }
-        let system = SystemExecutor::new(1).map_err(|_| ProbeFailure::MissingCli)?;
+        let system = SystemExecutor::new(1).map_err(|_| ProbeFailure::Command)?;
         let executor = crate::host::HostProbeExecutor::new(&system, &self.state)
             .map_err(|_| ProbeFailure::ProbeDirectory)?;
         let mut argv = vec![OsString::from(program)];
@@ -570,15 +582,34 @@ mod tests {
             source: std::io::Error::other("test directory failure"),
         });
         assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let failure = command_error(ExecError::Io {
+                operation: "spawn",
+                source: std::io::Error::from(kind),
+            });
+            assert_eq!(failure, ProbeFailure::MissingCli);
+        }
         for failure in [
             ExecError::Busy,
+            ExecError::ProcessBudget { used: 9, limit: 8 },
             ExecError::Io {
                 operation: "spawn",
                 source: std::io::Error::other("test spawn failure"),
             },
+            ExecError::Io {
+                operation: "poll",
+                source: std::io::Error::other("test poll failure"),
+            },
         ] {
-            assert_eq!(command_error(failure), ProbeFailure::MissingCli);
+            assert_eq!(command_error(failure), ProbeFailure::Command);
         }
+        assert_eq!(
+            serde_json::to_value(ProbeFailure::Command).unwrap(),
+            "command"
+        );
     }
 
     #[test]
