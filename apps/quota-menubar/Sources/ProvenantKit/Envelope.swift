@@ -140,17 +140,20 @@ public struct Page<Item: Sendable>: Sendable {
     public var items: [Item]
     public var nextCursor: String?
     public var truncated: Bool
+    /// What each peer host contributed, when the listing asked for peers. Only the first page carries it.
+    public var peers: [PeerCoverage]? = nil
 }
 
 /// Reads pages until the cursor runs out or `maxPages` is reached. `truncated` is set when pages remain.
 public func collectPages<Item: Sendable>(maxPages: Int = 10, _ fetch: (String?) async throws -> Page<Item>) async throws -> Page<Item> {
-    var all: [Item] = [], cursor: String?, more = false
+    var all: [Item] = [], cursor: String?, more = false, peers: [PeerCoverage]?
     for _ in 0..<maxPages {
         let page = try await fetch(cursor)
+        peers = peers ?? page.peers
         all += page.items
         cursor = page.nextCursor
         more = page.truncated || cursor != nil
         if cursor == nil { break }
     }
-    return Page(items: all, nextCursor: cursor, truncated: more)
+    return Page(items: all, nextCursor: cursor, truncated: more, peers: peers)
 }
