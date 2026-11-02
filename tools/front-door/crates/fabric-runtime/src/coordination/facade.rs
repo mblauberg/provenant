@@ -213,6 +213,10 @@ pub enum FacadeError {
     DispatchRefused { reason: String },
     #[error("{reason}")]
     DispatchUnobserved { reason: String },
+    /// A host Git refusal that names its step and the limit. The reason holds
+    /// redacted diagnostics only, never raw source text.
+    #[error("{reason}")]
+    HostDeliveryIo { reason: String },
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
     WorktreeMissing,
     #[error(
@@ -274,6 +278,7 @@ impl FacadeError {
             Self::ConfinementRefused => "confinement_refused",
             Self::DispatchRefused { .. } => "dispatch_refused",
             Self::DispatchUnobserved { .. } => "dispatch_unobserved",
+            Self::HostDeliveryIo { .. } => "io",
             Self::WorktreeMissing => "worktree_missing",
             Self::WorktreeUnregistered { .. } => "worktree_unregistered",
             Self::BaseUnreachable => "base_unreachable",

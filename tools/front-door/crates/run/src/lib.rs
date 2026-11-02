@@ -310,6 +310,14 @@ pub enum RunError {
     },
     #[error("host writer delivery failed at Prepare ({step}): {reason}")]
     DeliveryPrepare { step: &'static str, reason: String },
+    #[error(
+        "host writer delivery failed at {stage:?}: git {command} output exceeded the {limit}-byte host limit"
+    )]
+    DeliveryLimit {
+        stage: WriterDeliveryStage,
+        command: String,
+        limit: usize,
+    },
     #[error("Git executable unavailable")]
     GitUnavailable,
     #[error("provider evidence could not be committed: {0}")]

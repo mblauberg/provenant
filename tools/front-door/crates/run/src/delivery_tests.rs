@@ -2879,6 +2879,100 @@ fn prepare_failures_name_step_and_bound_git_stderr()
     Ok(())
 }
 
+/// A prepared host whose Git prints `bytes` of output for any call containing
+/// `pattern`, once prepared. Every other call goes to the real Git. Preparing
+/// lists worktrees too, so the fake stays inert until the flag file exists.
+fn oversize_host(
+    pattern: &str,
+    bytes: usize,
+) -> std::result::Result<(PrepareFixture, HostDeliveryContext), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let git = fixture.root.join("oversize-git");
+    let payload = fixture.root.join("oversize-output");
+    let flag = fixture.root.join("oversize-enabled");
+    std::fs::write(&payload, vec![b'a'; bytes])?;
+    let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
+    fixture.executable(
+        &git,
+        &format!(
+            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nif [ -e '{}' ]; then cat '{}'; exit 0; fi;;\nesac\nexec '{}' \"$@\"\n",
+            flag.display(),
+            payload.display(),
+            real_git.display()
+        ),
+    )?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), git.into_os_string()));
+    let host = fixture.prepare()?;
+    std::fs::write(&flag, b"")?;
+    Ok((fixture, host))
+}
+
+#[test]
+fn many_linked_worktrees_do_not_block_protection_checks()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    // Each entry is about 155 bytes, so 200 linked worktrees exceed 16 KiB.
+    for index in 0..200 {
+        let path = fixture.root.join(format!("tree-{index}"));
+        fixture.git(&[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--detach",
+            path.to_str().ok_or("tree")?,
+        ])?;
+    }
+    let project = &fixture.writer.project;
+    HostDeliveryContext::validate_integration_target(project, "feature/unprotected")?;
+    HostDeliveryContext::check_delivery_branch(project, "feature/unprotected")?;
+    Ok(())
+}
+
+#[test]
+fn worktree_listing_over_the_capture_default_is_refused_at_every_stage()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let limit = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
+    let (fixture, host) = oversize_host("worktree list", limit + 1)?;
+    for stage in [WriterDeliveryStage::Prepare, WriterDeliveryStage::Integrate] {
+        let error = host
+            .command(
+                &fixture.writer.project,
+                "git",
+                &["worktree", "list", "--porcelain"],
+                stage,
+            )
+            .expect_err("an oversized listing must be refused");
+        assert!(
+            matches!(error, RunError::DeliveryLimit { .. }),
+            "{stage:?}: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("worktree list"), "{message}");
+        assert!(message.contains(&limit.to_string()), "{message}");
+    }
+    Ok(())
+}
+
+#[test]
+fn non_listing_host_output_over_its_bound_names_the_command()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (fixture, host) = oversize_host("oversize-probe", 16 * 1024 + 1)?;
+    let error = host
+        .command(
+            &fixture.writer.project,
+            "git",
+            &["symbolic-ref", "--quiet", "refs/heads/oversize-probe"],
+            WriterDeliveryStage::Prepare,
+        )
+        .expect_err("oversized output must be refused");
+    let message = error.to_string();
+    assert!(message.contains("symbolic-ref"), "{message}");
+    assert!(message.contains("16384"), "{message}");
+    Ok(())
+}
+
 #[test]
 fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
 -> std::result::Result<(), Box<dyn std::error::Error>> {

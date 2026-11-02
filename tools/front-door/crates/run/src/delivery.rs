@@ -1034,6 +1034,7 @@ impl HostDeliveryContext {
                     Some("rev-parse") if args.contains(&"--absolute-git-dir") => "git dir",
                     Some("rev-parse") => "HEAD",
                     Some("config") => "credential helper",
+                    Some("worktree") => "worktree",
                     _ if args.contains(&"fetch") => "fetch",
                     _ => "git executable",
                 };
@@ -1119,15 +1120,8 @@ impl HostDeliveryContext {
         options.env = Some(&environment);
         options.stdin = Some(input);
         let commit_log = tool == "git" && args.first() == Some(&"log");
-        // A configuration listing with origins can exceed an ordinary reply.
-        let listing = args.contains(&"--show-origin");
-        options.stdout = StreamPolicy::Capture {
-            limit: match (commit_log, listing) {
-                (true, _) => 56_000,
-                (false, true) => 1024 * 1024,
-                (false, false) => 16 * 1024,
-            },
-        };
+        let limit = stdout_limit(commit_log, args);
+        options.stdout = StreamPolicy::Capture { limit };
         options.stop_on_output_limit = commit_log;
         options.stderr = if stage == Stage::Prepare {
             StreamPolicy::Capture { limit: 4096 }
@@ -1147,12 +1141,18 @@ impl HostDeliveryContext {
             && output.termination == Termination::Exit(1)
             && output.stdout.bytes.is_empty();
         let bounded_log = commit_log && output.stdout.truncated && output.overflow_stopped;
+        if output.stdout.truncated && !commit_log {
+            return Err(RunError::DeliveryLimit {
+                stage,
+                command: git_subcommand(args),
+                limit,
+            });
+        }
         if (output.termination != Termination::Exit(0)
             && !absent_helpers
             && !absent_default
             && !bounded_log)
             || output.timed_out
-            || output.stdout.truncated && !commit_log
             || output.stdout.read_failed
             || output.drain_truncated
         {
@@ -1797,6 +1797,36 @@ pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) 
     RunError::DeliveryPrepare {
         step,
         reason: prepare_reason(detail),
+    }
+}
+
+/// The stdout limit for one host Git or forge call, chosen from its argv. A
+/// worktree listing grows with the linked worktrees, so it gets the crate's
+/// capture default; every other call keeps its bound.
+fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
+    if commit_log {
+        56_000
+    } else if args.contains(&"--show-origin") {
+        // A configuration listing with origins can exceed an ordinary reply.
+        1024 * 1024
+    } else if args.starts_with(&["worktree", "list"]) {
+        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+    } else {
+        16 * 1024
+    }
+}
+
+/// The subcommand words of a host call, for diagnostics. Options and absolute
+/// paths, such as a `--git-dir` value, are skipped.
+fn git_subcommand(args: &[&str]) -> String {
+    let mut words = args
+        .iter()
+        .copied()
+        .filter(|word| !word.starts_with('-') && !word.starts_with('/'));
+    let verb = words.next().unwrap_or("git");
+    match (verb, words.next()) {
+        ("worktree", Some(sub)) => format!("worktree {sub}"),
+        _ => verb.to_owned(),
     }
 }
 
