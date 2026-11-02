@@ -1230,6 +1230,32 @@ fn planned_workers_and_the_no_scout_note_expand_and_feed_their_consumers() {
     assert_eq!(run.status, GraphStatus::Paused);
 }
 
+#[test]
+fn a_hand_written_plan_keeps_its_consumers_declared_inputs() {
+    let mut doc = pattern_planner(4);
+    doc.nodes[1].inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "plan".into(),
+        outputs: vec![OutputKind::Result],
+    }];
+    let instance = json!({"id":"impl", "pattern":"generator", "parameters":{}});
+    let run_it = |doc: &GraphDocument| {
+        let mut owner = fixture_owner(&[&pattern_result(instance.clone()), "a", "b", "c"]);
+        let run = advance(doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+        plans::expand(doc, &[], &run.checkpoint.expansions, &plans::generous()).unwrap()
+    };
+    let expanded = run_it(&doc);
+    let after = expanded.nodes.iter().find(|n| n.id == "after").unwrap();
+    let inputs: Vec<_> = after.inputs.iter().map(|i| i.node.as_str()).collect();
+    assert_eq!(inputs, ["plan"], "no wire_exports, no extra inputs");
+    // Declared by the plan node, the same consumer also reads the instance exports.
+    doc.nodes[0].plan.as_mut().unwrap().wire_exports = true;
+    let wired = run_it(&doc);
+    let after = wired.nodes.iter().find(|n| n.id == "after").unwrap();
+    assert!(after.inputs.len() > 1);
+}
+
 fn pattern_result_all(instances: Vec<Value>) -> String {
     format!(
         "```fragment\n{}\n```",

@@ -505,8 +505,25 @@ pub fn apply(
     stages[position] = planner;
     // Stages the planned fragment needs after it, for example the synthesis
     // that reconciles the evidence the static stage reconciled in itself.
-    if let Some(after) = catalogue.get("after").and_then(Value::as_array) {
+    if let Some(after) = catalogue.get("after") {
+        let after = after
+            .as_array()
+            .ok_or_else(|| format!("preset {name}: plan.after must be a list of stages"))?;
         for (offset, stage) in after.iter().enumerate() {
+            let id = stage
+                .as_object()
+                .and_then(|stage| stage.get("id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("preset {name}: plan.after stages need an id"))?;
+            if stages
+                .iter()
+                .enumerate()
+                .any(|(at, existing)| stage_id(existing, at) == id)
+            {
+                return Err(format!(
+                    "preset {name}: plan.after stage {id} repeats a stage id"
+                ));
+            }
             stages.insert(position + 1 + offset, stage.clone());
         }
     }
@@ -517,16 +534,23 @@ pub fn apply(
     let mut entries = Vec::new();
     for pattern in patterns {
         // A pattern gated by a parameter the chair turned off is not offered.
-        if let Some(gate) = pattern.get("enabled_by").and_then(Value::as_str)
-            && plan_values.get(gate).is_none_or(|value| match value {
+        if let Some(gate) = pattern.get("enabled_by") {
+            let gate = gate.as_str().ok_or_else(|| {
+                format!("preset {name}: plan pattern enabled_by must name a parameter")
+            })?;
+            let value = plan_values.get(gate).ok_or_else(|| {
+                format!("preset {name}: plan pattern enabled_by names no parameter: {gate}")
+            })?;
+            let off = match value {
                 Value::Null | Value::Bool(false) => true,
                 Value::Number(number) => number.as_f64() == Some(0.0),
                 Value::String(text) => text.is_empty(),
                 Value::Array(items) => items.is_empty(),
                 Value::Object(_) | Value::Bool(true) => false,
-            })
-        {
-            continue;
+            };
+            if off {
+                continue;
+            }
         }
         match pattern.get("for_each").and_then(Value::as_str) {
             Some(list) => entries.extend(each_item(
@@ -552,6 +576,7 @@ pub fn apply(
         "patterns": lowered,
         "patterns_only": true,
         "disjoint_waves": true,
+        "wire_exports": true,
     }))
 }
 

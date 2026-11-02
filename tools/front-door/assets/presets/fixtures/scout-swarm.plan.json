@@ -3,7 +3,7 @@
     "pattern": "scout-swarm",
     "preset": "scout-swarm"
   },
-  "graph_id": "preset-26fc9622a8afd78f9b71b05033766b4c",
+  "graph_id": "preset-6743311ed1ef53c0231d82303b2b6541",
   "nodes": [
     {
       "access": "read_only",
@@ -116,7 +116,8 @@
             }
           }
         ],
-        "patterns_only": true
+        "patterns_only": true,
+        "wire_exports": true
       },
       "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nChoose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and, when the catalogue offers one, an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
       "read_roots": [

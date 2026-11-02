@@ -3113,6 +3113,51 @@ mod planner_front_end {
         );
     }
 
+    fn planned_error(extends: &str, plan: &str) -> String {
+        let mut layers = layers(PlanMode::On, None);
+        layers
+            .insert("user", "custom", &format!("extends='{extends}'\n{plan}\n"))
+            .unwrap();
+        expand_with(&layers, "custom", "brief", &[], &[]).unwrap_err()
+    }
+
+    #[test]
+    fn catalogue_gates_and_trailing_stages_are_validated() {
+        let pattern = |gate: &str| {
+            format!(
+                "[[plan.patterns]]\nname='w'\nenabled_by={gate}\nexports=[{{node='n',outputs=['result']}}]\nnodes=[{{id='n',brief='b',acceptance_checks=['c']}}]\n[plan.patterns.parameters]\nq={{type='string'}}\n"
+            )
+        };
+        let unknown = planned_error(
+            "fan-out",
+            &format!("[plan]\nreplaces='branch'\n{}", pattern("'nope'")),
+        );
+        assert!(
+            unknown.contains("enabled_by names no parameter: nope"),
+            "{unknown}"
+        );
+        let wrong = planned_error(
+            "fan-out",
+            &format!("[plan]\nreplaces='branch'\n{}", pattern("3")),
+        );
+        assert!(
+            wrong.contains("enabled_by must name a parameter"),
+            "{wrong}"
+        );
+        let list = planned_error("scope-then-run", "[plan]\nafter='synthesis'");
+        assert!(list.contains("plan.after must be a list"), "{list}");
+        let nameless = planned_error("scope-then-run", "[plan]\nafter=[{ role='plan.research' }]");
+        assert!(
+            nameless.contains("plan.after stages need an id"),
+            "{nameless}"
+        );
+        let repeat = planned_error(
+            "scope-then-run",
+            "[plan]\nafter=[{ id='scope', role='plan.research' }]",
+        );
+        assert!(repeat.contains("repeats a stage id"), "{repeat}");
+    }
+
     fn acceptance(count: usize) -> String {
         let items: String = (1..=count).map(|n| format!("{n}. item {n}\n")).collect();
         format!("Do the work.\n\n## Acceptance\n{items}\n## Verify\n- cargo test\n")

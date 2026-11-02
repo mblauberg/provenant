@@ -3,7 +3,7 @@
     "pattern": "review-council",
     "preset": "review-council"
   },
-  "graph_id": "preset-9c7007015dfd40e27d73d1840b2eeeb6",
+  "graph_id": "preset-c8ad464699138caddaa2b8c9ef45b3cf",
   "nodes": [
     {
       "access": "read_only",
@@ -229,7 +229,8 @@
             }
           }
         ],
-        "patterns_only": true
+        "patterns_only": true,
+        "wire_exports": true
       },
       "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nEach catalogue pattern is one lens the review panel allows for this subject. Instantiate the lenses the change needs, at most once each, and choose a tier for each: a lower tier for mechanical checks, a higher one where a miss would be costly. Always include the correctness lens. You cannot add a lens the catalogue does not list.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
       "role": "plan.shape",

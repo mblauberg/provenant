@@ -3,7 +3,7 @@
     "pattern": "fan-out",
     "preset": "fan-out"
   },
-  "graph_id": "preset-bcddef5829022bcf6ad59cfe3c85cf33",
+  "graph_id": "preset-5e240126e6bb65846250083aa6e0d6ae",
   "nodes": [
     {
       "access": "read_only",
@@ -60,7 +60,8 @@
             }
           }
         ],
-        "patterns_only": true
+        "patterns_only": true,
+        "wire_exports": true
       },
       "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nChoose how many workers to run and give each one distinct question to answer, on a route that suits its difficulty. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
       "role": "plan.shape",

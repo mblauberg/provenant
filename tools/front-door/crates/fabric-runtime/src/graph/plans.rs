@@ -19,6 +19,10 @@ pub struct PlanSpec {
     /// share a checkout and run in turn.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disjoint_waves: bool,
+    /// Consumers of the plan node also read what the fragment's pattern
+    /// instances export. Off, a consumer keeps exactly the inputs it declared.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wire_exports: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +353,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
         .iter()
         .find(|n| n.id == expansion.source)
         .and_then(|n| n.plan.as_ref())
+        .filter(|spec| spec.wire_exports)
     else {
         return Vec::new();
     };

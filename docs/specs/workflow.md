@@ -548,15 +548,16 @@ names and parameters are recorded. The planner's position is per preset:
 presets plan first and set the swarm's width.
 
 The other catalogues are narrow. `scout-swarm` and `scope-then-run` offer a
-codebase `scout` and an `external-scout`, each with a `question` and a
-closed-list `route`; `fan-out` and `fan-out-synthesise` offer a `worker`, with
+codebase `scout` (a `question` and a closed-list `route`) and an
+`external-scout` (a `question` only, on the `web` route); `fan-out` and `fan-out-synthesise` offer a `worker`, with
 a `question` and a `route`. `scope-then-run` also offers `no-scout`, a junior
 note with a `reason`, so the planner decides whether to scout at all (an empty
 fragment is refused). The planner's fragment replaces the preset's static
 scout stage. A consumer of the planned stage reads what the fragment's pattern
 instances export (each scout's, worker's or lens's selected outputs), added to
 its inputs beside the planner's own result, as it would read the static
-composite. `scope-then-run` gets a `plan.research` synthesis after its planned
+composite; the plan node declares this with `wire_exports`, so a hand-written
+plan keeps exactly the inputs it declared. `scope-then-run` gets a `plan.research` synthesis after its planned
 scouts, so scoping works from reconciled evidence as before. A catalogue entry
 with `enabled_by = "external"` is offered only while that parameter is
 non-zero, so `external = 0` removes the external scout. Planned scouts keep the

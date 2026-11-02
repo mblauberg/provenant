@@ -3,7 +3,7 @@
     "pattern": "big-batch",
     "preset": "big-batch"
   },
-  "graph_id": "preset-43ed6944f281262b450745dd7301863f",
+  "graph_id": "preset-000f88053d593e468774568fe06ef116",
   "integration_branch": "batch/graph",
   "nodes": [
     {
@@ -474,7 +474,8 @@
             }
           }
         ],
-        "patterns_only": true
+        "patterns_only": true,
+        "wire_exports": true
       },
       "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: /repo/lane1, /repo/lane2.\nSplit the work into waves of writer lanes. Give each lane its own worktree, a literal write scope disjoint from the other lanes in its wave, the subset of acceptance items it owns, a route and a budget. End every wave with a wave-barrier whose depends_on and inputs name that wave's lanes, and make the next wave's lanes depend on the barrier.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
       "role": "plan.shape",
