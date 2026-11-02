@@ -33,15 +33,36 @@ fn ensure_inner(
     let relative = ".provenant/scratch";
     let parent = child(repo.root_dir(), ".provenant")?;
     let scratch = child(&parent, "scratch")?;
-    let info = child(repo.common_dir(), "info")?;
+    let mut info = child(repo.common_dir(), "info")?;
     before_lock();
-    let _lock = info.lock(
+    let lock = info.lock(
         OsStr::new("provenant-exclude.lock"),
         LockMode::Exclusive,
         WaitBudget::cli(clock.mono_now(), 30).map_err(|_| WorktreeError::InvalidRequest)?,
         cancel,
         clock,
-    )?;
+    );
+    let _lock = match lock {
+        Ok(lock) => lock,
+        Err(error) if error.is_not_found() => {
+            // macOS can report ENOENT when opening a lock relative to an info
+            // descriptor that went stale during concurrent scratch setup. Only
+            // retry if the common directory still names the same info inode.
+            let refreshed = child(repo.common_dir(), "info")?;
+            if !info.metadata()?.same_identity(&refreshed.metadata()?) {
+                return Err(error.into());
+            }
+            info = refreshed;
+            info.lock(
+                OsStr::new("provenant-exclude.lock"),
+                LockMode::Exclusive,
+                WaitBudget::cli(clock.mono_now(), 30).map_err(|_| WorktreeError::InvalidRequest)?,
+                cancel,
+                clock,
+            )?
+        }
+        Err(error) => return Err(error.into()),
+    };
     let mut bytes = match crate::stable_read::read_regular(&info, OsStr::new("exclude"), 1_048_576)
     {
         Ok((bytes, _)) => bytes,
