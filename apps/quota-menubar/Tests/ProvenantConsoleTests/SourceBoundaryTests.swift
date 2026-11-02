@@ -6,7 +6,7 @@ final class SourceBoundaryTests: XCTestCase {
     private let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../Sources").standardized
 
     private func swiftFiles(in target: String) throws -> [(name: String, text: String)] {
-        let root = sources.appending(path: target)
+        let root = sources.appending(path: target).resolvingSymlinksInPath()
         let files = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
         return try files.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
             .map { ($0.lastPathComponent, try String(contentsOf: $0, encoding: .utf8)) }
@@ -14,7 +14,7 @@ final class SourceBoundaryTests: XCTestCase {
 
     func testSharedAndConsoleSourcesTouchNoStoreCredentialOrSSH() throws {
         let forbidden = ["sqlite", "import Security", "SecItem", "Keychain", "ssh", "import GRDB", ".db\"", "credentials", ".claude", ".codex"]
-        for target in ["ProvenantKit", "ProvenantConsole"] {
+        for target in ["ProvenantKit", "ProvenantDesign", "ProvenantConsole"] {
             let files = try swiftFiles(in: target)
             XCTAssertFalse(files.isEmpty)
             for file in files {
@@ -25,8 +25,8 @@ final class SourceBoundaryTests: XCTestCase {
         }
     }
 
-    func testConsoleRunsNoTimers() throws {
-        for file in try swiftFiles(in: "ProvenantConsole") {
+    func testConsoleAndDesignRunNoTimersOrFileWatchers() throws {
+        for file in try swiftFiles(in: "ProvenantConsole") + swiftFiles(in: "ProvenantDesign") {
             for word in ["Timer", "asyncAfter", "Task.sleep", "DispatchSource"] {
                 XCTAssertFalse(file.text.contains(word), "\(file.name) uses \(word)")
             }

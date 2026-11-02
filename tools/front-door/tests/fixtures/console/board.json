@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "command": "console board",
+  "status": "ok",
+  "data": {
+    "coverage": {
+      "chairs": "unavailable",
+      "host": null,
+      "nested_runs": "unavailable",
+      "observations": "complete",
+      "runs": "complete",
+      "scope": "local"
+    },
+    "filters": {
+      "all": false,
+      "host": null,
+      "limit": 1,
+      "project_id": null,
+      "state_root": "sha256:90b2b3089ca030888c94b489f59cd7206ed7237449e10811f2df5363695b36c0"
+    },
+    "generation": "events:101",
+    "high_water": 101,
+    "lanes": [
+      {
+        "attention": false,
+        "chair": null,
+        "lane_id": {
+          "attempt_id": "65656565656565656565656565656565",
+          "host": null,
+          "run_id": "65656565656565656565656565656565",
+          "task_id": "03030303030303030303030303030303"
+        },
+        "metadata": {
+          "attempt": {
+            "admission_deadline": null,
+            "applied_route": null,
+            "attempt_id": "65656565656565656565656565656565",
+            "attempt_number": 1,
+            "authority_digest": "sha256:0505050505050505050505050505050505050505050505050505050505050505",
+            "delivery_id": null,
+            "exit_evidence": null,
+            "generation": 0,
+            "head": null,
+            "observed_route": null,
+            "operation_id": "board-101",
+            "project_id": "01010101010101010101010101010101",
+            "prompt": {
+              "bytes": 12,
+              "complete": true,
+              "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
+              "path": {
+                "encoding": "utf8",
+                "path": "attempts/65656565656565656565656565656565/prompt.txt"
+              },
+              "redacted": false
+            },
+            "protected_paths": [],
+            "provider_launched": null,
+            "provider_ms": null,
+            "publication_error": null,
+            "queued_at": "2026-11-02T01:57:31.075623Z",
+            "read_only_writable": [],
+            "requested_route": {
+              "effort": "high",
+              "kind": "model",
+              "model": "fixture/model",
+              "provider": "fixture"
+            },
+            "resolved_route": null,
+            "result": null,
+            "retry_of": null,
+            "revision": 1,
+            "run_id": "65656565656565656565656565656565",
+            "runtime_deadline": null,
+            "schema_version": 1,
+            "session": null,
+            "started_at": null,
+            "state": {
+              "state": "queued"
+            },
+            "subject": null,
+            "task_id": "03030303030303030303030303030303",
+            "title": "Board fixture",
+            "trace": {
+              "actor": "02020202020202020202020202020202",
+              "attempt": "65656565656565656565656565656565",
+              "host": null,
+              "operation": "board-101",
+              "parent": null,
+              "project": "01010101010101010101010101010101",
+              "run": "65656565656565656565656565656565"
+            },
+            "usage": {
+              "cache_read": null,
+              "cache_write": null,
+              "cache_write_1h": null,
+              "context_basis_points": null,
+              "output_excluding_reasoning": null,
+              "reasoning": null,
+              "source": null,
+              "uncached_input": null
+            },
+            "verified_owner": "02020202020202020202020202020202"
+          },
+          "run": {
+            "actor_id": "02020202020202020202020202020202",
+            "children": [],
+            "closed_at": null,
+            "closure": "open",
+            "created_at": "2026-11-02T01:57:31.075623Z",
+            "generation": 0,
+            "operation_id": "board-101",
+            "parent": null,
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:240445ed9495544e614ca567929b19a69ab8f97bf299bd678e6b93c20357988b",
+            "revision": 1,
+            "run_id": "65656565656565656565656565656565",
+            "schema_version": 1,
+            "task_ids": [
+              "03030303030303030303030303030303"
+            ]
+          }
+        },
+        "observation_coverage": "complete",
+        "usage_coverage": {
+          "known": [],
+          "missing": [
+            "uncached_input",
+            "cache_read",
+            "cache_write",
+            "output_excluding_reasoning",
+            "reasoning"
+          ]
+        },
+        "wait": {
+          "attempt_id": "65656565656565656565656565656565",
+          "lane_class": "read_only",
+          "waiting_for": "launch: not yet handed to a guardian"
+        }
+      }
+    ],
+    "next_cursor": "2.101.101.sha256:88fdd1c45d28a6ed462639aaadc725d8f7821fd400d0c5b0481ba269745061c7",
+    "observed_at": "2026-11-02T01:57:31.286667Z",
+    "schema_version": 3,
+    "snapshot": "sha256:69dffe883b1c10ac1aee3c8fbcb31bf51981f712326f476ba5428efb9b96267e",
+    "truncated": true
+  },
+  "error": null
+}

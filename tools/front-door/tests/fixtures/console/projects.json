@@ -1,0 +1,22 @@
+{
+  "command": "console projects",
+  "data": {
+    "coverage": {
+      "scope": "local"
+    },
+    "projects": [
+      {
+        "common_dir": {
+          "encoding": "utf8",
+          "path": "/fixture/project/.git"
+        },
+        "label": "project",
+        "project_id": "47e56ec3dd1b387241e80489127d81e9"
+      }
+    ],
+    "schema_version": 2
+  },
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
+}

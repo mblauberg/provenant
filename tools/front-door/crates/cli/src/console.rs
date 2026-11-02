@@ -122,23 +122,33 @@ pub enum Error {
 struct Project {
     project_id: ProjectId,
     common_dir: Value,
+    label: Option<String>,
+}
+
+impl Project {
+    fn new(project_id: ProjectId, path: &std::path::Path) -> Self {
+        let bytes = path.as_os_str().as_bytes();
+        let common_dir = match std::str::from_utf8(bytes) {
+            Ok(text) => json!({"encoding":"utf8", "path":text}),
+            Err(_) => json!({"encoding":"native_bytes", "path":provenant_core::hex(bytes)}),
+        };
+        Self {
+            project_id,
+            common_dir,
+            label: path
+                .parent()
+                .and_then(std::path::Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::to_owned),
+        }
+    }
 }
 
 fn projects(roots: &Roots, selected: Option<ProjectId>) -> Result<Vec<Project>, Error> {
     let mut projects = provenant_config::registered_projects(roots)?
         .into_iter()
         .filter(|p| selected.is_none_or(|id| p.project_id() == id))
-        .map(|p| {
-            let path = p.common_dir().as_os_str().as_bytes();
-            let common_dir = match std::str::from_utf8(path) {
-                Ok(text) => json!({"encoding":"utf8", "path":text}),
-                Err(_) => json!({"encoding":"native_bytes", "path":provenant_core::hex(path)}),
-            };
-            Project {
-                project_id: p.project_id(),
-                common_dir,
-            }
-        })
+        .map(|p| Project::new(p.project_id(), p.common_dir()))
         .collect::<Vec<_>>();
     projects.sort_by_key(|p| p.project_id.to_string());
     Ok(projects)
@@ -156,8 +166,27 @@ fn read_with_budget(
     budget: usize,
 ) -> Result<Value, Error> {
     if let Console::Changes { since } = command {
-        let current = serde_json::to_value(provenant_os::changes::read(roots.state.as_path())?)
+        let mut current = serde_json::to_value(provenant_os::changes::read(roots.state.as_path())?)
             .map_err(|_| Error::Encode)?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let context = provenant_run::ExecutionContext {
+            state_root: roots.state.clone(),
+            project_id: ProjectId::from_bytes([0; 16]),
+            actor_id: provenant_core::ActorId::from_bytes([0; 16]),
+            read_prompts: false,
+        };
+        // Hints may be skipped; the run owner's event counter also covers
+        // nonterminal transitions without reading attempts or artifact bodies.
+        current["runs"] = provenant_run::RunStore::open_read_only(&context, &call)
+            .ok()
+            .flatten()
+            .and_then(|store| store.board_generation(&call).ok())
+            .map_or(Value::Null, |generation| json!(generation));
         let previous: Option<Value> = since
             .as_ref()
             .map(|text| {
@@ -168,7 +197,12 @@ fn read_with_budget(
                     serde_json::from_str(text).map_err(|_| Error::InvalidGenerations)?;
                 let object = value.as_object().ok_or(Error::InvalidGenerations)?;
                 let names = ["epoch", "inbox", "board", "chair", "quota", "configuration"];
-                if object.len() != names.len()
+                // Accept a v1 baseline too: its absent runs value means reload.
+                if !(object.len() == names.len()
+                    || object.len() == names.len() + 1 && object.contains_key("runs"))
+                    || object
+                        .get("runs")
+                        .is_some_and(|v| !v.is_null() && v.as_u64().is_none())
                     || names.iter().any(|name| {
                         object
                             .get(*name)
@@ -181,7 +215,7 @@ fn read_with_budget(
             })
             .transpose()?;
         let mut changed = serde_json::Map::new();
-        for name in ["inbox", "board", "chair", "quota", "configuration"] {
+        for name in ["inbox", "board", "runs", "chair", "quota", "configuration"] {
             let now = current[name].as_u64();
             let before = previous.as_ref().and_then(|value| value[name].as_u64());
             let same_epoch = current["epoch"].as_u64().is_some()
@@ -192,7 +226,7 @@ fn read_with_budget(
             };
             changed.insert(name.to_owned(), comparison);
         }
-        return Ok(json!({"generations": current, "changed": changed}));
+        return Ok(json!({"schema_version":2,"generations": current, "changed": changed}));
     }
     if let Console::Board {
         all, limit, cursor, ..
@@ -238,7 +272,9 @@ fn read_with_budget(
         Console::Detail { .. } | Console::Search { .. } => unreachable!("read handled above"),
         Console::Overview => return overview::read(roots, &projects),
         Console::Projects => {
-            return Ok(json!({"projects":projects, "coverage":{"scope":"local"}}));
+            return Ok(
+                json!({"schema_version":2,"projects":projects, "coverage":{"scope":"local"}}),
+            );
         }
         Console::Sessions {
             session,
@@ -262,8 +298,8 @@ fn read_with_budget(
             {
                 sessions.push(
                     json!({"record":found.record, "consistency":found.consistency,
-                    "role":"chair", "evidence":"checkpoint_save", "summary":null,
-                    "summary_status":"unavailable"}),
+                    "role":"chair", "evidence":"checkpoint_save", "summary":found.record.summary,
+                    "summary_status":if found.record.summary.is_some() { "available" } else { "unavailable" }}),
                 );
             }
         }
@@ -295,10 +331,35 @@ fn read_with_budget(
     let end = offset.saturating_add(*limit as usize).min(sessions.len());
     let next_cursor = (end < sessions.len()).then(|| format!("{snapshot}:{end}"));
     Ok(
-        json!({"snapshot":snapshot, "sessions":&sessions[offset..end], "next_cursor":next_cursor,
+        json!({"schema_version":2,"snapshot":snapshot, "sessions":&sessions[offset..end], "next_cursor":next_cursor,
         "truncated":scan_truncated || end < sessions.len(), "scan_truncated":scan_truncated,
         "coverage":{"scope":"local"}}),
     )
+}
+
+#[cfg(test)]
+fn write_fixture(
+    name: &str,
+    command: &str,
+    data: Value,
+    root: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(directory) = std::env::var_os("PROVENANT_CONSOLE_FIXTURES") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory)?;
+        let envelope = provenant_records::CommandResult::new(
+            command,
+            provenant_records::Outcome::Ok,
+            Some(data),
+        );
+        let text = serde_json::to_string_pretty(&envelope)?;
+        let mut bytes = text
+            .replace(root.to_str().ok_or("fixture root")?, "/fixture")
+            .into_bytes();
+        bytes.push(b'\n');
+        std::fs::write(directory.join(format!("{name}.json")), bytes)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -306,6 +367,29 @@ mod tests {
     use super::*;
     use provenant_core::RootInputs;
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn project_labels_preserve_native_path_encoding() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::ffi::OsStringExt;
+        let id = ProjectId::from_bytes([1; 16]);
+        let readable = serde_json::to_value(Project::new(
+            id,
+            std::path::Path::new("/fixture/console-project/.git"),
+        ))?;
+        assert_eq!(readable["label"], "console-project");
+        assert_eq!(readable["common_dir"]["encoding"], "utf8");
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(
+            b"/fixture/native-\xff/.git".to_vec(),
+        ));
+        let native = serde_json::to_value(Project::new(id, &path))?;
+        assert!(native["label"].is_null());
+        assert_eq!(native["common_dir"]["encoding"], "native_bytes");
+        assert_eq!(
+            native["common_dir"]["path"],
+            provenant_core::hex(path.as_os_str().as_bytes())
+        );
+        Ok(())
+    }
 
     #[test]
     fn changes_reports_unknown_and_comparison() {

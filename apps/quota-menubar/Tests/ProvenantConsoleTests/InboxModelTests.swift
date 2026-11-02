@@ -1,35 +1,20 @@
 import Foundation
 import XCTest
 import ProvenantKit
+import ProvenantDesign
 @testable import ProvenantConsole
 
-/// Replays the recorded CLI output in `ProvenantKitTests/Fixtures`.
-private final class FixtureReplay: @unchecked Sendable {
-    private let lock = NSLock()
-    private var calls: [[String]] = []
-    private var replies: [(prefix: [String], file: String, status: Int32)]
-    init(_ replies: [(prefix: [String], file: String, status: Int32)]) { self.replies = replies }
+import ProvenantTestSupport
 
-    var recorded: [[String]] { lock.withLock { calls } }
-    func set(_ replies: [(prefix: [String], file: String, status: Int32)]) { lock.withLock { self.replies = replies } }
-
-    var client: InboxClient {
-        InboxClient(cli: CLIClient { [self] arguments, _ in
-            let hit = lock.withLock { calls.append(arguments); return replies.first { arguments.starts(with: $0.prefix) } }
-            guard let hit else { throw ClientError.launch("no recorded reply for \(arguments)") }
-            let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-                .appending(path: "../ProvenantKitTests/Fixtures/\(hit.file).json").standardized
-            return CLI.Output(status: hit.status, signalled: false, timedOut: false, truncated: false,
-                              out: try Data(contentsOf: url), err: "")
-        })
-    }
+private extension Replay {
+    var inbox: InboxClient { InboxClient(cli: client) }
 }
 
 @MainActor
 final class InboxModelTests: XCTestCase {
     func testRefreshListsRequestsAndKeepsThemWhenARefreshFails() async {
-        let replay = FixtureReplay([(["inbox"], "inbox-page2", 0)])
-        let model = InboxModel(client: replay.client)
+        let replay = Replay([(["inbox"], "inbox-page2", 0)])
+        let model = InboxModel(client: replay.inbox)
         await model.refresh()
         XCTAssertEqual(model.requests.map(\.request.title), ["Which name?"])
         XCTAssertEqual(model.selection, model.requests.first?.id)
@@ -41,11 +26,11 @@ final class InboxModelTests: XCTestCase {
     }
 
     func testStaleAnswerShowsCurrentStateAndSendsNothingElse() async throws {
-        let replay = FixtureReplay([(["answer"], "answer-conflict", 1), (["inbox", "--all-projects", String(repeating: "1", count: 32)], "inbox-item-stale", 0),
+        let replay = Replay([(["answer"], "answer-conflict", 1), (["inbox", "--all-projects", String(repeating: "1", count: 32)], "inbox-item-stale", 0),
                              (["inbox", "--all-projects", "--state"], "inbox-page2", 0)])
-        let model = InboxModel(client: replay.client)
+        let model = InboxModel(client: replay.inbox)
         await model.refresh()
-        let page = try FixtureReplay.page1Request()
+        let page = try Replay.page1Request()
         await model.answer(page, action: .choose, option: "sqlite")
         let result = try XCTUnwrap(model.results[page.id])
         XCTAssertEqual(result.kind, .stale)
@@ -57,23 +42,23 @@ final class InboxModelTests: XCTestCase {
     }
 
     func testSavedAnswerShowsDeliveryAsReturned() async throws {
-        let replay = FixtureReplay([(["answer"], "answer-saved", 0), (["inbox", "--all-projects", String(repeating: "1", count: 32)], "inbox-item-answered", 0),
+        let replay = Replay([(["answer"], "answer-saved", 0), (["inbox", "--all-projects", String(repeating: "1", count: 32)], "inbox-item-answered", 0),
                              (["inbox", "--all-projects", "--state"], "inbox-page2", 0)])
-        let model = InboxModel(client: replay.client)
-        let request = try FixtureReplay.page1Request()
+        let model = InboxModel(client: replay.inbox)
+        let request = try Replay.page1Request()
         await model.answer(request, action: .choose, option: "sqlite")
         let result = try XCTUnwrap(model.results[request.id])
         XCTAssertEqual(result.kind, .saved)
         XCTAssertTrue(result.message.contains("Delivery queued"), result.message)
         XCTAssertEqual(result.item?.delivery?.state, "acknowledged")
-        XCTAssertEqual(InboxModel.deliveryLine(try XCTUnwrap(result.item?.delivery)),
-                       "Delivery acknowledged by fabric mail, 1 attempt, acknowledged 2026-10-30T01:06:09Z.")
+        XCTAssertEqual(InboxModel.deliveryLine(try XCTUnwrap(result.item?.delivery), now: Stamp.parse("2026-10-30T01:16:09Z")!),
+                       "Delivery acknowledged by fabric mail, 1 attempt, acknowledged \(Stamp.relative("2026-10-30T01:06:09Z", now: Stamp.parse("2026-10-30T01:16:09Z")!)).")
     }
 
     func testConfirmationAndDeliverySurviveAFailedItemReadAndARefresh() async throws {
-        let replay = FixtureReplay([(["inbox", "--all-projects", "--state", "open", "--limit", "50", "--cursor", "CUR1"], "inbox-page2", 0),
+        let replay = Replay([(["inbox", "--all-projects", "--state", "open", "--limit", "50", "--cursor", "CUR1"], "inbox-page2", 0),
                                     (["inbox", "--all-projects", "--state"], "inbox-page1", 0)])
-        let model = InboxModel(client: replay.client)
+        let model = InboxModel(client: replay.inbox)
         await model.refresh()
         let request = try XCTUnwrap(model.requests.first)
         XCTAssertEqual(model.selection, request.id)
@@ -128,7 +113,7 @@ final class InboxModelTests: XCTestCase {
 
     func testSearchNarrowsTheCurrentScopeWithoutChangingTheCounts() async {
         let model = await InboxModel.consoleFixture()
-        let counts = InboxModel.Filter.allCases.map { model.count(for: $0) }
+        let counts = InboxFilter.allCases.map { model.count(for: $0) }
 
         model.searchText = "storage"
         XCTAssertEqual(model.visibleRequests.map(\.request.title), ["Pick the storage layer"])
@@ -144,7 +129,7 @@ final class InboxModelTests: XCTestCase {
         model.searchText = ""
         XCTAssertEqual(model.visibleRequests.map(\.request.title), ["Which name?", "Should the queue retry?"])
         XCTAssertEqual(model.selection, model.visibleRequests.first?.id)
-        XCTAssertEqual(InboxModel.Filter.allCases.map { model.count(for: $0) }, counts)
+        XCTAssertEqual(InboxFilter.allCases.map { model.count(for: $0) }, counts)
     }
 
     func testKeyboardSelectionMovesThroughTheVisibleListAndStopsAtEachEnd() async {
@@ -224,13 +209,11 @@ final class InboxModelTests: XCTestCase {
     }
 }
 
-private extension FixtureReplay {
+private extension Replay {
     /// The first request of the recorded first page (revision 3).
     static func page1Request() throws -> HumanRequest {
-        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appending(path: "../ProvenantKitTests/Fixtures/inbox-page1.json").standardized
-        struct Page: Decodable { let items: [HumanRequest] }
-        let envelope = try Envelope<Page>.decode(Data(contentsOf: url))
+                struct Page: Decodable { let items: [HumanRequest] }
+        let envelope = try Envelope<Page>.decode(Replay.fixture("inbox-page1"))
         return try XCTUnwrap(envelope.data?.items.first)
     }
 }
@@ -239,9 +222,40 @@ private extension FixtureReplay {
 private extension InboxModel {
     /// A model replayed from `inbox-console.json` and refreshed once.
     static func consoleFixture() async -> InboxModel {
-        let replay = FixtureReplay([(["inbox"], "inbox-console", 0)])
-        let model = InboxModel(client: replay.client)
+        let replay = Replay([(["inbox"], "inbox-console", 0)])
+        let model = InboxModel(client: replay.inbox)
         await model.refresh()
         return model
+    }
+}
+
+final class InboxSelectionTests: XCTestCase {
+    func testMoveStopsAtEachEndAndEmptyClears() {
+        var s = InboxSelection(id: "b")
+        s.move(by: 1, in: ["a", "b", "c"]); XCTAssertEqual(s.id, "c")
+        s.move(by: 1, in: ["a", "b", "c"]); XCTAssertEqual(s.id, "c")
+        s.move(by: -5, in: ["a", "b", "c"]); XCTAssertEqual(s.id, "a")
+        s.move(by: 1, in: []); XCTAssertNil(s.id)
+    }
+
+    func testMoveWithNothingSelectedPicksAnEnd() {
+        var s = InboxSelection()
+        s.move(by: 1, in: ["a", "b"]); XCTAssertEqual(s.id, "a")
+        s = InboxSelection(id: "gone")
+        s.move(by: -1, in: ["a", "b"]); XCTAssertEqual(s.id, "b")
+    }
+
+    func testReconcileKeepsListedOrPinnedElseFirst() {
+        var s = InboxSelection(id: "b")
+        s.reconcile(visible: ["a", "b"], pinned: [], keepPinned: false); XCTAssertEqual(s.id, "b")
+        s.reconcile(visible: ["a"], pinned: ["b"], keepPinned: true); XCTAssertEqual(s.id, "b")
+        s.reconcile(visible: ["a"], pinned: ["b"], keepPinned: false); XCTAssertEqual(s.id, "a")
+        s.reconcile(visible: [], pinned: [], keepPinned: false); XCTAssertNil(s.id)
+    }
+
+    func testRequestKindKeepsUnknownKinds() {
+        XCTAssertEqual(RequestKind("Assumption"), .assumption)
+        XCTAssertEqual(RequestKind("review"), .other("review"))
+        XCTAssertEqual(RequestKind("review").title, "Review")
     }
 }

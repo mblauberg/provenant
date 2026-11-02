@@ -1,0 +1,78 @@
+{
+  "command": "console overview",
+  "data": {
+    "counts": {
+      "needs_you": 3,
+      "running": 2,
+      "attention": 1
+    },
+    "coverage": {
+      "inbox": "complete",
+      "nested_runs": "partial",
+      "runs": "complete",
+      "scope": "local"
+    },
+    "lanes": [
+      {
+        "project_id": "01010101010101010101010101010101",
+        "project_label": "provenant",
+        "run_id": "d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9",
+        "task_id": "03030303030303030303030303030303",
+        "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "task_label": "Implement console overview",
+        "state": "running",
+        "outcome": null,
+        "attention": false
+      },
+      {
+        "project_id": "01010101010101010101010101010101",
+        "project_label": "provenant",
+        "run_id": "dadadadadadadadadadadadadadadada",
+        "task_id": "03030303030303030303030303030303",
+        "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+        "task_label": "Review the change set",
+        "state": "running",
+        "outcome": null,
+        "attention": false
+      },
+      {
+        "project_id": "01010101010101010101010101010101",
+        "project_label": "provenant",
+        "run_id": "dededededededededededededededede",
+        "task_id": "03030303030303030303030303030303",
+        "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+        "task_label": "Run the whole test suite",
+        "state": "terminal",
+        "outcome": "failed",
+        "attention": true
+      }
+    ],
+    "needs_you": [
+      {
+        "chair_session_id": "3f9c2a10d4e84b7f",
+        "id": "11111111111111111111111111111111",
+        "project_id": "dadadadadadadadadadadadadadadada",
+        "project_label": "Alpha",
+        "title": "Pick the storage layer"
+      },
+      {
+        "chair_session_id": "3f9c2a10d4e84b7f",
+        "id": "55555555555555555555555555555555",
+        "project_id": null,
+        "project_label": null,
+        "title": "Should the queue retry?"
+      },
+      {
+        "chair_session_id": "9a8b7c6d5e4f3a2b",
+        "id": "22222222222222222222222222222222",
+        "project_id": "dadadadadadadadadadadadadadadada",
+        "project_label": "Alpha",
+        "title": "Which name?"
+      }
+    ],
+    "schema_version": 2
+  },
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
+}

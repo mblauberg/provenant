@@ -1,0 +1,1383 @@
+{
+  "schema_version": 1,
+  "command": "quota history",
+  "status": "ok",
+  "data": {
+    "schema_version": 1,
+    "generated_unix_seconds": 1793610000,
+    "count": 72,
+    "matched": 72,
+    "truncated": false,
+    "readings": [
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793523600,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 2000,
+            "resets_unix_seconds": 1793527200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793523600,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 500,
+            "resets_unix_seconds": 1793527200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793523600,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1000,
+            "resets_unix_seconds": 1793527200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793527200,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 2270,
+            "resets_unix_seconds": 1793530800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793527200,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 570,
+            "resets_unix_seconds": 1793530800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793527200,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1400,
+            "resets_unix_seconds": 1793530800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793530800,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 2540,
+            "resets_unix_seconds": 1793534400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793530800,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 640,
+            "resets_unix_seconds": 1793534400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793530800,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1800,
+            "resets_unix_seconds": 1793534400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793534400,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 2810,
+            "resets_unix_seconds": 1793538000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793534400,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 710,
+            "resets_unix_seconds": 1793538000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793534400,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 2200,
+            "resets_unix_seconds": 1793538000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793538000,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 3080,
+            "resets_unix_seconds": 1793541600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793538000,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 780,
+            "resets_unix_seconds": 1793541600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793538000,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 2600,
+            "resets_unix_seconds": 1793541600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793541600,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 3350,
+            "resets_unix_seconds": 1793545200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793541600,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 850,
+            "resets_unix_seconds": 1793545200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793541600,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 3000,
+            "resets_unix_seconds": 1793545200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793545200,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 3620,
+            "resets_unix_seconds": 1793548800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793545200,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 920,
+            "resets_unix_seconds": 1793548800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793545200,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 3400,
+            "resets_unix_seconds": 1793548800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793548800,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 3890,
+            "resets_unix_seconds": 1793552400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793548800,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 990,
+            "resets_unix_seconds": 1793552400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793548800,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 3800,
+            "resets_unix_seconds": 1793552400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793552400,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 4160,
+            "resets_unix_seconds": 1793556000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793552400,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1060,
+            "resets_unix_seconds": 1793556000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793552400,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 4200,
+            "resets_unix_seconds": 1793556000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793556000,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 4430,
+            "resets_unix_seconds": 1793559600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793556000,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1130,
+            "resets_unix_seconds": 1793559600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793556000,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 4600,
+            "resets_unix_seconds": 1793559600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793559600,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 4700,
+            "resets_unix_seconds": 1793563200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793559600,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1200,
+            "resets_unix_seconds": 1793563200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793559600,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 5000,
+            "resets_unix_seconds": 1793563200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793563200,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 4970,
+            "resets_unix_seconds": 1793566800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793563200,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1270,
+            "resets_unix_seconds": 1793566800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793563200,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 5400,
+            "resets_unix_seconds": 1793566800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793566800,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 5240,
+            "resets_unix_seconds": 1793570400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793566800,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1340,
+            "resets_unix_seconds": 1793570400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793566800,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 5800,
+            "resets_unix_seconds": 1793570400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793570400,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 5510,
+            "resets_unix_seconds": 1793574000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793570400,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1410,
+            "resets_unix_seconds": 1793574000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793570400,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 6200,
+            "resets_unix_seconds": 1793574000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793574000,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 5780,
+            "resets_unix_seconds": 1793577600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793574000,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1480,
+            "resets_unix_seconds": 1793577600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793574000,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 6600,
+            "resets_unix_seconds": 1793577600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793577600,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 6050,
+            "resets_unix_seconds": 1793581200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793577600,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1550,
+            "resets_unix_seconds": 1793581200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793577600,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 7000,
+            "resets_unix_seconds": 1793581200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793581200,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 6320,
+            "resets_unix_seconds": 1793584800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793581200,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1620,
+            "resets_unix_seconds": 1793584800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793581200,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 7400,
+            "resets_unix_seconds": 1793584800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793584800,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 6590,
+            "resets_unix_seconds": 1793588400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793584800,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1690,
+            "resets_unix_seconds": 1793588400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793584800,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 7800,
+            "resets_unix_seconds": 1793588400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793588400,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 6860,
+            "resets_unix_seconds": 1793592000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793588400,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1760,
+            "resets_unix_seconds": 1793592000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793588400,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 8200,
+            "resets_unix_seconds": 1793592000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793592000,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 7130,
+            "resets_unix_seconds": 1793595600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793592000,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1830,
+            "resets_unix_seconds": 1793595600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793592000,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 8600,
+            "resets_unix_seconds": 1793595600
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793595600,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 7400,
+            "resets_unix_seconds": 1793599200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793595600,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1900,
+            "resets_unix_seconds": 1793599200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793595600,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 9000,
+            "resets_unix_seconds": 1793599200
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793599200,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 7670,
+            "resets_unix_seconds": 1793602800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793599200,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 1970,
+            "resets_unix_seconds": 1793602800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793599200,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 9400,
+            "resets_unix_seconds": 1793602800
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793602800,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 7940,
+            "resets_unix_seconds": 1793606400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793602800,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 2040,
+            "resets_unix_seconds": 1793606400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793602800,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 9800,
+            "resets_unix_seconds": 1793606400
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793606400,
+        "account_key": "anese",
+        "label": "Anese",
+        "provider": "claude",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 8210,
+            "resets_unix_seconds": 1793610000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793606400,
+        "account_key": "g1",
+        "label": "Account 01",
+        "provider": "agy",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 2110,
+            "resets_unix_seconds": 1793610000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      },
+      {
+        "schema_version": 1,
+        "observed_unix_seconds": 1793606400,
+        "account_key": "default",
+        "label": "default",
+        "provider": "codex",
+        "status": "available",
+        "plan": null,
+        "tier": null,
+        "windows": [
+          {
+            "pool": "p",
+            "used_basis_points": 10000,
+            "resets_unix_seconds": 1793610000
+          }
+        ],
+        "credit_balance": null,
+        "reset_credits": null
+      }
+    ]
+  },
+  "error": null
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "command": "console search",
+  "status": "ok",
+  "data": {
+    "schema_version": 1,
+    "snapshot": "sha256:x",
+    "query": "fixture",
+    "part": "result",
+    "matches": [
+      {
+        "lane_id": {
+          "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+          "host": null,
+          "run_id": "dddddddddddddddddddddddddddddddd",
+          "task_id": "03030303030303030303030303030303"
+        },
+        "part": "result",
+        "snippet": "\u2026regenerated every fixture under tests/fixtures/console\u2026",
+        "artifact_bytes": 512
+      },
+      {
+        "lane_id": {
+          "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+          "host": null,
+          "run_id": "dededededededededededededededede",
+          "task_id": "03030303030303030303030303030303"
+        },
+        "part": "result",
+        "snippet": "2 tests failed: fixture drift in board.json",
+        "artifact_bytes": 900
+      }
+    ],
+    "next_cursor": null,
+    "truncated": false,
+    "coverage": {
+      "scope": "local"
+    }
+  },
+  "error": null
+}

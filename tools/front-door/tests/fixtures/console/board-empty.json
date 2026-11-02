@@ -1,0 +1,31 @@
+{
+  "command": "console board",
+  "data": {
+    "coverage": {
+      "chairs": "unavailable",
+      "host": "7249da8d9cb98a25696aa69922cc1866",
+      "nested_runs": "unavailable",
+      "observations": "complete",
+      "runs": "empty",
+      "scope": "local"
+    },
+    "filters": {
+      "all": false,
+      "host": "7249da8d9cb98a25696aa69922cc1866",
+      "limit": 50,
+      "project_id": null,
+      "state_root": "sha256:a0c127fa5b2286577ebc9893f3428c0c1f607c674ce4c2e36f5387e3f8e29d7d"
+    },
+    "generation": "empty",
+    "high_water": 0,
+    "lanes": [],
+    "next_cursor": null,
+    "observed_at": "2026-11-02T01:58:27.161938Z",
+    "schema_version": 3,
+    "snapshot": "sha256:6e7c1ae3da4729de4646923c1406eba51d8e29ce86aef35109254e74a4594a9b",
+    "truncated": false
+  },
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
+}

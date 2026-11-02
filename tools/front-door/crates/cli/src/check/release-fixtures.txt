@@ -2,9 +2,9 @@
 # Format: <path> <rule> <first-16-hex-of-SHA-256(line-without-newline)>
 # Entries suppress only this literal in working files and history; stale entries fail the release scan.
 .github/workflows/ci.yml release.home-path 95849c84bf3cfe3d
-apps/quota-menubar/Tests/ProvenantKitTests/Fixtures/inbox-console.json release.home-path 103f3a3f1014ce6c
-apps/quota-menubar/Tests/ProvenantKitTests/Fixtures/inbox-console.json release.home-path 92775c5f776ead48
-apps/quota-menubar/Tests/ProvenantKitTests/Fixtures/inbox-host.json release.home-path 859c6814214591be
+apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures/inbox-console.json release.home-path 103f3a3f1014ce6c
+apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures/inbox-console.json release.home-path 92775c5f776ead48
+apps/quota-menubar/Tests/ProvenantTestSupport/Fixtures/inbox-host.json release.home-path 859c6814214591be
 bench/tasks/routing-effort.patch release.home-path ba642492100016a8
 bench/tasks/run-follow-dispatch.patch release.github-token 99c270f8f6f93d02
 docs/runbooks/configuration.md release.home-path 7740e31cae060f24

@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "command": "console detail",
+  "status": "ok",
+  "data": {
+    "applied_route": null,
+    "artifacts": [
+      {
+        "bytes": 12,
+        "complete": true,
+        "digest": "sha256:aaecb569221e2e49869a9b3e5d61280a2098fb65b08bae1198e892e8f6f00aba",
+        "name": "prompt",
+        "present": true,
+        "redacted": false
+      }
+    ],
+    "coverage": {
+      "linked_inbox_requests": "complete",
+      "nested": "bounded_tree_search",
+      "peer": "not_searched"
+    },
+    "delivery": null,
+    "lane_id": {
+      "attempt_id": "65656565656565656565656565656565",
+      "host": null,
+      "project_id": "01010101010101010101010101010101",
+      "run_id": "65656565656565656565656565656565",
+      "task_id": "03030303030303030303030303030303"
+    },
+    "linked_inbox_requests": [],
+    "observed_route": null,
+    "requested_route": {
+      "effort": "high",
+      "kind": "model",
+      "model": "fixture/model",
+      "provider": "fixture"
+    },
+    "resolved_route": null,
+    "schema_version": 1,
+    "status": "found",
+    "timings": {
+      "finished_at": null,
+      "provider_ms": null,
+      "queued_at": "2026-11-02T01:57:31.075623Z",
+      "started_at": null
+    },
+    "trace": {
+      "actor": "02020202020202020202020202020202",
+      "attempt": "65656565656565656565656565656565",
+      "host": null,
+      "operation": "board-101",
+      "parent": null,
+      "project": "01010101010101010101010101010101",
+      "run": "65656565656565656565656565656565"
+    },
+    "usage": {
+      "cache_read": null,
+      "cache_write": null,
+      "cache_write_1h": null,
+      "context_basis_points": null,
+      "output_excluding_reasoning": null,
+      "reasoning": null,
+      "source": null,
+      "uncached_input": null
+    },
+    "usage_coverage": {
+      "known": [],
+      "missing": [
+        "uncached_input",
+        "cache_read",
+        "cache_write",
+        "output_excluding_reasoning",
+        "reasoning"
+      ]
+    }
+  },
+  "error": null
+}

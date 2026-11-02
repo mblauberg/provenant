@@ -65,15 +65,16 @@ public final class CLIClient: @unchecked Sendable {
     /// A client over a fixed runner, such as one that replays recorded CLI output in tests.
     public init(limit: Double = 30, runner: @escaping Runner) { self.runner = runner; self.limit = limit }
 
-    /// Runs `arguments` plus `--json` and decodes the envelope. Error envelopes throw `ClientError.command`, whether
-    /// or not the CLI exited cleanly.
-    public func call<Payload: Decodable & Sendable>(_ arguments: [String], as _: Payload.Type = Payload.self) async throws -> Payload {
-        try await Task.detached(priority: .userInitiated) { [self] in try callSync(arguments, as: Payload.self) }.value
+    /// Runs `arguments` plus `--json` and decodes the envelope, which must name `command` (such as "console board")
+    /// at envelope version 1. Error envelopes throw `ClientError.command`, whether or not the CLI exited cleanly.
+    public func call<Payload: Decodable & Sendable>(_ arguments: [String], command: String,
+                                                    as _: Payload.Type = Payload.self) async throws -> Payload {
+        try await Task.detached(priority: .userInitiated) { [self] in try callSync(arguments, command: command, as: Payload.self) }.value
     }
 
-    func callSync<Payload: Decodable & Sendable>(_ arguments: [String], as _: Payload.Type) throws -> Payload {
+    func callSync<Payload: Decodable & Sendable>(_ arguments: [String], command: String, as _: Payload.Type) throws -> Payload {
         let run = try execute(arguments + ["--json"])
-        return try Self.decode(run, command: nil, as: Payload.self)
+        return try Self.decode(run, command: command, as: Payload.self)
     }
 
     /// Decode an already scheduled CLI call, including structured errors on nonzero exits.
@@ -81,6 +82,10 @@ public final class CLIClient: @unchecked Sendable {
         if run.truncated { throw ClientError.outputTooLarge }
         if run.timedOut { throw ClientError.timedOut }
         if run.signalled { throw ClientError.signalled(run.status) }
+        if let command, let header = try? JSONDecoder().decode(Header.self, from: run.out),
+           header.schemaVersion != 1 || header.command != command {
+            throw ClientError.malformed("unexpected command envelope")
+        }
         let envelope: Envelope<Payload>
         do { envelope = try Envelope<Payload>.decode(run.out) } catch {
             if run.status != 0 {
@@ -99,6 +104,12 @@ public final class CLIClient: @unchecked Sendable {
             throw ClientError.malformed("status \(envelope.status) without data")
         }
         return data
+    }
+
+    private struct Header: Decodable {
+        let schemaVersion: Int
+        let command: String
+        enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version", command }
     }
 
     private func execute(_ arguments: [String]) throws -> CLI.Output {

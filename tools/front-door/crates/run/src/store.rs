@@ -312,6 +312,10 @@ impl RunStore {
             }
             Ok(())
         })?;
+        provenant_os::changes::hint(
+            self.context.state_root.as_path(),
+            &[provenant_os::changes::Scope::Board],
+        );
         #[cfg(test)]
         crate::tests::crash_at("reserved");
         seal(&dir, "request.json", &bytes(&input.request)?, RECORD_LIMIT)?;
@@ -804,6 +808,10 @@ impl RunStore {
             crate::tests::crash_at("transaction");
             Ok(())
         })?;
+        provenant_os::changes::hint(
+            self.context.state_root.as_path(),
+            &[provenant_os::changes::Scope::Board],
+        );
         self.contribution_diagnostic(next.run_id, self.retain_contribution_route(next, call));
         Ok(())
     }

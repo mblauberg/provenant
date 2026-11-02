@@ -90,17 +90,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
     const BYTE_BUDGET: usize = 1_048_576;
     let labels: BTreeMap<_, _> = projects
         .iter()
-        .map(|p| {
-            let path = p.common_dir["path"].as_str();
-            let label = (p.common_dir["encoding"] == "utf8")
-                .then_some(path)
-                .flatten()
-                .and_then(|p| std::path::Path::new(p).parent())
-                .and_then(|p| p.file_name())
-                .and_then(|p| p.to_str())
-                .map(str::to_owned);
-            (p.project_id.to_string(), label)
-        })
+        .map(|p| (p.project_id.to_string(), p.label.clone()))
         .collect();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -116,7 +106,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
             remaining_bytes -= page.bytes_read;
             for item in page.items {
                 if let Some(label) = labels.get(&item.project_id) {
-                    needs_you.push(json!({"id":item.id,"project_id":item.project_id,"project_label":label,"title":item.title,"task_label":null,"chair_session_id":item.chair_session_id}));
+                    needs_you.push(json!({"id":item.id,"project_id":item.project_id,"project_label":label,"title":item.title,"chair_session_id":item.chair_session_id}));
                 }
             }
             if page.truncated {
@@ -149,22 +139,11 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                     let Some(label) = labels.get(&item.project_id.to_string()) else {
                         continue;
                     };
-                    let (state, active, needs_attention) = match item.state {
-                        OverviewState::Queued => ("queued", true, false),
-                        OverviewState::Starting => ("starting", true, false),
-                        OverviewState::Running => ("running", true, false),
-                        OverviewState::Settling => ("settling", true, false),
-                        OverviewState::Terminal(outcome) => {
-                            use provenant_run::Outcome;
-                            let attention =
-                                !matches!(outcome, Outcome::Succeeded | Outcome::Cancelled);
-                            ("terminal", false, attention)
-                        }
-                    };
+                    let (state, active, needs_attention, outcome_value) = lane_state(item.state);
                     running += usize::from(active);
                     attention += usize::from(needs_attention);
                     if active || needs_attention {
-                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"run_id":item.run_id,"task_id":item.task_id,"attempt_id":item.attempt_id,"task_label":item.title,"state":state,"attention":needs_attention}));
+                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"run_id":item.run_id,"task_id":item.task_id,"attempt_id":item.attempt_id,"task_label":item.title,"state":state,"outcome":outcome_value,"attention":needs_attention}));
                     }
                 }
                 if batch.truncated {
@@ -178,16 +157,52 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
         Err(provenant_run::RunError::Version(_)) => "incompatible",
         _ => "unavailable",
     };
-    Ok(json!({"needs_you":needs_you,"lanes":lanes,
+    Ok(
+        json!({"schema_version":2,"needs_you":needs_you,"lanes":lanes,
         "counts":{"needs_you":(fabric != "unavailable" && fabric != "incompatible").then_some(needs_you.len()),
                   "running":(run != "unavailable" && run != "incompatible").then_some(running),
                   "attention":(run != "unavailable" && run != "incompatible").then_some(attention)},
-        "coverage":{"scope":"local","inbox":fabric,"runs":run,"nested_runs":"unavailable"}}))
+        "coverage":{"scope":"local","inbox":fabric,"runs":run,"nested_runs":"unavailable"}}),
+    )
+}
+
+/// A lane's coarse state, whether it is active, whether it needs attention, and
+/// the terminal outcome in the snake_case vocabulary the board and tree emit.
+fn lane_state(state: OverviewState) -> (&'static str, bool, bool, Value) {
+    match state {
+        OverviewState::Queued => ("queued", true, false, Value::Null),
+        OverviewState::Starting => ("starting", true, false, Value::Null),
+        OverviewState::Running => ("running", true, false, Value::Null),
+        OverviewState::Settling => ("settling", true, false, Value::Null),
+        OverviewState::Terminal(outcome) => {
+            use provenant_run::Outcome;
+            let attention = !matches!(outcome, Outcome::Succeeded | Outcome::Cancelled);
+            let outcome = serde_json::to_value(outcome).unwrap_or(Value::Null);
+            ("terminal", false, attention, outcome)
+        }
+    }
 }
 
 #[cfg(test)]
 mod comparison_tests {
     use super::*;
+
+    #[test]
+    fn terminal_lane_carries_its_outcome() {
+        use provenant_run::Outcome;
+        assert_eq!(
+            lane_state(OverviewState::Terminal(Outcome::TimedOut)),
+            ("terminal", false, true, json!("timed_out"))
+        );
+        assert_eq!(
+            lane_state(OverviewState::Terminal(Outcome::Succeeded)),
+            ("terminal", false, false, json!("succeeded"))
+        );
+        assert_eq!(
+            lane_state(OverviewState::Running),
+            ("running", true, false, Value::Null)
+        );
+    }
     use provenant_fabric_runtime::inbox::{OverviewBatch, OverviewItem};
 
     #[test]

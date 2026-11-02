@@ -20,13 +20,18 @@ let package = Package(
             path: "Sources/QuotaMenuBar",
             resources: [.process("Resources")]
         ),
+        // Design tokens and the small components every console screen shares. SwiftUI only.
+        .target(name: "ProvenantDesign", path: "Sources/ProvenantDesign"),
         .executableTarget(
             name: "ProvenantConsole",
-            dependencies: ["ProvenantKit"],
+            dependencies: ["ProvenantKit", "ProvenantDesign"],
             path: "Sources/ProvenantConsole"
         ),
-        .testTarget(name: "ProvenantKitTests", dependencies: ["ProvenantKit"], resources: [.copy("Fixtures")]),
+        // Recorded CLI output and the one Replay both test targets use. Not a product.
+        .target(name: "ProvenantTestSupport", dependencies: ["ProvenantKit"], path: "Tests/ProvenantTestSupport",
+                exclude: [], resources: [.copy("Fixtures")]),
+        .testTarget(name: "ProvenantKitTests", dependencies: ["ProvenantKit", "ProvenantTestSupport"]),
         .testTarget(name: "QuotaMenuBarTests", dependencies: ["QuotaMenuBar", "ProvenantKit"]),
-        .testTarget(name: "ProvenantConsoleTests", dependencies: ["ProvenantConsole", "ProvenantKit"])
+        .testTarget(name: "ProvenantConsoleTests", dependencies: ["ProvenantConsole", "ProvenantKit", "ProvenantDesign", "ProvenantTestSupport"])
     ]
 )
