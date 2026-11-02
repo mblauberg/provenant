@@ -79,7 +79,11 @@ invalid_rows, duplicate_rows, truncated, reason?}`. `state` is:
   another host or no `project_key`; or the peer answered but gave no page, with
   `reason` `project_unknown` (the peer knows none of this host's registered
   projects), `limit_refused` (`--limit` exceeds the peer's `page_rows`; lower
-  it), `invalid_page` (an unexpected reply) or `duplicate_host`.
+  it), `invalid_request` (the peer refused the request for another reason, so
+  lowering `--limit` will not help), `invalid_page` (an unexpected reply) or
+  `duplicate_host`. `project_unknown` is best-effort: it is recognised from the
+  first line of the peer's error output, so an unrecognised message reads as
+  `unreachable` with reason `error`.
 - `unreachable`: no usable answer, with `reason` `timeout` (the shared
   `peer_seconds` budget ran out), `error` (any other transport or peer
   failure) or `no_project` (no registered project to ask through). Local rows

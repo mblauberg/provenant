@@ -621,8 +621,9 @@ fn chosen_peers(
 enum Miss {
     /// The peer does not know that project, so another may be tried.
     ProjectUnknown,
-    /// The page size exceeds the peer's `page_rows`; no project changes that.
-    LimitRefused,
+    /// An invalid-input refusal: the page size exceeds the peer's `page_rows`,
+    /// or the request itself is unusable. The caller tells the two apart.
+    Invalid,
     Timeout,
     Error,
 }
@@ -631,7 +632,7 @@ fn classify_miss(failure: &crate::fabric::PeerFailure) -> Miss {
     use provenant_fabric_runtime::coordination::facade::FacadeError;
     let detail = failure.detail.as_deref().unwrap_or_default();
     match failure.error {
-        FacadeError::InvalidInput => Miss::LimitRefused,
+        FacadeError::InvalidInput => Miss::Invalid,
         FacadeError::Timeout => Miss::Timeout,
         _ if detail.contains(&provenant_fabric_runtime::hosts::PeerError::Project.to_string()) => {
             Miss::ProjectUnknown
@@ -687,18 +688,21 @@ fn fan_out(
             ) else {
                 continue;
             };
-            match context.peer_within(
-                &clock,
-                host,
-                PeerAction::ConsoleInbox {
-                    extra: Default::default(),
-                    state,
-                    limit,
-                },
-                budget,
-                &provenant_core::CancelToken::new(),
-                remaining,
-            ) {
+            let ask = |limit: u64, budget, remaining| {
+                context.peer_within(
+                    &clock,
+                    host,
+                    PeerAction::ConsoleInbox {
+                        extra: Default::default(),
+                        state,
+                        limit,
+                    },
+                    budget,
+                    &provenant_core::CancelToken::new(),
+                    remaining,
+                )
+            };
+            match ask(limit, budget, remaining) {
                 Ok(PeerResult::Console { data, .. }) => return InboxObservation::Page(data),
                 Ok(_) => return InboxObservation::Refused("invalid_page"),
                 Err(failure)
@@ -710,7 +714,21 @@ fn fan_out(
                     return InboxObservation::Unsupported;
                 }
                 Err(failure) => match classify_miss(&failure) {
-                    Miss::LimitRefused => return InboxObservation::Refused("limit_refused"),
+                    Miss::Invalid => {
+                        // The refusal carries no cause, so ask for the smallest
+                        // page: if that is served, only the page size was refused.
+                        let left = deadline.saturating_duration_since(std::time::Instant::now());
+                        let served = limit > 1
+                            && !left.is_zero()
+                            && budget_for(left).is_ok_and(|budget| {
+                                matches!(ask(1, budget, left), Ok(PeerResult::Console { .. }))
+                            });
+                        return InboxObservation::Refused(if served {
+                            "limit_refused"
+                        } else {
+                            "invalid_request"
+                        });
+                    }
                     Miss::ProjectUnknown => unknown += 1,
                     miss => {
                         // A timeout outranks a generic error in the report.

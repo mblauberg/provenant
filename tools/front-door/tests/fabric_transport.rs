@@ -3176,8 +3176,17 @@ fn inbox_hosts_flags_are_validated_and_cursor_pages_skip_peers() -> Result {
         ],
         "remote --host",
     )?;
-    // A qualified ID that names another host than --host is refused, key or not.
-    let conflicting = format!("{local}:{}", "1".repeat(32));
+    // A qualified ID naming another configured peer than --host is refused.
+    let bench = next_host(peer)?;
+    assert_ne!(bench.to_string(), local);
+    let config = rig.state.join("config.toml");
+    let original = std::fs::read_to_string(&config)?;
+    let text = original.clone();
+    std::fs::write(
+        &config,
+        format!("{text}[domains.fabric.peers.bench]\nhost='{bench}'\ndestination='bench'\n"),
+    )?;
+    let id = "1".repeat(32);
     refused(
         &[
             "inbox",
@@ -3186,11 +3195,35 @@ fn inbox_hosts_flags_are_validated_and_cursor_pages_skip_peers() -> Result {
             "workshop",
             "--project-key",
             &key,
-            &conflicting,
+            &format!("{bench}:{id}"),
             "--json",
         ],
         "request owner does not match --host",
     )?;
+    // The same ID qualified by --host's own host passes the owner check; the
+    // call then fails on the missing request, not on the mismatch.
+    let (status, owned) = json_command(
+        &rig,
+        &[
+            "inbox",
+            "--all-projects",
+            "--host",
+            "workshop",
+            "--project-key",
+            &key,
+            &format!("{peer}:{id}"),
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0, "{owned}");
+    assert!(
+        !owned["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not match --host"),
+        "{owned}"
+    );
+    std::fs::write(&config, original)?;
     let (status, first) = json_command(
         &rig,
         &[
@@ -3249,9 +3282,15 @@ fn inbox_hosts_flags_are_validated_and_cursor_pages_skip_peers() -> Result {
 #[test]
 fn inbox_hosts_names_why_a_peer_gave_no_page() -> Result {
     let mut rig = TestRig::new()?;
-    loopback_peer(&mut rig)?;
+    let peer = loopback_peer(&mut rig)?;
+    let (_, identity) = json_command(&rig, &["fabric", "identity", "--json"])?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?
+        .to_owned();
     ask_inbox(&rig, None, "chair-local", "local-ask")?;
     let peer_state = rig.root.join("peer-state");
+    ask_inbox(&rig, Some(&peer_state), "chair-a", "peer-ask")?;
     let peers = |rig: &TestRig| -> Result<Value> {
         let (status, listed) = json_command(
             rig,
@@ -3283,6 +3322,23 @@ fn inbox_hosts_names_why_a_peer_gave_no_page() -> Result {
     let unknown = peers(&rig)?;
     assert_eq!(unknown["state"], "partial", "{unknown}");
     assert_eq!(unknown["reason"], "project_unknown", "{unknown}");
+    // An invalid-input refusal that a one-row page does not cure is not about
+    // --limit, so it must not say so.
+    let frame = rig.root.join("invalid.json");
+    std::fs::write(
+        &frame,
+        serde_json::to_vec(&json!({
+            "version":1,"protocol":CONSOLE_INBOX_PROTOCOL,"host":peer.to_string(),"project":key,
+            "result":{"result":"error","data":{"error":{"code":"invalid_input"}}},
+        }))?,
+    )?;
+    std::fs::write(
+        &ssh,
+        format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", frame.display()),
+    )?;
+    let invalid = peers(&rig)?;
+    assert_eq!(invalid["state"], "partial", "{invalid}");
+    assert_eq!(invalid["reason"], "invalid_request", "{invalid}");
     // A peer that never answers inside peer_seconds stays unreachable.
     std::fs::write(&ssh, "#!/bin/sh\nsleep 20\n")?;
     let main = rig.state.join("config.toml");

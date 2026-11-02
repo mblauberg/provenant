@@ -16,12 +16,28 @@ pub enum InboxObservation {
     Unsupported,
 }
 
+/// Unicode format characters (category Cf) that can reorder or hide text.
+fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{890}'..='\u{891}'
+        | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
+        | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}'
+        | '\u{1d173}'..='\u{1d17a}' | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+}
+
 /// A peer-supplied project label is display text only: a string, with control
-/// characters removed and at most 128 characters. Anything else is null.
+/// and Unicode format characters (such as bidi overrides) removed and at most
+/// 128 characters. Anything else is null.
 fn peer_label(value: &Value) -> Value {
     let label: String = value
         .as_str()
-        .map(|text| text.chars().filter(|c| !c.is_control()).take(128).collect())
+        .map(|text| {
+            text.chars()
+                .filter(|c| !c.is_control() && !is_format(*c))
+                .take(128)
+                .collect()
+        })
         .unwrap_or_default();
     if label.is_empty() {
         Value::Null
@@ -318,6 +334,9 @@ mod tests {
         assert!(label(json!(7)).is_null());
         assert!(label(json!("\u{1b}\n\t\u{0}")).is_null());
         assert_eq!(label(json!("re\u{1b}[31mpo\n")), "re[31mpo");
+        // Bidi overrides and other format characters are removed too.
+        assert_eq!(label(json!("a\u{202e}b\u{200b}c\u{2066}d\u{feff}")), "abcd");
+        assert!(label(json!("\u{202e}\u{200f}")).is_null());
         // 130 two-byte characters are cut on a character boundary.
         let long = "é".repeat(130);
         assert_eq!(label(json!(long)), json!("é".repeat(128)));
