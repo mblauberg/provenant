@@ -18,6 +18,19 @@ pub struct BoardPage {
 }
 
 impl RunStore {
+    /// Monotonic event generation for every board-visible run mutation.
+    /// Read directly from the owner store so transitions are observable even
+    /// when a best-effort change-file hint was skipped.
+    pub fn board_generation(&self, call: &Request<'_>) -> Result<u64> {
+        call.check()?;
+        let event: i64 =
+            self.db
+                .query_row("SELECT COALESCE(MAX(sequence),0) FROM events", [], |row| {
+                    row.get(0)
+                })?;
+        u64::try_from(event).map_err(|_| RunError::Validation("board generation"))
+    }
+
     /// Cross-project host-store read. No child-store traversal or provider I/O.
     /// Each page observes current facts below a fixed attempt high-water mark.
     pub fn board_page(
@@ -106,6 +119,64 @@ mod tests {
     use super::*;
     use crate::tests::{call, clock, context, input};
     use provenant_core::{AttemptId, CancelToken, RunId};
+
+    #[test]
+    fn console_changes_after_creation_transition_and_terminal_commit()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let state = context.state_root.as_path();
+        assert!(provenant_os::changes::read(state)?.board.is_none());
+        let input = input();
+        store.create(&input, &call)?;
+        let created = provenant_os::changes::read(state)?;
+        assert!(created.board.is_some());
+        let generation = store.board_generation(&call)?;
+        let queued = store.record(input.attempts[0].attempt_id, &call)?;
+        let attempt = store.mark_starting(
+            &queued,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        assert!(matches!(attempt.state, AttemptState::Starting { .. }));
+        let starting = store.board_generation(&call)?;
+        assert!(starting > generation);
+        store.withdraw(
+            attempt.attempt_id,
+            attempt.state,
+            Outcome::Cancelled,
+            "test",
+            input.created_at,
+            &call,
+        )?;
+        let terminal = provenant_os::changes::read(state)?;
+        assert_eq!(created.epoch, terminal.epoch);
+        assert!(terminal.board > created.board);
+        assert!(store.board_generation(&call)? > starting);
+        assert!(
+            store
+                .withdraw(
+                    input.attempts[0].attempt_id,
+                    AttemptState::Queued {
+                        extra: Default::default()
+                    },
+                    Outcome::Cancelled,
+                    "test",
+                    input.created_at,
+                    &call
+                )?
+                .is_none()
+        );
+        assert_eq!(provenant_os::changes::read(state)?.board, terminal.board);
+        Ok(())
+    }
 
     #[test]
     fn board_paging_snapshot_and_metadata() -> std::result::Result<(), Box<dyn std::error::Error>> {

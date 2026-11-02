@@ -90,17 +90,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
     const BYTE_BUDGET: usize = 1_048_576;
     let labels: BTreeMap<_, _> = projects
         .iter()
-        .map(|p| {
-            let path = p.common_dir["path"].as_str();
-            let label = (p.common_dir["encoding"] == "utf8")
-                .then_some(path)
-                .flatten()
-                .and_then(|p| std::path::Path::new(p).parent())
-                .and_then(|p| p.file_name())
-                .and_then(|p| p.to_str())
-                .map(str::to_owned);
-            (p.project_id.to_string(), label)
-        })
+        .map(|p| (p.project_id.to_string(), p.label.clone()))
         .collect();
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -116,7 +106,7 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
             remaining_bytes -= page.bytes_read;
             for item in page.items {
                 if let Some(label) = labels.get(&item.project_id) {
-                    needs_you.push(json!({"id":item.id,"project_id":item.project_id,"project_label":label,"title":item.title,"task_label":null,"chair_session_id":item.chair_session_id}));
+                    needs_you.push(json!({"id":item.id,"project_id":item.project_id,"project_label":label,"title":item.title,"chair_session_id":item.chair_session_id}));
                 }
             }
             if page.truncated {
@@ -178,11 +168,13 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
         Err(provenant_run::RunError::Version(_)) => "incompatible",
         _ => "unavailable",
     };
-    Ok(json!({"needs_you":needs_you,"lanes":lanes,
+    Ok(
+        json!({"schema_version":2,"needs_you":needs_you,"lanes":lanes,
         "counts":{"needs_you":(fabric != "unavailable" && fabric != "incompatible").then_some(needs_you.len()),
                   "running":(run != "unavailable" && run != "incompatible").then_some(running),
                   "attention":(run != "unavailable" && run != "incompatible").then_some(attention)},
-        "coverage":{"scope":"local","inbox":fabric,"runs":run,"nested_runs":"unavailable"}}))
+        "coverage":{"scope":"local","inbox":fabric,"runs":run,"nested_runs":"unavailable"}}),
+    )
 }
 
 #[cfg(test)]
