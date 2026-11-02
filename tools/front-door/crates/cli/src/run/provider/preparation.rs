@@ -638,7 +638,7 @@ pub(super) fn prepare_candidates(
                     )
                 })
                 .map_or_else(
-                    || format!("{reason:?}"),
+                    || provenant_routing::exclusion_detail(reason),
                     |error| {
                         reported_plan_errors.insert(route.adapter.clone());
                         format!("confinement plan: {error}")

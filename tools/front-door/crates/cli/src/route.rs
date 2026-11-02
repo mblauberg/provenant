@@ -897,6 +897,8 @@ fn with_context<T>(
             availability,
             quota: &quota,
             capacity_cooldowns: &capacity_cooldowns,
+            accounts: &quota_records,
+            quota_policies: &policies,
             access,
             now,
             host,
@@ -958,13 +960,27 @@ pub(crate) fn resolve_dispatch(
         host,
         &excluded,
     );
-    let exhausted = matches!(&selected, Err(EdgeError::Routing(error)) if error.code() == "no_eligible_pool_member");
+    // The unused families have no member to take: none is eligible, or the one
+    // chosen is blocked by persisted account evidence (mismatch or refusal). A
+    // snapshot-exhausted or unavailable one is not: it stays selected rather
+    // than relaxing to a used family, as it did before account evidence.
+    let exhausted = match &selected {
+        Err(EdgeError::Routing(error)) => error.code() == "no_eligible_pool_member",
+        Ok(route) => {
+            !excluded.is_empty()
+                && matches!(
+                    &route.readiness,
+                    RouteReadiness::Unavailable { reason, .. } if reason.is_account_block()
+                )
+        }
+        Err(_) => false,
+    };
     if required && exhausted {
         Err(DispatchError::FamilySeparation(
             excluded_families.unwrap_or_default().to_vec(),
         ))
     } else if !excluded.is_empty() && exhausted {
-        resolve_dispatch_excluding(
+        let relaxed = resolve_dispatch_excluding(
             request,
             roots,
             account,
@@ -973,8 +989,14 @@ pub(crate) fn resolve_dispatch(
             access,
             host,
             &[],
-        )
-        .map_err(DispatchError::from)
+        );
+        match (relaxed, selected) {
+            // Relaxing must not trade a spent route for another one.
+            (Ok(route), Ok(spent)) if !matches!(route.readiness, RouteReadiness::Ready { .. }) => {
+                Ok(spent)
+            }
+            (relaxed, _) => relaxed.map_err(DispatchError::from),
+        }
     } else {
         selected.map_err(DispatchError::from)
     }
@@ -1011,6 +1033,9 @@ fn resolve_dispatch_excluding(
         |context, records, policies| {
             let mut excluded_members = initial_exclusions.to_vec();
             let mut refusals = Vec::new();
+            // Resolution already skips persisted mismatch and refusals, so this
+            // narrowing retry now mostly catches admission-only failures (a fresh
+            // AuthRequired, an exhausted allowance).
             let mut refused_accounts: Vec<(String, String)> = Vec::new();
             let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
                 request,
@@ -1022,7 +1047,7 @@ fn resolve_dispatch_excluding(
             )?;
             loop {
                 let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
-                let pools = admission_pools(&resolved.adapter, context.catalogue, &model);
+                let pools = context.catalogue.admission_pools(&model);
                 let now_unix_seconds = context.now.as_timestamp().as_second();
                 let admission = provenant_quota::Admission {
                     policies,
@@ -1200,21 +1225,24 @@ fn record_pool_redraw(
     current.redraws = redraws;
     Ok(())
 }
-/// The pools a model draws on: the free allowance and its catalogued group.
-fn admission_pools(adapter: &str, catalogue: &Catalogue, model: &ModelId) -> Vec<String> {
-    let mut pools = free_pools(adapter, || catalogue.is_free_model(model));
-    pools.extend(catalogue.quota_pool(model).map(str::to_owned));
-    pools
+/// The account records and polling policies every account-block assessment
+/// reads: resolution, the final admission recheck and settlement alternates.
+/// Calibrated at `now` and dated by the configured polling intervals, so the
+/// three agree on what a refusal's clearing reading and freshness mean.
+pub(crate) fn account_evidence(
+    settings: &provenant_quota::Settings,
+    mut records: Vec<provenant_quota::AccountRecord>,
+    now: i64,
+) -> (
+    Vec<provenant_quota::AccountRecord>,
+    Vec<provenant_quota::QuotaPolicy>,
+) {
+    settings.apply_calibration(&mut records, now);
+    (
+        records,
+        provenant_providers::scheduling_policies(settings, REGISTRY),
+    )
 }
-/// Only OpenCode draws on the keyless free allowance, whatever a pool lists.
-fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
-    provenant_records::AdapterSpec::get(adapter)
-        .and_then(|spec| spec.free_pool)
-        .filter(|_| free())
-        .map(|pool| vec![pool.to_owned()])
-        .unwrap_or_default()
-}
-
 /// Recheck each selected fallback against the latest persisted refusals.
 pub(crate) fn check_dispatch_candidate(
     roots: &Roots,
@@ -1227,12 +1255,12 @@ pub(crate) fn check_dispatch_candidate(
         .map_err(|e| e.to_string())?
         .domains;
     provenant_routing::check_go_allowance(&model, &domains.routing, &catalogue)?;
-    let pools = admission_pools(&route.adapter, &catalogue, &model);
+    let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
-    let mut records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
-    domains.quota.apply_calibration(&mut records, now);
+    let records = crate::quota::read_cache(roots).map_err(|e| e.to_string())?;
+    let (records, policies) = account_evidence(&domains.quota, records, now);
     provenant_quota::Admission {
-        policies: &provenant_providers::scheduling_policies(&domains.quota, REGISTRY),
+        policies: &policies,
         now_unix_seconds: now,
         records: &records,
         pools: &pools,
@@ -2350,9 +2378,12 @@ mod route_tests {
 
     #[test]
     fn only_opencode_routes_draw_on_the_free_pool() {
-        assert_eq!(super::free_pools("opencode", || true), ["opencode-free"]);
-        assert!(super::free_pools("opencode", || false).is_empty());
-        assert!(super::free_pools("codex", || true).is_empty());
+        assert_eq!(
+            provenant_routing::free_pools("opencode", || true),
+            ["opencode-free"]
+        );
+        assert!(provenant_routing::free_pools("opencode", || false).is_empty());
+        assert!(provenant_routing::free_pools("codex", || true).is_empty());
     }
 
     #[test]
@@ -2715,6 +2746,7 @@ mod route_tests {
         };
         let drawn = resolve(None)?;
         let spent = drawn.account_key.clone().ok_or("account")?;
+        assert!(super::check_dispatch_candidate(&roots, &drawn).is_ok());
         // The provider refused the drawn account: the next dispatch keeps the
         // model and takes the other account instead of failing.
         crate::quota::persist_provider_refusal(
@@ -2730,12 +2762,28 @@ mod route_tests {
             now,
             Some(now + 3_600),
         )?;
+        // A refusal written after resolution still stops the launch.
+        let error = super::check_dispatch_candidate(&roots, &drawn).unwrap_err();
+        assert!(error.contains("scoped provider refusal"), "{error}");
         let redrawn = resolve(None)?;
+        assert!(super::check_dispatch_candidate(&roots, &redrawn).is_ok());
         assert_eq!(redrawn.model, "gpt-6-luna");
         assert!(matches!(redrawn.readiness, RouteReadiness::Ready { .. }));
         assert_ne!(redrawn.account_key.as_deref(), Some(spent.as_str()));
         // A pinned account is the caller's choice and is never swapped.
-        assert!(resolve(Some(&spent)).is_err());
+        // It resolves as unavailable with the typed reason rather than ready.
+        let RouteReadiness::Unavailable { reason, .. } = resolve(Some(&spent))?.readiness else {
+            return Err("a pinned refused account must be unavailable".into());
+        };
+        assert_eq!(
+            reason,
+            provenant_records::RouteExclusionReason::ProviderRefused
+        );
+        // The unavailable reason keeps the repair text, not a debug name.
+        assert_eq!(
+            provenant_routing::exclusion_detail(&reason),
+            "scoped provider refusal"
+        );
         Ok(())
     }
 
@@ -3012,6 +3060,217 @@ mod route_tests {
         assert!(matches!(
             deferred.readiness,
             provenant_records::RouteReadiness::Unavailable { .. }
+        ));
+        Ok(())
+    }
+
+    /// A codex family already used by a review and an unused claude one, each
+    /// with a single ready account.
+    struct ReviewFixture {
+        _temp: tempfile::TempDir,
+        roots: provenant_core::Roots,
+        availability: Vec<provenant_providers::AvailabilityRecord>,
+        access: [provenant_routing::AccessContext<'static>; 2],
+        request: provenant_routing::RouteRequest,
+        now: i64,
+    }
+    impl ReviewFixture {
+        fn new() -> Result<Self, Box<dyn Error>> {
+            use std::os::unix::fs::PermissionsExt;
+            struct Resolver;
+            impl provenant_core::PathResolver for Resolver {
+                fn resolve_existing_ancestor(
+                    &self,
+                    path: &std::path::Path,
+                ) -> std::io::Result<std::path::PathBuf> {
+                    Ok(path.into())
+                }
+            }
+            let temp = tempfile::tempdir()?;
+            let mut inputs = provenant_core::RootInputs::new(
+                temp.path().join("home"),
+                temp.path().join("checkout"),
+            );
+            inputs.state_dir = Some(temp.path().join("state"));
+            let roots = inputs.resolve(&Resolver)?;
+            std::fs::create_dir_all(roots.state.as_path())?;
+            std::fs::set_permissions(
+                roots.state.as_path(),
+                std::fs::Permissions::from_mode(0o700),
+            )?;
+            let path = roots.state.as_path().join("config.toml");
+            std::fs::write(
+                &path,
+                "schema_version=1\n[domains.routing.pools]\ntest=[{model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']},{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
+            )?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let catalogue = super::Catalogue::bundled()?;
+            let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+            let availability = [("codex", "gpt-6-luna"), ("claude", "claude-haiku-5-5")]
+                .into_iter()
+                .map(|(adapter, model)| provenant_providers::AvailabilityRecord {
+                    schema_version: 1,
+                    adapter: adapter.into(),
+                    executable: "/fixture/provider".into(),
+                    version: "fixture".into(),
+                    fixture_ref: "fixture".into(),
+                    catalogue_revision: catalogue.revision().into(),
+                    account_key: Some(format!("{adapter}-account")),
+                    observed_models: vec![model.into()],
+                    observed_unix_seconds: now,
+                    expires_unix_seconds: now + 300,
+                    last_update: None,
+                })
+                .collect();
+            let access = ["codex", "claude"].map(|adapter| provenant_routing::AccessContext {
+                adapter,
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            });
+            let request = super::RouteRequest {
+                read_heavy: false,
+                model: None,
+                route: Some("test".into()),
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+            }
+            .to_domain()?;
+            Ok(Self {
+                _temp: temp,
+                roots,
+                availability,
+                access,
+                request,
+                now,
+            })
+        }
+        /// Resolve with the openai family already used by the review.
+        fn resolve(
+            &self,
+            required: bool,
+        ) -> Result<provenant_records::ResolvedRoute, super::DispatchError> {
+            let used = [String::from("openai")];
+            super::resolve_dispatch(
+                &self.request,
+                &self.roots,
+                None,
+                ("fixture", 0),
+                &self.availability,
+                &self.access,
+                "fixture",
+                Some((&used, required)),
+            )
+        }
+        /// Persist the claude account's record, as the quota cache holds it.
+        fn seed_claude(
+            &self,
+            edit: impl FnOnce(&mut provenant_quota::AccountRecord),
+        ) -> Result<(), Box<dyn Error>> {
+            use std::os::unix::fs::PermissionsExt;
+            let scope = provenant_quota::AccountScope {
+                adapter: "claude".into(),
+                account_key: "claude-account".into(),
+                label: "claude-account".into(),
+            };
+            let mut record = provenant_quota::AccountRecord::empty(scope);
+            edit(&mut record);
+            let quota = self.roots.state.as_path().join("quota");
+            let account = quota.join("claude-account");
+            std::fs::create_dir_all(&account)?;
+            for dir in [&quota, &account] {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+            let file = account.join("claude.json");
+            std::fs::write(&file, serde_json::to_vec(&record)?)?;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn review_substitution_skips_refused_unused_families() -> Result<(), Box<dyn Error>> {
+        let fixture = ReviewFixture::new()?;
+        // The used family is the one codex serves, so Claude is the unused one.
+        let unused = fixture.resolve(false)?;
+        assert_eq!(unused.adapter, "claude");
+        assert!(matches!(unused.readiness, RouteReadiness::Ready { .. }));
+        // Its only account is refused: review relaxes to the ready, used family
+        // rather than picking the refused member.
+        crate::quota::persist_provider_refusal(
+            fixture.roots.state.as_path(),
+            &provenant_records::run::RouteRecord {
+                provider: Some("claude".into()),
+                model: Some("claude/claude-haiku-5-5".into()),
+                account_key: Some("claude-account".into()),
+                account_label: Some("claude-account".into()),
+                ..Default::default()
+            },
+            None,
+            fixture.now,
+            Some(fixture.now + 3_600),
+        )?;
+        let relaxed = fixture.resolve(false)?;
+        assert_eq!(relaxed.adapter, "codex");
+        assert!(matches!(relaxed.readiness, RouteReadiness::Ready { .. }));
+        // A required separation never relaxes.
+        assert!(matches!(
+            fixture.resolve(true),
+            Err(super::DispatchError::FamilySeparation(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn review_substitution_skips_a_mismatched_unused_family() -> Result<(), Box<dyn Error>> {
+        let fixture = ReviewFixture::new()?;
+        fixture.seed_claude(|record| {
+            record.last_error = Some(provenant_quota::ProbeFailure::AccountMismatch);
+        })?;
+        let relaxed = fixture.resolve(false)?;
+        assert_eq!(relaxed.adapter, "codex");
+        assert!(matches!(relaxed.readiness, RouteReadiness::Ready { .. }));
+        assert!(matches!(
+            fixture.resolve(true),
+            Err(super::DispatchError::FamilySeparation(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn review_substitution_keeps_a_snapshot_exhausted_unused_family() -> Result<(), Box<dyn Error>>
+    {
+        // Snapshot exhaustion is not an account block: an unused family whose
+        // reading is spent stays selected, as it did before account evidence.
+        let fixture = ReviewFixture::new()?;
+        let now = fixture.now;
+        fixture.seed_claude(|record| {
+            let account = record.account.clone();
+            record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                schema_version: 1,
+                account,
+                revision: 0,
+                status: provenant_quota::QuotaStatus::Exhausted,
+                observed_unix_seconds: now,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![provenant_quota::QuotaWindow {
+                    pool: "seven_day".into(),
+                    window_seconds: Some(604_800),
+                    used_basis_points: 10_000,
+                    resets_unix_seconds: Some(now + 3_600),
+                }],
+                details: None,
+            });
+        })?;
+        let route = fixture.resolve(false)?;
+        assert_eq!(route.adapter, "claude");
+        assert!(matches!(
+            route.readiness,
+            RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::Exhausted,
+                ..
+            }
         ));
         Ok(())
     }

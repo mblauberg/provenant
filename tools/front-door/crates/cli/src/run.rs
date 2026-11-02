@@ -329,7 +329,8 @@ impl run::Providers for Registry<'_> {
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
-        let (routing, accounts, quota) = match context_roots.as_ref().or(self.roots) {
+        let (routing, accounts, quota, quota_settings) = match context_roots.as_ref().or(self.roots)
+        {
             Some(roots) => {
                 let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
                     .map_err(|error| error.to_string())?;
@@ -338,6 +339,7 @@ impl run::Providers for Registry<'_> {
                     config.domains.accounts.with_derived_accounts(),
                     // Unreadable quota is unknown, and unknown is not spent.
                     crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default(),
+                    config.domains.quota,
                 )
             }
             None => Default::default(),
@@ -360,9 +362,12 @@ impl run::Providers for Registry<'_> {
         if assessment.refusal.is_some() || assessment.retry.is_some() {
             return Ok(assessment);
         }
-        let model_pool = provenant_routing::Catalogue::bundled()
-            .ok()
-            .and_then(|catalogue| catalogue.quota_pool(&model).map(str::to_owned));
+        let catalogue =
+            provenant_routing::Catalogue::bundled().map_err(|error| error.to_string())?;
+        // The same calibrated records and configured polling intervals that
+        // resolution and the admission recheck read.
+        let (quota, policies) =
+            crate::route::account_evidence(&quota_settings, quota, now.unix_seconds());
         let other_account = |adapter: &str, key: &str| {
             unspent_alternative(
                 accounts
@@ -371,9 +376,10 @@ impl run::Providers for Registry<'_> {
                     .filter(|entry| entry.adapter == adapter)
                     .map(|entry| entry.key.as_str()),
                 &quota,
+                &policies,
                 key,
                 &model,
-                model_pool.as_deref(),
+                &catalogue,
                 now.unix_seconds(),
             )
         };

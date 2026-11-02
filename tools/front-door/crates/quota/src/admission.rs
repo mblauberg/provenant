@@ -1,6 +1,6 @@
 //! Admission checks use validated evidence, including persisted provider refusals.
 use crate::*;
-use provenant_records::{ExtraFields, ResolvedRoute, RouteReadiness};
+use provenant_records::{ExtraFields, ResolvedRoute, RouteExclusionReason, RouteReadiness};
 use serde::{Deserialize, Serialize};
 
 /// A newer reading clears a refusal only below this use (95%).
@@ -110,7 +110,139 @@ pub struct Admission<'a> {
     /// turn an unrelated pool into a model-wide exhaustion.
     pub pools: &'a [String],
 }
+/// Persisted evidence that makes one account unusable for a model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountBlock {
+    /// The executable's signed-in account differs from the registered one.
+    Mismatch,
+    /// A live refusal on the adapter's keyless free pool.
+    FreeTierRefusal,
+    /// A live refusal scoped to the model or one of its verified pools.
+    ScopedRefusal,
+}
+impl AccountBlock {
+    /// The repair text admission reports.
+    pub fn repair(self) -> &'static str {
+        match self {
+            Self::Mismatch => "account mismatch; re-register",
+            Self::FreeTierRefusal => {
+                "free tier exhausted; use a paid route or wait for its allowance reset"
+            }
+            Self::ScopedRefusal => "scoped provider refusal",
+        }
+    }
+    /// The route exclusion reason this block surfaces as; the one mapping
+    /// resolution and the settlement alternates share.
+    pub fn exclusion_reason(self) -> RouteExclusionReason {
+        match self {
+            Self::Mismatch => RouteExclusionReason::AccountMismatch,
+            Self::FreeTierRefusal => RouteExclusionReason::FreeTierRefused,
+            Self::ScopedRefusal => RouteExclusionReason::ProviderRefused,
+        }
+    }
+    /// The block a reason came from, when it is one (not invalid evidence).
+    pub fn from_exclusion_reason(reason: &RouteExclusionReason) -> Option<Self> {
+        [Self::Mismatch, Self::FreeTierRefusal, Self::ScopedRefusal]
+            .into_iter()
+            .find(|block| block.exclusion_reason() == *reason)
+    }
+}
+
 impl Admission<'_> {
+    /// The account's snapshot when it is still fresh at `now`.
+    fn fresh_snapshot<'r>(
+        &self,
+        adapter: &str,
+        record: Option<&'r AccountRecord>,
+    ) -> Option<&'r QuotaSnapshot> {
+        record.and_then(|r| r.snapshot.as_ref()).filter(|s| {
+            s.observed_unix_seconds <= self.now_unix_seconds
+                && self
+                    .now_unix_seconds
+                    .saturating_sub(s.observed_unix_seconds)
+                    < schedule::interval(
+                        self.policies,
+                        adapter,
+                        schedule::Trigger::Timer,
+                        schedule::Power::Ac,
+                    )
+                    .unwrap_or(0) as i64
+        })
+    }
+
+    /// Whether persisted mismatch or a live provider refusal blocks `account_key`
+    /// from serving `model` (the model without its adapter prefix). Expiry and
+    /// clearing by a fresh, comparable reading live only here. Invalid evidence is
+    /// an error; absent evidence is no block.
+    pub fn account_block(
+        &self,
+        adapter: &str,
+        account_key: &str,
+        model: &str,
+    ) -> Result<Option<AccountBlock>, QuotaError> {
+        let record = self
+            .records
+            .iter()
+            .find(|r| r.account.adapter == adapter && r.account.account_key == account_key);
+        if let Some(r) = record {
+            r.validate()?;
+            if r.last_error == Some(ProbeFailure::AccountMismatch) {
+                return Ok(Some(AccountBlock::Mismatch));
+            }
+        }
+        let free = free_pool(adapter);
+        // Only the adapter's own keyless free pool spans models.
+        let in_free = |pool: Option<&str>| free.is_some() && pool == free;
+        let snapshot = self.fresh_snapshot(adapter, record);
+        for refusal in record
+            .into_iter()
+            .flat_map(|r| r.refusals.iter())
+            .filter(|r| {
+                r.account.adapter == adapter
+                    && r.account.account_key == account_key
+                    && (r.model == model
+                        || (in_free(r.pool.as_deref())
+                            && self.pools.iter().any(|pool| Some(pool.as_str()) == free)))
+            })
+        {
+            let expires = refusal.expires_unix_seconds()?;
+            let comparable_newer = record.is_some_and(|r| r.last_error.is_none())
+                && snapshot.is_some_and(|s| {
+                    s.observed_unix_seconds > refusal.observed_unix_seconds
+                        && matches!(
+                            s.status,
+                            QuotaStatus::Available
+                                | QuotaStatus::CreditOnly
+                                | QuotaStatus::Exhausted
+                        )
+                        && refusal.pool.as_ref().is_some_and(|pool| {
+                            let mut windows = s
+                                .windows
+                                .iter()
+                                .filter(|w| matches_pool(adapter, &w.pool, pool))
+                                .peekable();
+                            windows.peek().is_some()
+                                && windows.all(|w| {
+                                    // A lapsed reset alone cannot clear a refusal.
+                                    w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
+                                })
+                        })
+                });
+            if expires > self.now_unix_seconds
+                && !comparable_newer
+                && ((in_free(refusal.pool.as_deref()) && refusal.model == model)
+                    || refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p)))
+            {
+                return Ok(Some(if in_free(refusal.pool.as_deref()) {
+                    AccountBlock::FreeTierRefusal
+                } else {
+                    AccountBlock::ScopedRefusal
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     /// Check provider readiness, current allowance and the account record's
     /// persisted refusals.
     pub fn check(&self, route: &ResolvedRoute) -> Result<(), QuotaError> {
@@ -125,35 +257,16 @@ impl Admission<'_> {
             .account_key
             .as_ref()
             .ok_or(QuotaError::Refused("account identity unknown"))?;
+        if let Some(block) = self.account_block(&route.adapter, key, &route.model)? {
+            return Err(QuotaError::Refused(block.repair()));
+        }
         let record = self
             .records
             .iter()
             .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
-        if let Some(r) = record {
-            r.validate()?;
-            if r.last_error == Some(ProbeFailure::AccountMismatch) {
-                return Err(QuotaError::Refused("account mismatch; re-register"));
-            }
-        }
-        let free = free_pool(&route.adapter);
-        // Only the adapter's own keyless free pool spans models.
-        let in_free = |pool: Option<&str>| free.is_some() && pool == free;
-        let snapshot = record.and_then(|r| r.snapshot.as_ref());
+        let snapshot = self.fresh_snapshot(&route.adapter, record);
         let go_model = route.adapter == "opencode" && route.model.starts_with("opencode-go/");
-        let fresh = snapshot.is_some_and(|s| {
-            s.observed_unix_seconds <= self.now_unix_seconds
-                && self
-                    .now_unix_seconds
-                    .saturating_sub(s.observed_unix_seconds)
-                    < schedule::interval(
-                        self.policies,
-                        &route.adapter,
-                        schedule::Trigger::Timer,
-                        schedule::Power::Ac,
-                    )
-                    .unwrap_or(0) as i64
-        });
-        if fresh && let Some(snapshot) = snapshot {
+        if let Some(snapshot) = snapshot {
             if snapshot.status == QuotaStatus::AuthRequired {
                 return Err(QuotaError::Refused("authentication required"));
             }
@@ -177,53 +290,6 @@ impl Admission<'_> {
                             .is_some_and(|d| d.calibration_active(&w.pool, self.now_unix_seconds)))
             }) {
                 return Err(QuotaError::Refused("allowance exhausted"));
-            }
-        }
-        for refusal in record
-            .into_iter()
-            .flat_map(|r| r.refusals.iter())
-            .filter(|r| {
-                r.account.adapter == route.adapter
-                    && r.account.account_key == *key
-                    && (r.model == route.model
-                        || (in_free(r.pool.as_deref())
-                            && self.pools.iter().any(|pool| Some(pool.as_str()) == free)))
-            })
-        {
-            let expires = refusal.expires_unix_seconds()?;
-            let comparable_newer = fresh
-                && record.is_some_and(|r| r.last_error.is_none())
-                && snapshot.is_some_and(|s| {
-                    s.observed_unix_seconds > refusal.observed_unix_seconds
-                        && matches!(
-                            s.status,
-                            QuotaStatus::Available
-                                | QuotaStatus::CreditOnly
-                                | QuotaStatus::Exhausted
-                        )
-                        && refusal.pool.as_ref().is_some_and(|pool| {
-                            let mut windows = s
-                                .windows
-                                .iter()
-                                .filter(|w| matches_pool(&route.adapter, &w.pool, pool))
-                                .peekable();
-                            windows.peek().is_some()
-                                && windows.all(|w| {
-                                    // A lapsed reset alone cannot clear a refusal.
-                                    w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
-                                })
-                        })
-                });
-            if expires > self.now_unix_seconds
-                && !comparable_newer
-                && ((in_free(refusal.pool.as_deref()) && refusal.model == route.model)
-                    || refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p)))
-            {
-                return Err(QuotaError::Refused(if in_free(refusal.pool.as_deref()) {
-                    "free tier exhausted; use a paid route or wait for its allowance reset"
-                } else {
-                    "scoped provider refusal"
-                }));
             }
         }
         Ok(())
@@ -581,6 +647,74 @@ mod admission_tests {
                 pools: &["opencode-free".into()]
             }
             .check(&route)
+            .is_err()
+        );
+    }
+    #[test]
+    fn account_block_types_mismatch_free_and_scoped_refusals() {
+        let scope = AccountScope {
+            adapter: "opencode".into(),
+            account_key: "opaque".into(),
+            label: "free".into(),
+        };
+        let refusal = |model: &str, pool: Option<&str>| Refusal {
+            extra: Default::default(),
+            account: scope.clone(),
+            model: model.into(),
+            pool: pool.map(Into::into),
+            observed_unix_seconds: 900,
+            resets_unix_seconds: Some(2000),
+        };
+        let block = |record: &AccountRecord, key: &str, model: &str, pools: &[String]| {
+            Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: 1000,
+                records: std::slice::from_ref(record),
+                pools,
+            }
+            .account_block("opencode", key, model)
+            .unwrap()
+        };
+        let free = ["opencode-free".to_owned()];
+        let mut record = AccountRecord::empty(scope.clone());
+        assert_eq!(block(&record, "opaque", "m", &free), None);
+        record
+            .refusals
+            .push(refusal("first-free", Some("opencode-free")));
+        assert_eq!(
+            block(&record, "opaque", "second-free", &free),
+            Some(AccountBlock::FreeTierRefusal)
+        );
+        // Another account, or a model not drawing on the free pool, is unaffected.
+        assert_eq!(block(&record, "other", "second-free", &free), None);
+        assert_eq!(block(&record, "opaque", "second-free", &[]), None);
+        record.refusals = vec![refusal("m", None)];
+        assert_eq!(
+            block(&record, "opaque", "m", &[]),
+            Some(AccountBlock::ScopedRefusal)
+        );
+        assert_eq!(block(&record, "opaque", "unrelated", &[]), None);
+        record.refusals.clear();
+        record.last_error = Some(ProbeFailure::AccountMismatch);
+        assert_eq!(
+            block(&record, "opaque", "m", &[]),
+            Some(AccountBlock::Mismatch)
+        );
+        // Invalid evidence is an error, not a pass.
+        record.last_error = None;
+        record.refusals = vec![Refusal {
+            resets_unix_seconds: None,
+            observed_unix_seconds: i64::MAX,
+            ..refusal("m", None)
+        }];
+        assert!(
+            Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: 1000,
+                records: &[record],
+                pools: &[],
+            }
+            .account_block("opencode", "opaque", "m")
             .is_err()
         );
     }

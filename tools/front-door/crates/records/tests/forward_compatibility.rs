@@ -354,3 +354,36 @@ fn unknown_profile_and_access_fields_survive_parent_skip_rules() -> TestResult {
     attempt["profile"] = empty_profile;
     assert_preserved::<run::AttemptRecord>("run-attempt-with-future-profile", attempt)
 }
+
+#[test]
+fn route_exclusion_reason_codes_round_trip() -> TestResult {
+    // Existing wire names stay readable; the account-evidence codes are additive.
+    for code in [
+        "disabled",
+        "missing_executable",
+        "unknown_availability",
+        "stale_availability",
+        "unknown_account",
+        "disclosure_denied",
+        "confinement_unavailable",
+        "unsupported_effort",
+        "exhausted",
+        "pacing_reserve",
+        "auth_required",
+        "unverified_model",
+        "account_mismatch",
+        "free_tier_refused",
+        "provider_refused",
+        "invalid_account_evidence",
+    ] {
+        let reason: RouteExclusionReason = serde_json::from_value(json!(code))?;
+        assert_eq!(serde_json::to_value(&reason)?, json!(code));
+        let seed = json!({"status":"unavailable","reason":code});
+        assert_preserved::<RouteReadiness>("route_readiness", {
+            let mut v = seed.clone();
+            add_future_fields(&mut v);
+            v
+        })?;
+    }
+    Ok(())
+}

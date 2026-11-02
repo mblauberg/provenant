@@ -24,6 +24,10 @@ pub struct RoutingContext<'a> {
     pub availability: &'a [AvailabilityRecord],
     pub quota: &'a [QuotaObservation],
     pub capacity_cooldowns: &'a [provenant_quota::CapacityCooldown],
+    /// Calibrated account records and the policies that date their freshness.
+    /// They supply persisted mismatch and refusal evidence only.
+    pub accounts: &'a [provenant_quota::AccountRecord],
+    pub quota_policies: &'a [provenant_quota::QuotaPolicy],
     pub access: &'a [AccessContext<'a>],
     pub now: provenant_core::WallTime,
     pub host: &'a str,
@@ -996,6 +1000,11 @@ fn account_reason<'q>(
     if reason.is_none() && access.is_none_or(|a| a.confinement_ref.is_empty()) {
         reason = Some(RouteExclusionReason::ConfinementUnavailable);
     }
+    if reason.is_none()
+        && let Some(key) = availability.account_key.as_deref()
+    {
+        reason = account_block_reason(model, key, context);
+    }
     // Explicit exact IDs use the executable/account preflight too. The provider
     // owns model availability; named routes and pools require catalogue entries.
     let quota = latest_reading(model, availability, context, true);
@@ -1040,6 +1049,39 @@ fn account_reason<'q>(
         reason = Some(RouteExclusionReason::PacingReserve);
     }
     (reason, quota)
+}
+/// How a route's unavailability reads to a person. Account evidence carries the
+/// quota repair text, so a refused or mismatched account says what to do next.
+pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
+    if let Some(block) = provenant_quota::AccountBlock::from_exclusion_reason(reason) {
+        return block.repair().to_owned();
+    }
+    match reason {
+        RouteExclusionReason::InvalidAccountEvidence => {
+            "invalid persisted account evidence; repair or re-register the account".to_owned()
+        }
+        other => format!("{other:?}"),
+    }
+}
+/// Persisted mismatch or refusal evidence, assessed by the same quota function
+/// that admission rechecks before launch. Invalid evidence excludes only the
+/// account it belongs to; it is never read as proof the account is ready.
+fn account_block_reason(
+    model: &ModelId,
+    account_key: &str,
+    context: &RoutingContext<'_>,
+) -> Option<RouteExclusionReason> {
+    let pools = context.catalogue.admission_pools(model);
+    let admission = provenant_quota::Admission {
+        policies: context.quota_policies,
+        now_unix_seconds: context.now_seconds(),
+        records: context.accounts,
+        pools: &pools,
+    };
+    match admission.account_block(model.adapter(), account_key, model.model()) {
+        Err(_) => Some(RouteExclusionReason::InvalidAccountEvidence),
+        Ok(block) => block.map(provenant_quota::AccountBlock::exclusion_reason),
+    }
 }
 /// The account's latest reading for this model, only a fresh one when
 /// `fresh`. Only a fresh reading may refuse the route; a stale one still ranks
@@ -1767,9 +1809,16 @@ fn classify_pool(
                             RouteExclusionReason::Disabled => classified
                                 .exclusions
                                 .push(format!("{}: disabled", member.model.as_str())),
+                            // Refusals expire and so are recoverable; a mismatch or
+                            // invalid evidence needs repair, so it ranks with the
+                            // other unavailable members. The CLI's relaxation set
+                            // (`is_account_block`) is a different question: whether
+                            // the chosen route can be used at all.
                             RouteExclusionReason::StaleAvailability
                             | RouteExclusionReason::AuthRequired
                             | RouteExclusionReason::Exhausted
+                            | RouteExclusionReason::FreeTierRefused
+                            | RouteExclusionReason::ProviderRefused
                             | RouteExclusionReason::PacingReserve => {
                                 if classified.first_recoverable_unavailable.is_none() {
                                     classified.first_recoverable_unavailable =
