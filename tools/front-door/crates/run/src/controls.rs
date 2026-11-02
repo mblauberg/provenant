@@ -2583,8 +2583,37 @@ impl RunStore {
             }
             None => {}
         }
+        let pending_writer = record.provider_launched == Some(false)
+            && matches!(
+                record.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Rejected,
+                    ..
+                }
+            )
+            && self
+                .request(record.run_id, call)?
+                .tasks
+                .iter()
+                .any(|task| task.task_id == record.task_id && task.writer.is_some())
+            && !record.settlement_receipts.as_ref().is_some_and(|receipts| {
+                matches!(receipts.cleanup_custody_release, EffectDisposition::Done)
+            });
         // An unreadable reservation cannot establish absence of custody.
         if let Some(issue) = listing.issues.first() {
+            let temporary = self
+                .attempt_dir(record.run_id, id, false)
+                .and_then(|attempt| {
+                    attempt
+                        .metadata_at(std::ffi::OsStr::new("tmp"), false)
+                        .map_err(Into::into)
+                });
+            if !pending_writer
+                && matches!(temporary, Err(RunError::Filesystem(ref error)) if error.is_not_found())
+            {
+                self.set_temporary_retained(id, false, call)?;
+                return Ok(None);
+            }
             return Ok(Some(Reconciled::TemporaryRetained {
                 path,
                 reason: TemporaryReason::new(
@@ -2600,23 +2629,7 @@ impl RunStore {
         // Starting writer refusals defer Git cleanup so launch can report the
         // terminal result without waiting for Git. Keep the retained marker
         // until the independently retried effect actually succeeds.
-        if record.provider_launched == Some(false)
-            && matches!(
-                record.state,
-                AttemptState::Terminal {
-                    outcome: Outcome::Rejected,
-                    ..
-                }
-            )
-            && self
-                .request(record.run_id, call)?
-                .tasks
-                .iter()
-                .any(|task| task.task_id == record.task_id && task.writer.is_some())
-            && !record.settlement_receipts.as_ref().is_some_and(|receipts| {
-                matches!(receipts.cleanup_custody_release, EffectDisposition::Done)
-            })
-        {
+        if pending_writer {
             let attempt = self.attempt_dir(record.run_id, id, false)?;
             if crate::holder::object_import_refused(&attempt, scope)?.is_some() {
                 return Ok(Some(Reconciled::TemporaryRetained {

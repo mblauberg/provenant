@@ -536,7 +536,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     let marker = fixture.writer.worktree.join(".git");
     let original = std::fs::read(&marker)?;
     std::fs::write(&marker, b"gitdir: /nonexistent\n")?;
-    let started = std::time::Instant::now();
+    let started = provenant_os::clock::host_monotonic_micros()?;
     let error = launch
         .worktree
         .repo()
@@ -555,7 +555,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             &call,
         )?
         .ok_or("refusal missing")?;
-    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(provenant_os::clock::host_monotonic_micros()? - started < 10_000_000);
     assert!(matches!(
         terminal.state,
         AttemptState::Terminal {
@@ -613,8 +613,23 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         &call,
         &observer,
     )?;
-    assert!(
-        crate::objects::resolve_ref(&git, launch.worktree.repo(), &pin).is_err(),
+    let argv = [
+        git.into_os_string(),
+        "--git-dir".into(),
+        common.into_os_string(),
+        "show-ref".into(),
+        "--verify".into(),
+        "--quiet".into(),
+        pin.into(),
+    ];
+    let status = SystemExecutor::new(1)?.execute(ExecOptions::new(
+        &argv,
+        &fixture.root,
+        Duration::from_secs(2),
+    ))?;
+    assert_eq!(
+        status.termination,
+        Termination::Exit(1),
         "{second:?} {:?}",
         store.record(id, &call)?.settlement_receipts
     );
@@ -714,7 +729,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         home: fixture.root.join("home"),
         project: execution.project_id,
     };
-    let started = std::time::Instant::now();
+    let started = provenant_os::clock::host_monotonic_micros()?;
     let result = store.start(
         input.run_id,
         &provider,
@@ -724,7 +739,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         },
         &call,
     )?;
-    let elapsed = started.elapsed();
+    let elapsed = Duration::from_micros(provenant_os::clock::host_monotonic_micros()? - started);
     std::fs::write(&marker, original)?;
     assert!(
         elapsed < Duration::from_secs(10),

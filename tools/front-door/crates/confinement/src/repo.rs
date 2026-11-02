@@ -273,7 +273,8 @@ pub struct VerifiedRepo {
 pub(crate) struct ConfigDigest {
     base: [u8; 32],
     pub(crate) included: [u8; 32],
-    common_config: Option<Vec<u8>>,
+    common_config: Option<[u8; 32]>,
+    config_head: Vec<u8>,
 }
 
 impl VerifiedRepo {
@@ -418,23 +419,20 @@ impl VerifiedRepo {
         E: From<RepoError>,
     {
         let mut repo = Self::open_structure(path, native_alternates).map_err(E::from)?;
-        let config_before = repo.configuration_digest().map_err(E::from)?;
+        let config_before = repo.configuration_digest(None).map_err(E::from)?;
         let data = probe(&repo)?;
         repo.probe_data = Some(data);
         // The probe records the digest of the included files it read; the
         // repository's own config files must not have changed meanwhile.
-        let config_after = repo.configuration_digest().map_err(E::from)?;
+        let config_after = repo
+            .configuration_digest(Some(&config_before.config_head))
+            .map_err(E::from)?;
         let included = repo
             .probe_data
             .as_ref()
             .map(|data| data.config_files_digest);
         if config_before.base != config_after.base
-            || !compatible_common_config(
-                config_before.common_config.as_deref(),
-                config_after.common_config.as_deref(),
-                &repo.private,
-            )
-            .map_err(E::from)?
+            || config_before.common_config != config_after.common_config
             || included != Some(config_after.included)
         {
             return Err(E::from(RepoError::IdentityChanged));
@@ -483,7 +481,10 @@ impl VerifiedRepo {
         self.probe_data.as_ref()
     }
 
-    fn configuration_digest(&self) -> Result<ConfigDigest, RepoError> {
+    fn configuration_digest(
+        &self,
+        verified_head: Option<&[u8]>,
+    ) -> Result<ConfigDigest, RepoError> {
         let mut digest = Sha256::new();
         for (marker, directory) in [(b'P', &self.private), (b'C', &self.common)] {
             for name in [OsStr::new("config"), OsStr::new("config.worktree")] {
@@ -508,10 +509,16 @@ impl VerifiedRepo {
         let (files, head_sensitive) = self.probe_data.as_ref().map_or((&[][..], false), |data| {
             (data.config_files.as_slice(), data.config_head_sensitive)
         });
+        let head = match verified_head {
+            Some(head) => head.to_vec(),
+            None => read_optional_bounded(&self.private, OsStr::new("HEAD"), GITFILE_LIMIT)?
+                .ok_or(RepoError::InvalidGitDirectory)?,
+        };
         Ok(ConfigDigest {
+            config_head: head.clone(),
             base: digest.finalize().into(),
             included: self.included_digest(files, head_sensitive)?,
-            common_config: read_common_config(&self.common)?,
+            common_config: common_config_digest(&self.common, &head, &self.root_path)?,
         })
     }
 
@@ -539,7 +546,7 @@ impl VerifiedRepo {
     /// configuration, and re-anchor the digest on it.
     pub(crate) fn set_probe_data(&mut self, data: RepoProbeData) -> Result<(), RepoError> {
         self.probe_data = Some(data);
-        self.config_digest = Some(self.configuration_digest()?);
+        self.config_digest = Some(self.configuration_digest(None)?);
         self.revalidate()
     }
 
@@ -551,14 +558,10 @@ impl VerifiedRepo {
         let Some(config_digest) = &self.config_digest else {
             return Err(RepoError::Unprobed);
         };
-        let current_config = current.configuration_digest()?;
+        let current_config = current.configuration_digest(Some(&config_digest.config_head))?;
         if config_digest.base != current_config.base
             || config_digest.included != current_config.included
-            || !compatible_common_config(
-                config_digest.common_config.as_deref(),
-                current_config.common_config.as_deref(),
-                &current.private,
-            )?
+            || config_digest.common_config != current_config.common_config
         {
             return Err(RepoError::IdentityChanged);
         }
@@ -666,7 +669,7 @@ pub fn verify_worktree(
         return Err(RepoError::InvalidRegistration);
     }
     worktree.probe_data = repo.probe_data.clone();
-    worktree.config_digest = Some(worktree.configuration_digest()?);
+    worktree.config_digest = Some(worktree.configuration_digest(None)?);
     worktree.revalidate()?;
     Ok(VerifiedWorktree { repo: worktree })
 }
@@ -708,124 +711,79 @@ fn included_files_digest(files: &[PathBuf]) -> Result<[u8; 32], RepoError> {
     Ok(digest.finalize().into())
 }
 
-fn compatible_common_config(
-    original: Option<&[u8]>,
-    current: Option<&[u8]>,
-    private: &Directory,
-) -> Result<bool, RepoError> {
-    if original == current {
-        return Ok(true);
-    }
-    let (Some(original), Some(current)) = (original, current) else {
-        return Ok(false);
+// Git parses the bounded snapshot; included files have their own digest.
+fn common_config_digest(
+    common: &Directory,
+    head: &[u8],
+    cwd: &Path,
+) -> Result<Option<[u8; 32]>, RepoError> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let Some(bytes) = read_common_config(common)? else {
+        return Ok(None);
     };
-    let Some(added) = current.strip_prefix(original) else {
-        return Ok(false);
-    };
-    // An unfinished line or continuation could make the appended text part of
-    // an earlier value, rather than a new section.
-    if !ends_complete_line(original) {
-        return Ok(false);
-    }
-    // Git writes the two tracking keys in separate config transactions. The
-    // snapshot can land after the remote key and before the merge key.
-    let completed;
-    let mut added = if added.starts_with(b"\tmerge = refs/heads/") {
-        let Some(start) = original
-            .windows(b"[branch \"".len())
-            .rposition(|w| w == b"[branch \"")
-        else {
-            return Ok(false);
-        };
-        if start != 0 && !ends_complete_line(&original[..start]) {
-            return Ok(false);
-        }
-        let tail = &original[start..];
-        if tail.iter().filter(|b| **b == b'\n').count() != 2 {
-            return Ok(false);
-        }
-        completed = [tail, added].concat();
-        completed.as_slice()
-    } else {
-        added
-    };
-    let head = read_optional_bounded(private, OsStr::new("HEAD"), GITFILE_LIMIT)?;
-    let Some(head) = head.as_deref().and_then(|head| head.strip_suffix(b"\n")) else {
-        return Ok(false);
-    };
-    let branch_head = if let Some(branch) = head.strip_prefix(b"ref: refs/heads/") {
-        if std::str::from_utf8(branch)
-            .ok()
-            .and_then(|name| GitRefName::branch(name).ok())
-            .is_none()
-        {
-            return Ok(false);
-        }
+    let line = head
+        .strip_suffix(b"\n")
+        .ok_or(RepoError::InvalidGitDirectory)?;
+    let branch = if let Some(branch) = line.strip_prefix(b"ref: refs/heads/") {
+        let name = std::str::from_utf8(branch).map_err(|_| RepoError::InvalidGitDirectory)?;
+        GitRefName::branch(name).map_err(|_| RepoError::InvalidGitDirectory)?;
         Some(branch)
-    } else if matches!(head.len(), 40 | 64) && head.iter().all(u8::is_ascii_hexdigit) {
+    } else if matches!(line.len(), 40 | 64) && line.iter().all(u8::is_ascii_hexdigit) {
         None
     } else {
-        return Ok(false);
+        return Err(RepoError::InvalidGitDirectory);
     };
-    while !added.is_empty() {
-        let Some(rest) = added.strip_prefix(b"[branch \"") else {
-            return Ok(false);
-        };
-        let Some(end) = rest.windows(3).position(|part| part == b"\"]\n") else {
-            return Ok(false);
-        };
-        let branch = &rest[..end];
-        let Ok(branch_text) = std::str::from_utf8(branch) else {
-            return Ok(false);
-        };
-        if branch_head == Some(branch)
-            || GitRefName::branch(branch_text).is_err()
-            || branch.iter().any(|b| matches!(b, b'"' | b'\\'))
-        {
-            return Ok(false);
-        }
-        let Some(rest) = rest[end + 3..].strip_prefix(b"\tremote = ") else {
-            return Ok(false);
-        };
-        let Some(remote_end) = rest.iter().position(|b| *b == b'\n') else {
-            return Ok(false);
-        };
-        let remote = &rest[..remote_end];
-        if remote.is_empty()
-            || remote
-                .iter()
-                .any(|b| !b.is_ascii_alphanumeric() && !matches!(b, b'.' | b'-' | b'_'))
-        {
-            return Ok(false);
-        }
-        let rest = &rest[remote_end + 1..];
-        if rest.is_empty() {
-            return Ok(true);
-        }
-        let Some(rest) = rest.strip_prefix(b"\tmerge = refs/heads/") else {
-            return Ok(false);
-        };
-        let Some(end) = rest.iter().position(|b| *b == b'\n') else {
-            return Ok(false);
-        };
-        let Ok(merge) = std::str::from_utf8(&rest[..end]) else {
-            return Ok(false);
-        };
-        if GitRefName::branch(merge).is_err() {
-            return Ok(false);
-        }
-        added = &rest[end + 1..];
+    let git = provenant_os::git::git_executable().ok_or(RepoError::InvalidGitDirectory)?;
+    let argv = [
+        git.into_os_string(),
+        "config".into(),
+        "--file".into(),
+        "-".into(),
+        "--null".into(),
+        "--list".into(),
+    ];
+    let mut options = ExecOptions::new(&argv, cwd, std::time::Duration::from_secs(2));
+    options.stdin = Some(&bytes);
+    options.env = Some(&[]);
+    options.stdout = StreamPolicy::Capture {
+        limit: CONFIG_LIMIT as usize * 2,
+    };
+    options.stop_on_output_limit = true;
+    let output = SystemExecutor::new(1)
+        .and_then(|executor| executor.execute(options))
+        .map_err(|_| RepoError::InvalidGitDirectory)?;
+    if output.termination != Termination::Exit(0)
+        || output.timed_out
+        || output.stdout.truncated
+        || output.stdout.read_failed
+        || output.drain_truncated
+    {
+        return Err(RepoError::InvalidGitDirectory);
     }
-    Ok(true)
-}
-
-fn ends_complete_line(bytes: &[u8]) -> bool {
-    let Some(bytes) = bytes.strip_suffix(b"\n") else {
-        return false;
-    };
-    let last = bytes.split(|b| *b == b'\n').next_back().unwrap_or_default();
-    let last = last.strip_suffix(b"\r").unwrap_or(last);
-    last.iter().rev().take_while(|b| **b == b'\\').count() % 2 == 0
+    let mut digest = Sha256::new();
+    for entry in output
+        .stdout
+        .bytes
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let key = entry
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default();
+        let ignored = key
+            .strip_prefix(b"branch.")
+            .and_then(|rest| {
+                rest.strip_suffix(b".remote")
+                    .or_else(|| rest.strip_suffix(b".merge"))
+            })
+            .is_some_and(|name| Some(name) != branch);
+        if !ignored {
+            digest.update((entry.len() as u64).to_be_bytes());
+            digest.update(entry);
+        }
+    }
+    Ok(Some(digest.finalize().into()))
 }
 
 fn verify_git_directory(metadata: Metadata, owner: u32) -> Result<(), RepoError> {
@@ -1088,6 +1046,7 @@ mod tests {
     fn verify_worktree_refuses_the_primary_checkout() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join(".git")).unwrap();
+        fs::write(temp.path().join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
         let repo = VerifiedRepo::open(temp.path(), |_| {
             Ok::<_, RepoError>(RepoProbeData::without_includes(
                 RepoObjectFormat::Sha1,
@@ -1121,11 +1080,12 @@ mod tests {
     }
 
     #[test]
-    fn repo_revalidation_detects_config_changes_without_a_second_git_probe() {
+    fn repo_revalidation_detects_config_changes() {
         let temp = tempfile::tempdir().unwrap();
         let git = temp.path().join(".git");
         fs::create_dir(&git).unwrap();
         fs::write(git.join("config"), b"[core]\nrepositoryformatversion = 0\n").unwrap();
+        fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
         let repo = VerifiedRepo::open(temp.path(), |_| {
             Ok::<_, RepoError>(RepoProbeData::without_includes(
                 RepoObjectFormat::Sha1,
@@ -1236,6 +1196,19 @@ mod tests {
         assert!(opened.is_ok());
         let config_path = root.join(".git/config");
         let config = fs::read(&config_path).unwrap();
+        // Git decodes quoted subsection names before the comparison.
+        let mut escaped = config.clone();
+        escaped.extend_from_slice(
+            b"[branch \"sibling\\\"quoted\"]\n remote = origin\n merge = refs/heads/main\n",
+        );
+        fs::write(&config_path, &escaped).unwrap();
+        assert!(tree.repo().revalidate().is_ok());
+        escaped.extend_from_slice(b"[branch \"first\"]\n remote = elsewhere\n");
+        fs::write(&config_path, &escaped).unwrap();
+        assert!(tree.repo().revalidate().is_err());
+        fs::write(&config_path, b"[broken\n").unwrap();
+        assert!(tree.repo().revalidate().is_err());
+        fs::write(&config_path, &config).unwrap();
         let mut poisoned = config.clone();
         poisoned.extend_from_slice(b"[core]\n\thooksPath = /tmp/poison\n");
         fs::write(&config_path, poisoned).unwrap();
@@ -1252,71 +1225,5 @@ mod tests {
         fs::write(&marker, marker_bytes).unwrap();
         fs::rename(temp.path().join("first"), temp.path().join("moved")).unwrap();
         assert!(tree.repo().revalidate().is_err());
-        let dir = provenant_os::fs::Directory::open_anchor(temp.path()).unwrap();
-        fs::write(temp.path().join("HEAD"), b"ref: refs/heads/first\n").unwrap();
-        let sibling = b"[branch \"second\"]\n\tremote = origin\n\tmerge = refs/heads/main\n";
-        let own = b"[branch \"first\"]\n\tremote = origin\n\tmerge = refs/heads/main\n";
-        let safe = b"[core]\n\tbare = false\n";
-        assert!(
-            super::compatible_common_config(
-                Some(safe),
-                Some(&[safe.as_slice(), sibling].concat()),
-                &dir
-            )
-            .unwrap()
-        );
-        assert!(
-            !super::compatible_common_config(
-                Some(safe),
-                Some(&[safe.as_slice(), own].concat()),
-                &dir
-            )
-            .unwrap()
-        );
-        fs::write(
-            temp.path().join("HEAD"),
-            b"0123456789012345678901234567890123456789\n",
-        )
-        .unwrap();
-        assert!(
-            super::compatible_common_config(
-                Some(safe),
-                Some(&[safe.as_slice(), sibling].concat()),
-                &dir
-            )
-            .unwrap()
-        );
-        fs::write(temp.path().join("HEAD"), b"invalid\n").unwrap();
-        assert!(
-            !super::compatible_common_config(
-                Some(safe),
-                Some(&[safe.as_slice(), sibling].concat()),
-                &dir
-            )
-            .unwrap()
-        );
-        fs::write(temp.path().join("HEAD"), b"ref: refs/heads/first\n").unwrap();
-        for prefix in [
-            b"[core]\n\teditor = unsafe\\\r\n".as_slice(),
-            b"[core]\n\teditor = unsafe\\\n".as_slice(),
-        ] {
-            assert!(
-                !super::compatible_common_config(
-                    Some(prefix),
-                    Some(&[prefix, sibling].concat()),
-                    &dir
-                )
-                .unwrap()
-            );
-            let partial = [prefix, b"[branch \"second\"]\n\tremote = origin\n"].concat();
-            assert!(
-                !super::compatible_common_config(
-                    Some(&partial),
-                    Some(&[partial.as_slice(), b"\tmerge = refs/heads/main\n"].concat()),
-                    &dir
-                )
-                .unwrap()
-            );
-        }
     }
 }

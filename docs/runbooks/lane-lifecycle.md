@@ -80,9 +80,8 @@ live process and names its pid and command when available.
 A refusal that says repository authority could not be revalidated includes the
 underlying repository error and its reason. Inspect that reason and the
 worktree's Git registration and configuration before submitting again.
-Git's appended tracking entries for another branch do not invalidate an
-unchanged worktree when they match the recognised format. Other configuration
-changes still require a fresh probe.
+Git tracking entries for other branches do not invalidate an unchanged
+worktree. Other configuration changes still require a fresh probe.
 After an unlaunched writer is rejected, reconciliation removes its retained
 Git pin. Status and wait queue recovery. To retry directly, run
 `provenant reconcile --id <run>` after resolving any reported cause.
