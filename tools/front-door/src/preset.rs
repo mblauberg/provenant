@@ -11,6 +11,9 @@ const DEPTH: usize = 8;
 #[path = "preset_cli.rs"]
 mod presentation;
 
+#[path = "preset_plan.rs"]
+pub mod planner;
+
 mod panel;
 #[cfg(test)]
 pub use panel::ShapeHint;
@@ -35,6 +38,8 @@ pub struct Layers {
     repo_files: BTreeSet<String>,
     /// Resolve without repository layers, for the landing floor.
     exclude_repo: std::cell::Cell<bool>,
+    /// The planner front-end's host inputs. `None` never plans.
+    pub plan: Option<planner::PlanContext>,
 }
 
 #[derive(Debug)]
@@ -49,6 +54,8 @@ pub struct Expansion {
     /// Requested routes replaced by a fallback, for example a missing web route.
     pub substitutions: Vec<Value>,
     pub warnings: Vec<String>,
+    /// The planner decision, for a preset that declares planner patterns.
+    pub plan: Option<planner::Decision>,
 }
 
 impl Layers {
@@ -858,6 +865,21 @@ pub fn expand_with(
         )
         .map_err(|error| format!("{error}; valid parameter and slot paths: {valid}"))?;
     }
+    let mut plan = None;
+    let mut catalogue = None;
+    if let Some(context) = &layers.plan {
+        plan = planner::decide(context, name, &config, &origins, prompt)?;
+        if plan.as_ref().is_some_and(|decision| decision.applied) {
+            catalogue = Some(planner::apply(
+                layers,
+                context,
+                name,
+                &mut config,
+                &origins,
+                prompt,
+            )?);
+        }
+    }
     let mut nodes = Vec::new();
     build(
         layers,
@@ -871,6 +893,9 @@ pub fn expand_with(
         &mut origins,
         &mut repo_files,
     )?;
+    if let Some(catalogue) = catalogue {
+        planner::attach(&mut nodes, catalogue)?;
+    }
     origins.retain(|path, _| !path.ends_with("$scope_read_only"));
     if let Some(trusted) = trusted
         && (!repo_files.is_empty() || repo_roles)
@@ -907,7 +932,18 @@ pub fn expand_with(
     }
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
     let substitutions = layers.substitutions.take();
-    let warnings = layers.warnings.take();
+    let mut warnings = layers.warnings.take();
+    if let Some(why) = plan
+        .as_ref()
+        .and_then(|decision| decision.degraded.as_ref())
+    {
+        warnings.push(format!(
+            "planner unavailable, running the preset's deterministic defaults: {why}"
+        ));
+    }
+    if let Some(decision) = &plan {
+        warnings.extend(decision.warnings.iter().cloned());
+    }
     for (role, used) in &roles {
         origins.insert(
             format!("roles.{role}"),
@@ -924,6 +960,9 @@ pub fn expand_with(
         "substitutions": substitutions,
         "warnings": warnings,
     });
+    if let Some(decision) = &plan {
+        document["provenance"]["plan"] = decision.to_json();
+    }
     if serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
         .len()
@@ -947,6 +986,7 @@ pub fn expand_with(
         roles,
         substitutions,
         warnings,
+        plan,
     })
 }
 
@@ -1585,6 +1625,7 @@ fn build_stages(
                 "delivery",
                 "decision_session",
                 "pattern",
+                "plan",
             ]
             .contains(&key.as_str())
         })
@@ -2248,25 +2289,167 @@ fn visit_nodes(
                 visit_nodes(children, visitor)?;
             }
         }
+        // A planner's catalogue templates bind the same run context as static
+        // nodes, so a planned lane starts from the pinned commit and read roots.
+        if let Some(patterns) = node
+            .pointer_mut("/plan/patterns")
+            .and_then(Value::as_array_mut)
+        {
+            for pattern in patterns {
+                if let Some(children) = pattern.get_mut("nodes").and_then(Value::as_array_mut) {
+                    visit_nodes(children, visitor)?;
+                }
+            }
+        }
     }
     Ok(())
 }
 
-/// The project's primary checkout and registered worktrees, which a graph node
-/// may always read. Outside a repository the project is only its own directory.
+/// The worktrees of the project `directory` belongs to, main checkout first,
+/// which a graph node may always read. Outside a repository the project is only
+/// its own directory.
+pub(crate) fn project_worktrees(directory: &Path) -> Vec<PathBuf> {
+    crate::handoff::git_text(directory, &["worktree", "list", "--porcelain"])
+        .map(|listing| {
+            listing
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(std::path::PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_else(|_| vec![directory.to_path_buf()])
+}
+
 fn discover_read_roots(directory: &Path, allowed: &[String], extra: &[PathBuf]) -> ReadRoots {
-    let mut project: Vec<PathBuf> =
-        crate::handoff::git_text(directory, &["worktree", "list", "--porcelain"])
-            .map(|listing| {
-                listing
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("worktree "))
-                    .map(std::path::PathBuf::from)
-                    .collect()
-            })
-            .unwrap_or_else(|_| vec![directory.to_path_buf()]);
+    let mut project = project_worktrees(directory);
     project.extend(extra.iter().cloned());
     ReadRoots::new(project, allowed)
+}
+
+/// The linked worktrees, not the main checkout, which can host a writer lane.
+pub(crate) fn linked_worktrees(directory: &Path) -> Vec<String> {
+    project_worktrees(directory)
+        .iter()
+        .skip(1)
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+/// Whether a read root is exactly one `${parameter}`, with nothing around it.
+fn bare_placeholder(text: &str) -> bool {
+    text.strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .is_some_and(|name| !name.is_empty() && !name.contains(['$', '{', '}']))
+}
+
+/// A planner pattern names a read root by a closed-list parameter. The planner
+/// can pick any listed value, so every one is confined to the project's
+/// registered worktrees and allow-list now, exactly like a literal root, and a
+/// root that is not exactly one parameter is refused. Each value is replaced by
+/// the canonical path it confined to, so a link retargeted after admission
+/// cannot move the grant, and the planner's catalogue lists the same paths.
+pub(crate) fn confine_pattern_roots(node: &mut Value, policy: &ReadRoots) -> Result<(), String> {
+    let Some(patterns) = node
+        .pointer_mut("/plan/patterns")
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    let mut renamed: Vec<(String, String)> = Vec::new();
+    for pattern in patterns {
+        let name = pattern
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_owned();
+        let mut parameters = Vec::new();
+        for root in pattern
+            .get("nodes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|child| child.get("read_roots").and_then(Value::as_array))
+            .flatten()
+        {
+            let text = root.as_str().ok_or("read_roots entries must be strings")?;
+            if !text.contains("${") {
+                continue;
+            }
+            if !bare_placeholder(text) {
+                return Err(format!(
+                    "plan pattern {name}: read root {text} must be exactly one parameter"
+                ));
+            }
+            parameters.push(text[2..text.len() - 1].to_owned());
+        }
+        for parameter in parameters {
+            let values = pattern
+                .pointer_mut(&format!("/parameters/{parameter}/enum"))
+                .and_then(Value::as_array_mut)
+                .filter(|values| !values.is_empty())
+                .ok_or_else(|| {
+                    format!("plan pattern {name}: read root ${{{parameter}}} needs a closed list")
+                })?;
+            for value in values {
+                let given = value
+                    .as_str()
+                    .ok_or("read root values must be strings")?
+                    .to_owned();
+                if !Path::new(&given).is_absolute() {
+                    return Err(format!(
+                        "plan pattern {name}: read root {given} must be absolute"
+                    ));
+                }
+                let canonical = policy
+                    .confine(Path::new(&given))?
+                    .to_str()
+                    .ok_or("read root is not UTF-8")?
+                    .to_owned();
+                if canonical != given {
+                    renamed.push((given, canonical.clone()));
+                    *value = json!(canonical);
+                }
+            }
+            // A default that named a link follows its value.
+            if let Some(default) = pattern.pointer_mut(&format!("/parameters/{parameter}/default"))
+                && let Some((_, canonical)) = default
+                    .as_str()
+                    .and_then(|text| renamed.iter().find(|(given, _)| given == text))
+            {
+                *default = json!(canonical);
+            }
+        }
+    }
+    // The planner reads the same canonical paths the catalogue will accept.
+    if let Some(prompt) = node.get("prompt").and_then(Value::as_str) {
+        let mut text = prompt.to_owned();
+        for (given, canonical) in &renamed {
+            text = replace_path(&text, given, canonical);
+        }
+        node["prompt"] = json!(text);
+    }
+    Ok(())
+}
+
+/// Replace `from` with `to` where `from` is a whole path, not the tail of a
+/// longer one such as `/var/x` inside `/private/var/x`.
+fn replace_path(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(from) {
+        let before = rest[..at].chars().next_back().or(out.chars().next_back());
+        let after = rest[at + from.len()..].chars().next();
+        let inside = |c: char| c.is_alphanumeric() || matches!(c, '/' | '_' | '-');
+        out.push_str(&rest[..at]);
+        if before.is_some_and(|c| inside(c) || c == '.') || after.is_some_and(inside) {
+            out.push_str(from);
+        } else {
+            out.push_str(to);
+        }
+        rest = &rest[at + from.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Bind CLI context before hashing, explaining or retaining the executed graph.
@@ -2300,6 +2483,7 @@ pub(crate) fn bind_run_context(
         .as_array_mut()
         .ok_or("missing graph nodes")?;
     visit_nodes(nodes, &mut |node| {
+        confine_pattern_roots(node, policy)?;
         let container = node.get("composite").is_some() || node.get("loop").is_some();
         if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {
             let writer = node["access"] == "worktree_write";
@@ -2339,6 +2523,13 @@ pub(crate) fn bind_run_context(
                 let mut confined = Vec::new();
                 for root in &roots {
                     let text = root.as_str().ok_or("read_roots entries must be strings")?;
+                    // A planner catalogue names the root by a closed-list
+                    // parameter (a registered worktree); the runtime fills it.
+                    // `confine_pattern_roots` has confined every value it can take.
+                    if bare_placeholder(text) {
+                        confined.push(root.clone());
+                        continue;
+                    }
                     let path = Path::new(text);
                     let path = if path.is_absolute() {
                         path.to_path_buf()
@@ -2543,6 +2734,12 @@ fn explain(
     if let Some(shape) = &expansion.review_shape {
         human.push_str(&format!("Review shape: {shape}\n"));
     }
+    if let Some(decision) = &expansion.plan {
+        human.push_str(&format!("{}\n", decision.line()));
+        if decision.requested != provenant_fabric_runtime::config::PlanMode::Off {
+            human.push_str(&format!("Planner route: {}\n", decision.route));
+        }
+    }
     if !validation_error.is_null() {
         human.push_str(&format!("Requires configuration: {validation_error}\n"));
     }
@@ -2571,7 +2768,7 @@ fn explain(
     for warning in &expansion.warnings {
         human.push_str(&format!("Warning: {warning}\n"));
     }
-    let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape});
+    let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
     if !brief_warnings.is_empty() {
         data["warnings"] = json!(brief_warnings);
     }
@@ -2784,6 +2981,36 @@ pub fn run(
         };
         let mut layers = configured(globals)?;
         layers.known_routes = Some(config.domains.routing.routes.keys().cloned().collect());
+        {
+            let settings = &config.domains.fabric.plan;
+            let mode = match request.preset_plan.as_deref() {
+                Some(text) => provenant_fabric_runtime::config::PlanMode::parse(text)
+                    .ok_or_else(|| format!("--plan must be auto, on or off: {text}"))?,
+                None => settings.mode,
+            };
+            // Resolve the planner route the way dispatch does: configured pool,
+            // `--exclude` and configured exclusions, account evidence and quota.
+            let unavailable = (mode != provenant_fabric_runtime::config::PlanMode::Off)
+                .then(|| {
+                    provenant_cli::route::route_blocked(
+                        &settings.route,
+                        &request.route.exclude,
+                        &roots.roots,
+                    )
+                })
+                .flatten();
+            layers.plan = Some(planner::PlanContext {
+                mode,
+                from_cli: request.preset_plan.is_some(),
+                worktrees: linked_worktrees(&directory),
+                route: settings.route.clone(),
+                lane_deadline_seconds: config.domains.fabric.limits.graph_timeout_seconds,
+                max_nodes: settings.max_nodes,
+                auto: settings.auto.clone(),
+                unavailable,
+                paths: request.selection_paths.clone(),
+            });
+        }
         layers.review = Some(review_selector(
             config.domains.routing.review.clone(),
             directory.clone(),

@@ -509,3 +509,63 @@ plan's node limit.
   `::pattern_children_obey_plan_node_and_kind_limits`.
 - Owner: `crates/fabric-runtime/src/graph/plans.rs`,
   `crates/fabric-runtime/src/graph/pattern_plan.rs`
+
+### Waves, patterns-only plans and closed route lists
+
+Three opt-in `plan` fields tighten a plan node without changing hand-written
+graphs. `patterns_only` refuses raw fragment nodes, so a fragment can only
+instantiate listed patterns. `disjoint_waves` refuses, before admission, two
+writer instances with overlapping write scopes unless a dependency orders them;
+a later wave depends on the earlier wave's barrier. A pattern's `route`,
+`routes` or `read_roots` field may be a `${parameter}` placeholder only when
+that parameter is a string with an `enum` (a closed list: route names, or the
+registered worktrees a lane's reviewers read); every other sensitive field
+(kind, access, role, source) still refuses placeholders. A `read_roots` entry
+is exactly that one placeholder, never joined to other text, and every value of
+its `enum` is a clean absolute path with no `..`. The front-end also confines
+each value to the project's registered worktrees and `allowed_read_roots`
+before the graph is admitted, as it does a literal root, and replaces it with
+the canonical path it resolved to, so retargeting a link afterwards moves no
+grant. A budget is a bounded
+integer parameter whose `max` is the graph timeout
+(`limits.graph_timeout_seconds`). Graph nodes have no per-node timer, so a
+budget is advisory: it is told to the writer, and only the graph timeout is
+enforced.
+
+### Preset planner front-end
+
+`provenant run --preset P --plan auto|on|off` puts a principal planner in front
+of a preset that declares a `[plan]` table (`big-batch` today). The default is
+`[domains.fabric.plan] mode`, `auto`. `on` replaces the preset's named stage
+with a read-only `plan` node (role `plan.shape`, route `principal`, no
+fallback) that carries the preset's catalogue. A planned writer lane keeps the
+static `generator-evaluator` lane's review: the writer, the default lens legs
+and the evaluator, as flat nodes because a pattern cannot nest composites; a
+test compares them with the independently expanded static preset. The pattern
+names and parameters are recorded. The planner's position is per preset:
+`big-batch` plans after `scout`, so the plan uses the research; research
+presets will plan first and set the swarm's width.
+
+`auto` decides in order: a shape parameter with any origin other than the
+bundled default (`--set`, `--params-file` or a project or user preset) stays
+off; more than `auto.acceptance_items` acceptance items in the brief (nested
+sub-bullets are not counted), a write scope over `auto.write_crates` crates, or
+at least `auto.batch_issues` distinct issue references (`#N`, decimal, at most
+six digits, not a hex colour) turn it on; so does no explicit lanes. For
+`big-batch` unset lanes always force `on`, so the size thresholds only change
+the recorded reason; they are kept for catalogues whose shape has a default.
+
+`--plan on` on a preset with no catalogue is an error only when given on the
+command line; a configured `on` records `off (preset declares no planner
+patterns)`. `--plan on` warns when it discards explicit lanes. The planner
+route is resolved with the dispatch resolver at expansion, honouring `--exclude`,
+configured exclusions and cached account evidence and quota; when no account
+can serve it, or an extending preset inherits `[plan]` without the stage it
+replaces, the run keeps the preset's static graph, records
+`provenance.plan.degraded` and warns; it never substitutes a weaker planner. A
+plan node that fails at run time has no fallback edge: its dependents block and
+the run fails, so rerun with `--plan off` (a follow-up). The registered writer
+worktrees default to the project's linked worktrees unless `parameters.worktrees`
+is set. `--explain` prints `plan: MODE -> on|off (reason)` and the planner
+route. `--plan off` and hand-written graphs are unchanged.
+

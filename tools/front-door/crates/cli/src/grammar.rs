@@ -609,6 +609,9 @@ pub struct Dispatch {
     /// Read preset parameters from a TOML table file; --set overrides it
     #[arg(long = "params-file", requires = "preset")]
     pub preset_params_file: Option<PathBuf>,
+    /// Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode
+    #[arg(long = "plan", requires = "preset", value_parser = ["auto", "on", "off"])]
+    pub preset_plan: Option<String>,
     /// Explain roles, limits and the expanded graph without running it
     #[arg(long)]
     pub explain: bool,
