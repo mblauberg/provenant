@@ -147,7 +147,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     }
     let risk_pool = panel_shape
         .reviewers
-        .first()
+        .last()
         .map(|group| group.pool.clone())
         .unwrap_or_default();
     for (tag, lens) in [

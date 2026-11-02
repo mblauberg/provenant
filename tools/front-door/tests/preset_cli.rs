@@ -89,7 +89,7 @@ fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout)?;
-    let snapshot = "review deep (by_kind; size=unknown; kind=integration; risk=routine)\n  risk tags: security\n  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=conventions-readability pool=senior\n  lens=refactor-cleanup pool=senior\n  lens=reliability pool=senior\n  lens=flexibility pool=senior\n  lens=security-privacy pool=junior\n";
+    let snapshot = "review deep (by_kind; size=unknown; kind=integration; risk=routine)\n  risk tags: security\n  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=conventions-readability pool=senior\n  lens=refactor-cleanup pool=senior\n  lens=reliability pool=senior\n  lens=flexibility pool=senior\n  lens=security-privacy pool=senior\n";
     assert!(text.contains(snapshot), "{text}");
     Ok(())
 }
