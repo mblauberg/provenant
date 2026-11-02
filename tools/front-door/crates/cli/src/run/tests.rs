@@ -484,22 +484,22 @@ fn settlement_alternates_read_the_configured_polling_interval_like_admission()
         AccountRecord, AccountScope, PollingIntervals, QuotaSnapshot, QuotaStatus, QuotaWindow,
         Refusal, Settings,
     };
-    let model = ModelId::parse("codex/gpt-6-luna")?;
+    let model = ModelId::parse("agy/gemini-3.8-flash")?;
     let now = 1_800_000_000;
     let scope = AccountScope {
-        adapter: "codex".into(),
+        adapter: "agy".into(),
         account_key: "other".into(),
         label: "other".into(),
     };
     // A refusal, then a comparable reading with headroom that is older than
-    // codex's default 900 s timer interval but inside a configured 3600 s one.
+    // agy's default 1200 s timer interval but inside a configured 3600 s one.
     let mut record = AccountRecord::empty(scope.clone());
     record.refusals.push(Refusal {
         extra: Default::default(),
         account: scope.clone(),
         model: model.model().into(),
-        pool: Some("seven_day".into()),
-        observed_unix_seconds: now - 1_500,
+        pool: Some("gemini".into()),
+        observed_unix_seconds: now - 2_000,
         resets_unix_seconds: None,
     });
     record.snapshot = Some(QuotaSnapshot {
@@ -507,11 +507,11 @@ fn settlement_alternates_read_the_configured_polling_interval_like_admission()
         account: scope,
         revision: 0,
         status: QuotaStatus::Available,
-        observed_unix_seconds: now - 1_200,
+        observed_unix_seconds: now - 1_500,
         source_ref: "fixture".into(),
         authority_ref: None,
         windows: vec![QuotaWindow {
-            pool: "seven_day".into(),
+            pool: "gemini".into(),
             window_seconds: Some(604_800),
             used_basis_points: 1_000,
             resets_unix_seconds: Some(now + 3_600),
@@ -522,7 +522,7 @@ fn settlement_alternates_read_the_configured_polling_interval_like_admission()
     let pools = catalogue.admission_pools(&model);
     let mut configured = Settings::default();
     configured.polling_intervals.insert(
-        "codex".into(),
+        "agy".into(),
         PollingIntervals {
             timer_seconds: Some(3_600),
             panel_seconds: None,
@@ -537,7 +537,7 @@ fn settlement_alternates_read_the_configured_polling_interval_like_admission()
             records: &records,
             pools: &pools,
         }
-        .account_block("codex", "other", model.model())?
+        .account_block("agy", "other", model.model())?
         .is_some();
         let alternative = unspent_alternative(
             ["work", "other"],

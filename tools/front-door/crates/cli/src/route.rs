@@ -3068,7 +3068,7 @@ mod route_tests {
     /// with a single ready account.
     struct ReviewFixture {
         _temp: tempfile::TempDir,
-        roots: Roots,
+        roots: provenant_core::Roots,
         availability: Vec<provenant_providers::AvailabilityRecord>,
         access: [provenant_routing::AccessContext<'static>; 2],
         request: provenant_routing::RouteRequest,
