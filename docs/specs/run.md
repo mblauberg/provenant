@@ -651,6 +651,7 @@ Run-store schema 7 is a forward-only migration. Before migrating an existing
 store, the owner takes a timestamped SQLite snapshot including committed WAL
 contents while excluding concurrent writes. Downgrade is unsupported; recovery
 requires the pre-migration copy or a forward repair.
+Peers sharing a state root must upgrade together: schema 7 and the version 2 attempt record are not readable by earlier builds.
 
 `cancel` durably records the request and signals the supervisor without waiting
 for a writer lock. The settlement driver checks it between phases and polls it
