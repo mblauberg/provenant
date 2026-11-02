@@ -31,3 +31,6 @@ config/installation.json
 .agent-fabric/
 .fabric-trial/
 .provenant/scratch/
+# Patch and merge leftovers.
+*.orig
+*.rej
