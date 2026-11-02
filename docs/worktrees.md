@@ -212,9 +212,17 @@ or binary from the writer checkout. Verification requires an explicit fixed
 release pin in `tools/front-door/rust-toolchain.toml` or the legacy
 `rust-toolchain`, an unambiguous host installation, and no rustup overrides or
 lane environment overrides. The lane's PATH must resolve to the protected host
-rustup shim, the lane must not be able to write its toolchain, and Cargo config
-files that could select another compiler cause a fallback. If verification
-fails, the target falls back with `toolchain_unverified`. The lane writes only
+rustup shim and the lane must not be able to write its toolchain. The one
+writable PATH entry allowed is the host's own `<scratch>/bin` (the build-slot
+`cargo` shim): Cargo run through rustup resolves its compiler from the pinned
+toolchain, so an entry there cannot select another. Cargo config files are read
+as data. A checked-in `.cargo/config.toml` is fine unless it can select a
+compiler (`build.rustc*`, `include`, or `[env]` entries for `RUSTUP_*`, `RUSTC*`
+or `PATH`); any file in the lane's own Cargo home is refused. If verification
+fails, the target falls back with `toolchain_unverified` and a `detail` code in
+`cargo-target-setup.json` naming the refusal (for example `path_entry_writable`,
+`cargo_config_selects_compiler`, `toolchain_env_override`,
+`rustup_overrides_present`), never an environment value. The lane writes only
 its own target; it cannot promote output into the seed. An existing lane target
 is retained. `cargo-target-setup.json` records whether
 preparation seeded, skipped or fell back, including mismatch reasons. The lane

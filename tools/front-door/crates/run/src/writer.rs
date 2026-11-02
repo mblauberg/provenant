@@ -395,21 +395,24 @@ impl LaunchConfinement {
             (AccessMode::WorktreeWrite(authority), Some((worktree, _)))
                 if cfg!(target_os = "macos")
                     && self.cargo_registry_seed
-                    && (!verified_cargo_config(
+                    && let Err(detail) = verified_cargo_config(
                         worktree.path(),
                         &authority.cargo_cache().path,
                         environment,
-                    ) || !trusted_lane_toolchain(
-                        &self.home,
-                        worktree.path(),
-                        environment,
-                        &provenant_confinement::write_grants(
-                            self.plan.permissions(),
-                            &self.profile,
-                        ),
-                    )) =>
+                    )
+                    .and_then(|()| {
+                        trusted_lane_toolchain(
+                            &self.home,
+                            worktree.path(),
+                            environment,
+                            &provenant_confinement::write_grants(
+                                self.plan.permissions(),
+                                &self.profile,
+                            ),
+                        )
+                    }) =>
             {
-                crate::cargo_seed::Outcome::fallback("toolchain_unverified")
+                crate::cargo_seed::Outcome::fallback_detail("toolchain_unverified", detail)
             }
             (AccessMode::WorktreeWrite(authority), Some((worktree, _))) => {
                 crate::cargo_seed::seed_target(
@@ -714,34 +717,85 @@ pub(super) fn verify_writer_git_paths(common: &Path, branch: &GitRefName) -> Res
 
 // Cargo configuration can override rustc independently of the rustup pin.
 // Refuse ambiguous configurations without executing or interpreting them.
+// Refusals are stable snake_case codes, recorded as the outcome `detail`.
 fn verified_cargo_config(
     worktree: &Path,
     cache: &Path,
     environment: &[(OsString, OsString)],
-) -> bool {
+) -> std::result::Result<(), &'static str> {
     for path in [worktree.join("tools"), worktree.join("tools/front-door")] {
         if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
-            return false;
+            return Err("worktree_layout_unexpected");
         }
     }
     let cargo_home = cache.join("cargo-home");
     let mut values = environment.iter().filter(|(key, _)| key == "CARGO_HOME");
-    if !matches!(values.next(), Some((_, value)) if Path::new(value) == cargo_home)
-        || values.next().is_some()
-    {
-        return false;
+    match (values.next(), values.next()) {
+        (Some((_, value)), None) if Path::new(value) == cargo_home => {}
+        (None, _) => return Err("cargo_home_env_missing"),
+        _ => return Err("cargo_home_env_unexpected"),
     }
-    let has_config = |directory: &Path| {
-        ["config", "config.toml"].iter().any(|name| {
-            !matches!(std::fs::symlink_metadata(directory.join(name)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-        })
+    let present = |directory: &Path| {
+        ["config", "config.toml"]
+            .iter()
+            .map(|name| directory.join(name))
+            .filter(|path| {
+                !matches!(std::fs::symlink_metadata(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            })
+            .collect::<Vec<_>>()
     };
-    !has_config(&cargo_home)
-        && worktree
-            .join("tools/front-door")
-            .ancestors()
-            .all(|ancestor| !has_config(&ancestor.join(".cargo")))
+    // The lane's own Cargo home is lane-writable state: any file there is refused.
+    if !present(&cargo_home).is_empty() {
+        return Err("cargo_home_config_present");
+    }
+    // A checked-in `.cargo/config.toml` is ordinary (this repository has one).
+    // It is read as data and refused only if it can select the compiler.
+    for ancestor in worktree.join("tools/front-door").ancestors() {
+        for path in present(&ancestor.join(".cargo")) {
+            cargo_config_cannot_select_compiler(&path)?;
+        }
+    }
+    Ok(())
+}
+
+// Read a Cargo config file as data, without executing it. A config is refused
+// when it is not a small regular UTF-8 TOML file or when it can change which
+// compiler runs: `build.rustc*`, an `include`, or `[env]` entries that reach
+// rustup, rustc or the search path.
+fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &'static str> {
+    use std::io::Read;
+    if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return Err("cargo_config_unreadable");
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(65537).read_to_end(&mut bytes))
+        .map_err(|_| "cargo_config_unreadable")?;
+    if bytes.len() > 65536 {
+        return Err("cargo_config_too_large");
+    }
+    let document: toml_edit::DocumentMut = String::from_utf8(bytes)
+        .map_err(|_| "cargo_config_invalid")?
+        .parse()
+        .map_err(|_| "cargo_config_invalid")?;
+    let compiler_key = |key: &str| {
+        key.starts_with("RUSTUP_")
+            || key.starts_with("RUSTC")
+            || key.starts_with("CARGO_BUILD_RUSTC")
+            || key == "PATH"
+    };
+    let build = document.get("build").and_then(|item| item.as_table_like());
+    let env = document.get("env").and_then(|item| item.as_table_like());
+    if document.contains_key("include")
+        || build.is_some_and(|table| table.iter().any(|(key, _)| key.starts_with("rustc")))
+        || env.is_some_and(|table| table.iter().any(|(key, _)| compiler_key(key)))
+        || (document.contains_key("build") && build.is_none())
+        || (document.contains_key("env") && env.is_none())
+    {
+        return Err("cargo_config_selects_compiler");
+    }
+    Ok(())
 }
 
 // Refuse the host probe if a lane can alter the host compiler or an earlier
@@ -751,8 +805,8 @@ fn trusted_lane_toolchain(
     worktree: &Path,
     environment: &[(OsString, OsString)],
     grants: &[provenant_confinement::permissions::WriteGrant],
-) -> bool {
-    use provenant_confinement::permissions::PathScope;
+) -> std::result::Result<(), &'static str> {
+    use provenant_confinement::permissions::{PathScope, WriteSource};
     use provenant_core::PathResolver;
     let resolve = |path: &Path| {
         provenant_os::fs::SystemPathResolver
@@ -760,7 +814,7 @@ fn trusted_lane_toolchain(
             .ok()
     };
     let Some(worktree) = resolve(worktree) else {
-        return false;
+        return Err("worktree_unresolvable");
     };
     let protected = |path: &Path| {
         let Some(path) = resolve(path) else {
@@ -777,34 +831,52 @@ fn trusted_lane_toolchain(
             })
         })
     };
-    if !protected(&home.join(".rustup")) || !protected(&home.join(".cargo/bin")) {
-        return false;
+    if !protected(&home.join(".rustup")) {
+        return Err("rustup_home_writable");
+    }
+    if !protected(&home.join(".cargo/bin")) {
+        return Err("cargo_bin_writable");
     }
     let mut paths = environment.iter().filter(|(key, _)| key == "PATH");
     let Some((_, path)) = paths.next() else {
-        return false;
+        return Err("path_missing");
     };
     if paths.next().is_some() {
-        return false;
+        return Err("path_duplicated");
     }
     let Ok(shim) = home.join(".cargo/bin/rustup").canonicalize() else {
-        return false;
+        return Err("rustup_shim_unresolvable");
     };
     if !protected(&shim) {
-        return false;
+        return Err("rustup_shim_writable");
     }
+    // The host puts the lane's `cargo` build-slot shim and shell hook in
+    // `<scratch>/bin`, first on PATH. Scratch is writable, so the lane could add
+    // a `rustc` there, but Cargo run through the rustup shim prepends the pinned
+    // toolchain to PATH and resolves the compiler from it, so an entry here
+    // cannot select another compiler. Any other writable entry is still refused,
+    // and an existing `rustc` in this directory must be the rustup shim.
+    let lane_shims: Vec<PathBuf> = grants
+        .iter()
+        .filter(|grant| grant.source == WriteSource::Scratch)
+        .map(|grant| grant.path.join("bin"))
+        .collect();
     for directory in std::env::split_paths(path) {
-        if !directory.is_absolute() || !protected(&directory) {
-            return false;
+        if !directory.is_absolute() {
+            return Err("path_entry_relative");
+        }
+        if !lane_shims.contains(&directory) && !protected(&directory) {
+            return Err("path_entry_writable");
         }
         let executable = directory.join("rustc");
         match executable.canonicalize() {
-            Ok(found) => return found == shim,
+            Ok(found) if found == shim => return Ok(()),
+            Ok(_) => return Err("rustc_not_rustup_shim"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return false,
+            Err(_) => return Err("rustc_path_unresolvable"),
         }
     }
-    false
+    Err("rustc_not_on_path")
 }
 
 fn record_cargo_setup(
@@ -1034,18 +1106,74 @@ mod cargo_setup_tests {
         std::fs::write(bin.join("rustup"), b"fixture").unwrap();
         std::os::unix::fs::symlink("rustup", bin.join("rustc")).unwrap();
         let env = vec![(OsString::from("PATH"), bin.as_os_str().to_owned())];
-        assert!(trusted_lane_toolchain(&home, &worktree, &env, &[]));
+        assert!(trusted_lane_toolchain(&home, &worktree, &env, &[]).is_ok());
         let grant = WriteGrant {
             source: WriteSource::WriteRoot,
             path: home.join(".rustup"),
             scope: PathScope::Subtree,
         };
-        assert!(!trusted_lane_toolchain(&home, &worktree, &env, &[grant]));
+        assert_eq!(
+            trusted_lane_toolchain(&home, &worktree, &env, &[grant]),
+            Err("rustup_home_writable")
+        );
         let path = std::env::join_paths([&worktree, &bin]).unwrap();
         let unsafe_env = vec![(OsString::from("PATH"), path)];
-        assert!(!trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]));
+        assert_eq!(
+            trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]),
+            Err("path_entry_writable")
+        );
         std::fs::write(worktree.join("rustc"), b"untrusted").unwrap();
-        assert!(!trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]));
+        assert_eq!(
+            trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]),
+            Err("path_entry_writable")
+        );
+    }
+
+    // Regression for #2484: a real lane has the writable scratch `bin/` (the
+    // build-slot `cargo` shim) first on PATH, which refused every lane.
+    #[test]
+    fn scratch_shim_directory_on_path_is_accepted_but_other_writable_entries_are_not() {
+        use provenant_confinement::permissions::{PathScope, WriteGrant, WriteSource};
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let worktree = tmp.path().join("worktree");
+        let scratch = tmp.path().join("scratch");
+        let bin = home.join(".cargo/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(home.join(".rustup")).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(scratch.join("bin")).unwrap();
+        std::fs::write(bin.join("rustup"), b"fixture").unwrap();
+        std::os::unix::fs::symlink("rustup", bin.join("rustc")).unwrap();
+        let grants = [WriteGrant {
+            source: WriteSource::Scratch,
+            path: scratch.clone(),
+            scope: PathScope::Subtree,
+        }];
+        let path = std::env::join_paths([scratch.join("bin").as_path(), bin.as_path()]).unwrap();
+        let env = vec![(OsString::from("PATH"), path)];
+        assert_eq!(
+            trusted_lane_toolchain(&home, &worktree, &env, &grants),
+            Ok(())
+        );
+        // The scratch directory itself, or a sibling inside it, is not the shim directory.
+        std::fs::create_dir(scratch.join("other")).unwrap();
+        let other = std::env::join_paths([scratch.join("other").as_path(), bin.as_path()]).unwrap();
+        assert_eq!(
+            trusted_lane_toolchain(
+                &home,
+                &worktree,
+                &[(OsString::from("PATH"), other)],
+                &grants
+            ),
+            Err("path_entry_writable")
+        );
+        // A compiler already present in the shim directory must be the rustup shim.
+        std::fs::write(scratch.join("bin/rustc"), b"untrusted").unwrap();
+        assert_eq!(
+            trusted_lane_toolchain(&home, &worktree, &env, &grants),
+            Err("rustc_not_rustup_shim")
+        );
     }
 
     #[test]
@@ -1059,18 +1187,82 @@ mod cargo_setup_tests {
             OsString::from("CARGO_HOME"),
             cache.join("cargo-home").into_os_string(),
         )];
-        assert!(verified_cargo_config(&worktree, &cache, &env));
-        assert!(!verified_cargo_config(&worktree, &cache, &[]));
+        assert!(verified_cargo_config(&worktree, &cache, &env).is_ok());
+        assert_eq!(
+            verified_cargo_config(&worktree, &cache, &[]),
+            Err("cargo_home_env_missing")
+        );
         std::fs::write(
             cache.join("cargo-home/config.toml"),
             "[build]\nrustc = 'evil'\n",
         )
         .unwrap();
-        assert!(!verified_cargo_config(&worktree, &cache, &env));
+        assert_eq!(
+            verified_cargo_config(&worktree, &cache, &env),
+            Err("cargo_home_config_present")
+        );
         std::fs::remove_file(cache.join("cargo-home/config.toml")).unwrap();
         std::fs::create_dir_all(worktree.join(".cargo")).unwrap();
+        let config = worktree.join(".cargo/config.toml");
+        // Selecting a compiler, directly or through include or [env], is refused.
+        for text in [
+            "[build]\nrustc = 'evil'\n",
+            "[build]\nrustc-wrapper = 'evil'\n",
+            "build.rustc-workspace-wrapper = 'evil'\n",
+            "include = 'elsewhere.toml'\n",
+            "[env]\nRUSTUP_TOOLCHAIN = 'nightly'\n",
+            "[env]\nPATH = { value = '/tmp', force = true }\n",
+            "build = 'rustc'\n",
+            "[build\n",
+        ] {
+            std::fs::write(&config, text).unwrap();
+            assert!(
+                matches!(
+                    verified_cargo_config(&worktree, &cache, &env),
+                    Err("cargo_config_selects_compiler" | "cargo_config_invalid")
+                ),
+                "{text}"
+            );
+        }
         std::fs::write(worktree.join(".cargo/config"), "[build]\nrustc = 'evil'\n").unwrap();
-        assert!(!verified_cargo_config(&worktree, &cache, &env));
+        std::fs::remove_file(&config).unwrap();
+        assert_eq!(
+            verified_cargo_config(&worktree, &cache, &env),
+            Err("cargo_config_selects_compiler")
+        );
+    }
+
+    // Regression for #2484: this repository checks in `.cargo/config.toml`, which
+    // refused every lane's target seed with `toolchain_unverified`. A config that
+    // cannot select a compiler must verify.
+    #[test]
+    fn checked_in_cargo_config_that_cannot_select_a_compiler_is_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path().join("worktree");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(worktree.join("tools/front-door/.cargo")).unwrap();
+        std::fs::create_dir_all(cache.join("cargo-home")).unwrap();
+        let env = vec![(
+            OsString::from("CARGO_HOME"),
+            cache.join("cargo-home").into_os_string(),
+        )];
+        let config = worktree.join("tools/front-door/.cargo/config.toml");
+        for text in [
+            "# comments only\n",
+            "[alias]\nxtask = 'run -p xtask'\n[target.aarch64-apple-darwin]\nrustflags = ['-C', 'link-arg=-s']\n[env]\nFOO = 'bar'\n",
+        ] {
+            std::fs::write(&config, text).unwrap();
+            assert_eq!(verified_cargo_config(&worktree, &cache, &env), Ok(()));
+        }
+        std::os::unix::fs::symlink(
+            "/etc/hosts",
+            worktree.join("tools/front-door/.cargo/config"),
+        )
+        .unwrap();
+        assert_eq!(
+            verified_cargo_config(&worktree, &cache, &env),
+            Err("cargo_config_unreadable")
+        );
     }
 
     #[test]
@@ -1093,6 +1285,20 @@ mod cargo_setup_tests {
             .unwrap();
             assert_eq!(git_record["reason"], reason);
         }
+        // A fallback names the specific refusal; other outcomes carry no detail.
+        let refusal = crate::cargo_seed::Outcome::fallback_detail(
+            "toolchain_unverified",
+            "path_entry_writable",
+        );
+        record_cargo_setup_file(&directory, "cargo-target-setup.json", &refusal).unwrap();
+        let record: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(tmp.path().join("cargo-target-setup.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            record,
+            serde_json::json!({"status":"fallback","reason":"toolchain_unverified","detail":"path_entry_writable"})
+        );
         std::fs::remove_file(tmp.path().join("cargo-setup.json")).unwrap();
         std::fs::create_dir(tmp.path().join("cargo-setup.json")).unwrap();
         assert!(

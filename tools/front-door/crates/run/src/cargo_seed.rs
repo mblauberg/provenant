@@ -5,18 +5,31 @@ use std::path::Path;
 pub(crate) struct Outcome {
     status: &'static str,
     reason: &'static str,
+    /// Stable snake_case code for the specific refusal behind `reason`. Never
+    /// an environment value or path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'static str>,
 }
 impl Outcome {
     pub(crate) fn skipped(reason: &'static str) -> Self {
         Self {
             status: "skipped",
             reason,
+            detail: None,
         }
     }
     pub(crate) fn fallback(reason: &'static str) -> Self {
         Self {
             status: "fallback",
             reason,
+            detail: None,
+        }
+    }
+    pub(crate) fn fallback_detail(reason: &'static str, detail: &'static str) -> Self {
+        Self {
+            status: "fallback",
+            reason,
+            detail: Some(detail),
         }
     }
 }
@@ -73,11 +86,11 @@ pub(crate) fn seed_target(
     }
     #[cfg(target_os = "macos")]
     {
-        let Ok((version, triple)) =
-            crate::target_seed::lane_rustc_metadata(worktree, home, environment)
-        else {
-            return Outcome::fallback("toolchain_unverified");
-        };
+        let (version, triple) =
+            match crate::target_seed::lane_rustc_metadata(worktree, home, environment) {
+                Ok(metadata) => metadata,
+                Err(detail) => return Outcome::fallback_detail("toolchain_unverified", detail),
+            };
         seed_target_with(state, cache, &version, &triple, clone_target)
     }
     #[cfg(not(target_os = "macos"))]
@@ -186,6 +199,7 @@ fn seed_target_with(
         Ok(()) => Outcome {
             status: "seeded",
             reason: "cloned",
+            detail: None,
         },
         Err(reason) => {
             if crate::artifacts::remove_entry_tree(&cache_dir, &stage).is_err() {
@@ -356,6 +370,7 @@ fn seed_store_with(
             } else {
                 "durability_unconfirmed"
             },
+            detail: None,
         },
         Err(reason) => {
             if crate::artifacts::remove_entry_tree(&cargo_dir, &stage_name).is_err() {
