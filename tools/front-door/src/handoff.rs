@@ -1026,7 +1026,10 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                     };
                     match worktrees::create(context, request, cancel) {
                         // The local branch exists without a worktree: check it out.
-                        Err(worktrees::WorktreeError::InvalidRequest) => {
+                        Err(
+                            worktrees::WorktreeError::InvalidRequest
+                            | worktrees::WorktreeError::BranchExistsWithBase { .. },
+                        ) => {
                             let request = WorktreeCreate {
                                 branch: branch.clone(),
                                 base: None,

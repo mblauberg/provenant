@@ -61,6 +61,9 @@ struct FakeOwner {
     now: Option<provenant_core::WallTime>,
     asked: Vec<String>,
     closed_asks: Vec<String>,
+    file_requests: Vec<Vec<InputRequest>>,
+    file_caps: Vec<usize>,
+    materialise: Option<fn(&[InputRequest]) -> MaterialisedInputs>,
 }
 
 /// An inbox reply from `chair`, choosing `option` or sending `text`.
@@ -89,6 +92,16 @@ impl AttemptOwner for FakeOwner {
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         self.now
+    }
+    fn materialise_inputs(
+        &mut self,
+        _key: &AttemptKey,
+        requests: &[InputRequest],
+        cap: usize,
+    ) -> Option<MaterialisedInputs> {
+        self.file_requests.push(requests.to_vec());
+        self.file_caps.push(cap);
+        self.materialise.map(|materialise| materialise(requests))
     }
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
         Ok(self.integration_heads.pop_front())
@@ -2413,6 +2426,155 @@ fn terminal_with_result(outcome: AttemptOutcome, result: &str) -> AttemptObserva
         branch: None,
         commit: None,
     }
+}
+
+fn terminal_from(result: &str, attempt_ref: &str) -> AttemptObservation {
+    let mut observation = terminal_with_result(AttemptOutcome::Succeeded, result);
+    if let AttemptObservation::Terminal {
+        attempt_ref: slot, ..
+    } = &mut observation
+    {
+        *slot = Some(attempt_ref.to_owned());
+    }
+    observation
+}
+
+/// `parent` feeds `child`'s prompt; the owner records what `child` asked for.
+fn parent_and_child(
+    materialise: Option<fn(&[InputRequest]) -> MaterialisedInputs>,
+) -> (GraphDocument, FakeOwner) {
+    let mut child = node("child", route("fixture"));
+    child.depends_on.push("parent".into());
+    child.inputs.push(GraphInput {
+        extra: Default::default(),
+        node: "parent".into(),
+        outputs: vec![OutputKind::Result],
+    });
+    let owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal_from("short excerpt", "host-a/attempt-1"),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        materialise,
+        ..Default::default()
+    };
+    (graph(vec![child, node("parent", route("fixture"))]), owner)
+}
+
+#[test]
+fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() {
+    let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        directory: Some("/state/graph-inputs/child-0".into()),
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::File {
+                label: request.label.clone(),
+                path: format!("/state/graph-inputs/child-0/{}.md", request.label).into(),
+                bytes: 9000,
+                omitted: 0,
+            })
+            .collect(),
+    }));
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful());
+    // The parent selects nothing, so only the child is asked to materialise.
+    assert_eq!(
+        owner.file_requests,
+        vec![vec![InputRequest {
+            label: "parent".into(),
+            attempt_ref: Some("host-a/attempt-1".into()),
+        }]]
+    );
+    assert_eq!(owner.file_caps, vec![outputs::NODE_INPUT_FILE_BYTES]);
+    let prompt = &owner.prompts[1];
+    let excerpt_at = prompt.find("short excerpt").expect("excerpt kept");
+    let files_at = prompt.find("<UPSTREAM_FILES>").expect("files block");
+    assert!(excerpt_at < files_at, "{prompt}");
+    assert!(prompt.contains("- parent: /state/graph-inputs/child-0/parent.md (9000 bytes)"));
+    assert!(!owner.prompts[0].contains("UPSTREAM_FILES"));
+}
+
+#[test]
+fn a_remote_upstream_is_named_unavailable_and_the_node_still_runs() {
+    let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        directory: None,
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::Unavailable {
+                label: request.label.clone(),
+                reason: "on host workshop; remote materialisation tracked in #2665".into(),
+            })
+            .collect(),
+    }));
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert!(owner.prompts[1].contains(
+        "- parent: unavailable: on host workshop; remote materialisation tracked in #2665"
+    ));
+}
+
+#[test]
+fn capped_upstream_results_are_named_in_the_prompt() {
+    let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        directory: Some("/state/graph-inputs/child-0".into()),
+        entries: vec![
+            MaterialisedInput::File {
+                label: requests[0].label.clone(),
+                path: "/state/graph-inputs/child-0/parent.md".into(),
+                bytes: 2_097_300,
+                omitted: 1234,
+            },
+            MaterialisedInput::Capped {
+                label: "later".into(),
+            },
+        ],
+    }));
+    advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let prompt = &owner.prompts[1];
+    assert!(
+        prompt.contains("CAPPED: 1234 more bytes omitted"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("- later: CAPPED: not written"), "{prompt}");
+}
+
+#[test]
+fn a_host_without_materialisation_leaves_the_prompt_as_it_was() {
+    let (document, mut owner) = parent_and_child(None);
+    advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(owner.file_requests.len(), 1, "the owner was still asked");
+    assert!(!owner.prompts[1].contains("UPSTREAM_FILES"));
+    assert!(owner.prompts[1].contains("short excerpt"));
+}
+
+#[test]
+fn partial_composite_materialises_only_its_successful_members() {
+    let (document, mut owner) = partial_review(1);
+    owner.materialise = Some(|requests| MaterialisedInputs {
+        directory: Some("/state/graph-inputs/verify-0".into()),
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::File {
+                label: request.label.clone(),
+                path: format!("/inputs/{}.md", request.label).into(),
+                bytes: 1,
+                omitted: 0,
+            })
+            .collect(),
+    });
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    let labels: Vec<_> = owner
+        .file_requests
+        .iter()
+        .flatten()
+        .map(|request| request.label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["lenses--lens-a"], "{labels:?}");
+    let verify = owner.prompts.last().unwrap();
+    assert!(verify.contains("/inputs/lenses--lens-a.md"));
+    assert!(!verify.contains("lens-b.md") && !verify.contains("lens-c.md"));
 }
 
 fn capture(text: &str) -> crate::result_capture::CapturedResult {

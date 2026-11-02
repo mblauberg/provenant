@@ -204,7 +204,7 @@ pub(super) fn resolve_ref(
     parse_oid(trim_ascii(&outcome.stdout.bytes))
 }
 
-pub(super) fn is_ancestor(
+pub fn is_ancestor(
     context: &WorktreeContext<'_>,
     ancestor: GitOid,
     tip: GitOid,

@@ -659,7 +659,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::ProcessTree { root } => return process_tree::run(root, globals),
         command => command,
     };
-    if let Err(error) = roots::validate_globals(globals) {
+    let session_save = matches!(
+        &command,
+        Command::Workflow(provenant_cli::Workflow::Session(
+            provenant_cli::workflow::Session::Save { .. }
+        ))
+    );
+    if let Err(error) = roots::validate_globals(globals, session_save) {
         // A bad selected root is a usage fault; the environment is not.
         let status = match error {
             roots::RootError::Home if inv.leaf == "install" => Outcome::Invalid,

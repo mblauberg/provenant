@@ -84,6 +84,12 @@ need no registration or adoption. Another project's checkout is refused.
 A held writer lock reports busy; lifecycle removal also refuses an observed
 live process and names its pid and command when available.
 
+A new writer may reuse a registered worktree from a terminal lane when the tree is clean and
+writer custody is free. Dirty trees, held locks and observed live writers still refuse. When
+`--base` is supplied for a branch that already exists, Provenant reuses its worktree only when
+the branch contains that base; otherwise the refusal says to omit `--base`. If the branch
+exists without a worktree, omit `--base` to check it out.
+
 A refusal that says repository authority could not be revalidated includes the
 underlying repository error and its reason. Inspect that reason and the
 worktree's Git registration and configuration before submitting again.

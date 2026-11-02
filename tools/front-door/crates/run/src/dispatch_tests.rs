@@ -418,6 +418,7 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         database_ipc: false,
         read_roots: reads.iter().map(|path| base.join(path)).collect(),
         write_roots: writes.iter().map(|path| base.join(path)).collect(),
+        inputs_root: None,
     };
     let task = |writer: bool, access: LaneAccess| {
         let mut task = input().request.tasks[0].clone();
@@ -522,6 +523,18 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
             task(false, access(None, &["reads/alias"], &[])),
             false,
             "symlinked read root escaping the parent root",
+        ),
+        (
+            &read_only,
+            task(
+                false,
+                LaneAccess {
+                    inputs_root: Some(base.join("reads")),
+                    ..Default::default()
+                },
+            ),
+            false,
+            "graph inputs the parent was not given",
         ),
         (
             &quiet_writer,

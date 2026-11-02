@@ -453,6 +453,12 @@ fn child_access_within(
             "child database IPC exceeds parent access",
         ));
     }
+    // Materialised graph inputs belong to the node that was given them.
+    if child.access.inputs_root.is_some() && child.access.inputs_root != parent.access.inputs_root {
+        return Err(RunError::Validation(
+            "child graph inputs exceed parent access",
+        ));
+    }
     let reach = |network| match network {
         NetworkAccess::Provider => 0,
         NetworkAccess::Local => 1,

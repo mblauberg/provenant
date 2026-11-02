@@ -163,7 +163,9 @@ pub fn create(
         .any(|entry| entry.branch.as_ref() == Some(&branch));
     if checked_out {
         return Err(if request.base.is_some() {
-            WorktreeError::InvalidRequest
+            WorktreeError::BranchExistsWithBase {
+                branch: request.branch.clone(),
+            }
         } else {
             WorktreeError::CheckedOut
         });
@@ -177,7 +179,9 @@ pub fn create(
     let branch_tips = read_branch_tips(context, cancel)?;
     let existing = branch_tips.get(&branch).copied();
     if existing.is_some() && request.base.is_some() {
-        return Err(WorktreeError::InvalidRequest);
+        return Err(WorktreeError::BranchExistsWithBase {
+            branch: request.branch.clone(),
+        });
     }
     let create_branch = existing.is_none();
     if create_branch {

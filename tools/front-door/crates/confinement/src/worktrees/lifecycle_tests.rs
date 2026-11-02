@@ -568,7 +568,7 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
     )?;
     let tree = verify_worktree(&fixture.repo, &info.path)?;
     let mut owner = WorktreeOwner {
-        attempt_id: None,
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([4; 16])),
         operation_id: Some("first-owner".parse()?),
         branch: "lane-owner".into(),
         base: info.head.to_string(),
@@ -577,7 +577,7 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
         origin: WorktreeOrigin::Lane,
         label: None,
     };
-    save_lane_owner_when_free(&context, &tree, &owner, &cancel())?;
+    save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
     let state = context
         .project_state
         .open_verified_directory(&state_dir_name(&info.path))?;
@@ -589,25 +589,81 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
         context.clock,
     )?;
     let next = WorktreeOwner {
+        attempt_id: None,
         operation_id: Some("next-owner".parse()?),
         ..owner.clone()
     };
     assert!(matches!(
-        save_lane_owner_when_free(&context, &tree, &next, &cancel()),
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &next,
+            info.head,
+            Some(&owner),
+            true,
+            &cancel()
+        ),
         Err(WorktreeError::LockBusy)
     ));
     assert_eq!(load_owner(&tree)?, Some(owner.clone()));
     drop(held);
     fs::write(info.path.join("dirty"), "keep")?;
     assert!(matches!(
-        save_lane_owner_when_free(&context, &tree, &next, &cancel()),
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &next,
+            info.head,
+            Some(&owner),
+            true,
+            &cancel()
+        ),
         Err(WorktreeError::Dirty)
     ));
     fs::remove_file(info.path.join("dirty"))?;
+    // Another writer moves the branch after the caller observed and validated
+    // `info.head`: the stale observation must not be published.
+    run_in_worktree(
+        &fixture,
+        &info.path,
+        &["commit", "--allow-empty", "-m", "moved after observation"],
+    )?;
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &next,
+            info.head,
+            Some(&owner),
+            true,
+            &cancel()
+        ),
+        Err(WorktreeError::IdentityChanged)
+    ));
+    assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+    let head = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("missing lane")?
+        .head;
+    assert_ne!(head, info.head);
+    save_lane_owner_when_free(&context, &tree, &next, head, Some(&owner), true, &cancel())?;
+    let stale = WorktreeOwner {
+        operation_id: Some("stale-owner".parse()?),
+        ..next.clone()
+    };
+    assert!(matches!(
+        save_lane_owner_when_free(&context, &tree, &stale, head, Some(&owner), true, &cancel()),
+        Err(WorktreeError::IdentityChanged)
+    ));
+    assert_eq!(load_owner(&tree)?, Some(next.clone()));
     owner.origin = WorktreeOrigin::Adopted;
     owner.label = Some("manual".into());
     save_owner(&tree, &owner)?;
-    assert!(save_lane_owner_when_free(&context, &tree, &next, &cancel()).is_err());
+    assert!(
+        save_lane_owner_when_free(&context, &tree, &next, head, Some(&owner), false, &cancel())
+            .is_err()
+    );
     assert_eq!(load_owner(&tree)?, Some(owner));
     Ok(())
 }

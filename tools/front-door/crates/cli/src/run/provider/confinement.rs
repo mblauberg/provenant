@@ -1,5 +1,40 @@
 use super::*;
 
+/// The host directory under which every graph node's materialised upstream
+/// results live, one subdirectory per project, graph and node.
+pub fn graph_inputs_directory(state_root: &Path) -> PathBuf {
+    state_root.join("fabric").join("graph-inputs")
+}
+
+/// The one inputs directory a graph node may read: its own, named by a digest
+/// of its project, graph and node. The digest keeps names that a
+/// case-insensitive filesystem would merge (`Review` and `review`), or that
+/// are not path-safe, in separate directories. `None` when the project is not
+/// a single path component.
+pub fn graph_node_inputs_directory(
+    state_root: &Path,
+    project: impl std::fmt::Display,
+    graph_id: &str,
+    node_id: &str,
+) -> Option<PathBuf> {
+    let project = project.to_string();
+    if matches!(project.as_str(), "" | "." | "..") || project.contains(['/', '\\', '\0']) {
+        return None;
+    }
+    // Length-prefixed, so no two tuples share an encoding.
+    let mut tuple = b"provenant graph inputs v1".to_vec();
+    for part in [project.as_str(), graph_id, node_id] {
+        tuple.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        tuple.extend_from_slice(part.as_bytes());
+    }
+    let digest = provenant_records::CanonicalV1::file_digest(&tuple);
+    Some(
+        graph_inputs_directory(state_root)
+            .join(project)
+            .join(provenant_core::hex(digest.bytes())),
+    )
+}
+
 pub(super) struct ConfinementRoots<'a> {
     pub(super) cwd: &'a Path,
     pub(super) home: &'a Path,
@@ -148,6 +183,7 @@ pub(super) fn confinement_request(
                         .flat_map(project_scratch_reads),
                 )
                 .chain(access.read_roots.iter().map(|path| grant(path)))
+                .chain(access.inputs_root.iter().map(|path| grant(path)))
                 .chain(roots.prompt_file.map(|path| PathGrant {
                     path: path.to_owned(),
                     scope: PathScope::Exact,
