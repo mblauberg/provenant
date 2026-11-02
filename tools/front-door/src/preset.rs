@@ -1777,6 +1777,7 @@ impl StageBuilder<'_> {
             object.remove("count");
             object.remove("for_each");
             object.remove("id");
+            let fallback_stage = object.remove("fallback_stage");
             let outputs = interpolate(
                 object.get("outputs").unwrap_or(&json!(["result"])),
                 &self.parameters,
@@ -2031,6 +2032,53 @@ impl StageBuilder<'_> {
                         "composite {id}: brief belongs on its leaves, received {brief}"
                     ));
                 }
+            }
+            if let Some(fallback_stage) = fallback_stage {
+                let fallback_outputs = interpolate(
+                    fallback_stage.get("outputs").unwrap_or(&json!(["result"])),
+                    &self.parameters,
+                    self.prompt,
+                    index as usize,
+                )?;
+                let mut fallback_dependencies = deps.to_vec();
+                if let Some(extra) = fallback_stage.get("depends_on") {
+                    let extra = interpolate(extra, &self.parameters, self.prompt, index as usize)?;
+                    for dependency in extra
+                        .as_array()
+                        .ok_or("fallback depends_on must be an array")?
+                    {
+                        let dependency = dependency
+                            .as_str()
+                            .ok_or("fallback dependency must be a string")?
+                            .to_owned();
+                        if !fallback_dependencies.contains(&dependency) {
+                            fallback_dependencies.push(dependency);
+                        }
+                    }
+                }
+                let fallback_inputs = match fallback_stage.get("inputs") {
+                    Some(inputs) => {
+                        interpolate(inputs, &self.parameters, self.prompt, index as usize)?
+                    }
+                    None => selected_inputs(&fallback_dependencies, &fallback_outputs),
+                };
+                let mut fallback_nodes = Vec::new();
+                let ends = self.entry(
+                    &fallback_stage,
+                    "fallback",
+                    &[],
+                    &mut fallback_nodes,
+                    depth + 1,
+                )?;
+                node["fallback_stage"] = json!({
+                    "nodes": fallback_nodes,
+                    "exports": selected_inputs(&ends, &fallback_outputs),
+                    "depends_on": fallback_dependencies,
+                    "inputs": fallback_inputs,
+                    "source": fallback_stage.get("source").map(|source| interpolate(source, &self.parameters, self.prompt, index as usize)).transpose()?,
+                    "read_roots": fallback_stage.get("read_roots").map(|roots| interpolate(roots, &self.parameters, self.prompt, index as usize)).transpose()?,
+                    "title": fallback_stage.get("title").map(|title| interpolate(title, &self.parameters, self.prompt, index as usize)).transpose()?,
+                });
             }
             if let Some(parameters) = self.parameters.as_object_mut() {
                 parameters.remove("item");

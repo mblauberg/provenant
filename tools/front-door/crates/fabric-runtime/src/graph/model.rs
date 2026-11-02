@@ -481,11 +481,21 @@ pub struct NodeOutputs {
     pub branch: Option<String>,
     pub commit: Option<String>,
     pub warnings: Vec<String>,
+    /// Why a planner used its static fallback stage, when one was configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PlanOutput>,
     /// The `remaining[]` items of the handoff block the report declared, in
     /// any status, so unfinished work survives a clipped result excerpt; none
     /// when no handoff was declared or it lists no items.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanOutput {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub fallback_reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -774,6 +784,17 @@ impl GraphCheckpoint {
 impl NodeProgress {
     /// Attempt-less evidence for final graph delivery.
     pub fn deterministic_summary(&self) -> Option<String> {
+        if let Some(reason) = self
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.plan.as_ref())
+            .map(|plan| plan.fallback_reason.as_str())
+        {
+            return Some(format!(
+                "Node {}: planner fallback\nReason: {reason}\n\n",
+                self.id
+            ));
+        }
         let decision = self
             .outputs
             .as_ref()

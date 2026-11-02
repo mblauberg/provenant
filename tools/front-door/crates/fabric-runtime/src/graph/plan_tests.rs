@@ -54,6 +54,56 @@ fn pattern_planner(max_nodes: usize) -> GraphDocument {
     })).unwrap()
 }
 
+#[test]
+fn failed_planner_runs_static_fallback_and_records_reason() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"planned-fallback", "nodes":[
+            {"id":"before", "access":"read_only", "prompt":"Prepare inputs", "route":{"alias":"junior"}},
+            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan",
+             "route":{"alias":"senior"}, "depends_on":["before"],
+             "inputs":[{"node":"before", "outputs":["result"]}],
+             "plan":{"kinds":["task"], "max_nodes":2,
+             "wire_exports":true,
+             "fallback_depends_on":["before"],
+             "fallback_inputs":[{"node":"before", "outputs":["result"]}],
+             "fallback":{"nodes":[
+                 {"id":"static", "access":"read_only", "prompt":"Static stage", "route":{"alias":"junior"}}
+             ], "exports":[{"node":"static", "outputs":["result"]}]}}},
+            {"id":"after", "access":"read_only", "prompt":"Consume stage", "route":{"alias":"senior"},
+             "depends_on":["plan"], "inputs":[{"node":"plan", "outputs":["result"]}]}
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "prepared result"),
+            terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief"),
+            terminal_with_result(AttemptOutcome::Succeeded, "static result"),
+            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 4);
+    assert!(owner.calls[2].0.node_id.contains("plan--fallback--static"));
+    assert!(owner.prompts[2].contains("prepared result"));
+    assert!(owner.prompts[3].contains("static result"));
+    let plan = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    assert_eq!(plan.state, NodeState::Succeeded);
+    assert_eq!(
+        serde_json::to_value(plan).unwrap()["outputs"]["plan"]["fallback_reason"],
+        "planner attempt failed (TaskFailed): planner rejected the brief"
+    );
+    let summary = plan.deterministic_summary().unwrap();
+    assert_eq!(
+        summary,
+        include_str!("../fixtures/plan-fallback-output.txt")
+    );
+}
+
 fn pattern_result(instance: Value) -> String {
     format!(
         "```fragment\n{}\n```",

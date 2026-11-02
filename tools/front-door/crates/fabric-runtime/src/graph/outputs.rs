@@ -166,6 +166,7 @@ pub(super) fn make_outputs(
         branch: branch.map(|value| bounded(&value, OUTPUT_FIELD_BYTES)),
         commit: commit.map(|value| bounded(&value, OUTPUT_FIELD_BYTES)),
         warnings,
+        plan: None,
         remaining,
     }
 }

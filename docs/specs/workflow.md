@@ -552,12 +552,13 @@ enforced.
 of a preset that declares a `[plan]` table: `big-batch`, `review-council`,
 `scout-swarm`, `fan-out`, `fan-out-synthesise` and `scope-then-run`. The default is
 `[domains.fabric.plan] mode`, `auto`. `on` replaces the preset's named stage
-with a read-only `plan` node (role `plan.shape`, route `principal`, no
-fallback) that carries the preset's catalogue. A planned writer lane keeps the
-static `generator-evaluator` lane's review: the writer, the default lens legs
-and the evaluator, as flat nodes because a pattern cannot nest composites; a
-test compares them with the independently expanded static preset. The pattern
-names and parameters are recorded. The planner's position is per preset:
+with a read-only `plan` node (role `plan.shape`, route `principal`) that carries
+the preset's catalogue and retains the static stage as a fallback subgraph. A
+planned writer lane keeps the static `generator-evaluator` lane's review: the
+writer, the default lens legs and the evaluator, as flat nodes because a
+pattern cannot nest composites; a test compares them with the independently
+expanded static preset. The pattern names and parameters are recorded. The
+planner's position is per preset:
 `big-batch` plans after `scout`, so the plan uses the research; the research
 presets plan first and set the swarm's width.
 
@@ -605,8 +606,9 @@ configured exclusions and cached account evidence and quota; when no account
 can serve it, or an extending preset inherits `[plan]` without the stage it
 replaces, the run keeps the preset's static graph, records
 `provenance.plan.degraded` and warns; it never substitutes a weaker planner. A
-plan node that fails at run time has no fallback edge: its dependents block and
-the run fails, so rerun with `--plan off`. The registered writer
+plan node that fails at run time runs the retained static stage and records
+`plan.fallback_reason` in its output. The graph succeeds only when that stage
+settles successfully. The registered writer
 worktrees default to the project's linked worktrees unless `parameters.worktrees`
 is set. The chair plans only what it states in the brief; the planner plans
 what the brief leaves open (lane shapes, scout questions and width, lens

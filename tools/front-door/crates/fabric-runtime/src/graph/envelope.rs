@@ -256,6 +256,12 @@ fn node_bound(
                 branch: Some(String::new()),
                 commit: Some(String::new()),
                 warnings: Vec::new(),
+                plan: node.plan.as_ref().and_then(|plan| {
+                    plan.fallback.as_ref().map(|_| PlanOutput {
+                        extra: Default::default(),
+                        fallback_reason: String::new(),
+                    })
+                }),
                 remaining: Some(Vec::new()),
             }
         }),
@@ -265,6 +271,13 @@ fn node_bound(
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
         + MAX_ADVANCE_ERROR_BYTES; // advance error
+    if node
+        .plan
+        .as_ref()
+        .is_some_and(|plan| plan.fallback.is_some())
+    {
+        bytes += NOTE_BYTES;
+    }
     // The node's own bounded launch retry wait, kept while it is running.
     if !boundary && node.composite.is_none() && node.decide.is_none() && node.land.is_none() {
         bytes += MAX_ADVANCE_ERROR_BYTES; // launch retry reason

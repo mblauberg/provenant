@@ -327,6 +327,7 @@ fn outputs(
         branch: None,
         commit: None,
         warnings: Vec::new(),
+        plan: None,
         remaining: None,
     };
     let mut results = Vec::new();

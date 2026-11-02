@@ -1799,6 +1799,7 @@ fn gate_outputs(passed: bool) -> NodeOutputs {
         branch: None,
         commit: None,
         warnings: Vec::new(),
+        plan: None,
         remaining: None,
     }
 }
