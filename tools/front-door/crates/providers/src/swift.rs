@@ -23,6 +23,7 @@ use provenant_confinement::permissions::PathGrant;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const APPLICATIONS: &str = "/Applications";
 const XCODE_LICENCE: &str = "/Library/Preferences/com.apple.dt.Xcode.plist";
 const COMMAND_LINE_TOOLS: &str = "/Library/Developer/CommandLineTools";
@@ -37,6 +38,7 @@ pub(crate) struct SwiftToolchain {
 impl SwiftToolchain {
     /// Resolve a developer directory to its toolchain, when it is a known
     /// location and has a driver.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn at(developer: &Path) -> Option<Self> {
         Self::at_in(developer, Path::new(APPLICATIONS))
     }
@@ -45,6 +47,7 @@ impl SwiftToolchain {
     /// developer subtree becomes executable, so only the Command Line Tools
     /// and `<applications>/<name>.app/Contents/Developer` qualify, by their
     /// canonical path; any other `DEVELOPER_DIR` adds no grant and no shim.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn at_in(developer: &Path, applications: &Path) -> Option<Self> {
         let developer = std::fs::canonicalize(developer).ok()?;
         let contents = developer.parent()?;
@@ -175,7 +178,7 @@ status=$?
 if [ "$status" -ne 0 ]; then
   case "$sub" in
     build|test|run|package)
-      printf 'provenant: swift %s exited %s inside the lane sandbox. Writes are allowed only in the worktree, TMPDIR (%s) and the lane cache (%s); an Operation not permitted or authorization denied error names a path outside them. SwiftPM runs with --disable-sandbox and the native build system; pass --build-system swiftbuild to override.\n' "$sub" "$status" "$TMPDIR" {cache_text} >&2
+      printf 'provenant: swift %s exited %s inside the lane sandbox. Writes are allowed only in the worktree, TMPDIR (%s) and the lane cache (%s); an "Operation not permitted" error names a path outside them. SwiftPM runs with --disable-sandbox and the native build system; pass --build-system swiftbuild to override.\n' "$sub" "$status" "$TMPDIR" {cache_text} >&2
       ;;
   esac
 fi
