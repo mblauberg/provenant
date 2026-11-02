@@ -852,6 +852,19 @@ fn decorate(
             None
         };
     for row in &mut report.accounts {
+        row.repair = if row.error == Some(ProbeFailure::IsolatedKeychainUnavailable) {
+            accounts
+                .entries
+                .values()
+                .find(|entry| entry.adapter == "agy" && entry.key == row.account.account_key)
+                .map(|entry| format!(
+                    "expected {}; re-register with `provenant accounts register --adapter agy --directory ~ {}` if this is the login-keychain account, or create the isolated keychain per docs/runbooks/providers.md",
+                    entry.directory.join("Library/Keychains/login.keychain-db").display(),
+                    entry.label
+                ))
+        } else {
+            None
+        };
         row.display = accounts
             .entries
             .iter()
@@ -1500,6 +1513,10 @@ fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String
                 human.push_str(
                     " (the signed-in account differs from the registered one; run `provenant accounts register --adapter agy --directory <dir> <label>`)",
                 );
+            } else if error == ProbeFailure::IsolatedKeychainUnavailable
+                && let Some(repair) = &row.repair
+            {
+                human.push_str(&format!("; isolated keychain unavailable: {repair}"));
             }
         }
         for cooldown in &row.capacity_cooldowns {
@@ -1817,6 +1834,7 @@ mod tests {
                     next_due_unix_seconds: None,
                     refreshing: false,
                     error: Some(error),
+                    repair: None,
                     capacity_cooldowns: vec![],
                     display: None,
                 }],
@@ -1847,6 +1865,44 @@ mod tests {
     }
 
     #[test]
+    fn isolated_keychain_status_names_expected_path_and_repair() {
+        let report = QuotaReport {
+            schema_version: 1,
+            generated_unix_seconds: 0,
+            accounts: vec![AccountRow {
+                account: AccountScope {
+                    adapter: "agy".into(),
+                    account_key: "agy-google-abc".into(),
+                    label: "legacy".into(),
+                },
+                snapshot: None,
+                status: QuotaStatus::KeychainUnavailable,
+                resets_at: None,
+                refusals: vec![],
+                free_pool_refusal: false,
+                age_seconds: None,
+                next_due_unix_seconds: None,
+                refreshing: false,
+                error: Some(ProbeFailure::IsolatedKeychainUnavailable),
+                repair: Some("expected /tmp/.gemini/Library/Keychains/login.keychain-db; re-register with `provenant accounts register --adapter agy --directory ~ legacy`".into()),
+                capacity_cooldowns: vec![],
+                display: None,
+            }],
+            sources: vec![],
+            coverage: Coverage { total: 1, known: 0 },
+            refreshing_ids: vec![],
+            next_due_unix_seconds: None,
+            report_path: String::new(),
+            display: Default::default(),
+            display_icon_warning: None,
+        };
+        let human = quota_human(&report);
+        assert!(human.contains("KEYCHAIN_UNAVAILABLE"), "{human}");
+        assert!(human.contains("/tmp/.gemini/Library/Keychains/login.keychain-db"), "{human}");
+        assert!(human.contains("--directory ~ legacy"), "{human}");
+    }
+
+    #[test]
     fn summary_only_flags_accounts_needing_attention() {
         let row = |status| AccountRow {
             account: AccountScope {
@@ -1863,6 +1919,7 @@ mod tests {
             next_due_unix_seconds: None,
             refreshing: false,
             error: None,
+            repair: None,
             capacity_cooldowns: vec![],
             display: None,
         };
@@ -1906,6 +1963,7 @@ mod tests {
             next_due_unix_seconds: None,
             refreshing: false,
             error: None,
+            repair: None,
             capacity_cooldowns: vec![],
             display: None,
         };
@@ -2088,6 +2146,7 @@ mod tests {
             next_due_unix_seconds: None,
             refreshing: false,
             error: None,
+            repair: None,
             capacity_cooldowns: vec![],
             display: None,
         };
