@@ -12,6 +12,7 @@ mod detail;
 mod detail_inbox;
 mod overview;
 pub mod peer;
+pub mod peer_inbox;
 mod search;
 mod tree;
 pub mod tree_peer;
