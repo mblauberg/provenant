@@ -15,17 +15,6 @@ FILTER_FILES = (ROOT / "tools/front-door/.config/nextest.toml", ROOT / ".github/
 TEST_SELECTOR = re.compile(r"test\(=([^)]*)\)")
 
 
-def strings(value: object):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for item in value.values():
-            yield from strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from strings(item)
-
-
 def main() -> int:
     selectors: dict[str, list[Path]] = {}
     for path in FILTER_FILES:
@@ -52,11 +41,9 @@ def main() -> int:
     if listed.returncode:
         print(listed.stderr, file=sys.stderr, end="")
         return listed.returncode
-    try:
-        inventory = json.loads(listed.stdout)
-    except json.JSONDecodeError:
-        inventory = [json.loads(line) for line in listed.stdout.splitlines() if line.strip()]
-    test_names = set(strings(inventory))
+    # nextest keys each suite's test cases by test name.
+    suites = json.loads(listed.stdout)["rust-suites"].values()
+    test_names = {name for suite in suites for name in suite["testcases"]}
     missing = sorted(name for name in selectors if name not in test_names)
     if missing:
         for name in missing:
