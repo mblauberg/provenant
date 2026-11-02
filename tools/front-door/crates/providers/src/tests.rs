@@ -2473,6 +2473,15 @@ fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<()
                     "{id} {access:?} {key}"
                 );
             }
+            // zsh creates here-document files under TMPPREFIX, not TMPDIR.
+            assert_eq!(
+                spec.env
+                    .iter()
+                    .find(|(name, _)| name == "TMPPREFIX")
+                    .map(|(_, value)| value),
+                Some(&plan.permissions().scratch.path.join("zsh").into_os_string()),
+                "{id} {access:?} TMPPREFIX"
+            );
         }
     }
     Ok(())
@@ -2613,6 +2622,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             "USER",
             "PATH",
             "TMPDIR",
+            "TMPPREFIX",
             "LANG",
             "PROVENANT_AGENT_LABEL",
             "PROVENANT_ROOT",
