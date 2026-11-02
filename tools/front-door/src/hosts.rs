@@ -38,6 +38,9 @@ struct Managed {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Report {
     claude: Vec<Identity>,
+    /// The executable lanes can resolve through their read-only Rust toolchain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nextest: Option<String>,
     /// The macOS login-session peer agent.
     peer_agent: provenant_fabric_runtime::peer_agent::Status,
     #[serde(default)]
@@ -56,6 +59,10 @@ fn executable(name: &str) -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
         .map(|p| p.join(name))
         .find(|p| provenant_os::sys::is_executable(p))
+}
+fn lane_nextest(home: &Path) -> Option<String> {
+    let path = home.join(".cargo/bin/cargo-nextest");
+    provenant_os::sys::is_executable(&path).then(|| path.display().to_string())
 }
 fn probe(
     argv: &[OsString],
@@ -220,6 +227,7 @@ pub(crate) fn local(
     let (managed, managed_error) = managed(roots, home);
     Ok(Report {
         claude,
+        nextest: lane_nextest(home),
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
         tick_agent: crate::tick_agent::diagnosis(state, home),
         managed,
@@ -296,6 +304,10 @@ fn valid_remote(report: &Report) -> bool {
             .managed_error
             .as_ref()
             .is_none_or(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
+        && report
+            .nextest
+            .as_ref()
+            .is_none_or(|path| path.len() <= 4096 && !path.chars().any(char::is_control))
         && report.warnings.len() <= 128
         && report
             .warnings
@@ -346,6 +358,14 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
             for warning in &report.warnings {
                 text.push_str(warning);
                 text.push('\n');
+            }
+            match &report.nextest {
+                Some(path) => {
+                    text.push_str(&format!("cargo nextest: available for lanes ({path})\n"))
+                }
+                None => text.push_str(
+                    "cargo nextest: unavailable for lanes; install cargo-nextest in ~/.cargo/bin\n",
+                ),
             }
             for row in &report.claude {
                 let state = serde_json::to_value(row.signin.state)
@@ -442,12 +462,31 @@ mod tests {
     fn doctor_report_requires_the_peer_agent() {
         let report: super::Report =
             serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped"}"#).unwrap();
+        assert!(report.nextest.is_none());
         assert!(report.managed.is_empty() && report.managed_error.is_none());
         assert_eq!(
             report.peer_agent,
             provenant_fabric_runtime::peer_agent::Status::Stopped
         );
         assert!(serde_json::from_str::<super::Report>(r#"{"claude":[]}"#).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn doctor_reports_nextest_only_when_lane_reachable() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".cargo/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let nextest = bin.join("cargo-nextest");
+        std::fs::write(&nextest, b"#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&nextest, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            super::lane_nextest(home.path()),
+            Some(nextest.display().to_string())
+        );
+        std::fs::remove_file(&nextest).unwrap();
+        assert_eq!(super::lane_nextest(home.path()), None);
     }
 
     #[test]
