@@ -101,7 +101,6 @@ impl RunStore {
         run: RunId,
         call: &Request<'_>,
     ) -> Result<Vec<AttemptId>> {
-        let request = self.request(run, call)?;
         let mut query = self.db.prepare("SELECT a.id,r.record FROM attempts a JOIN settlement_receipts r ON r.attempt=a.id WHERE a.run=?1 AND a.project=?2 AND a.terminal=1")?;
         let rows = query.query_map(
             params![run.to_string(), self.context.project_id.to_string()],
@@ -112,10 +111,7 @@ impl RunStore {
             call.check()?;
             let (id, raw) = row?;
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            if self
-                .effects_pending(&request, run, id, &raw, call)
-                .unwrap_or(true)
-            {
+            if self.effects_pending(run, id, &raw, call).unwrap_or(true) {
                 pending.push(id);
             }
         }
@@ -124,7 +120,6 @@ impl RunStore {
 
     fn effects_pending(
         &self,
-        request: &CanonicalRequest,
         run: RunId,
         id: AttemptId,
         raw: &[u8],
@@ -143,21 +138,8 @@ impl RunStore {
         };
         let receipts: SettlementReceipts = crate::db::decode_unversioned(raw)?;
         let record = self.record(id, call)?;
-        let task = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == record.task_id)
-            .ok_or(RunError::NotFound)?;
-        let delivery = task.writer.is_some()
-            && task.deliver.is_some()
-            && matches!(
-                record.state,
-                AttemptState::Terminal {
-                    outcome: Outcome::Succeeded | Outcome::ReviewRequired,
-                    ..
-                }
-            )
-            && retryable(&receipts.delivery);
+        // The sealed decision decided eligibility; its receipt is the answer.
+        let delivery = retryable(&receipts.delivery);
         let manifest = retryable(&receipts.manifest_conflict)
             && (matches!(receipts.manifest_conflict, EffectDisposition::Failed { .. })
                 || self
@@ -1390,8 +1372,10 @@ impl RunStore {
                 *receipts.slot_mut(effect) = disposition;
             }
         } else {
-            // A decision sealed without effects tracked no import to finish.
+            // A decision sealed without effects tracked no import to finish
+            // and made no delivery commitment.
             receipts.git_import = EffectDisposition::Done;
+            receipts.delivery = EffectDisposition::Done;
         }
         if read_sealed(&attempt, "delivery-cancelled.json", RECORD_LIMIT)?.is_some() {
             receipts.cancellation = Some(CancellationDisposition::DeliveryEffective);

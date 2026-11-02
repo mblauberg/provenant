@@ -264,6 +264,27 @@ struct ObjectImportRefusal {
     reason: String,
 }
 
+/// Seal the refusal that keeps the private Git for host recovery.
+fn seal_import_refusal(
+    attempt: &Directory,
+    scope: custody::Scope,
+    worktree: &std::path::Path,
+    reason: &str,
+) -> Result<()> {
+    crate::artifacts::seal(
+        attempt,
+        "object-import-refused.json",
+        &crate::db::bytes(&ObjectImportRefusal {
+            schema_version: 1,
+            scope,
+            kind: "object_import_refusal".into(),
+            worktree: worktree.into(),
+            reason: reason.chars().take(4096).collect(),
+        })?,
+        RECORD_LIMIT,
+    )
+}
+
 pub(crate) fn object_import_refused(
     attempt: &Directory,
     scope: custody::Scope,
@@ -670,18 +691,7 @@ impl RunStore {
         let reason = format!(
             "settlement exhausted three attempts; private Git retained for host recovery: {detail}"
         );
-        crate::artifacts::seal(
-            attempt,
-            "object-import-refused.json",
-            &crate::db::bytes(&ObjectImportRefusal {
-                schema_version: 1,
-                scope: Self::scope(record),
-                kind: "object_import_refusal".into(),
-                worktree: writer.worktree.clone(),
-                reason: reason.chars().take(4096).collect(),
-            })?,
-            RECORD_LIMIT,
-        )?;
+        seal_import_refusal(attempt, Self::scope(record), &writer.worktree, &reason)?;
         self.record_effect(
             record.attempt_id,
             record.generation,
@@ -704,61 +714,6 @@ impl RunStore {
             )?;
         }
         Ok(())
-    }
-
-    fn delivery_applicable(&self, record: &AttemptRecord, attempt: &Directory) -> Result<bool> {
-        if !matches!(
-            record.state,
-            AttemptState::Terminal {
-                outcome: Outcome::Succeeded,
-                ..
-            }
-        ) && !(matches!(
-            record.state,
-            AttemptState::Terminal {
-                outcome: Outcome::ReviewRequired,
-                ..
-            }
-        ) && record.protected_paths.is_empty()
-            && record
-                .partial_signals
-                .contains(&PartialSignal::DeclaredStop))
-        {
-            return Ok(false);
-        }
-        if let Some(raw) = read_sealed(attempt, "terminal-effects.json", RECORD_LIMIT)? {
-            let initial: crate::store::TerminalEffects = crate::db::decode(&raw)?;
-            if initial.schema_version != 1 || initial.scope != Self::scope(record) {
-                return Err(RunError::Conflict);
-            }
-            if initial.effects.iter().any(|(effect, disposition)| {
-                *effect == SettlementEffect::Delivery
-                    && matches!(disposition, EffectDisposition::Done)
-            }) {
-                return Ok(false);
-            }
-        }
-        #[derive(Deserialize)]
-        struct DeliveryExit {
-            scope: custody::Scope,
-            termination: Option<Termination>,
-            never_spawned: bool,
-            stop_reason: Option<StopReason>,
-            unresolved_cleanup: bool,
-            #[serde(default)]
-            cancel_delivered_before_exit: Option<bool>,
-        }
-        let Some(exit) = &record.exit_evidence else {
-            return Ok(false);
-        };
-        let evidence: DeliveryExit =
-            crate::db::decode(&self.artifact_bytes(record.run_id, exit, RECORD_LIMIT)?)?;
-        Ok(evidence.scope == Self::scope(record)
-            && evidence.termination == Some(Termination::Exit(0))
-            && !evidence.never_spawned
-            && evidence.stop_reason.is_none()
-            && !evidence.unresolved_cleanup
-            && evidence.cancel_delivered_before_exit != Some(true))
     }
 
     fn retry_terminal_effects(
@@ -821,16 +776,6 @@ impl RunStore {
                     ..
                 }
         ) {
-            if !self.delivery_applicable(record, attempt)? {
-                self.record_effect(
-                    record.attempt_id,
-                    record.generation,
-                    SettlementEffect::Delivery,
-                    EffectDisposition::Done,
-                    call,
-                )?;
-                return Ok(());
-            }
             let request = self.request(record.run_id, call)?;
             let task = request
                 .tasks
@@ -1354,18 +1299,7 @@ impl RunStore {
                         writer.worktree.display(),
                         last_failure.as_deref().unwrap_or("settlement retry limit")
                     );
-                    crate::artifacts::seal(
-                        attempt,
-                        "object-import-refused.json",
-                        &crate::db::bytes(&ObjectImportRefusal {
-                            schema_version: 1,
-                            scope: exit.scope,
-                            kind: "object_import_refusal".into(),
-                            worktree: writer.worktree.clone(),
-                            reason: reason.clone(),
-                        })?,
-                        RECORD_LIMIT,
-                    )?;
+                    seal_import_refusal(attempt, exit.scope, &writer.worktree, &reason)?;
                     decoded.outcome = Outcome::Failed;
                     decoded.reason = Some(reason);
                 }

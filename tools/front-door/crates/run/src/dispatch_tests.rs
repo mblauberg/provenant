@@ -3318,9 +3318,10 @@ fn a_busy_publication_lock_leaves_the_sealed_decision_to_replay() -> TestResult 
         observed: Some(route()),
         ..Fake::default()
     };
-    let held = store
-        .run_dir(run.run_id, false)?
-        .try_lock(std::ffi::OsStr::new("publication.lock"), LockMode::Exclusive)?;
+    let held = store.run_dir(run.run_id, false)?.try_lock(
+        std::ffi::OsStr::new("publication.lock"),
+        LockMode::Exclusive,
+    )?;
     let error = store
         .finish(id, &dir, &observed, &fake, &call)
         .expect_err("a held publication lock cannot commit");
