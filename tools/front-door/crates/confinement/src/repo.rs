@@ -50,6 +50,24 @@ pub enum RepoError {
     Fs(#[from] FsError),
 }
 
+impl RepoError {
+    pub(crate) fn variant(&self) -> &'static str {
+        match self {
+            Self::InvalidPath => "InvalidPath",
+            Self::InvalidRoot => "InvalidRoot",
+            Self::InvalidGitMarker => "InvalidGitMarker",
+            Self::InvalidRegistration => "InvalidRegistration",
+            Self::ForeignProject { .. } => "ForeignProject",
+            Self::InvalidGitDirectory => "InvalidGitDirectory",
+            Self::AlternateObjects => "AlternateObjects",
+            Self::IdentityChanged => "IdentityChanged",
+            Self::MetadataTooLarge => "MetadataTooLarge",
+            Self::Unprobed => "Unprobed",
+            Self::Fs(_) => "Fs",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RepoObjectFormat {
     Sha1,
@@ -251,10 +269,12 @@ pub struct VerifiedRepo {
 
 /// Digest of the repository's own config files, kept apart from the digest of
 /// the files they include so a probe can tell which of the two moved.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConfigDigest {
     base: [u8; 32],
     pub(crate) included: [u8; 32],
+    common_config: Option<[u8; 32]>,
+    config_head: Vec<u8>,
 }
 
 impl VerifiedRepo {
@@ -399,17 +419,22 @@ impl VerifiedRepo {
         E: From<RepoError>,
     {
         let mut repo = Self::open_structure(path, native_alternates).map_err(E::from)?;
-        let config_before = repo.configuration_digest().map_err(E::from)?;
+        let config_before = repo.configuration_digest(None).map_err(E::from)?;
         let data = probe(&repo)?;
         repo.probe_data = Some(data);
         // The probe records the digest of the included files it read; the
         // repository's own config files must not have changed meanwhile.
-        let config_after = repo.configuration_digest().map_err(E::from)?;
+        let config_after = repo
+            .configuration_digest(Some(&config_before.config_head))
+            .map_err(E::from)?;
         let included = repo
             .probe_data
             .as_ref()
             .map(|data| data.config_files_digest);
-        if config_before.base != config_after.base || included != Some(config_after.included) {
+        if config_before.base != config_after.base
+            || config_before.common_config != config_after.common_config
+            || included != Some(config_after.included)
+        {
             return Err(E::from(RepoError::IdentityChanged));
         }
         repo.config_digest = Some(config_after);
@@ -456,10 +481,19 @@ impl VerifiedRepo {
         self.probe_data.as_ref()
     }
 
-    fn configuration_digest(&self) -> Result<ConfigDigest, RepoError> {
+    fn configuration_digest(
+        &self,
+        verified_head: Option<&[u8]>,
+    ) -> Result<ConfigDigest, RepoError> {
         let mut digest = Sha256::new();
         for (marker, directory) in [(b'P', &self.private), (b'C', &self.common)] {
             for name in [OsStr::new("config"), OsStr::new("config.worktree")] {
+                if name == OsStr::new("config")
+                    && (marker == b'C'
+                        || self.private_identity.same_identity(&self.common_identity))
+                {
+                    continue;
+                }
                 digest.update([marker]);
                 digest.update(name.as_bytes());
                 match read_optional_bounded(directory, name, CONFIG_LIMIT)? {
@@ -475,9 +509,20 @@ impl VerifiedRepo {
         let (files, head_sensitive) = self.probe_data.as_ref().map_or((&[][..], false), |data| {
             (data.config_files.as_slice(), data.config_head_sensitive)
         });
+        let head = match verified_head {
+            Some(head) => head.to_vec(),
+            // A missing or malformed HEAD is reported by the caller's own HEAD
+            // read with its path; here it only means no branch is checked out.
+            None => read_optional_bounded(&self.private, OsStr::new("HEAD"), GITFILE_LIMIT)
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        };
         Ok(ConfigDigest {
+            config_head: head.clone(),
             base: digest.finalize().into(),
             included: self.included_digest(files, head_sensitive)?,
+            common_config: common_config_digest(&self.common, &head)?,
         })
     }
 
@@ -505,17 +550,37 @@ impl VerifiedRepo {
     /// configuration, and re-anchor the digest on it.
     pub(crate) fn set_probe_data(&mut self, data: RepoProbeData) -> Result<(), RepoError> {
         self.probe_data = Some(data);
-        self.config_digest = Some(self.configuration_digest()?);
+        self.config_digest = Some(self.configuration_digest(None)?);
         self.revalidate()
     }
 
     pub fn revalidate(&self) -> Result<(), RepoError> {
         let mut current = Self::open_structure(&self.root_path, self.native_alternates)?;
+        self.check_identity(&current)?;
         // The included files to digest are the ones this handle was probed on.
         current.probe_data = self.probe_data.clone();
-        let Some(config_digest) = self.config_digest else {
+        let Some(config_digest) = &self.config_digest else {
             return Err(RepoError::Unprobed);
         };
+        let current_config = current.configuration_digest(Some(&config_digest.config_head))?;
+        if config_digest.base != current_config.base
+            || config_digest.included != current_config.included
+            || config_digest.common_config != current_config.common_config
+        {
+            return Err(RepoError::IdentityChanged);
+        }
+        Ok(())
+    }
+
+    /// Check the held worktree's structural identity before a potentially slow
+    /// setup. This does not validate Git configuration and cannot authorise a
+    /// Git operation or replace the full revalidation at the point of use.
+    pub fn revalidate_identity(&self) -> Result<(), RepoError> {
+        let current = Self::open_structure(&self.root_path, self.native_alternates)?;
+        self.check_identity(&current)
+    }
+
+    fn check_identity(&self, current: &Self) -> Result<(), RepoError> {
         if !self.root_identity.same_identity(&current.root_identity)
             || !self
                 .private_identity
@@ -527,7 +592,6 @@ impl VerifiedRepo {
             || self.gitdir_backlink_bytes != current.gitdir_backlink_bytes
             || self.private_path != current.private_path
             || self.common_path != current.common_path
-            || config_digest != current.configuration_digest()?
         {
             return Err(RepoError::IdentityChanged);
         }
@@ -609,7 +673,7 @@ pub fn verify_worktree(
         return Err(RepoError::InvalidRegistration);
     }
     worktree.probe_data = repo.probe_data.clone();
-    worktree.config_digest = Some(worktree.configuration_digest()?);
+    worktree.config_digest = Some(worktree.configuration_digest(None)?);
     worktree.revalidate()?;
     Ok(VerifiedWorktree { repo: worktree })
 }
@@ -649,6 +713,80 @@ fn included_files_digest(files: &[PathBuf]) -> Result<[u8; 32], RepoError> {
         }
     }
     Ok(digest.finalize().into())
+}
+
+// Git parses the bounded snapshot; included files have their own digest.
+fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 32]>, RepoError> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let Some(bytes) = read_common_config(common)? else {
+        return Ok(None);
+    };
+    // Other branches' tracking keys are ignored. A checked-out branch keeps
+    // its own; a detached HEAD keeps none. A missing or malformed HEAD keeps
+    // every branch's keys, so a HEAD race cannot hide a tracking change; the
+    // writer's own HEAD read reports the damage with its path.
+    let line = head.strip_suffix(b"\n").unwrap_or_default();
+    let detached = matches!(line.len(), 40 | 64) && line.iter().all(u8::is_ascii_hexdigit);
+    let branch = line.strip_prefix(b"ref: refs/heads/").filter(|branch| {
+        std::str::from_utf8(branch).is_ok_and(|name| GitRefName::branch(name).is_ok())
+    });
+    let keep_all = branch.is_none() && !detached;
+    let git = provenant_os::git::git_executable().ok_or(RepoError::InvalidGitDirectory)?;
+    let argv = [
+        git.into_os_string(),
+        "config".into(),
+        "--file".into(),
+        "-".into(),
+        // Git refuses relative includes from stdin; included files have their
+        // own digest, so the snapshot is parsed without following them.
+        "--no-includes".into(),
+        "--null".into(),
+        "--list".into(),
+    ];
+    // Parsing needs no repository; running outside the worktree keeps Git's
+    // discovery from failing on the damaged metadata this check exists to report.
+    let mut options = ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(2));
+    options.stdin = Some(&bytes);
+    options.env = Some(&[]);
+    options.stdout = StreamPolicy::Capture {
+        limit: CONFIG_LIMIT as usize * 2,
+    };
+    options.stop_on_output_limit = true;
+    let output = SystemExecutor::new(1)
+        .and_then(|executor| executor.execute(options))
+        .map_err(|_| RepoError::InvalidGitDirectory)?;
+    if output.termination != Termination::Exit(0)
+        || output.timed_out
+        || output.stdout.truncated
+        || output.stdout.read_failed
+        || output.drain_truncated
+    {
+        return Err(RepoError::InvalidGitDirectory);
+    }
+    let mut digest = Sha256::new();
+    for entry in output
+        .stdout
+        .bytes
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let key = entry
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or_default();
+        let ignored = key
+            .strip_prefix(b"branch.")
+            .and_then(|rest| {
+                rest.strip_suffix(b".remote")
+                    .or_else(|| rest.strip_suffix(b".merge"))
+            })
+            .is_some_and(|name| !keep_all && Some(name) != branch);
+        if !ignored {
+            digest.update((entry.len() as u64).to_be_bytes());
+            digest.update(entry);
+        }
+    }
+    Ok(Some(digest.finalize().into()))
 }
 
 fn verify_git_directory(metadata: Metadata, owner: u32) -> Result<(), RepoError> {
@@ -695,17 +833,38 @@ fn read_optional_bounded(
 fn read_bounded(directory: &Directory, name: &OsStr, limit: u64) -> Result<Vec<u8>, RepoError> {
     crate::stable_read::read_regular(directory, name, limit)
         .map(|(bytes, _)| bytes)
-        .map_err(|error| match error {
-            crate::stable_read::ReadError::Unsupported => RepoError::InvalidGitDirectory,
-            crate::stable_read::ReadError::TooLarge => RepoError::MetadataTooLarge,
-            crate::stable_read::ReadError::Changed => RepoError::IdentityChanged,
-            crate::stable_read::ReadError::Filesystem(error) => RepoError::Fs(error),
-            crate::stable_read::ReadError::Io(source) => RepoError::Fs(FsError::Io {
-                operation: "read Git metadata",
-                path: PathBuf::from(name),
-                source,
-            }),
-        })
+        .map_err(|error| git_read_error(error, name))
+}
+
+fn git_read_error(error: crate::stable_read::ReadError, name: &OsStr) -> RepoError {
+    match error {
+        crate::stable_read::ReadError::Unsupported => RepoError::InvalidGitDirectory,
+        crate::stable_read::ReadError::TooLarge => RepoError::MetadataTooLarge,
+        crate::stable_read::ReadError::Changed => RepoError::IdentityChanged,
+        crate::stable_read::ReadError::Filesystem(error) => RepoError::Fs(error),
+        crate::stable_read::ReadError::Io(source) => RepoError::Fs(FsError::Io {
+            operation: "read Git metadata",
+            path: PathBuf::from(name),
+            source,
+        }),
+    }
+}
+
+fn read_common_config(directory: &Directory) -> Result<Option<Vec<u8>>, RepoError> {
+    let name = OsStr::new("config");
+    // Git replaces this shared file atomically. A rename during a stable read
+    // is transient; still compare the eventual bytes against the snapshot.
+    for attempt in 0..3 {
+        match crate::stable_read::read_regular(directory, name, CONFIG_LIMIT) {
+            Ok((bytes, _)) => return Ok(Some(bytes)),
+            Err(crate::stable_read::ReadError::Changed) if attempt < 2 => continue,
+            Err(crate::stable_read::ReadError::Filesystem(error)) if error.is_not_found() => {
+                return Ok(None);
+            }
+            Err(error) => return Err(git_read_error(error, name)),
+        }
+    }
+    unreachable!("the last stable read always returns")
 }
 
 /// A Git path file contains exactly one `gitdir: ` line, or a one-line path in
@@ -890,6 +1049,7 @@ mod tests {
     fn verify_worktree_refuses_the_primary_checkout() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join(".git")).unwrap();
+        fs::write(temp.path().join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
         let repo = VerifiedRepo::open(temp.path(), |_| {
             Ok::<_, RepoError>(RepoProbeData::without_includes(
                 RepoObjectFormat::Sha1,
@@ -923,11 +1083,12 @@ mod tests {
     }
 
     #[test]
-    fn repo_revalidation_detects_config_changes_without_a_second_git_probe() {
+    fn repo_revalidation_detects_config_changes() {
         let temp = tempfile::tempdir().unwrap();
         let git = temp.path().join(".git");
         fs::create_dir(&git).unwrap();
         fs::write(git.join("config"), b"[core]\nrepositoryformatversion = 0\n").unwrap();
+        fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
         let repo = VerifiedRepo::open(temp.path(), |_| {
             Ok::<_, RepoError>(RepoProbeData::without_includes(
                 RepoObjectFormat::Sha1,
@@ -943,5 +1104,129 @@ mod tests {
         .unwrap();
 
         assert!(matches!(repo.revalidate(), Err(RepoError::IdentityChanged)));
+    }
+
+    #[test]
+    fn repo_revalidation_accepts_a_tracked_sibling_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let git = |args: &[&str]| {
+            let result = provenant_os::fixture::git_command()
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ]);
+        git(&["remote", "add", "origin", "https://example.invalid/repo"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "first",
+            temp.path().join("first").to_str().unwrap(),
+            "HEAD",
+        ]);
+        let repo = VerifiedRepo::open(&root, |_| {
+            Ok::<_, RepoError>(RepoProbeData::without_includes(
+                RepoObjectFormat::Sha1,
+                String::new(),
+                Vec::new(),
+            ))
+        })
+        .unwrap();
+        let tree = verify_worktree(&repo, temp.path().join("first")).unwrap();
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--track",
+            "-b",
+            "second",
+            temp.path().join("second").to_str().unwrap(),
+            "origin/main",
+        ]);
+        assert!(tree.repo().revalidate().is_ok());
+        git(&["config", "branch.third.remote", "origin"]);
+        assert!(tree.repo().revalidate().is_ok());
+        let partial = VerifiedRepo::open(&root, |_| {
+            Ok::<_, RepoError>(RepoProbeData::without_includes(
+                RepoObjectFormat::Sha1,
+                String::new(),
+                Vec::new(),
+            ))
+        })
+        .unwrap();
+        let partial_tree = verify_worktree(&partial, temp.path().join("first")).unwrap();
+        git(&["config", "branch.third.merge", "refs/heads/main"]);
+        assert!(partial_tree.repo().revalidate().is_ok());
+        assert!(tree.repo().revalidate().is_ok());
+        let opened = VerifiedRepo::open(&root, |_| {
+            git(&[
+                "worktree",
+                "add",
+                "-q",
+                "--track",
+                "-b",
+                "fourth",
+                temp.path().join("fourth").to_str().unwrap(),
+                "origin/main",
+            ]);
+            Ok::<_, RepoError>(RepoProbeData::without_includes(
+                RepoObjectFormat::Sha1,
+                String::new(),
+                Vec::new(),
+            ))
+        });
+        assert!(opened.is_ok());
+        let config_path = root.join(".git/config");
+        let config = fs::read(&config_path).unwrap();
+        // Git decodes quoted subsection names before the comparison.
+        let mut escaped = config.clone();
+        escaped.extend_from_slice(
+            b"[branch \"sibling\\\"quoted\"]\n remote = origin\n merge = refs/heads/main\n",
+        );
+        fs::write(&config_path, &escaped).unwrap();
+        assert!(tree.repo().revalidate().is_ok());
+        escaped.extend_from_slice(b"[branch \"first\"]\n remote = elsewhere\n");
+        fs::write(&config_path, &escaped).unwrap();
+        assert!(tree.repo().revalidate().is_err());
+        fs::write(&config_path, b"[broken\n").unwrap();
+        assert!(tree.repo().revalidate().is_err());
+        fs::write(&config_path, &config).unwrap();
+        let mut poisoned = config.clone();
+        poisoned.extend_from_slice(b"[core]\n\thooksPath = /tmp/poison\n");
+        fs::write(&config_path, poisoned).unwrap();
+        assert!(matches!(
+            tree.repo().revalidate(),
+            Err(RepoError::IdentityChanged)
+        ));
+        fs::write(&config_path, config).unwrap();
+        let marker = temp.path().join("first/.git");
+        let marker_bytes = fs::read(&marker).unwrap();
+        fs::write(&marker, b"gitdir: /tmp/not-the-original\n").unwrap();
+        assert!(tree.repo().revalidate().is_err());
+        assert!(tree.repo().revalidate_identity().is_err());
+        fs::write(&marker, marker_bytes).unwrap();
+        fs::rename(temp.path().join("first"), temp.path().join("moved")).unwrap();
+        assert!(tree.repo().revalidate().is_err());
     }
 }

@@ -566,6 +566,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 "route",
                 "model",
                 "effort",
+                "mode",
                 "network",
                 "worktree",
                 "branch",
@@ -1068,6 +1069,12 @@ mod tests {
     }
     #[test]
     fn core_path_help_and_defaults() {
+        for command in ["run", "dispatch"] {
+            let ParseOutcome::Help { text, .. } = parsed(&[command, "--help"]) else {
+                panic!("{command} help");
+            };
+            assert!(text.contains("--mode"), "{text}");
+        }
         for words in [&[][..], &["help"][..]] {
             let ParseOutcome::Help { text, .. } = parsed(words) else {
                 panic!("core help");
