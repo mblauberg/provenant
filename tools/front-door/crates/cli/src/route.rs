@@ -2066,9 +2066,13 @@ pub fn run(
                         .iter()
                         .map(|override_| format!("pacing override {override_:?}")),
                 );
-                lines.extend(list.model_exclusions.iter().map(|row| {
-                    OverrideRow::model_exclusion(row, at.expect("clock available")).line()
-                }));
+                if let Some(now) = at {
+                    lines.extend(
+                        list.model_exclusions
+                            .iter()
+                            .map(|row| OverrideRow::model_exclusion(row, now).line()),
+                    );
+                }
                 lines.extend(list.pools.iter().map(|(name, members)| {
                     let models = members
                         .iter()

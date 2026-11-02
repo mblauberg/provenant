@@ -2185,6 +2185,90 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
+## `provenant route exclude`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Manage persistent exact-model exclusions from pools",
+  "groups": [
+    {
+      "arguments": [],
+      "multiple": true,
+      "name": "RouteExclude",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant route exclude add`
+
+| Argument | Contract |
+|---|---|
+| `model` | `{"description": "Exact model in ADAPTER/ID form", "name": "model", "positional": true, "required": true}` |
+| `--until` | `{"description": "Future RFC 3339 timestamp or duration, such as 2h", "name": "until"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Exclude a model until removed or expired",
+  "groups": [
+    {
+      "arguments": [
+        "model",
+        "until"
+      ],
+      "multiple": true,
+      "name": "ExcludeAdd",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant route exclude remove`
+
+| Argument | Contract |
+|---|---|
+| `model` | `{"description": "Exact model in ADAPTER/ID form", "name": "model", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Remove an exact-model exclusion",
+  "groups": [
+    {
+      "arguments": [
+        "model"
+      ],
+      "multiple": true,
+      "name": "ExcludeRemove",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant route exclude list`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "List exact-model exclusions"
+}
+```
+
 ## `provenant preset`
 
 | Argument | Contract |
