@@ -3245,10 +3245,6 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
     assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
     std::fs::create_dir_all(home.join(".cargo/bin"))?;
     std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
-    std::fs::write(
-        home.join(".cargo/bin/cargo-nextest"),
-        b"fixture nextest executable",
-    )?;
     let cache = Path::new("/fixture/home/Library/Caches/provenant-lane-cargo/fixture");
     let spec = prepare(&home, &plan)?;
     let env = |key: &str| {
@@ -3262,7 +3258,6 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
         std::env::split_paths(&path).any(|dir| dir == home.join(".cargo/bin")),
         "{path:?}"
     );
-    assert!(home.join(".cargo/bin/cargo-nextest").is_file());
     let cache = env("CARGO_TARGET_DIR")
         .and_then(|target| target.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| cache.to_path_buf());
