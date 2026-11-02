@@ -25,7 +25,6 @@ pub fn writer_fixture_plan(
             private_state: &paths.provider_state,
             assets,
             prompt_file: None,
-            temporary_alias: paths.temporary_alias.as_deref(),
         },
         Some(writer),
         &run::LaneAccess::default(),

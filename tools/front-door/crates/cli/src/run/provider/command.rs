@@ -76,7 +76,6 @@ pub(super) fn prepare_command(
             private_state: &paths.provider_state,
             assets,
             prompt_file: None,
-            temporary_alias: paths.temporary_alias.as_deref(),
         },
         None,
         &access,

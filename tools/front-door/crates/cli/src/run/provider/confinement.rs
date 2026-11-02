@@ -7,9 +7,6 @@ pub(super) struct ConfinementRoots<'a> {
     pub(super) private_state: &'a Path,
     pub(super) assets: &'a Path,
     pub(super) prompt_file: Option<&'a Path>,
-    /// The short alias of the attempt's `tmp`. Its link is readable so the lane
-    /// can resolve it; every write and execute grant stays on the real path.
-    pub(super) temporary_alias: Option<&'a Path>,
 }
 
 /// Point the lane's temporary-directory variables at the short alias of
@@ -174,10 +171,6 @@ pub(super) fn confinement_request(
                 )
                 .chain(access.read_roots.iter().map(|path| grant(path)))
                 .chain(roots.prompt_file.map(|path| PathGrant {
-                    path: path.to_owned(),
-                    scope: PathScope::Exact,
-                }))
-                .chain(roots.temporary_alias.map(|path| PathGrant {
                     path: path.to_owned(),
                     scope: PathScope::Exact,
                 }))
