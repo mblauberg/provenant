@@ -884,3 +884,84 @@ fn fragment_cannot_widen_read_roots_source_or_role() {
     let run = advance(&doc, &mut fixture_owner(&[&result(vec![same]), "done", "done"]), &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.checkpoint.expansions.len(), 1);
 }
+
+fn two_instances(first: Value, second: Value) -> String {
+    format!(
+        "```fragment\n{}\n```",
+        json!({"schema_version":1,"nodes":[],"patterns":[first, second]})
+    )
+}
+
+#[test]
+fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
+    let mut doc = pattern_planner(8);
+    doc.nodes[0].plan.as_mut().unwrap().disjoint_waves = true;
+    let one = json!({"id":"one", "pattern":"generator", "parameters":{"scope":["src/a"]}});
+    let clash = json!({"id":"two", "pattern":"generator", "parameters":{"scope":["src/a/b"]}});
+    let mut owner = fixture_owner(&[&two_instances(one.clone(), clash.clone())]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert!(run.checkpoint.expansions.is_empty());
+    assert_eq!(owner.calls.len(), 1);
+
+    let disjoint = json!({"id":"two", "pattern":"generator", "parameters":{"scope":["src/b"]}});
+    let mut ordered = clash.clone();
+    ordered["depends_on"] = json!(["one"]);
+    for second in [disjoint, ordered] {
+        let results = ["implemented", "reviewed", "implemented", "reviewed", "checked"];
+        let mut owner = fixture_owner(&[&[two_instances(one.clone(), second).as_str()][..], &results[..]].concat());
+        let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+        assert_eq!(run.checkpoint.expansions[0].patterns.len(), 2);
+    }
+
+    // Without the switch, overlapping instances keep sharing one checkout.
+    let mut plain = pattern_planner(8);
+    plain.nodes[0].plan.as_mut().unwrap().disjoint_waves = false;
+    let results = ["implemented", "reviewed", "implemented", "reviewed", "checked"];
+    let mut owner = fixture_owner(&[&[two_instances(one, clash).as_str()][..], &results[..]].concat());
+    let run = advance(&plain, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+}
+
+#[test]
+fn patterns_only_plans_refuse_raw_fragment_nodes() {
+    let mut doc = pattern_planner(8);
+    doc.nodes[0].plan.as_mut().unwrap().patterns_only = true;
+    let raw = format!(
+        "```fragment\n{}\n```",
+        json!({"schema_version":1,"nodes":[slice("a", &["src"])],"patterns":[]})
+    );
+    let mut owner = fixture_owner(&[&raw]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+}
+
+#[test]
+fn pattern_routes_may_vary_only_over_a_closed_list() {
+    let mut doc = pattern_planner(4);
+    {
+        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+        pattern.nodes[0]["route"] = json!({"alias":"${label}"});
+    }
+    assert!(plans::validate_spec(&doc.nodes[0]).is_err(), "free text names any route");
+    {
+        let parameter = doc.nodes[0].plan.as_mut().unwrap().patterns[0]
+            .parameters
+            .get_mut("label")
+            .unwrap();
+        parameter.default = Some(json!("junior"));
+        parameter.allowed = vec![json!("junior"), json!("senior")];
+    }
+    assert!(plans::validate_spec(&doc.nodes[0]).is_ok());
+    let outside = json!({"id":"impl", "pattern":"generator", "parameters":{"label":"principal"}});
+    let mut owner = fixture_owner(&[&pattern_result(outside)]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    let inside = json!({"id":"impl", "pattern":"generator", "parameters":{"label":"senior"}});
+    let mut owner = fixture_owner(&[&pattern_result(inside), "implemented", "reviewed", "checked"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+}

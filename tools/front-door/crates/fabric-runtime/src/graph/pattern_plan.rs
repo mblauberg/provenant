@@ -94,7 +94,6 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
         ) {
             return Err("plan pattern node");
         }
-        let mut sensitive = Vec::new();
         for key in [
             "kind",
             "access",
@@ -104,12 +103,23 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
             "route",
             "routes",
         ] {
+            let mut named = Vec::new();
             if let Some(value) = node.get(key) {
-                placeholders(value, &mut sensitive)?;
+                placeholders(value, &mut named)?;
             }
-        }
-        if !sensitive.is_empty() {
-            return Err("plan pattern cannot vary fixed authority fields by parameter");
+            // A route may pick from a closed list the pattern fixes, so every
+            // value the fragment can choose is one the catalogue already names.
+            let closed = matches!(key, "route" | "routes")
+                && named.iter().all(|name| {
+                    pattern.parameters.get(name).is_some_and(|parameter| {
+                        parameter.kind == PatternParameterKind::String
+                            && !parameter.allowed.is_empty()
+                            && parameter.allowed.iter().all(Value::is_string)
+                    })
+                });
+            if !named.is_empty() && !closed {
+                return Err("plan pattern cannot vary fixed authority fields by parameter");
+            }
         }
         let mut names = Vec::new();
         placeholders(node, &mut names)?;
