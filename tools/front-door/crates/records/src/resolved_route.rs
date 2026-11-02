@@ -167,3 +167,16 @@ pub enum RouteExclusionReason {
     /// The account's persisted quota evidence is malformed, so only that account is excluded.
     InvalidAccountEvidence,
 }
+impl RouteExclusionReason {
+    /// Whether persisted account evidence (mismatch, refusal or malformed
+    /// records) excluded the route, as opposed to readiness, access or pacing.
+    pub fn is_account_block(&self) -> bool {
+        matches!(
+            self,
+            Self::AccountMismatch
+                | Self::FreeTierRefused
+                | Self::ProviderRefused
+                | Self::InvalidAccountEvidence
+        )
+    }
+}

@@ -1,6 +1,6 @@
 //! Admission checks use validated evidence, including persisted provider refusals.
 use crate::*;
-use provenant_records::{ExtraFields, ResolvedRoute, RouteReadiness};
+use provenant_records::{ExtraFields, ResolvedRoute, RouteExclusionReason, RouteReadiness};
 use serde::{Deserialize, Serialize};
 
 /// A newer reading clears a refusal only below this use (95%).
@@ -130,6 +130,21 @@ impl AccountBlock {
             }
             Self::ScopedRefusal => "scoped provider refusal",
         }
+    }
+    /// The route exclusion reason this block surfaces as; the one mapping
+    /// resolution and the settlement alternates share.
+    pub fn exclusion_reason(self) -> RouteExclusionReason {
+        match self {
+            Self::Mismatch => RouteExclusionReason::AccountMismatch,
+            Self::FreeTierRefusal => RouteExclusionReason::FreeTierRefused,
+            Self::ScopedRefusal => RouteExclusionReason::ProviderRefused,
+        }
+    }
+    /// The block a reason came from, when it is one (not invalid evidence).
+    pub fn from_exclusion_reason(reason: &RouteExclusionReason) -> Option<Self> {
+        [Self::Mismatch, Self::FreeTierRefusal, Self::ScopedRefusal]
+            .into_iter()
+            .find(|block| block.exclusion_reason() == *reason)
     }
 }
 

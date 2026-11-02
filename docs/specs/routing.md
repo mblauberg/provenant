@@ -353,7 +353,7 @@ older readers that reject unknown variants cannot read records carrying them.
   `::independent_pool_reset_and_refusal_scope`;
   `tests/dispatch_provider.rs::codex_capacity_settles_without_quota_refusal`;
   `crates/routing/src/tests.rs::spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale`;
-  `crates/quota/src/admission.rs::tests::account_block_types_mismatch_free_and_scoped_refusals`;
+  `crates/quota/src/admission.rs::admission_tests::account_block_types_mismatch_free_and_scoped_refusals`;
   `crates/routing/src/tests.rs::persisted_mismatch_excludes_account_and_selects_another`;
   `::invalid_account_evidence_excludes_only_that_account`;
   `::free_pool_refusal_excludes_the_account_for_every_free_model`;

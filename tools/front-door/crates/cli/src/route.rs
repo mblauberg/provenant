@@ -961,21 +961,16 @@ pub(crate) fn resolve_dispatch(
         &excluded,
     );
     // The unused families have no member to take: none is eligible, or the one
-    // chosen is spent or refused. An unavailable one is not spent: stale
-    // availability stays selected rather than relaxing to a used family.
+    // chosen is blocked by persisted account evidence (mismatch or refusal). A
+    // snapshot-exhausted or unavailable one is not: it stays selected rather
+    // than relaxing to a used family, as it did before account evidence.
     let exhausted = match &selected {
         Err(EdgeError::Routing(error)) => error.code() == "no_eligible_pool_member",
         Ok(route) => {
             !excluded.is_empty()
                 && matches!(
-                    route.readiness,
-                    RouteReadiness::Unavailable {
-                        reason: provenant_records::RouteExclusionReason::Exhausted
-                            | provenant_records::RouteExclusionReason::FreeTierRefused
-                            | provenant_records::RouteExclusionReason::ProviderRefused
-                            | provenant_records::RouteExclusionReason::AccountMismatch,
-                        ..
-                    }
+                    &route.readiness,
+                    RouteReadiness::Unavailable { reason, .. } if reason.is_account_block()
                 )
         }
         Err(_) => false,
@@ -1038,6 +1033,9 @@ fn resolve_dispatch_excluding(
         |context, records, policies| {
             let mut excluded_members = initial_exclusions.to_vec();
             let mut refusals = Vec::new();
+            // Resolution already skips persisted mismatch and refusals, so this
+            // narrowing retry now mostly catches admission-only failures (a fresh
+            // AuthRequired, an exhausted allowance).
             let mut refused_accounts: Vec<(String, String)> = Vec::new();
             let mut resolved = provenant_routing::resolve_for_account_with_seed_excluding(
                 request,

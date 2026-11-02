@@ -1053,20 +1053,15 @@ fn account_reason<'q>(
 /// How a route's unavailability reads to a person. Account evidence carries the
 /// quota repair text, so a refused or mismatched account says what to do next.
 pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
-    match reason {
-        RouteExclusionReason::AccountMismatch => provenant_quota::AccountBlock::Mismatch.repair(),
-        RouteExclusionReason::FreeTierRefused => {
-            provenant_quota::AccountBlock::FreeTierRefusal.repair()
-        }
-        RouteExclusionReason::ProviderRefused => {
-            provenant_quota::AccountBlock::ScopedRefusal.repair()
-        }
-        RouteExclusionReason::InvalidAccountEvidence => {
-            "invalid persisted account evidence; repair or re-register the account"
-        }
-        other => return format!("{other:?}"),
+    if let Some(block) = provenant_quota::AccountBlock::from_exclusion_reason(reason) {
+        return block.repair().to_owned();
     }
-    .to_owned()
+    match reason {
+        RouteExclusionReason::InvalidAccountEvidence => {
+            "invalid persisted account evidence; repair or re-register the account".to_owned()
+        }
+        other => format!("{other:?}"),
+    }
 }
 /// Persisted mismatch or refusal evidence, assessed by the same quota function
 /// that admission rechecks before launch. Invalid evidence excludes only the
@@ -1085,11 +1080,7 @@ fn account_block_reason(
     };
     match admission.account_block(model.adapter(), account_key, model.model()) {
         Err(_) => Some(RouteExclusionReason::InvalidAccountEvidence),
-        Ok(block) => block.map(|block| match block {
-            provenant_quota::AccountBlock::Mismatch => RouteExclusionReason::AccountMismatch,
-            provenant_quota::AccountBlock::FreeTierRefusal => RouteExclusionReason::FreeTierRefused,
-            provenant_quota::AccountBlock::ScopedRefusal => RouteExclusionReason::ProviderRefused,
-        }),
+        Ok(block) => block.map(provenant_quota::AccountBlock::exclusion_reason),
     }
 }
 /// The account's latest reading for this model, only a fresh one when
@@ -1818,6 +1809,11 @@ fn classify_pool(
                             RouteExclusionReason::Disabled => classified
                                 .exclusions
                                 .push(format!("{}: disabled", member.model.as_str())),
+                            // Refusals expire and so are recoverable; a mismatch or
+                            // invalid evidence needs repair, so it ranks with the
+                            // other unavailable members. The CLI's relaxation set
+                            // (`is_account_block`) is a different question: whether
+                            // the chosen route can be used at all.
                             RouteExclusionReason::StaleAvailability
                             | RouteExclusionReason::AuthRequired
                             | RouteExclusionReason::Exhausted
