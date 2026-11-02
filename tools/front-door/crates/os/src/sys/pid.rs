@@ -50,7 +50,7 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
     let mut snapshot = OccupancySnapshot::default();
     let mut complete = true;
     let proc = std::path::PathBuf::from(format!("/proc/{pid}"));
-    let mut record = |label: i64, link: &std::path::Path, snapshot: &mut OccupancySnapshot| {
+    let record = |label: i64, link: &std::path::Path, snapshot: &mut OccupancySnapshot| {
         let target = std::fs::read_link(link).ok();
         let identity = std::fs::metadata(link).ok();
         let Some(target) = target else { return false };
@@ -1174,6 +1174,65 @@ fn darwin_cwd(pid: i32) -> Result<CwdObservation, PidError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    struct Reaped(std::process::Child);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_occupancy_reports_image_and_open_file_with_identity_completeness() {
+        // A single-threaded child keeps its descriptor table still, so the
+        // two identity snapshots can agree. spawn returns after exec succeeds.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let child = Reaped(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::fs::File::open(file.path()).unwrap())
+                .spawn()
+                .unwrap(),
+        );
+        let observation = occupancy(child.0.id() as i32);
+        let paths: Vec<_> = observation
+            .paths
+            .iter()
+            .filter_map(|path| std::fs::canonicalize(path).ok())
+            .collect();
+        assert!(
+            paths.contains(&std::fs::canonicalize(file.path()).unwrap()),
+            "{observation:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.file_name().is_some_and(|name| name == "sleep")),
+            "{observation:?}"
+        );
+        assert!(observation.complete, "{observation:?}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_occupancy_never_proves_an_unqueryable_process_empty() {
+        for pid in [0, -1, i32::MAX] {
+            let observation = occupancy(pid);
+            assert!(
+                !observation.complete && observation.paths.is_empty(),
+                "{pid}"
+            );
+        }
+        // A reaped pid has no listing to prove empty.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id() as i32;
+        child.wait().unwrap();
+        assert!(!occupancy(pid).complete);
+    }
+
     use super::*;
 
     #[test]
