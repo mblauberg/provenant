@@ -4580,7 +4580,7 @@ fn exclusions_that_empty_a_pool_are_named_and_pins_ignore_them()
         rule(ExclusionSelector::Provider("codex".into())),
     ];
     let mut pin = request("claude/test")?;
-    pin.fallback = Fallback::Models(vec![ModelId::parse("codex/test")?]);
+    pin.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("codex/test")?])?);
     let pinned = resolve_for_account_with_seed_excluding(
         &pin,
         &ctx,
@@ -4590,9 +4590,11 @@ fn exclusions_that_empty_a_pool_are_named_and_pins_ignore_them()
         &[],
         &account_rules,
     )?;
-    assert_eq!(pinned.account_key.as_deref(), Some("claude-key"));
-    assert!(matches!(pinned.readiness, RouteReadiness::Ready { .. }));
-    assert_eq!(pinned.alternatives.len(), 1);
+    let plain =
+        resolve_for_account_with_seed_excluding(&pin, &ctx, None, "exclusion", 0, &[], &[])?;
+    assert_eq!(pinned.account_key, plain.account_key);
+    assert_eq!(pinned.readiness, plain.readiness);
+    assert_eq!(pinned.alternatives.as_slice().len(), 1);
     Ok(())
 }
 
@@ -4605,12 +4607,12 @@ fn named_route_fallback_keeps_to_the_exclusions_of_its_pool()
     ctx.availability = &records;
     let mut query = request("claude/test")?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
-    query.fallback = Fallback::Models(vec![ModelId::parse("codex/test")?]);
+    query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("codex/test")?])?);
     let none = resolve_for_account_with_seed_excluding(&query, &ctx, None, "fb", 0, &[], &[])?;
-    assert_eq!(none.alternatives.len(), 1);
+    assert_eq!(none.alternatives.as_slice().len(), 1);
     let rules = [rule(ExclusionSelector::Provider("codex".into()))];
     let route = resolve_for_account_with_seed_excluding(&query, &ctx, None, "fb", 0, &[], &rules)?;
-    assert_eq!(route.alternatives.len(), 0);
+    assert_eq!(route.alternatives.as_slice().len(), 0);
     // A persistent model exclusion filters the fallback too.
     config.model_exclusions.push(ModelExclusion {
         model: ModelId::parse("codex/test")?,
@@ -4619,12 +4621,12 @@ fn named_route_fallback_keeps_to_the_exclusions_of_its_pool()
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.availability = &records;
     let route = resolve_for_account_with_seed_excluding(&query, &ctx, None, "fb", 0, &[], &[])?;
-    assert_eq!(route.alternatives.len(), 0);
+    assert_eq!(route.alternatives.as_slice().len(), 0);
     // The same fallback on a pinned model is left alone.
     let mut pin = request("claude/test")?;
-    pin.fallback = Fallback::Models(vec![ModelId::parse("codex/test")?]);
+    pin.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("codex/test")?])?);
     let route = resolve_for_account_with_seed_excluding(&pin, &ctx, None, "fb", 0, &[], &rules)?;
-    assert_eq!(route.alternatives.len(), 1);
+    assert_eq!(route.alternatives.as_slice().len(), 1);
     Ok(())
 }
 
@@ -4673,19 +4675,19 @@ fn an_excluded_account_is_named_when_another_account_cannot_serve_the_model()
 #[test]
 fn a_single_model_route_honours_exclusions_unlike_a_pin() -> Result<(), Box<dyn std::error::Error>>
 {
-    let catalogue = Catalogue::bundled()?;
+    let (catalogue, records) = exclusion_fixture()?;
+    let claude = catalogue.pools["trial"][0].model.clone();
     let mut config = RoutingConfig::default();
     config.routes.insert(
         "solo".into(),
         NamedRoute {
-            model: ModelId::parse("claude/test")?,
+            model: claude.clone(),
             effort: None,
         },
     );
-    let (_, records) = exclusion_fixture()?;
     let mut ctx = context(&catalogue, &config, now()?);
     ctx.availability = &records;
-    let mut query = request("claude/test")?;
+    let mut query = request(claude.as_str())?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("solo")?);
     let rules = [rule(ExclusionSelector::Provider("claude".into()))];
     let error = resolve_for_account_with_seed_excluding(&query, &ctx, None, "solo", 0, &[], &rules)
@@ -4699,7 +4701,7 @@ fn a_single_model_route_honours_exclusions_unlike_a_pin() -> Result<(), Box<dyn 
     );
     assert!(
         resolve_for_account_with_seed_excluding(
-            &request("claude/test")?,
+            &request(claude.as_str())?,
             &ctx,
             None,
             "s",
