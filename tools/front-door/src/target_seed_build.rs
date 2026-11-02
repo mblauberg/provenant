@@ -540,7 +540,7 @@ mod tests {
         let failed = refresh_with(state.path(), "aaa", |_| {
             Err(io::Error::other("build failed").into())
         });
-        assert!(failed.is_err());
+        assert!(failed.is_err(), "{failed:?}");
         assert_eq!(newest_generation_commit(state.path()), None);
         // The failed commit is backed off; a newer commit builds again.
         assert_eq!(
