@@ -300,10 +300,16 @@ fn append(document: &mut GraphDocument, expansion: &Expansion) {
         .and_then(|n| n.round.clone());
     // Retain the original dependency for selected upstream outputs, and wait
     // for the entire fragment before admitting any of its consumers.
+    // A consumer that read the planner's result also reads what the fragment's
+    // pattern instances export, as it would read the static composite.
+    let exported = fragment_exports(document, expansion);
     for node in &mut document.nodes {
         if node.dependencies().any(|name| name == &expansion.source) {
             node.after_expansion
                 .extend(expansion.nodes.iter().map(|n| n.id.clone()));
+            if !expansion.continuation {
+                wire_exports(node, &expansion.source, &exported);
+            }
             if expansion.continuation {
                 if let Some(composite) = &mut node.composite {
                     for export in &mut composite.exports {
@@ -333,6 +339,62 @@ fn append(document: &mut GraphDocument, expansion: &Expansion) {
             });
             child
         }));
+}
+
+/// The flat nodes and outputs that a fragment's pattern instances export, in
+/// instantiation order. Instance IDs are already namespaced by the planner.
+fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<GraphInput> {
+    let Some(spec) = document
+        .nodes
+        .iter()
+        .find(|n| n.id == expansion.source)
+        .and_then(|n| n.plan.as_ref())
+    else {
+        return Vec::new();
+    };
+    expansion
+        .patterns
+        .iter()
+        .filter_map(|instance| {
+            let pattern = spec.patterns.iter().find(|p| p.name == instance.name)?;
+            Some(pattern.exports.iter().map(move |export| GraphInput {
+                extra: Default::default(),
+                node: format!("{}--{}", instance.id, export.node),
+                outputs: export.outputs.clone(),
+            }))
+        })
+        .flatten()
+        .collect()
+}
+
+/// Add the exported nodes a consumer asked of the planner, keeping only the
+/// outputs it selected. The planner's own input stays, for its rationale.
+fn wire_exports(node: &mut GraphNode, source: &str, exported: &[GraphInput]) {
+    let wanted: Vec<_> = node
+        .inputs
+        .iter()
+        .filter(|input| input.node == source)
+        .flat_map(|input| input.outputs.iter().copied())
+        .collect();
+    for export in exported {
+        let outputs: Vec<_> = export
+            .outputs
+            .iter()
+            .copied()
+            .filter(|output| wanted.contains(output))
+            .collect();
+        if outputs.is_empty() || node.inputs.iter().any(|input| input.node == export.node) {
+            continue;
+        }
+        node.inputs.push(GraphInput {
+            extra: Default::default(),
+            node: export.node.clone(),
+            outputs,
+        });
+        if !node.depends_on.contains(&export.node) {
+            node.depends_on.push(export.node.clone());
+        }
+    }
 }
 
 fn valid_scope(scope: &str) -> bool {

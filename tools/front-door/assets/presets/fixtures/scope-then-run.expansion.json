@@ -536,6 +536,7 @@
       "pattern.select_when": "bundled",
       "pattern.summary": "bundled",
       "pattern.tags": "bundled",
+      "plan.after": "bundled",
       "plan.explicit": "bundled",
       "plan.guidance": "bundled",
       "plan.patterns": "bundled",

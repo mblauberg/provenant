@@ -19,7 +19,10 @@ tags = ["research", "write", "review"]
 # instantiates only these patterns; the scope and run stages still follow.
 replaces = "scout"
 explicit = ["width"]
-guidance = """Decide whether to scout at all: when the brief and the spec already answer what the scope stage needs, instantiate no-scout once and say why. Otherwise choose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question."""
+# The static scout stage reconciles its scouts in a synthesis; the planned one
+# does it here, ahead of scoping.
+after = [{ id = "synthesis", role = "plan.research" }]
+guidance = """Decide whether to scout at all: when the brief and the spec already answer what the scope stage needs, instantiate no-scout once and say why. Otherwise choose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and, when the catalogue offers one, an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question."""
 
 [[plan.patterns]]
 name = "scout"
@@ -34,6 +37,7 @@ route = { type = "string", default = "junior", enum = ["junior", "senior", "prin
 
 [[plan.patterns]]
 name = "external-scout"
+enabled_by = "external"
 exports = [{ node = "scout", outputs = ["result", "findings"] }]
 nodes = [
   { id = "scout", role = "scout.external", brief = "Your question: ${question}", acceptance_checks = ["Answer the question from primary sources", "Give each source with its URL and date"] },

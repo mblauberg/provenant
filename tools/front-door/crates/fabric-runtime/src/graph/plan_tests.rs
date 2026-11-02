@@ -1132,6 +1132,15 @@ fn planned_scout_swarm_expands_scouts_with_a_question_and_a_route() {
     assert_eq!(recorded, ["scout", "scout", "external-scout"]);
     assert_eq!(expansion.patterns[1].parameters["route"], "senior");
     assert_eq!(expansion.patterns[0].parameters["route"], "junior");
+    // The synthesis reads each scout's evidence as well as the planner's text.
+    let expanded = plans::expand(&doc, &[], &run.checkpoint.expansions, &plans::generous()).unwrap();
+    let synthesis = expanded.nodes.iter().find(|n| n.id == "synthesis").unwrap();
+    let inputs: Vec<_> = synthesis.inputs.iter().map(|i| i.node.as_str()).collect();
+    assert_eq!(inputs, ["plan", "plan--a--scout", "plan--b--scout", "plan--web--scout"]);
+    assert!(synthesis.depends_on.contains(&"plan--a--scout".to_owned()));
+    // The scouts keep the caller's read roots, which the planner holds too.
+    let scout = expanded.nodes.iter().find(|n| n.id == "plan--a--scout").unwrap();
+    assert!(scout.read_roots.iter().any(|root| root.ends_with("/repo/extra")), "{:?}", scout.read_roots);
     // A route outside the closed list is refused, not trusted.
     let outside = pattern_result_all(vec![
         json!({"id":"a", "pattern":"scout", "parameters":{"question":"q", "route":"web"}}),
@@ -1161,6 +1170,11 @@ fn planned_review_council_expands_only_the_lens_legs_the_catalogue_lists() {
     let recorded: Vec<_> = expansion.patterns.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(recorded, ["lens-correctness-spec", "lens-tests"]);
     assert_eq!(expansion.patterns[0].parameters["tier"], "senior");
+    // The verifier reads the lens findings through the lens legs' exports.
+    let expanded = plans::expand(&doc, &[], &run.checkpoint.expansions, &plans::generous()).unwrap();
+    let verify = expanded.nodes.iter().find(|n| n.id == "verify").unwrap();
+    let inputs: Vec<_> = verify.inputs.iter().map(|i| i.node.as_str()).collect();
+    assert_eq!(inputs, ["plan", "plan--correctness-spec--lens", "plan--tests--lens"]);
     // The security lens is gated off for this subject, so it cannot be named.
     let gated = pattern_result_all(vec![leg("security-privacy", "junior")]);
     let mut owner = fixture_owner(&["framed", &gated]);
@@ -1173,6 +1187,47 @@ fn planned_review_council_expands_only_the_lens_legs_the_catalogue_lists() {
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+}
+
+#[test]
+fn planned_workers_and_the_no_scout_note_expand_and_feed_their_consumers() {
+    for (name, instances, ids, last) in [
+        (
+            "fan-out-synthesise",
+            vec![
+                json!({"id":"w1", "pattern":"worker", "parameters":{"question":"What does X do?"}}),
+                json!({"id":"w2", "pattern":"worker", "parameters":{"question":"Who owns Y?", "route":"principal"}}),
+            ],
+            vec!["plan--w1--worker", "plan--w2--worker"],
+            "synthesis",
+        ),
+        (
+            "scope-then-run",
+            vec![json!({"id":"skip", "pattern":"no-scout", "parameters":{"reason":"the brief names the files"}})],
+            vec!["plan--skip--note"],
+            "synthesis",
+        ),
+    ] {
+        let doc = planned_fixture(name);
+        let fragment = pattern_result_all(instances);
+        let mut results = vec![fragment.as_str()];
+        results.extend(std::iter::repeat_n("done\nVERDICT: PASS", 20));
+        let mut owner = fixture_owner(&results);
+        let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete, "{name}: {:?}", run.checkpoint.pause_reason);
+        let expanded = plans::expand(&doc, &[], &run.checkpoint.expansions, &plans::generous()).unwrap();
+        let consumer = expanded.nodes.iter().find(|n| n.id == last).unwrap();
+        let inputs: Vec<_> = consumer.inputs.iter().map(|i| i.node.as_str()).collect();
+        assert_eq!(&inputs[1..], ids, "{name}");
+    }
+    // The worker's route is a closed list too.
+    let doc = planned_fixture("fan-out");
+    let outside = pattern_result_all(vec![
+        json!({"id":"w", "pattern":"worker", "parameters":{"question":"q", "route":"web"}}),
+    ]);
+    let mut owner = fixture_owner(&[&outside]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
 }
 
 fn pattern_result_all(instances: Vec<Value>) -> String {

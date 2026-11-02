@@ -675,10 +675,15 @@ Catalogues shipped today:
 
 `review-council --plan on` cannot add a lens: the panel (risk-gated lenses,
 slot limit, order and tiers) builds the catalogue first, so the planner only
-narrows it and raises or lowers tiers. A planned research stage does not run
-the static synthesis; the next stage reads the planner result. `deliver` has
-no catalogue because one `write` stage is named by the CI gate, the review and
-land; use `big-batch` for planned lanes. The chair plans when the brief
+narrows it and raises or lowers tiers. A stage after a planned stage reads the
+instantiated scouts', workers' or lenses' outputs, added to its inputs beside
+the planner's result. `scope-then-run` runs a synthesis of its planned scouts
+before scoping; `scout-swarm` keeps its own synthesis. `external = 0` removes
+the external scout from the catalogue (`enabled_by = "external"`), and a
+preset's `after` lists stages inserted behind the planner. Planned scouts keep
+the caller's `read_roots`. `deliver` has
+no catalogue by decision: one `write` stage is named by the CI gate, the review
+and land, so planned delivery stays with `big-batch`. The chair plans when the brief
 already fixes the shape (pass the parameter); leave `--plan auto` when the
 brief leaves it open.
 

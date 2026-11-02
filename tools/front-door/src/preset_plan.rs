@@ -8,7 +8,11 @@
 //! planned lane runs the same role as a static one. The runtime owns the
 //! bounded expansion; nothing here widens what it allows.
 //!
-//! A catalogue entry with `for_each = "lenses"` stands for one pattern per lens
+//! `after` lists stages inserted behind the planner, for a reconciliation the
+//! static stage ran inside itself.
+//!
+//! A catalogue entry with `enabled_by = "param"` is offered only while that
+//! parameter is non-zero. A catalogue entry with `for_each = "lenses"` stands for one pattern per lens
 //! the routing review panel selects for the subject, so a planner can only
 //! choose lenses that panel allows, at a tier it may lower or raise but never
 //! at a lens the panel left out.
@@ -220,6 +224,20 @@ fn auto_rule(
     if let Some(parameter) = shaped.iter().find(|name| explicit(origins, name)) {
         return (false, format!("{parameter} given explicitly"));
     }
+    // A review panel is scaled by the subject's size: only a large one plans,
+    // however long the brief.
+    if catalogue.get("by_size").and_then(Value::as_bool) == Some(true) {
+        return match size {
+            Some("large") => (true, "review subject is large".into()),
+            other => (
+                false,
+                format!(
+                    "review subject is not large (size={})",
+                    other.unwrap_or("unknown")
+                ),
+            ),
+        };
+    }
     let items = acceptance_items(brief);
     if items > ctx.auto.acceptance_items {
         return (
@@ -243,19 +261,6 @@ fn auto_rule(
     let named = issues(brief);
     if named >= ctx.auto.batch_issues {
         return (true, format!("{named} issues in one batch"));
-    }
-    // A review panel is scaled by the subject's size: only a large one plans.
-    if catalogue.get("by_size").and_then(Value::as_bool) == Some(true) {
-        return match size {
-            Some("large") => (true, "review subject is large".into()),
-            other => (
-                false,
-                format!(
-                    "review subject is not large (size={})",
-                    other.unwrap_or("unknown")
-                ),
-            ),
-        };
     }
     if let Some(parameter) = shaped.first() {
         return (true, format!("{parameter} not set"));
@@ -464,6 +469,16 @@ pub fn apply(
     ] {
         parameters.insert(key.into(), value);
     }
+    let plan_values = flatten_parameters(
+        name,
+        config.get("parameters").unwrap_or(&json!({})),
+        "",
+        origins,
+    )?;
+    let extra_roots = plan_values
+        .get("read_roots")
+        .filter(|roots| roots.as_array().is_some_and(|roots| !roots.is_empty()))
+        .cloned();
     let stages = config
         .get_mut("stages")
         .and_then(Value::as_array_mut)
@@ -475,25 +490,44 @@ pub fn apply(
         .ok_or_else(|| {
             format!("preset {name}: plan.replaces names no top-level stage: {replaces}")
         })?;
-    stages[position] = json!({
+    let mut planner = json!({
         "id": "plan",
         "role": "plan.shape",
         "tier": ctx.route,
         "access": "read_only",
         "plan": {"kinds": ["task", "synthesise"], "max_nodes": ctx.max_nodes, "patterns": []},
     });
-    let plan_values = flatten_parameters(
-        name,
-        config.get("parameters").unwrap_or(&json!({})),
-        "",
-        origins,
-    )?;
+    // A fragment cannot widen its planner's read roots, so a preset whose
+    // planned scouts read the caller's extra roots gives the planner the same.
+    if let Some(roots) = extra_roots {
+        planner["read_roots"] = roots;
+    }
+    stages[position] = planner;
+    // Stages the planned fragment needs after it, for example the synthesis
+    // that reconciles the evidence the static stage reconciled in itself.
+    if let Some(after) = catalogue.get("after").and_then(Value::as_array) {
+        for (offset, stage) in after.iter().enumerate() {
+            stages.insert(position + 1 + offset, stage.clone());
+        }
+    }
     let patterns = catalogue
         .get("patterns")
         .and_then(Value::as_array)
         .ok_or_else(|| format!("preset {name}: plan.patterns must list patterns"))?;
     let mut entries = Vec::new();
     for pattern in patterns {
+        // A pattern gated by a parameter the chair turned off is not offered.
+        if let Some(gate) = pattern.get("enabled_by").and_then(Value::as_str)
+            && plan_values.get(gate).is_none_or(|value| match value {
+                Value::Null | Value::Bool(false) => true,
+                Value::Number(number) => number.as_f64() == Some(0.0),
+                Value::String(text) => text.is_empty(),
+                Value::Array(items) => items.is_empty(),
+                Value::Object(_) | Value::Bool(true) => false,
+            })
+        {
+            continue;
+        }
         match pattern.get("for_each").and_then(Value::as_str) {
             Some(list) => entries.extend(each_item(
                 layers,

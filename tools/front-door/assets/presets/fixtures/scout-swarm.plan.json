@@ -3,7 +3,7 @@
     "pattern": "scout-swarm",
     "preset": "scout-swarm"
   },
-  "graph_id": "preset-a4b77cef1c5ade340eba3dfac34d4ab0",
+  "graph_id": "preset-26fc9622a8afd78f9b71b05033766b4c",
   "nodes": [
     {
       "access": "read_only",
@@ -38,7 +38,9 @@
                 "access": "read_only",
                 "id": "scout",
                 "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 1. Research read-only: brief\n\nYour question: ${question}\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
-                "read_roots": [],
+                "read_roots": [
+                  "/repo/extra"
+                ],
                 "references": [
                   {
                     "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
@@ -116,7 +118,10 @@
         ],
         "patterns_only": true
       },
-      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nChoose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
+      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nChoose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and, when the catalogue offers one, an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
+      "read_roots": [
+        "/repo/extra"
+      ],
       "role": "plan.shape",
       "role_digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
       "route": {
@@ -156,6 +161,7 @@
       "parameters.external.max": "bundled",
       "parameters.external.min": "bundled",
       "parameters.external.type": "bundled",
+      "parameters.read_roots": "--params-file",
       "parameters.read_roots.default": "bundled",
       "parameters.read_roots.doc": "bundled",
       "parameters.read_roots.type": "bundled",

@@ -553,8 +553,15 @@ closed-list `route`; `fan-out` and `fan-out-synthesise` offer a `worker`, with
 a `question` and a `route`. `scope-then-run` also offers `no-scout`, a junior
 note with a `reason`, so the planner decides whether to scout at all (an empty
 fragment is refused). The planner's fragment replaces the preset's static
-scout stage, so the swarm's synthesis is not run there and the scope stage
-reads the planner result. `review-council` offers one pattern per lens, and the
+scout stage. A consumer of the planned stage reads what the fragment's pattern
+instances export (each scout's, worker's or lens's selected outputs), added to
+its inputs beside the planner's own result, as it would read the static
+composite. `scope-then-run` gets a `plan.research` synthesis after its planned
+scouts, so scoping works from reconciled evidence as before. A catalogue entry
+with `enabled_by = "external"` is offered only while that parameter is
+non-zero, so `external = 0` removes the external scout. Planned scouts keep the
+caller's `read_roots`, and the planner holds the same roots because a fragment
+cannot widen its planner. `review-council` offers one pattern per lens, and the
 catalogue is built by the routing review panel (#2527), not by the preset:
 the panel drops risk-gated lenses whose tag is absent, applies the review
 shape's slot limit and lens order, and sets each lens's default tier. The
@@ -590,8 +597,10 @@ is set. The chair plans only what it states in the brief; the planner plans
 what the brief leaves open (lane shapes, scout questions and width, lens
 tiers). A chair that already knows the shape passes the parameter and `auto`
 stays off. `--explain` prints `plan: MODE -> on|off (reason)` and the planner
-route. `--plan off` and hand-written graphs are unchanged. `deliver` has no catalogue:
-its single `write` stage is referenced by name by the CI gate, the review
-subject and the land step, and planned lanes would need an integration branch
-and no pull requests, so a planned delivery is `big-batch`'s job.
+route. `--plan off` and hand-written graphs are unchanged.
+
+`deliver` gets no catalogue, by decision of the chair: planned delivery stays
+with `big-batch`. `deliver`'s single `write` stage is referenced by name by the
+CI gate, the review subject and the land step, and planned lanes would need an
+integration branch and no pull requests.
 

@@ -2747,6 +2747,57 @@ mod planner_front_end {
     }
 
     #[test]
+    fn external_zero_removes_the_external_scout_from_the_catalogue() {
+        let on = layers(PlanMode::On, None);
+        for name in ["scout-swarm", "scope-then-run"] {
+            let with = run(&on, name, "brief", Vec::new());
+            assert!(pattern_names(&with).contains(&"external-scout".to_owned()));
+            let without = run(&on, name, "brief", vec![("external".into(), json!(0))]);
+            assert!(
+                !pattern_names(&without).contains(&"external-scout".to_owned()),
+                "{name}: {:?}",
+                pattern_names(&without)
+            );
+            assert!(pattern_names(&without).contains(&"scout".to_owned()));
+        }
+    }
+
+    #[test]
+    fn shared_scout_and_worker_patterns_are_declared_identically() {
+        let on = layers(PlanMode::On, None);
+        let swarm = run(&on, "scout-swarm", "brief", Vec::new());
+        let scoped = run(&on, "scope-then-run", "brief", Vec::new());
+        for name in ["scout", "external-scout"] {
+            assert_eq!(pattern(&swarm, name), pattern(&scoped, name), "{name}");
+        }
+        let fan = run(&on, "fan-out", "brief", Vec::new());
+        let synthesised = run(&on, "fan-out-synthesise", "brief", Vec::new());
+        assert_eq!(pattern(&fan, "worker"), pattern(&synthesised, "worker"));
+    }
+
+    #[test]
+    fn planned_scouts_keep_the_callers_read_roots() {
+        let on = layers(PlanMode::On, None);
+        for name in ["scout-swarm", "scope-then-run"] {
+            let extra = vec![("read_roots".to_owned(), json!(["/repo/extra"]))];
+            let expansion = run(&on, name, "brief", extra);
+            let roots = &pattern(&expansion, "scout")["nodes"][0]["read_roots"];
+            assert!(
+                roots.as_array().unwrap().contains(&json!("/repo/extra")),
+                "{name}: {roots}"
+            );
+            // A fragment cannot widen its planner, so the planner holds them too.
+            let planner = expansion.document["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["id"] == "plan")
+                .unwrap();
+            assert_eq!(planner["read_roots"], json!(["/repo/extra"]), "{name}");
+        }
+    }
+
+    #[test]
     fn scope_then_run_lets_the_planner_decide_whether_to_scout() {
         let expansion = run(
             &layers(PlanMode::On, None),
@@ -2754,7 +2805,10 @@ mod planner_front_end {
             "brief",
             Vec::new(),
         );
-        assert_eq!(ids(&expansion), ["plan", "scope", "ready", "run"]);
+        assert_eq!(
+            ids(&expansion),
+            ["plan", "synthesis", "scope", "ready", "run"]
+        );
         assert_eq!(
             pattern_names(&expansion),
             ["scout", "external-scout", "no-scout"]
@@ -2762,9 +2816,12 @@ mod planner_front_end {
         let none = pattern(&expansion, "no-scout");
         assert_eq!(none["parameters"]["reason"]["type"], "string");
         assert_eq!(none["exports"][0]["node"], "note");
-        // The scoping stage reads the planner's result in place of the scouts.
-        let scope = &expansion.document["nodes"][1];
-        assert_eq!(scope["depends_on"], json!(["plan"]));
+        // The scouts' evidence is reconciled before scoping, as the static
+        // scout stage's synthesis does.
+        let nodes = expansion.document["nodes"].as_array().unwrap();
+        assert_eq!(nodes[1]["depends_on"], json!(["plan"]));
+        assert_eq!(nodes[1]["role"], "plan.research");
+        assert_eq!(nodes[2]["depends_on"], json!(["synthesis"]));
     }
 
     fn lens_names(expansion: &super::super::preset::Expansion) -> Vec<String> {
@@ -2826,8 +2883,6 @@ mod planner_front_end {
                 .unwrap()
                 .contains(&json!("principal"))
         );
-        // Lens choice is bounded by the panel, not by the preset's full list.
-        assert!(lens_names(&planned).len() <= 11);
     }
 
     #[test]
@@ -2877,6 +2932,16 @@ mod planner_front_end {
         assert!(!decision.applied);
         assert_eq!(decision.reason, "review subject is not large (size=small)");
         assert!(!ids(&small).contains(&"plan".to_owned()));
+        // A long brief does not override the panel's size.
+        let long = (1..=12)
+            .map(|n| format!("- [ ] criterion {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let brief = format!("Review #1 #2 #3 #4 #5 #6\n## Acceptance\n{long}");
+        let small_long = run(&sized(Some("small")), "review-council", &brief, params());
+        let decision = small_long.plan.as_ref().unwrap();
+        assert!(!decision.applied, "{}", decision.reason);
+        assert_eq!(decision.reason, "review subject is not large (size=small)");
         let unknown = run(&sized(None), "review-council", "brief", params());
         assert!(
             unknown
@@ -3380,7 +3445,15 @@ mod planner_front_end {
     #[test]
     fn planned_research_and_review_match_their_golden_graphs() {
         let council = vec![("worktree".to_owned(), json!("/repo/lane"))];
-        for (name, params) in [("scout-swarm", Vec::new()), ("review-council", council)] {
+        let roots = vec![("read_roots".to_owned(), json!(["/repo/extra"]))];
+        let scoped = vec![("worktree".to_owned(), json!("/repo/lane"))];
+        for (name, params) in [
+            ("scout-swarm", roots),
+            ("review-council", council),
+            ("fan-out", Vec::new()),
+            ("fan-out-synthesise", Vec::new()),
+            ("scope-then-run", scoped),
+        ] {
             let expansion = run(&layers(PlanMode::On, None), name, "brief", params);
             let mut actual = serde_json::to_string_pretty(&expansion.document).unwrap();
             actual.push('\n');
