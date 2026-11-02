@@ -2457,7 +2457,17 @@ mod planner_front_end {
     }
 
     fn worktrees() -> Vec<(String, Value)> {
-        vec![("worktrees".into(), json!(["/repo/lane1", "/repo/lane2"]))]
+        vec![
+            ("worktrees".into(), json!(["/repo/lane1", "/repo/lane2"])),
+            ("batch_worktree".into(), json!("/repo/batch")),
+        ]
+    }
+
+    /// The same preset without any plan context: the baseline that `off` must equal.
+    fn plain(name: &str, params: Vec<(String, Value)>) -> super::super::preset::Expansion {
+        let mut layers = Layers::empty();
+        layers.review = Some(shapes());
+        expand_with(&layers, name, "brief", &params, &[]).unwrap()
     }
 
     fn ids(expansion: &super::super::preset::Expansion) -> Vec<String> {
@@ -2506,7 +2516,7 @@ mod planner_front_end {
 
     #[test]
     fn plan_off_and_no_context_leave_the_static_graph_untouched() {
-        let plain = expand_with(&Layers::empty(), "big-batch", "brief", &[], &[]).unwrap();
+        let plain = plain("big-batch", Vec::new());
         let off = run(&layers(PlanMode::Off, None), "big-batch", "brief", Vec::new());
         assert_eq!(plain.document["nodes"], off.document["nodes"]);
         assert_eq!(off.plan.as_ref().unwrap().line(), "plan: off -> off (planning turned off)");
@@ -2572,7 +2582,7 @@ mod planner_front_end {
             "brief",
             Vec::new(),
         );
-        let plain = expand_with(&Layers::empty(), "big-batch", "brief", &[], &[]).unwrap();
+        let plain = plain("big-batch", Vec::new());
         assert_eq!(degraded.document["nodes"], plain.document["nodes"]);
         let decision = degraded.plan.as_ref().unwrap();
         assert!(!decision.applied);

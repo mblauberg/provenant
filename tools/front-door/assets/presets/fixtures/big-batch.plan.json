@@ -1,0 +1,1253 @@
+{
+  "context": {
+    "pattern": "big-batch",
+    "preset": "big-batch"
+  },
+  "graph_id": "preset-27c1aa78288a9a3dbccb841a462396c0",
+  "integration_branch": "batch/graph",
+  "nodes": [
+    {
+      "access": "read_only",
+      "composite": {
+        "exports": [
+          {
+            "node": "synthesis",
+            "outputs": [
+              "result",
+              "findings"
+            ]
+          }
+        ],
+        "nodes": [
+          {
+            "access": "read_only",
+            "composite": {
+              "exports": [
+                {
+                  "node": "scout-1",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "scout-2",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "scout-3",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "scout-4",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "external",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                }
+              ],
+              "nodes": [
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "scout-1",
+                  "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 1. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+                  "read_roots": [],
+                  "references": [
+                    {
+                      "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+                      "ref": "skill:scope/references/scout-areas.md",
+                      "when": "before choosing your area"
+                    }
+                  ],
+                  "role": "scout.codebase",
+                  "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
+                  "route": {
+                    "alias": "junior"
+                  },
+                  "title": "scout-1"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "scout-2",
+                  "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 2. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+                  "read_roots": [],
+                  "references": [
+                    {
+                      "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+                      "ref": "skill:scope/references/scout-areas.md",
+                      "when": "before choosing your area"
+                    }
+                  ],
+                  "role": "scout.codebase",
+                  "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
+                  "route": {
+                    "alias": "junior"
+                  },
+                  "title": "scout-2"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "scout-3",
+                  "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 3. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+                  "read_roots": [],
+                  "references": [
+                    {
+                      "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+                      "ref": "skill:scope/references/scout-areas.md",
+                      "when": "before choosing your area"
+                    }
+                  ],
+                  "role": "scout.codebase",
+                  "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
+                  "route": {
+                    "alias": "junior"
+                  },
+                  "title": "scout-3"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "scout-4",
+                  "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 4. Research read-only: brief\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
+                  "read_roots": [],
+                  "references": [
+                    {
+                      "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+                      "ref": "skill:scope/references/scout-areas.md",
+                      "when": "before choosing your area"
+                    }
+                  ],
+                  "role": "scout.codebase",
+                  "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
+                  "route": {
+                    "alias": "junior"
+                  },
+                  "title": "scout-4"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "external",
+                  "prompt": "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date.\n\nExternal scout 1. Research outward for: brief\nPrefer primary sources and current documentation over memory, even when\nconfident. Report each finding with its source URL and publication or\nretrieval date, mark vendor-reported figures, and state where sources\ndisagree. Do not edit files.\n\n\n# Researcher\n\nUse when a scope depends on facts outside the repository: standards, vendor\nbehaviour, prior art, competing tools or published evidence.\n\nLook outward first. Search current documentation, upstream source and credible\nwrite-ups before relying on memory, even when confident.\n\nReturn for each finding:\n- The claim in one sentence.\n- The source URL and its publication or retrieval date.\n- Whether the source is primary (specification, source code, vendor\n  documentation) or secondary, and whether any figure is vendor-reported.\n- How the claim bears on the decision in front of the chair.\n\nSeparate established fact from inference. State disagreement between sources\nrather than resolving it silently. Cite no source you did not read.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:34f67a52a0144687511c67303fff9acedaa139033493971d4c9fe293c5ce5b52",
+                      "ref": "skill:scope/references/researcher.md",
+                      "when": "always"
+                    }
+                  ],
+                  "role": "scout.external",
+                  "role_digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
+                  "route": {
+                    "alias": "web"
+                  },
+                  "title": "external"
+                }
+              ]
+            },
+            "depends_on": [],
+            "id": "scouts",
+            "kind": "composite"
+          },
+          {
+            "access": "read_only",
+            "depends_on": [
+              "scouts"
+            ],
+            "id": "synthesis",
+            "inputs": [
+              {
+                "node": "scouts",
+                "outputs": [
+                  "result"
+                ]
+              }
+            ],
+            "kind": "synthesise",
+            "prompt": "You reconcile research evidence into next steps.\n\nReconcile the scouts' evidence for: brief\nPreserve useful scope partitions, file references, dated external sources and\nunresolved uncertainty. Choose next implementation steps using judgement;\nretain every child's evidence.\n",
+            "role": "plan.research",
+            "role_digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
+            "route": {
+              "alias": "senior"
+            },
+            "title": "synthesis"
+          }
+        ]
+      },
+      "depends_on": [],
+      "id": "scout",
+      "kind": "composite"
+    },
+    {
+      "access": "read_only",
+      "depends_on": [
+        "scout"
+      ],
+      "id": "plan",
+      "inputs": [
+        {
+          "node": "scout",
+          "outputs": [
+            "result"
+          ]
+        }
+      ],
+      "kind": "plan",
+      "plan": {
+        "disjoint_waves": true,
+        "kinds": [
+          "task",
+          "synthesise"
+        ],
+        "max_nodes": 24,
+        "patterns": [
+          {
+            "exports": [
+              {
+                "node": "implement",
+                "outputs": [
+                  "branch",
+                  "commit"
+                ]
+              }
+            ],
+            "name": "writer-lane",
+            "nodes": [
+              {
+                "acceptance_checks": "${acceptance}",
+                "access": "worktree_write",
+                "delivery": "integrate:batch/graph",
+                "id": "implement",
+                "prompt": "You implement one bounded slice inside the write scope, within the authority envelope below.\n\nImplement one bounded slice: brief\n\nLane ${lane}. Time budget: ${budget_seconds} seconds; commit your work and stop with a handoff before it passes.\nSpec (acceptance criteria): \nKeep changes within the supplied write scope. Run targeted checks and commit.\n\nAuthority envelope. The objective above and the acceptance criteria are\napproved. You hold authority to make any engineering decision that serves them\nand is reversible: names, structure, tests, helper code and the order of work.\nDo not stop to ask about those. Make the call, state it as an assumption and\nrecord it in your final report under DECISIONS (decision, reason, how to\nreverse). Ask only when the decision belongs to the owner (product direction,\nscope, cost, irreversible or externally visible effects) or when the work needs\nauthority beyond the write scope and this envelope; then report NEEDS-USER\nwith the specific question and the option you would take.\n",
+                "role": "write.implement",
+                "role_digest": "sha256:065a17b832ac8f6726b3829edb9f465f44b8f887cdeed85f4815bd59f4b803c5",
+                "route": {
+                  "alias": "${route}"
+                },
+                "source": {
+                  "commit": "HEAD",
+                  "type": "commit"
+                },
+                "title": "Lane ${lane}",
+                "worktree": "${worktree}",
+                "write_scope": "${scope}"
+              }
+            ],
+            "parameters": {
+              "acceptance": {
+                "doc": "The acceptance items this lane owns.",
+                "min": 1,
+                "type": "list"
+              },
+              "budget_seconds": {
+                "default": 3600,
+                "doc": "Wall-clock budget for the lane, at most the lane deadline.",
+                "max": 3600,
+                "min": 60,
+                "type": "integer"
+              },
+              "lane": {
+                "doc": "Short lane name.",
+                "type": "string"
+              },
+              "route": {
+                "default": "senior",
+                "doc": "Route alias for the lane.",
+                "enum": [
+                  "junior",
+                  "senior",
+                  "principal"
+                ],
+                "type": "string"
+              },
+              "scope": {
+                "doc": "Literal relative paths the lane may change; disjoint within a wave.",
+                "min": 1,
+                "type": "list"
+              },
+              "worktree": {
+                "doc": "Registered writer worktree for the lane.",
+                "enum": [
+                  "/repo/lane1",
+                  "/repo/lane2"
+                ],
+                "type": "string"
+              }
+            }
+          },
+          {
+            "exports": [
+              {
+                "node": "barrier",
+                "outputs": [
+                  "result",
+                  "findings"
+                ]
+              }
+            ],
+            "name": "wave-barrier",
+            "nodes": [
+              {
+                "acceptance_checks": [
+                  "Every lane in the wave met its acceptance subset",
+                  "Cross-lane conflicts are recorded"
+                ],
+                "access": "read_only",
+                "id": "barrier",
+                "kind": "synthesise",
+                "prompt": "You close one wave of lanes before the next starts.\n\nClose wave ${wave} of: brief\nRead each lane's commit and result. Confirm every lane met the acceptance\nsubset it owns, and record any conflict between lanes before the next wave\nstarts. Do not edit files.\n",
+                "role": "plan.wave",
+                "role_digest": "sha256:3771fb15867cef6f72b7b35c7dbd6343062982d0cb3f355b34ee937a7bc0d872",
+                "route": {
+                  "alias": "senior"
+                },
+                "title": "Wave ${wave} barrier"
+              }
+            ],
+            "parameters": {
+              "wave": {
+                "doc": "Wave name.",
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "patterns_only": true
+      },
+      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: /repo/lane1, /repo/lane2.\nSplit the work into waves of writer lanes. Give each lane its own worktree, a literal write scope disjoint from the other lanes in its wave, the subset of acceptance items it owns, a route and a budget. End every wave with a wave-barrier whose depends_on and inputs name that wave's lanes, and make the next wave's lanes depend on the barrier.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
+      "role": "plan.shape",
+      "role_digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
+      "route": {
+        "alias": "principal"
+      },
+      "title": "plan"
+    },
+    {
+      "access": "read_only",
+      "composite": {
+        "exports": [
+          {
+            "node": "synthesis",
+            "outputs": [
+              "result",
+              "findings",
+              "verdict",
+              "commit"
+            ]
+          }
+        ],
+        "nodes": [
+          {
+            "access": "read_only",
+            "depends_on": [],
+            "id": "subject",
+            "prompt": "You frame an immutable review subject. Do not edit files.\n\nFrame the immutable review subject for: brief\nBase (diff reference): \nSpec (acceptance criteria): \nIdentify acceptance criteria and risk areas from the pinned source commit,\nreading the spec where one is named. Do not edit files. Subsequent independent\nlenses review this exact commit against the base and the spec.\n",
+            "read_roots": [
+              "/repo/batch"
+            ],
+            "role": "plan.review",
+            "role_digest": "sha256:cc9b118bf74049c200dc2e053a9d30de01f36479c4688392153484bcf832a60c",
+            "route": {
+              "alias": "senior"
+            },
+            "source": {
+              "type": "integration"
+            },
+            "title": "subject"
+          },
+          {
+            "access": "read_only",
+            "composite": {
+              "exports": [
+                {
+                  "node": "lens-correctness-spec",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "lens-design-fit-reuse",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                }
+              ],
+              "nodes": [
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "distinct_from": "writer",
+                  "id": "lens-correctness-spec",
+                  "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n",
+                  "read_roots": [
+                    "/repo/batch"
+                  ],
+                  "references": [
+                    {
+                      "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:eed92bd4b886f327c37d1ede6084ad87266bc3e25b8a40f576ae7c59fdedcd5b",
+                      "ref": "skill:code-review/references/lenses/correctness-spec.md",
+                      "when": "always"
+                    }
+                  ],
+                  "role": "lens.correctness-spec",
+                  "role_digest": "sha256:0389100b682b6cca0df2a4896784fc41c1af37e9043ab7eadcab2923ad9814fb",
+                  "route": {
+                    "alias": "junior"
+                  },
+                  "title": "lens-correctness-spec"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-design-fit-reuse",
+                  "prompt": "Lens design-fit-reuse. Check design fit and reuse of existing code.\n\nLens: design-fit-reuse. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: design fit and reuse\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" and its design-principle probes.\n\n- Does the change belong where it was put? Find the canonical owner of the\n  behaviour or data and compare.\n- Search the repository for an existing utility, type, validation rule or flow\n  that already does this. Name what should have been reused.\n- Look for a second source of truth, a state machine hidden in flags, or\n  coupling that crosses an ownership boundary.\n- Use SOLID as probes only. Report a principle when it ties to a present defect\n  or material risk, with a way to validate it.\n",
+                  "read_roots": [
+                    "/repo/batch"
+                  ],
+                  "references": [
+                    {
+                      "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:cdc1ef703b729564597d135d650e554df1013f62113133032e4191016a25ef92",
+                      "ref": "skill:code-review/references/lenses/design-fit-reuse.md",
+                      "when": "always"
+                    }
+                  ],
+                  "role": "lens.design-fit-reuse",
+                  "role_digest": "sha256:18354a40f4c4349ba5e4e47ba960bc66995bf9968e0058068005a1ef84aa9684",
+                  "route": {
+                    "alias": "junior"
+                  },
+                  "title": "lens-design-fit-reuse"
+                }
+              ]
+            },
+            "depends_on": [
+              "subject"
+            ],
+            "id": "lenses",
+            "inputs": [
+              {
+                "node": "subject",
+                "outputs": [
+                  "result"
+                ]
+              }
+            ],
+            "kind": "composite",
+            "source": {
+              "node": "subject",
+              "type": "node"
+            }
+          },
+          {
+            "access": "read_only",
+            "depends_on": [
+              "lenses",
+              "subject"
+            ],
+            "distinct_from": "dependencies",
+            "id": "verify",
+            "inputs": [
+              {
+                "node": "lenses",
+                "outputs": [
+                  "result"
+                ]
+              }
+            ],
+            "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nVerify the lens findings for: brief\nTry to falsify every finding against the pinned commit: reproduce it, look for\nthe code or test that contradicts it, and check it against the spec. Re-emit\nevery finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your\nevidence. Add any finding the lenses missed and mark it NEW. Do not edit files.\nEnd with a findings block (schema_version 1) whose entries keep each finding's\nid and add \"verification\": \"upheld\", \"falsified\" or \"unverifiable\".\n",
+            "read_roots": [
+              "/repo/batch"
+            ],
+            "role": "review.verify",
+            "role_digest": "sha256:1b76693d13635aa0106f7bf34f48335c9c19bd59703932ab86c6aca9a988d0d0",
+            "route": {
+              "alias": "verifier"
+            },
+            "source": {
+              "node": "subject",
+              "type": "node"
+            },
+            "title": "verify"
+          },
+          {
+            "access": "read_only",
+            "depends_on": [
+              "verify",
+              "subject"
+            ],
+            "dispositions": [
+              "accepted",
+              "rejected",
+              "deferred"
+            ],
+            "id": "synthesis",
+            "inputs": [
+              {
+                "node": "verify",
+                "outputs": [
+                  "result"
+                ]
+              }
+            ],
+            "kind": "synthesise",
+            "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" (accepted, rejected or deferred) and \"reason\".\nA finding without a disposition is incomplete. Emit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\n",
+            "read_roots": [
+              "/repo/batch"
+            ],
+            "role": "review.synthesis",
+            "role_digest": "sha256:7b8230ad9a34ce36ef5b05bbf287644e291f18dd4784f1d54c1fd4ee4c3a0f6c",
+            "route": {
+              "alias": "senior"
+            },
+            "source": {
+              "node": "subject",
+              "type": "node"
+            },
+            "title": "synthesis"
+          }
+        ]
+      },
+      "depends_on": [
+        "plan"
+      ],
+      "id": "council",
+      "inputs": [
+        {
+          "node": "plan",
+          "outputs": [
+            "result"
+          ]
+        }
+      ],
+      "kind": "composite"
+    },
+    {
+      "acceptance_checks": [
+        "Preserve externally observable behaviour",
+        "Run targeted checks and commit"
+      ],
+      "access": "worktree_write",
+      "delivery": "integrate:batch/graph",
+      "depends_on": [
+        "council"
+      ],
+      "id": "refactor",
+      "inputs": [
+        {
+          "node": "council",
+          "outputs": [
+            "result",
+            "findings",
+            "commit"
+          ]
+        }
+      ],
+      "prompt": "At batch end, inspect long-horizon boundaries, migrations and SOLID for:\nbrief\nStart from the council's pinned combined commit. Remove unnecessary machinery\nand improve the approved design without speculative abstraction. Run checks\nand commit. Independent principal review follows in the repair loop.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Preserve externally observable behaviour\n- Run targeted checks and commit",
+      "role": "refactor-principal",
+      "role_digest": "sha256:412c0546ad9aaeb516cf443059eedf1a85106366979ef93c45d82d1a83405972",
+      "route": {
+        "alias": "principal"
+      },
+      "source": {
+        "node": "council",
+        "type": "node"
+      },
+      "title": "refactor",
+      "worktree": "/repo/batch",
+      "write_scope": [
+        "."
+      ]
+    },
+    {
+      "access": "read_only",
+      "depends_on": [
+        "refactor"
+      ],
+      "id": "repair",
+      "inputs": [
+        {
+          "node": "refactor",
+          "outputs": [
+            "result"
+          ]
+        }
+      ],
+      "kind": "loop",
+      "loop": {
+        "body": [
+          {
+            "acceptance_checks": [
+              "Resolve accepted findings",
+              "Run targeted checks and commit"
+            ],
+            "access": "worktree_write",
+            "delivery": "integrate:batch/graph",
+            "depends_on": [],
+            "id": "fix",
+            "inputs": [
+              {
+                "node": "previous.review",
+                "outputs": [
+                  "result",
+                  "findings"
+                ]
+              }
+            ],
+            "prompt": "Repair accepted batch findings for: brief\nUse the serial batch worktree advanced by the principal and earlier repairs.\nInspect preceding review evidence, preserve scope, run targeted checks and\ncommit. Reviewers will pin and review this round's changed head.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Resolve accepted findings\n- Run targeted checks and commit",
+            "role": "repairer",
+            "role_digest": "sha256:48bd9b141b12a80448fc7f69b5d5a9a6fee0883fc16f2ea917034edbf8a23106",
+            "route": {
+              "alias": "senior"
+            },
+            "title": "fix",
+            "worktree": "/repo/batch",
+            "write_scope": [
+              "."
+            ]
+          },
+          {
+            "access": "read_only",
+            "composite": {
+              "exports": [
+                {
+                  "node": "synthesis",
+                  "outputs": [
+                    "result",
+                    "findings",
+                    "verdict",
+                    "commit"
+                  ]
+                }
+              ],
+              "nodes": [
+                {
+                  "access": "read_only",
+                  "depends_on": [
+                    "fix"
+                  ],
+                  "id": "subject",
+                  "prompt": "You frame an immutable review subject. Do not edit files.\n\nFrame the immutable review subject for: brief\nBase (diff reference): \nSpec (acceptance criteria): \nIdentify acceptance criteria and risk areas from the pinned source commit,\nreading the spec where one is named. Do not edit files. Subsequent independent\nlenses review this exact commit against the base and the spec.\n",
+                  "read_roots": [
+                    "/repo/batch"
+                  ],
+                  "role": "plan.review",
+                  "role_digest": "sha256:cc9b118bf74049c200dc2e053a9d30de01f36479c4688392153484bcf832a60c",
+                  "route": {
+                    "alias": "senior"
+                  },
+                  "source": {
+                    "node": "fix",
+                    "type": "node"
+                  },
+                  "title": "subject"
+                },
+                {
+                  "access": "read_only",
+                  "composite": {
+                    "exports": [
+                      {
+                        "node": "lens-correctness-spec",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-design-fit-reuse",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      }
+                    ],
+                    "nodes": [
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "distinct_from": "writer",
+                        "id": "lens-correctness-spec",
+                        "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n",
+                        "read_roots": [
+                          "/repo/batch"
+                        ],
+                        "references": [
+                          {
+                            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:eed92bd4b886f327c37d1ede6084ad87266bc3e25b8a40f576ae7c59fdedcd5b",
+                            "ref": "skill:code-review/references/lenses/correctness-spec.md",
+                            "when": "always"
+                          }
+                        ],
+                        "role": "lens.correctness-spec",
+                        "role_digest": "sha256:0389100b682b6cca0df2a4896784fc41c1af37e9043ab7eadcab2923ad9814fb",
+                        "route": {
+                          "alias": "junior"
+                        },
+                        "title": "lens-correctness-spec"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-design-fit-reuse",
+                        "prompt": "Lens design-fit-reuse. Check design fit and reuse of existing code.\n\nLens: design-fit-reuse. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: design fit and reuse\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" and its design-principle probes.\n\n- Does the change belong where it was put? Find the canonical owner of the\n  behaviour or data and compare.\n- Search the repository for an existing utility, type, validation rule or flow\n  that already does this. Name what should have been reused.\n- Look for a second source of truth, a state machine hidden in flags, or\n  coupling that crosses an ownership boundary.\n- Use SOLID as probes only. Report a principle when it ties to a present defect\n  or material risk, with a way to validate it.\n",
+                        "read_roots": [
+                          "/repo/batch"
+                        ],
+                        "references": [
+                          {
+                            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:cdc1ef703b729564597d135d650e554df1013f62113133032e4191016a25ef92",
+                            "ref": "skill:code-review/references/lenses/design-fit-reuse.md",
+                            "when": "always"
+                          }
+                        ],
+                        "role": "lens.design-fit-reuse",
+                        "role_digest": "sha256:18354a40f4c4349ba5e4e47ba960bc66995bf9968e0058068005a1ef84aa9684",
+                        "route": {
+                          "alias": "junior"
+                        },
+                        "title": "lens-design-fit-reuse"
+                      }
+                    ]
+                  },
+                  "depends_on": [
+                    "subject"
+                  ],
+                  "id": "lenses",
+                  "inputs": [
+                    {
+                      "node": "subject",
+                      "outputs": [
+                        "result"
+                      ]
+                    }
+                  ],
+                  "kind": "composite",
+                  "source": {
+                    "node": "subject",
+                    "type": "node"
+                  }
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [
+                    "lenses",
+                    "subject"
+                  ],
+                  "distinct_from": "dependencies",
+                  "id": "verify",
+                  "inputs": [
+                    {
+                      "node": "lenses",
+                      "outputs": [
+                        "result"
+                      ]
+                    }
+                  ],
+                  "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nVerify the lens findings for: brief\nTry to falsify every finding against the pinned commit: reproduce it, look for\nthe code or test that contradicts it, and check it against the spec. Re-emit\nevery finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your\nevidence. Add any finding the lenses missed and mark it NEW. Do not edit files.\nEnd with a findings block (schema_version 1) whose entries keep each finding's\nid and add \"verification\": \"upheld\", \"falsified\" or \"unverifiable\".\n",
+                  "read_roots": [
+                    "/repo/batch"
+                  ],
+                  "role": "review.verify",
+                  "role_digest": "sha256:1b76693d13635aa0106f7bf34f48335c9c19bd59703932ab86c6aca9a988d0d0",
+                  "route": {
+                    "alias": "verifier"
+                  },
+                  "source": {
+                    "node": "subject",
+                    "type": "node"
+                  },
+                  "title": "verify"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [
+                    "verify",
+                    "subject"
+                  ],
+                  "dispositions": [
+                    "accepted",
+                    "rejected",
+                    "deferred"
+                  ],
+                  "id": "synthesis",
+                  "inputs": [
+                    {
+                      "node": "verify",
+                      "outputs": [
+                        "result"
+                      ]
+                    }
+                  ],
+                  "kind": "synthesise",
+                  "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" (accepted, rejected or deferred) and \"reason\".\nA finding without a disposition is incomplete. Emit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\n",
+                  "read_roots": [
+                    "/repo/batch"
+                  ],
+                  "role": "review.synthesis",
+                  "role_digest": "sha256:7b8230ad9a34ce36ef5b05bbf287644e291f18dd4784f1d54c1fd4ee4c3a0f6c",
+                  "route": {
+                    "alias": "senior"
+                  },
+                  "source": {
+                    "node": "subject",
+                    "type": "node"
+                  },
+                  "title": "synthesis"
+                }
+              ]
+            },
+            "depends_on": [
+              "fix"
+            ],
+            "id": "review",
+            "inputs": [
+              {
+                "node": "fix",
+                "outputs": [
+                  "result"
+                ]
+              }
+            ],
+            "kind": "composite"
+          },
+          {
+            "access": "read_only",
+            "condition": {
+              "expected": "VERDICT: PASS",
+              "threshold": "all",
+              "type": "verdict"
+            },
+            "depends_on": [
+              "review"
+            ],
+            "id": "accept",
+            "inputs": [
+              {
+                "node": "review",
+                "outputs": [
+                  "verdict"
+                ]
+              }
+            ],
+            "kind": "gate",
+            "title": "accept"
+          }
+        ],
+        "max_rounds": 2,
+        "until": "accept"
+      }
+    }
+  ],
+  "provenance": {
+    "origins": {
+      "expanded.council.exports": "bundled",
+      "expanded.council.parameters.base": "entry",
+      "expanded.council.parameters.base.default": "bundled",
+      "expanded.council.parameters.base.doc": "bundled",
+      "expanded.council.parameters.base.type": "bundled",
+      "expanded.council.parameters.lenses": "bundled",
+      "expanded.council.parameters.review_shape": "entry",
+      "expanded.council.parameters.review_shape.default": "bundled",
+      "expanded.council.parameters.review_shape.doc": "bundled",
+      "expanded.council.parameters.review_shape.type": "bundled",
+      "expanded.council.parameters.risk_tags": "entry",
+      "expanded.council.parameters.risk_tags.default": "bundled",
+      "expanded.council.parameters.risk_tags.doc": "bundled",
+      "expanded.council.parameters.risk_tags.type": "bundled",
+      "expanded.council.parameters.risk_tier": "entry",
+      "expanded.council.parameters.risk_tier.default": "bundled",
+      "expanded.council.parameters.risk_tier.doc": "bundled",
+      "expanded.council.parameters.risk_tier.type": "bundled",
+      "expanded.council.parameters.spec": "entry",
+      "expanded.council.parameters.spec.default": "bundled",
+      "expanded.council.parameters.spec.doc": "bundled",
+      "expanded.council.parameters.spec.type": "bundled",
+      "expanded.council.parameters.subject": "entry",
+      "expanded.council.parameters.subject.default.commit": "bundled",
+      "expanded.council.parameters.subject.default.type": "bundled",
+      "expanded.council.parameters.subject.doc": "bundled",
+      "expanded.council.parameters.subject.type": "bundled",
+      "expanded.council.parameters.verifier_tier.default": "bundled",
+      "expanded.council.parameters.verifier_tier.doc": "bundled",
+      "expanded.council.parameters.verifier_tier.type": "bundled",
+      "expanded.council.parameters.verifiers.default": "bundled",
+      "expanded.council.parameters.verifiers.doc": "bundled",
+      "expanded.council.parameters.verifiers.max": "bundled",
+      "expanded.council.parameters.verifiers.min": "bundled",
+      "expanded.council.parameters.verifiers.type": "bundled",
+      "expanded.council.parameters.worktree": "entry",
+      "expanded.council.parameters.worktree.default": "bundled",
+      "expanded.council.parameters.worktree.doc": "bundled",
+      "expanded.council.parameters.worktree.type": "bundled",
+      "expanded.council.pattern.citations": "bundled",
+      "expanded.council.pattern.cost": "bundled",
+      "expanded.council.pattern.level": "bundled",
+      "expanded.council.pattern.select_when": "bundled",
+      "expanded.council.pattern.summary": "bundled",
+      "expanded.council.pattern.tags": "bundled",
+      "expanded.council.stages": "bundled",
+      "expanded.review.exports": "bundled",
+      "expanded.review.parameters.base": "entry",
+      "expanded.review.parameters.base.default": "bundled",
+      "expanded.review.parameters.base.doc": "bundled",
+      "expanded.review.parameters.base.type": "bundled",
+      "expanded.review.parameters.lenses": "bundled",
+      "expanded.review.parameters.review_shape": "entry",
+      "expanded.review.parameters.review_shape.default": "bundled",
+      "expanded.review.parameters.review_shape.doc": "bundled",
+      "expanded.review.parameters.review_shape.type": "bundled",
+      "expanded.review.parameters.risk_tags": "entry",
+      "expanded.review.parameters.risk_tags.default": "bundled",
+      "expanded.review.parameters.risk_tags.doc": "bundled",
+      "expanded.review.parameters.risk_tags.type": "bundled",
+      "expanded.review.parameters.risk_tier": "entry",
+      "expanded.review.parameters.risk_tier.default": "bundled",
+      "expanded.review.parameters.risk_tier.doc": "bundled",
+      "expanded.review.parameters.risk_tier.type": "bundled",
+      "expanded.review.parameters.spec": "entry",
+      "expanded.review.parameters.spec.default": "bundled",
+      "expanded.review.parameters.spec.doc": "bundled",
+      "expanded.review.parameters.spec.type": "bundled",
+      "expanded.review.parameters.subject": "entry",
+      "expanded.review.parameters.subject.default.commit": "bundled",
+      "expanded.review.parameters.subject.default.type": "bundled",
+      "expanded.review.parameters.subject.doc": "bundled",
+      "expanded.review.parameters.subject.type": "bundled",
+      "expanded.review.parameters.verifier_tier.default": "bundled",
+      "expanded.review.parameters.verifier_tier.doc": "bundled",
+      "expanded.review.parameters.verifier_tier.type": "bundled",
+      "expanded.review.parameters.verifiers.default": "bundled",
+      "expanded.review.parameters.verifiers.doc": "bundled",
+      "expanded.review.parameters.verifiers.max": "bundled",
+      "expanded.review.parameters.verifiers.min": "bundled",
+      "expanded.review.parameters.verifiers.type": "bundled",
+      "expanded.review.parameters.worktree": "entry",
+      "expanded.review.parameters.worktree.default": "bundled",
+      "expanded.review.parameters.worktree.doc": "bundled",
+      "expanded.review.parameters.worktree.type": "bundled",
+      "expanded.review.pattern.citations": "bundled",
+      "expanded.review.pattern.cost": "bundled",
+      "expanded.review.pattern.level": "bundled",
+      "expanded.review.pattern.select_when": "bundled",
+      "expanded.review.pattern.summary": "bundled",
+      "expanded.review.pattern.tags": "bundled",
+      "expanded.review.stages": "bundled",
+      "expanded.scout.exports": "bundled",
+      "expanded.scout.parameters.external": "entry",
+      "expanded.scout.parameters.external.default": "bundled",
+      "expanded.scout.parameters.external.doc": "bundled",
+      "expanded.scout.parameters.external.max": "bundled",
+      "expanded.scout.parameters.external.min": "bundled",
+      "expanded.scout.parameters.external.type": "bundled",
+      "expanded.scout.parameters.read_roots": "entry",
+      "expanded.scout.parameters.read_roots.default": "bundled",
+      "expanded.scout.parameters.read_roots.doc": "bundled",
+      "expanded.scout.parameters.read_roots.type": "bundled",
+      "expanded.scout.parameters.width": "entry",
+      "expanded.scout.parameters.width.default": "bundled",
+      "expanded.scout.parameters.width.doc": "bundled",
+      "expanded.scout.parameters.width.max": "bundled",
+      "expanded.scout.parameters.width.min": "bundled",
+      "expanded.scout.parameters.width.type": "bundled",
+      "expanded.scout.pattern.citations": "bundled",
+      "expanded.scout.pattern.cost": "bundled",
+      "expanded.scout.pattern.level": "bundled",
+      "expanded.scout.pattern.select_when": "bundled",
+      "expanded.scout.pattern.summary": "bundled",
+      "expanded.scout.pattern.tags": "bundled",
+      "expanded.scout.stages": "bundled",
+      "integration_branch": "bundled",
+      "parameters.base.default": "bundled",
+      "parameters.base.doc": "bundled",
+      "parameters.base.type": "bundled",
+      "parameters.batch_worktree": "--params-file",
+      "parameters.batch_worktree.default": "bundled",
+      "parameters.batch_worktree.doc": "bundled",
+      "parameters.batch_worktree.type": "bundled",
+      "parameters.external.default": "bundled",
+      "parameters.external.doc": "bundled",
+      "parameters.external.max": "bundled",
+      "parameters.external.min": "bundled",
+      "parameters.external.type": "bundled",
+      "parameters.integration_branch.default": "bundled",
+      "parameters.integration_branch.doc": "bundled",
+      "parameters.integration_branch.type": "bundled",
+      "parameters.lanes": "bundled",
+      "parameters.read_roots.default": "bundled",
+      "parameters.read_roots.doc": "bundled",
+      "parameters.read_roots.type": "bundled",
+      "parameters.review_shape.default": "bundled",
+      "parameters.review_shape.doc": "bundled",
+      "parameters.review_shape.type": "bundled",
+      "parameters.risk_tags.default": "bundled",
+      "parameters.risk_tags.doc": "bundled",
+      "parameters.risk_tags.type": "bundled",
+      "parameters.risk_tier.default": "bundled",
+      "parameters.risk_tier.doc": "bundled",
+      "parameters.risk_tier.type": "bundled",
+      "parameters.spec.default": "bundled",
+      "parameters.spec.doc": "bundled",
+      "parameters.spec.type": "bundled",
+      "parameters.width.default": "bundled",
+      "parameters.width.doc": "bundled",
+      "parameters.width.max": "bundled",
+      "parameters.width.min": "bundled",
+      "parameters.width.type": "bundled",
+      "parameters.worktrees": "--params-file",
+      "parameters.worktrees.default": "bundled",
+      "parameters.worktrees.doc": "bundled",
+      "parameters.worktrees.type": "bundled",
+      "pattern.citations": "bundled",
+      "pattern.cost": "bundled",
+      "pattern.level": "bundled",
+      "pattern.select_when": "bundled",
+      "pattern.summary": "bundled",
+      "pattern.tags": "bundled",
+      "plan.explicit": "bundled",
+      "plan.guidance": "bundled",
+      "plan.patterns": "bundled",
+      "plan.replaces": "bundled",
+      "roles.lens.correctness-spec": "bundled",
+      "roles.lens.design-fit-reuse": "bundled",
+      "roles.plan.research": "bundled",
+      "roles.plan.review": "bundled",
+      "roles.plan.shape": "bundled",
+      "roles.plan.wave": "bundled",
+      "roles.refactor-principal": "preset",
+      "roles.refactor-principal.acceptance_checks": "bundled",
+      "roles.refactor-principal.access": "bundled",
+      "roles.refactor-principal.delivery": "bundled",
+      "roles.refactor-principal.outputs": "bundled",
+      "roles.refactor-principal.prompt": "bundled",
+      "roles.refactor-principal.source.node": "bundled",
+      "roles.refactor-principal.source.type": "bundled",
+      "roles.refactor-principal.tier": "bundled",
+      "roles.refactor-principal.worktree": "bundled",
+      "roles.refactor-principal.write_scope": "bundled",
+      "roles.repairer": "preset",
+      "roles.repairer.acceptance_checks": "bundled",
+      "roles.repairer.access": "bundled",
+      "roles.repairer.delivery": "bundled",
+      "roles.repairer.inputs": "bundled",
+      "roles.repairer.prompt": "bundled",
+      "roles.repairer.tier": "bundled",
+      "roles.repairer.worktree": "bundled",
+      "roles.repairer.write_scope": "bundled",
+      "roles.review.synthesis": "bundled",
+      "roles.review.verify": "bundled",
+      "roles.scout.codebase": "bundled",
+      "roles.scout.external": "bundled",
+      "roles.write.implement": "bundled",
+      "stages": "bundled"
+    },
+    "plan": {
+      "applied": "on",
+      "degraded": null,
+      "reason": "planning requested",
+      "requested": "on",
+      "route": "principal"
+    },
+    "preset": "big-batch",
+    "roles": {
+      "lens.correctness-spec": {
+        "digest": "sha256:0389100b682b6cca0df2a4896784fc41c1af37e9043ab7eadcab2923ad9814fb",
+        "extends": [
+          "lens.correctness-spec",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:eed92bd4b886f327c37d1ede6084ad87266bc3e25b8a40f576ae7c59fdedcd5b",
+            "ref": "skill:code-review/references/lenses/correctness-spec.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.design-fit-reuse": {
+        "digest": "sha256:18354a40f4c4349ba5e4e47ba960bc66995bf9968e0058068005a1ef84aa9684",
+        "extends": [
+          "lens.design-fit-reuse",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:cdc1ef703b729564597d135d650e554df1013f62113133032e4191016a25ef92",
+            "ref": "skill:code-review/references/lenses/design-fit-reuse.md",
+            "when": "always"
+          }
+        ]
+      },
+      "plan.research": {
+        "digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
+        "extends": [
+          "plan.research",
+          "plan"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "plan.review": {
+        "digest": "sha256:cc9b118bf74049c200dc2e053a9d30de01f36479c4688392153484bcf832a60c",
+        "extends": [
+          "plan.review",
+          "plan"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "plan.shape": {
+        "digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
+        "extends": [
+          "plan.shape",
+          "plan"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "plan.wave": {
+        "digest": "sha256:3771fb15867cef6f72b7b35c7dbd6343062982d0cb3f355b34ee937a7bc0d872",
+        "extends": [
+          "plan.wave",
+          "plan"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "refactor-principal": {
+        "digest": "sha256:412c0546ad9aaeb516cf443059eedf1a85106366979ef93c45d82d1a83405972",
+        "extends": [
+          "refactor-principal"
+        ],
+        "origin": "preset",
+        "references": []
+      },
+      "repairer": {
+        "digest": "sha256:48bd9b141b12a80448fc7f69b5d5a9a6fee0883fc16f2ea917034edbf8a23106",
+        "extends": [
+          "repairer"
+        ],
+        "origin": "preset",
+        "references": []
+      },
+      "review.synthesis": {
+        "digest": "sha256:7b8230ad9a34ce36ef5b05bbf287644e291f18dd4784f1d54c1fd4ee4c3a0f6c",
+        "extends": [
+          "review.synthesis"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "review.verify": {
+        "digest": "sha256:1b76693d13635aa0106f7bf34f48335c9c19bd59703932ab86c6aca9a988d0d0",
+        "extends": [
+          "review.verify"
+        ],
+        "origin": "bundled",
+        "references": []
+      },
+      "scout.codebase": {
+        "digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
+        "extends": [
+          "scout.codebase",
+          "scout"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+            "ref": "skill:scope/references/scout-areas.md",
+            "when": "before choosing your area"
+          }
+        ]
+      },
+      "scout.external": {
+        "digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
+        "extends": [
+          "scout.external",
+          "scout"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:34f67a52a0144687511c67303fff9acedaa139033493971d4c9fe293c5ce5b52",
+            "ref": "skill:scope/references/researcher.md",
+            "when": "always"
+          }
+        ]
+      },
+      "write.implement": {
+        "digest": "sha256:065a17b832ac8f6726b3829edb9f465f44b8f887cdeed85f4815bd59f4b803c5",
+        "extends": [
+          "write.implement"
+        ],
+        "origin": "bundled",
+        "references": []
+      }
+    },
+    "substitutions": [],
+    "warnings": [
+      "preset review-council: omitted lens simplicity: review shape has 2 slots",
+      "preset review-council: omitted lens conventions-readability: review shape has 2 slots",
+      "preset review-council: omitted lens tests: review shape has 2 slots",
+      "preset review-council: omitted lens \"security-privacy\": requires risk tag security",
+      "preset review-council: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
+      "preset review-council: omitted lens \"adversarial\": requires risk tag terminal",
+      "preset review-council: omitted lens simplicity: review shape has 2 slots",
+      "preset review-council: omitted lens conventions-readability: review shape has 2 slots",
+      "preset review-council: omitted lens tests: review shape has 2 slots",
+      "preset review-council: omitted lens \"security-privacy\": requires risk tag security",
+      "preset review-council: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
+      "preset review-council: omitted lens \"adversarial\": requires risk tag terminal"
+    ]
+  },
+  "schema_version": 1
+}
