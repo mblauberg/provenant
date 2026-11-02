@@ -151,6 +151,15 @@ pub(crate) fn run_preset_graph(
     })();
     match result {
         Ok(run) => {
+            let graph_id = run.checkpoint.graph_id.clone();
+            let mut status_command = String::from("provenant");
+            if let Some(state_dir) = &globals.state_dir {
+                status_command.push_str(&format!(" --state-dir {}", shell_path(state_dir)));
+            }
+            if let Some(project) = &globals.project {
+                status_command.push_str(&format!(" --project {}", shell_path(project)));
+            }
+            status_command.push_str(&format!(" fabric graph status {graph_id}"));
             let outcome = match run.status {
                 GraphStatus::Complete if run.checkpoint.successful() => Outcome::Ok,
                 GraphStatus::Complete => Outcome::Failed,
@@ -163,6 +172,7 @@ pub(crate) fn run_preset_graph(
                 document.display()
             );
             let mut human = graph_human(&run);
+            human.push_str(&format!("Graph ID: {graph_id}\nStatus: {status_command}\n"));
             if matches!(run.status, GraphStatus::Pending | GraphStatus::Paused) {
                 human.push_str(&format!("Continue: {continuation}\n"));
             } else if let Some(result) = run
@@ -180,8 +190,7 @@ pub(crate) fn run_preset_graph(
                 human.push_str(&result.excerpt);
                 human.push('\n');
             }
-            let mut data =
-                serde_json::json!({"graph":run,"document":document,"continue":continuation});
+            let mut data = serde_json::json!({"graph":run,"graph_id":graph_id,"status_command":status_command,"document":document,"continue":continuation});
             if !warnings.is_empty() {
                 data["warnings"] = serde_json::json!(warnings);
             }
@@ -200,6 +209,18 @@ pub(crate) fn run_preset_graph(
             &error.to_string(),
             globals,
         ),
+    }
+}
+
+fn shell_path(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy();
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "_./-".contains(character))
+    {
+        value.into_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
