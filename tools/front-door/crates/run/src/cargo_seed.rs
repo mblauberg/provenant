@@ -737,15 +737,13 @@ mod tests {
     )]
     fn seeded_git_dependency_builds_offline() {
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use provenant_os::fixture::{git_env, run_git};
         use std::ffi::OsString;
         use std::time::Duration;
 
+        // Cargo runs with the fixture env: a lane's GIT_DIR must not reach its Git fetch.
         let run = |argv: &[OsString], cwd: &std::path::Path, overrides: &[(&str, OsString)]| {
-            // A lane exports GIT_DIR and GIT_WORK_TREE for its private Git;
-            // inheriting them would make this fixture commit the lane's tree.
-            let mut env: Vec<_> = std::env::vars_os()
-                .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
-                .collect();
+            let mut env = git_env();
             for (key, value) in overrides {
                 env.retain(|(existing, _)| existing != key);
                 env.push(((*key).into(), value.clone()));
@@ -771,9 +769,10 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dep.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
-        for args in [
-            &["init", "-q"][..],
-            &["add", "."][..],
+        run_git(&dep, &["init", "-q"]).unwrap();
+        run_git(&dep, &["add", "."]).unwrap();
+        run_git(
+            &dep,
             &[
                 "-c",
                 "user.name=Fixture",
@@ -782,14 +781,9 @@ mod tests {
                 "commit",
                 "-qm",
                 "fixture",
-            ][..],
-        ] {
-            let argv: Vec<OsString> = std::iter::once("git")
-                .chain(args.iter().copied())
-                .map(Into::into)
-                .collect();
-            run(&argv, &dep, &[]);
-        }
+            ],
+        )
+        .unwrap();
         std::fs::write(app.join("Cargo.toml"), format!("[package]\nname = \"seed_app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nseed_fixture = {{ git = \"file://{}\" }}\n", dep.display())).unwrap();
         std::fs::write(
             app.join("src/lib.rs"),

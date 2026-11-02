@@ -298,16 +298,33 @@ fn check_os_sources(path: &Path) -> Result<(), Box<dyn Error>> {
 
 // Cover literal Git commands and the common names used for fixture Git paths.
 // Deliberately bound tests also go through the helper before adding their env.
-fn check_fixture_git_sources(path: &Path, pattern: &regex::Regex) -> Result<(), Box<dyn Error>> {
+fn rust_sources(path: &Path, sources: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
     if path.is_dir() {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             if !entry.file_type()?.is_symlink() {
-                check_fixture_git_sources(&entry.path(), pattern)?;
+                rust_sources(&entry.path(), sources)?;
             }
         }
     } else if path.extension().is_some_and(|extension| extension == "rs") {
-        let mut source = fs::read_to_string(path)?;
+        sources.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+// The directories whose Rust sources the Git guards scan.
+fn source_roots() -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    ["src", "tests", "crates", "build.rs"]
+        .map(|path| root.join(path))
+        .into()
+}
+
+fn check_fixture_git_sources(path: &Path, pattern: &regex::Regex) -> Result<(), Box<dyn Error>> {
+    let mut sources = Vec::new();
+    rust_sources(path, &mut sources)?;
+    for path in sources {
+        let mut source = fs::read_to_string(&path)?;
         let name = path.to_string_lossy();
         // The build script has a production Git command between test items.
         if name.ends_with("/build.rs") {
@@ -358,6 +375,94 @@ fn fixture_git_policy_rejects_named_and_multiple_test_modules() {
         false,
         &pattern
     ));
+}
+
+// Test code that runs the resolved Git through `ExecOptions` must use the fixture
+// helper. With `env` unset the child inherits the lane's GIT_DIR and GIT_WORK_TREE,
+// so a fixture commits into the lane. An explicit `env` does not inherit them.
+// Works on tokens, so comments and string literals cannot trigger or hide a use.
+fn executor_git_violation(source: &str, test_file: bool) -> bool {
+    let scope = if test_file {
+        source
+    } else {
+        source
+            .find("#[cfg(test)]")
+            .map_or("", |start| &source[start..])
+    };
+    let tokens = rust_tokens(scope);
+    let calls = |name: &str| {
+        tokens
+            .windows(2)
+            .any(|pair| pair[0] == name && pair[1] == "(")
+    };
+    let explicit_env = tokens.windows(3).any(|triple| {
+        triple[0] == "env" && (triple[1] == "=" || triple[1] == ":") && triple[2] == "Some"
+    });
+    let executor = tokens
+        .windows(3)
+        .any(|triple| triple[0] == "ExecOptions" && triple[1] == "::" && triple[2] == "new");
+    executor && calls("git_executable") && !calls("run_git") && !calls("git_env") && !explicit_env
+}
+
+#[test]
+fn executor_git_policy_flags_only_inherited_env() {
+    let offending = concat!(
+        "let git = provenant_os::git::git_executable().ok_or(\"git\")?;\n",
+        "let options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));"
+    );
+    assert!(executor_git_violation(offending, true));
+    assert!(executor_git_violation(
+        concat!(
+            "#[cfg(test)] mod t { ",
+            "fn f() { ",
+            "git_executable(); ",
+            "ExecOptions::new(); } }"
+        ),
+        false
+    ));
+    for source in [
+        "let git = git_executable()?; run_git(cwd, &[\"init\"])?;",
+        "let git = git_executable()?; let mut o = ExecOptions::new(a, c, d); o.env = Some(&env);",
+        "let git = git_executable()?; let o = ExecOptions { env: Some(&env), ..x };",
+        "let git = git_executable()?; let o = ExecOptions::new(a, c, d); let e = git_env();",
+        "// git_executable() ExecOptions::new\nlet s = \"git_executable() ExecOptions::new\";",
+    ] {
+        assert!(!executor_git_violation(source, true), "{source}");
+    }
+    // Production code outside a test module is not in scope for this guard.
+    assert!(!executor_git_violation(
+        "fn production() { let git = git_executable(); let o = ExecOptions::new(a, c, d); }",
+        false
+    ));
+}
+
+#[test]
+fn executor_git_commands_use_the_fixture_helper() -> Result<(), Box<dyn Error>> {
+    let mut sources = Vec::new();
+    for path in source_roots() {
+        rust_sources(&path, &mut sources)?;
+    }
+    for path in sources {
+        let source = fs::read_to_string(&path)?;
+        let name = path.to_string_lossy();
+        let test_file = name.contains("/tests/") || name.ends_with("_tests.rs");
+        if executor_git_violation(&source, test_file) {
+            return Err(format!(
+                "{} runs Git through ExecOptions with the inherited env; use provenant_os::fixture::run_git",
+                path.display()
+            )
+            .into());
+        }
+    }
+    // These two files must not build Git argv or filter GIT_ variables inline.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for file in ["crates/run/src/controls.rs", "crates/run/src/cargo_seed.rs"] {
+        let source = fs::read_to_string(root.join(file))?;
+        for forbidden in ["starts_with(\"GIT_\")", "git_executable()", "once(\"git\")"] {
+            assert!(!source.contains(forbidden), "{file} contains {forbidden}");
+        }
+    }
+    Ok(())
 }
 
 #[test]
