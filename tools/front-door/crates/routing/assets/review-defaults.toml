@@ -37,6 +37,7 @@ terminal = "deep"
 [review.select.by_kind]
 integration = "deep"
 docs = "quick"
+refactor = "standard"
 [review.select.by_paths]
 [review.select.by_size]
 small = "quick"
