@@ -2667,15 +2667,7 @@ fn bind_default_subject_to_worktree(
         }
         None
     }
-    let Some(worktree) = writer_path(nodes).or_else(|| {
-        cli_worktree.map(|worktree| {
-            if worktree.is_absolute() {
-                worktree.to_path_buf()
-            } else {
-                directory.join(worktree)
-            }
-        })
-    }) else {
+    let Some(worktree) = writer_path(nodes).or_else(|| cli_worktree.map(Path::to_path_buf)) else {
         return Ok(());
     };
     let worktree = if worktree.is_absolute() {
