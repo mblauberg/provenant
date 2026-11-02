@@ -79,6 +79,29 @@ impl Fixture {
             .join("install/receipt.json")
     }
 }
+
+#[derive(Clone, Copy)]
+enum AgentFixture {
+    Peer,
+    Tick,
+}
+
+fn configured_agent(f: &mut Fixture, agent: AgentFixture) -> PathBuf {
+    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
+        .resolve(&Resolver)
+        .unwrap();
+    match agent {
+        AgentFixture::Peer => {
+            f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
+            peer_agent_plist(f.targets.roots.state.as_path()).unwrap()
+        }
+        AgentFixture::Tick => {
+            f.targets.tick_agent = Some(b"rendered plist\n".to_vec());
+            tick_agent_plist(f.targets.roots.state.as_path()).unwrap()
+        }
+    }
+}
+
 fn package_fixture_release(
     source: &Path,
     source_digest: provenant_records::SourceDigest,
@@ -801,11 +824,7 @@ fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
     for state in ["unchanged", "modified", "missing"] {
         let modified = state == "modified";
         let mut f = Fixture::new();
-        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-            .resolve(&Resolver)
-            .unwrap();
-        f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
-        let plist = peer_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        let plist = configured_agent(&mut f, AgentFixture::Peer);
         let plan = f.plan();
         assert!(
             plan.actions()
@@ -4080,11 +4099,7 @@ fn tick_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
     for state in ["unchanged", "modified", "missing"] {
         let modified = state == "modified";
         let mut f = Fixture::new();
-        f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-            .resolve(&Resolver)
-            .unwrap();
-        f.targets.tick_agent = Some(b"rendered plist\n".to_vec());
-        let plist = tick_agent_plist(f.targets.roots.state.as_path()).unwrap();
+        let plist = configured_agent(&mut f, AgentFixture::Tick);
         let plan = f.plan();
         assert!(
             plan.actions()
