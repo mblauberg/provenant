@@ -135,7 +135,7 @@ on a normal host.
 When a signed executable fails the built-in unreadable-cwd checks, the refusal
 names `confinement.census_ignore_unreadable` and includes the canonical
 executable path and team ID needed for an exact host entry. See
-[supervisor host-owner exceptions](supervisor.md#host-owner-exceptions) for
+[supervisor host-owner exceptions](supervisor.md#unreadable-processes-need-positive-non-occupancy-evidence) for
 the signing checks and entry format. Unsigned path-only exceptions are not
 supported.
 Queued and pending submitted dispatches naming a worktree retain it with
